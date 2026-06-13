@@ -9,7 +9,6 @@
 //! sheet Cα paths are Laplacian-smoothed first so ribbons run down the axis
 //! instead of corkscrewing along the raw Cα trace.
 
-use glam::Vec3;
 use molar::prelude::*;
 
 use std::collections::BTreeMap;
@@ -30,9 +29,9 @@ const RING: usize = 12;
 const CR_SLOPE: f32 = 1.25;
 
 struct Residue {
-    ca: Vec3,
+    ca: Vector3f,
     /// Carbonyl O position, if present (for the ribbon orientation).
-    o: Option<Vec3>,
+    o: Option<Vector3f>,
     color: u32,
     class: SsClass,
     chain: char,
@@ -49,8 +48,8 @@ pub fn build(
 ) -> MeshData {
     // Group atoms by residue (BTreeMap keeps ascending resindex order).
     struct Acc {
-        ca: Option<(Vec3, u32)>,
-        o: Option<Vec3>,
+        ca: Option<(Vector3f, u32)>,
+        o: Option<Vector3f>,
         chain: char,
     }
     let mut by_res: BTreeMap<usize, Acc> = BTreeMap::new();
@@ -143,7 +142,7 @@ fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
     // weighted neighbor average `(2·CAᵢ + CAᵢ₋₁ + CAᵢ₊₁)/4` (VMD); helix and coil
     // keep the raw Cα — the smooth helix ribbon comes from the orientation, not
     // from moving the centerline.
-    let coords: Vec<Vec3> = (0..n)
+    let coords: Vec<Vector3f> = (0..n)
         .map(|i| {
             if classes[i] == SsClass::Sheet {
                 let prev = run[i.saturating_sub(1)].ca;
@@ -168,16 +167,16 @@ fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
     // coords are nm, where |D|~0.02 ≪ 1 would freeze `g` (→ rippled helices,
     // mis-oriented sheets), so we scale the direction vectors to Ångström.
     const NM_TO_ANGSTROM: f32 = 10.0;
-    let mut perps = vec![Vec3::ZERO; n];
-    let mut g = Vec3::ZERO;
+    let mut perps = vec![Vector3f::zeros(); n];
+    let mut g = Vector3f::zeros();
     let mut last_ca = run[0].ca;
     let mut last_o = run[0].o.unwrap_or(run[0].ca);
     for i in 0..n {
         let ca = run[i].ca;
         let a = (ca - last_ca) * NM_TO_ANGSTROM;
         let b = (last_o - last_ca) * NM_TO_ANGSTROM;
-        let d = a.cross(b).cross(a);
-        let dd = if d.dot(g) < 0.0 { -d } else { d };
+        let d = a.cross(&b).cross(&a);
+        let dd = if d.dot(&g) < 0.0 { -d } else { d };
         g = (g + dd).normalize_or_zero();
         perps[i] = g;
         last_ca = ca;
@@ -233,8 +232,8 @@ fn demote_singletons(classes: &mut [SsClass]) {
 /// Everything the per-sample cross-section builder needs for one run.
 struct RunCtx<'a> {
     run: &'a [Residue],
-    coords: &'a [Vec3],
-    perps: &'a [Vec3],
+    coords: &'a [Vector3f],
+    perps: &'a [Vector3f],
     classes: &'a [SsClass],
     is_arrow: &'a [bool],
     shape: &'a Shape,
@@ -243,10 +242,10 @@ struct RunCtx<'a> {
 
 /// One cross-section: a center frame + ellipse dimensions + color.
 struct Ring {
-    center: Vec3,
-    tangent: Vec3,
-    width: Vec3,
-    normal: Vec3,
+    center: Vector3f,
+    tangent: Vector3f,
+    width: Vector3f,
+    normal: Vector3f,
     hw: f32,
     ht: f32,
     color: u32,
@@ -266,7 +265,7 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
     // updir). The perp need not be exactly ⟂ to the tangent — `normal` is ⟂ to
     // both, and the two cross-section axes (perp, normal) are mutually ⟂.
     let perp = (c.perps[i] * (1.0 - u) + c.perps[i + 1] * u).normalize_or_zero();
-    let normal = tangent.cross(perp).normalize_or_zero();
+    let normal = tangent.cross(&perp).normalize_or_zero();
 
     let (hw_a, ht_a) = c.shape.dims(c.classes[i]);
     let (hw_b, ht_b) = c.shape.dims(c.classes[i + 1]);
@@ -356,15 +355,31 @@ fn add_cap(mesh: &mut MeshData, ring: &Ring, ring_base: u32, front: bool) {
 // Math helpers
 //──────────────────────────────────────────────────────────────────────────────
 
-fn v3(p: &Pos) -> Vec3 {
-    Vec3::new(p.x, p.y, p.z)
+fn v3(p: &Pos) -> Vector3f {
+    p.coords
+}
+
+/// Two small conveniences nalgebra's `Vector3` doesn't provide, used by the
+/// spline/cross-section math: a zero-safe normalize and a plain `[f32; 3]`.
+trait Vec3Ext {
+    fn normalize_or_zero(self) -> Vector3f;
+    fn to_array(self) -> [f32; 3];
+}
+
+impl Vec3Ext for Vector3f {
+    fn normalize_or_zero(self) -> Vector3f {
+        self.try_normalize(1e-9).unwrap_or_else(Vector3f::zeros)
+    }
+    fn to_array(self) -> [f32; 3] {
+        [self.x, self.y, self.z]
+    }
 }
 
 /// Evaluate VMD's modified Catmull-Rom (slope `CR_SLOPE`) on the segment from
 /// `p1` to `p2`, returning (position, tangent) at `w ∈ [0,1]`. Interpolates the
 /// control points; the slope controls loop fullness. Matches VMD's
 /// `create_modified_CR_spline_basis` + `make_spline_interpolation`.
-fn cr_eval(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, w: f32) -> (Vec3, Vec3) {
+fn cr_eval(p0: Vector3f, p1: Vector3f, p2: Vector3f, p3: Vector3f, w: f32) -> (Vector3f, Vector3f) {
     let is = 1.0 / CR_SLOPE;
     let q0 = p0 * (-is) + p1 * (2.0 - is) + p2 * (is - 2.0) + p3 * is; // w³
     let q1 = p0 * (2.0 * is) + p1 * (is - 3.0) + p2 * (3.0 - 2.0 * is) + p3 * (-is); // w²
