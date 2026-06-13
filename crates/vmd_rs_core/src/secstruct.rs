@@ -31,21 +31,24 @@ pub struct SsMap {
 }
 
 impl SsMap {
-    /// Run DSSP on `bound` and key the per-residue result by `resindex`.
+    /// Assign secondary structure on `bound` (PyMOL `dss` algorithm) and key the
+    /// per-residue result by `resindex`.
     ///
-    /// molar's `Dssp::ss()` is ordered by ascending residue index, one entry
-    /// per distinct `resindex` present in the selection, so it zips 1:1 against
-    /// the sorted distinct resindices (both come from a `BTreeMap` over the same
-    /// particles).
+    /// We use molar's `PymolSS` rather than `Dssp`: DSSP (Kabsch–Sander) over-
+    /// extends β-strands relative to VMD/PyMOL (e.g. 2lao 178–185 vs the real
+    /// 178–180), which looked wrong in the cartoon. `PymolSS::ss()` is ordered by
+    /// ascending residue index, one entry per distinct `resindex`, so it zips 1:1
+    /// against the sorted distinct resindices (both from a `BTreeMap` over the
+    /// same particles).
     pub fn compute(bound: &(impl ParticleIterProvider + PosProvider)) -> Self {
         let mut resindices: BTreeMap<usize, ()> = BTreeMap::new();
         for p in bound.iter_particle() {
             resindices.insert(p.atom.resindex, ());
         }
-        let dssp = Dssp::new(bound);
+        let assigned = Dss::new(bound);
         let map = resindices
             .into_keys()
-            .zip(dssp.ss().iter().copied())
+            .zip(assigned.ss().iter().copied())
             .collect();
         Self { map }
     }
