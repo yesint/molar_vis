@@ -91,6 +91,12 @@ fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: RepKind, co
             ];
             painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
         }
+        RepKind::Metaball => {
+            // Three fused blobs.
+            painter.circle_filled(c + Vec2::new(-hw * 0.5, r * 0.18), r * 0.55, color);
+            painter.circle_filled(c + Vec2::new(hw * 0.08, -r * 0.22), r * 0.7, color);
+            painter.circle_filled(c + Vec2::new(hw * 0.55, r * 0.12), r * 0.5, color);
+        }
     }
 }
 
@@ -367,6 +373,17 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                 ui.end_row();
                 ui.label("Ribbon thickness (nm)");
                 changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
+                ui.end_row();
+            }
+            RepParams::Metaball { radius_scale, resolution, isovalue } => {
+                ui.label("Radius scale");
+                changed |= ui.add(egui::Slider::new(radius_scale, 0.3..=1.5)).changed();
+                ui.end_row();
+                ui.label("Resolution (nm)");
+                changed |= ui.add(egui::Slider::new(resolution, 0.04..=0.20)).changed();
+                ui.end_row();
+                ui.label("Isovalue");
+                changed |= ui.add(egui::Slider::new(isovalue, 0.02..=0.6)).changed();
                 ui.end_row();
             }
         });

@@ -11,11 +11,13 @@ mod camera_uniform;
 mod cylinder;
 mod line;
 mod mesh;
+mod metaball;
 mod sphere;
 
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
 pub use mesh::MeshVertex;
+pub use metaball::MetaballAtom;
 pub use sphere::SphereInstance;
 
 use camera_uniform::CameraUniform;
@@ -89,6 +91,14 @@ struct MeshBuffers {
     index_count: u32,
 }
 
+/// Baked metaball volume + its render bind group. `_uniform`/`_volume` are kept
+/// alive because `bind_group` references them.
+struct MetaballGpu {
+    _uniform: wgpu::Buffer,
+    _volume: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 /// Per-representation GPU geometry (any subset may be present).
 #[derive(Default)]
 pub struct RepGpu {
@@ -96,6 +106,7 @@ pub struct RepGpu {
     cylinders: Option<DrawBuffer>, // 4 verts/instance
     lines: Option<DrawBuffer>,     // vertex count (LineList)
     mesh: Option<MeshBuffers>,     // indexed triangles (cartoon)
+    metaball: Option<MetaballGpu>, // ray-marched density volume
 }
 
 fn upload_buf<T: bytemuck::Pod>(
@@ -150,6 +161,10 @@ pub struct SceneRenderer {
     cylinder_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    metaball_pipeline: wgpu::RenderPipeline,
+    metaball_render_bgl: wgpu::BindGroupLayout,
+    metaball_bake_pipeline: wgpu::ComputePipeline,
+    metaball_bake_bgl: wgpu::BindGroupLayout,
 }
 
 impl SceneRenderer {
@@ -191,6 +206,9 @@ impl SceneRenderer {
             cylinder::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
         let line_pipeline = line::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
         let mesh_pipeline = mesh::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
+        let (metaball_pipeline, metaball_render_bgl) =
+            metaball::build_render_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
+        let (metaball_bake_pipeline, metaball_bake_bgl) = metaball::build_bake_pipeline(device);
 
         let targets = Targets::new(device, color_format, [1, 1]);
         let egui_texture = rs.renderer.write().register_native_texture(
@@ -209,6 +227,10 @@ impl SceneRenderer {
             cylinder_pipeline,
             line_pipeline,
             mesh_pipeline,
+            metaball_pipeline,
+            metaball_render_bgl,
+            metaball_bake_pipeline,
+            metaball_bake_bgl,
         }
     }
 
@@ -225,7 +247,89 @@ impl SceneRenderer {
             cylinders: upload_buf(device, &geom.cylinders, "cylinders"),
             lines: upload_buf(device, &geom.lines, "lines"),
             mesh: upload_mesh(device, &geom.mesh),
+            metaball: geom
+                .metaball
+                .as_ref()
+                .and_then(|m| self.upload_metaball(rs, m)),
         }
+    }
+
+    /// Upload metaball atoms, allocate the volume, run the compute bake, and build
+    /// the render bind group. The bake runs once here (on geometry change).
+    fn upload_metaball(
+        &self,
+        rs: &RenderState,
+        data: &crate::geometry::MetaballData,
+    ) -> Option<MetaballGpu> {
+        let n_voxels =
+            data.dims[0] as u64 * data.dims[1] as u64 * data.dims[2] as u64;
+        if data.atoms.is_empty() || n_voxels == 0 {
+            return None;
+        }
+        let device = &rs.device;
+
+        let atoms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("metaball-atoms"),
+            contents: bytemuck::cast_slice(&data.atoms),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let volume = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("metaball-volume"),
+            size: n_voxels * 16, // vec4<f32> per voxel
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let uni = metaball::MetaballUniform {
+            origin: [data.origin[0], data.origin[1], data.origin[2], data.voxel],
+            dims: [data.dims[0], data.dims[1], data.dims[2], data.atoms.len() as u32],
+            params: [
+                data.isovalue,
+                metaball::METABALL_K,
+                metaball::METABALL_CUTOFF,
+                0.0,
+            ],
+        };
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("metaball-uniform"),
+            contents: bytemuck::bytes_of(&uni),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bake_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("metaball-bake-bg"),
+            layout: &self.metaball_bake_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: atoms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: volume.as_entire_binding() },
+            ],
+        });
+
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("metaball-bake-encoder"),
+        });
+        {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("metaball-bake-pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.metaball_bake_pipeline);
+            cpass.set_bind_group(0, &bake_bg, &[]);
+            let groups = |d: u32| d.div_ceil(4); // workgroup_size(4,4,4)
+            cpass.dispatch_workgroups(groups(data.dims[0]), groups(data.dims[1]), groups(data.dims[2]));
+        }
+        rs.queue.submit(std::iter::once(enc.finish()));
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("metaball-render-bg"),
+            layout: &self.metaball_render_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: volume.as_entire_binding() },
+            ],
+        });
+
+        Some(MetaballGpu { _uniform: uniform, _volume: volume, bind_group })
     }
 
     /// Render every visible representation of every visible molecule into the
@@ -318,6 +422,12 @@ impl SceneRenderer {
                         pass.set_vertex_buffer(0, m.vertices.slice(..));
                         pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..m.index_count, 0, 0..1);
+                    }
+                    if let Some(mb) = &rep.gpu.metaball {
+                        // Full-screen ray-march; camera is group 0 (already bound).
+                        pass.set_pipeline(&self.metaball_pipeline);
+                        pass.set_bind_group(1, &mb.bind_group, &[]);
+                        pass.draw(0..3, 0..1);
                     }
                 }
             }

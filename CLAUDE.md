@@ -78,10 +78,20 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `data.rs` + `data/loader.rs` (`RawMolecule`: System + guessed bonds + bbox; positions/
   radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter).
 - `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A),
-  camera UBO (bind group 0), sphere/cylinder/line/**mesh** pipelines, `RepGpu` (per-rep
-  buffers; mesh = vertex + u32 index buffer), `upload()`, `render_scene()`, `texture_id()`.
-  Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl`.
-  The cartoon mesh writes real depth and interleaves correctly with the impostors.
+  camera UBO (bind group 0; `CameraUniform` carries `view/proj/params` + appended
+  `inv_view_proj`), sphere/cylinder/line/**mesh**/**metaball** pipelines, `RepGpu` (per-rep
+  buffers), `upload()` (also runs the metaball compute bake), `render_scene()`, `texture_id()`.
+  Plus `render/{sphere,cylinder,line,mesh,metaball,camera_uniform}.rs` and `render/shaders/*.wgsl`.
+  The cartoon mesh + metaball both write real depth and interleave with the impostors.
+- `render/metaball.rs` + `shaders/metaball_bake.wgsl` (compute) + `shaders/metaball.wgsl`
+  (full-screen ray-march): the **Metaball** rep. A compute pass bakes a density+color volume
+  (storage buffer, `vec4`: `rgb=Σwᵢ·colorᵢ`, `a=Σwᵢ`, `wᵢ=exp(-K·d²/Rᵢ²)`, gather, no atomics)
+  from the atoms; the fragment pass reconstructs the world ray (`inv_view_proj`), AABB-marches
+  the trilinearly-sampled volume to the isovalue, gradient normal, blended `color=rgb/a`,
+  Lambert + `frag_depth`. **Requires compute + storage buffers → WebGPU/native only, NOT
+  WebGL2** (eframe's default device gives full `Limits::default()` on non-GL backends, so
+  native works as-is; a future WASM build must use WebGPU). CPU only fills `geometry::
+  MetaballData` (atoms + grid) — the bake/march are all GPU.
 
 ## Key architecture
 
@@ -195,3 +205,7 @@ History labels via `describe_change` ("edit selection", "change coloring",
   ribbon_thickness}`. **`RepParams` is now a per-style enum** (each variant carries only its
   own knobs); `geometry::build` dispatches on it (no more `kind` arg).
 - ✅ MVP complete (M0–M6, all five representations).
+- ✅ **Metaball** rep (post-MVP) — `RepKind::Metaball` / `RepParams::Metaball{radius_scale,
+  resolution,isovalue}`. GPU metaball isosurface: compute-baked density+color volume +
+  full-screen ray-march (see `render/metaball.rs`). VdW radii scaled down (`radius_scale`),
+  colors blended on atom boundaries. WebGPU/native only (compute + storage buffers; not WebGL2).
