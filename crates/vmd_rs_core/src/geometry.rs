@@ -7,7 +7,7 @@
 use molar::prelude::*;
 
 use crate::color::{ColorMethod, Colorizer};
-use crate::render::{CylinderInstance, LineVertex, MeshVertex, MetaballAtom, SphereInstance};
+use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
 use crate::secstruct::SsMap;
 
 mod cartoon;
@@ -19,17 +19,15 @@ pub enum RepKind {
     BallAndStick,
     Lines,
     Cartoon,
-    Metaball,
 }
 
 impl RepKind {
-    pub const ALL: [RepKind; 6] = [
+    pub const ALL: [RepKind; 5] = [
         RepKind::Vdw,
         RepKind::Licorice,
         RepKind::BallAndStick,
         RepKind::Lines,
         RepKind::Cartoon,
-        RepKind::Metaball,
     ];
 
     pub fn label(self) -> &'static str {
@@ -39,7 +37,6 @@ impl RepKind {
             RepKind::BallAndStick => "Ball and Stick",
             RepKind::Lines => "Lines",
             RepKind::Cartoon => "Cartoon",
-            RepKind::Metaball => "Metaball",
         }
     }
 
@@ -51,7 +48,6 @@ impl RepKind {
             "ballstick" | "ball_and_stick" | "ball-and-stick" => Some(RepKind::BallAndStick),
             "lines" => Some(RepKind::Lines),
             "cartoon" => Some(RepKind::Cartoon),
-            "metaball" => Some(RepKind::Metaball),
             _ => None,
         }
     }
@@ -85,14 +81,6 @@ pub enum RepParams {
         /// Helix/sheet ribbon half-thickness.
         ribbon_thickness: f32,
     },
-    Metaball {
-        /// VDW radius multiplier for each atom's kernel (fused blobs; <1 shrinks).
-        radius_scale: f32,
-        /// Density-grid voxel edge (nm); smaller = smoother but heavier.
-        resolution: f32,
-        /// Isosurface density threshold (lower = fatter, more fused).
-        isovalue: f32,
-    },
 }
 
 impl RepParams {
@@ -110,11 +98,6 @@ impl RepParams {
                 ribbon_width: 0.15,
                 ribbon_thickness: 0.03,
             },
-            RepKind::Metaball => RepParams::Metaball {
-                radius_scale: 0.8,
-                resolution: 0.08,
-                isovalue: 0.1,
-            },
         }
     }
 }
@@ -125,7 +108,6 @@ pub struct GeometryData {
     pub cylinders: Vec<CylinderInstance>,
     pub lines: Vec<LineVertex>,
     pub mesh: MeshData,
-    pub metaball: Option<MetaballData>,
 }
 
 /// An indexed triangle mesh (Cartoon representation).
@@ -133,22 +115,6 @@ pub struct GeometryData {
 pub struct MeshData {
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u32>,
-}
-
-/// Inputs for the GPU metaball pass: the selected atoms (center, kernel radius,
-/// color) plus the density-volume grid covering them. The volume is baked and
-/// ray-marched entirely on the GPU; the CPU only fills this.
-#[derive(Default)]
-pub struct MetaballData {
-    pub atoms: Vec<MetaballAtom>,
-    /// World-space min corner of the density volume.
-    pub origin: [f32; 3],
-    /// Voxel edge length (nm).
-    pub voxel: f32,
-    /// Grid dimensions (voxels per axis).
-    pub dims: [u32; 3],
-    /// Isosurface density threshold.
-    pub isovalue: f32,
 }
 
 /// Build GPU geometry for one representation. `sel` is bound to its `System` to
@@ -211,83 +177,7 @@ pub fn build(
                 ..Default::default()
             }
         }
-        RepParams::Metaball { radius_scale, resolution, isovalue } => GeometryData {
-            metaball: build_metaball(&bound, &colorizer, radius_scale, resolution, isovalue),
-            ..Default::default()
-        },
     }
-}
-
-/// Kernel support radius as a multiple of each atom's kernel radius `R` (the
-/// Gaussian `exp(-K·(d/R)²)` is ~0 beyond this). Must match `metaball_bake.wgsl`.
-const METABALL_CUTOFF: f32 = 2.5;
-/// Cap on total voxels (≈96 MB at 16 B/voxel) — keeps the volume buffer within
-/// the default `max_storage_buffer_binding_size`; resolution is coarsened to fit.
-const METABALL_MAX_VOXELS: f32 = 6_000_000.0;
-
-/// Collect the selected atoms (center, kernel radius = VDW·`radius_scale`, color)
-/// and size a density grid around them. The volume is baked + ray-marched on the
-/// GPU; this only assembles the inputs.
-fn build_metaball(
-    bound: &impl ParticleIterProvider,
-    colorizer: &Colorizer,
-    radius_scale: f32,
-    resolution: f32,
-    isovalue: f32,
-) -> Option<MetaballData> {
-    let mut atoms = Vec::new();
-    let mut lo = [f32::INFINITY; 3];
-    let mut hi = [f32::NEG_INFINITY; 3];
-    let mut max_support = 0.0f32;
-    for p in bound.iter_particle() {
-        let r = (p.atom.vdw() * radius_scale).max(1e-3);
-        let c = [p.pos.x, p.pos.y, p.pos.z];
-        let col = colorizer.color(p.atom, p.id);
-        let rgb = [
-            (col & 0xff) as f32 / 255.0,
-            ((col >> 8) & 0xff) as f32 / 255.0,
-            ((col >> 16) & 0xff) as f32 / 255.0,
-        ];
-        atoms.push(MetaballAtom {
-            center_radius: [c[0], c[1], c[2], r],
-            color: [rgb[0], rgb[1], rgb[2], 1.0],
-        });
-        max_support = max_support.max(r * METABALL_CUTOFF);
-        for k in 0..3 {
-            lo[k] = lo[k].min(c[k]);
-            hi[k] = hi[k].max(c[k]);
-        }
-    }
-    if atoms.is_empty() {
-        return None;
-    }
-
-    // Pad the box so every kernel's support fits inside the volume.
-    let pad = max_support;
-    let origin = [lo[0] - pad, lo[1] - pad, lo[2] - pad];
-    let extent = [
-        hi[0] - lo[0] + 2.0 * pad,
-        hi[1] - lo[1] + 2.0 * pad,
-        hi[2] - lo[2] + 2.0 * pad,
-    ];
-
-    // Choose a voxel size, coarsening if the grid would be too large.
-    let mut voxel = resolution.max(0.01);
-    let dims_at = |v: f32| {
-        [
-            (extent[0] / v).ceil() as u32 + 1,
-            (extent[1] / v).ceil() as u32 + 1,
-            (extent[2] / v).ceil() as u32 + 1,
-        ]
-    };
-    let mut dims = dims_at(voxel);
-    let total = dims[0] as f32 * dims[1] as f32 * dims[2] as f32;
-    if total > METABALL_MAX_VOXELS {
-        voxel *= (total / METABALL_MAX_VOXELS).cbrt();
-        dims = dims_at(voxel);
-    }
-
-    Some(MetaballData { atoms, origin, voxel, dims, isovalue })
 }
 
 fn spheres(

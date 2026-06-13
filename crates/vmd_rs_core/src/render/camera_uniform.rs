@@ -13,10 +13,6 @@ pub struct CameraUniform {
     /// x = 1.0 for perspective (eye-ray impostors), 0.0 for orthographic
     /// (parallel-ray impostors). y,z,w reserved.
     pub params: [f32; 4],
-    /// Clip → world, i.e. `(proj·view)⁻¹`. Appended after `params` so the
-    /// impostor/mesh shaders that declare only `view, proj, params` still read
-    /// correct offsets; the metaball ray-march uses it to reconstruct rays.
-    pub inv_view_proj: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
@@ -25,7 +21,6 @@ impl CameraUniform {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
             params: [if perspective { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-            inv_view_proj: (proj * view).inverse().to_cols_array_2d(),
         }
     }
 }
