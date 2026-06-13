@@ -394,6 +394,19 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
         });
     }
 
+    // Restore this style's default parameters.
+    if !matches!(rep.params, RepParams::Vdw | RepParams::Lines) {
+        ui.add_space(2.0);
+        if ui
+            .button(format!("{}  Defaults", icon::ARROW_COUNTER_CLOCKWISE))
+            .on_hover_text("Restore default parameters for this style")
+            .clicked()
+        {
+            rep.params = RepParams::for_kind(rep.kind);
+            changed = true;
+        }
+    }
+
     if changed {
         rep.geom_dirty = true;
     }
@@ -653,11 +666,6 @@ impl App {
                     .default_open(true)
                     .show(ui, |ui| view_dirty |= self.draw_molecule_list(ui));
 
-                ui.separator();
-                egui::CollapsingHeader::new("Representations")
-                    .default_open(true)
-                    .show(ui, |ui| view_dirty |= self.draw_rep_list(ui));
-
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(4.0);
                     let dt = ui.ctx().input(|i| i.stable_dt);
@@ -745,44 +753,69 @@ impl App {
         });
     }
 
-    /// Loaded molecules, one row each: name + atom count on the left, a
-    /// right-justified compact action group (visibility eye, delete trash).
+    /// Loaded molecules. Each is a foldable block: a header row (fold caret, name,
+    /// atom count, then a right-justified action group: add-rep, eye, trash), with
+    /// the molecule's representations nested below when expanded.
     fn draw_molecule_list(&mut self, ui: &mut egui::Ui) -> bool {
         if self.scene.molecules.is_empty() {
             ui.weak(&self.status);
             return false;
         }
+        let default_rep = self.default_rep;
         let mut view_dirty = false;
-        let mut new_selected = self.scene.selected_mol;
         let mut delete: Option<usize> = None;
 
         for i in 0..self.scene.molecules.len() {
-            let selected = self.scene.selected_mol == Some(i);
-            let mol = &mut self.scene.molecules[i];
-            ui.horizontal(|ui| {
-                if ui.selectable_label(selected, mol.name.as_str()).clicked() {
-                    new_selected = Some(i);
-                }
-                ui.weak(format!("({})", mol.n_atoms));
-                // Right-justified, compact action group.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    compact_actions(ui);
-                    if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
-                        delete = Some(i);
-                    }
-                    let eye = if mol.visible { icon::EYE } else { icon::EYE_SLASH };
+            let open;
+            {
+                let mol = &mut self.scene.molecules[i];
+                ui.horizontal(|ui| {
+                    let caret = if mol.reps_open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
                     if ui
-                        .selectable_label(mol.visible, eye)
-                        .on_hover_text(if mol.visible { "Hide" } else { "Show" })
+                        .selectable_label(false, caret)
+                        .on_hover_text("Representations")
                         .clicked()
                     {
-                        mol.visible = !mol.visible;
-                        view_dirty = true;
+                        mol.reps_open = !mol.reps_open;
                     }
+                    ui.label(mol.name.as_str());
+                    ui.weak(format!("({})", mol.n_atoms));
+                    // Right-justified action group: add-rep · eye · trash.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        compact_actions(ui);
+                        if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
+                            delete = Some(i);
+                        }
+                        let eye = if mol.visible { icon::EYE } else { icon::EYE_SLASH };
+                        if ui
+                            .selectable_label(mol.visible, eye)
+                            .on_hover_text(if mol.visible { "Hide" } else { "Show" })
+                            .clicked()
+                        {
+                            mol.visible = !mol.visible;
+                            view_dirty = true;
+                        }
+                        if ui
+                            .button(format!("{} rep", icon::PLUS))
+                            .on_hover_text("Add representation")
+                            .clicked()
+                        {
+                            mol.reps.push(Representation::new(default_rep));
+                            mol.selected_rep = Some(mol.reps.len() - 1);
+                            mol.reps_open = true;
+                            view_dirty = true;
+                        }
+                    });
                 });
-            });
+                open = mol.reps_open;
+            }
+            if open {
+                ui.indent(egui::Id::new(("reps", i)), |ui| {
+                    view_dirty |= self.draw_reps_for(ui, i);
+                });
+            }
+            ui.add_space(4.0);
         }
-        self.scene.selected_mol = new_selected;
 
         if let Some(i) = delete {
             // Park the molecule in the trash so the delete can be undone.
@@ -799,12 +832,11 @@ impl App {
     /// focused, collapses on Enter/blur), a drawn style-icon dropdown, and a
     /// right-justified action group (gear→params, eye, update-every-frame,
     /// duplicate, trash). An "Add" button precedes the list.
-    fn draw_rep_list(&mut self, ui: &mut egui::Ui) -> bool {
-        let default_rep = self.default_rep;
-        let Some(mi) = self.scene.selected_mol else {
-            ui.weak("Select a molecule above.");
-            return false;
-        };
+    /// The representations of molecule `mi`, nested under it: rich two-row blocks
+    /// (drag handle · selection · actions / style · color · gear) with
+    /// drag-reorder. The "add representation" control lives in the molecule's
+    /// header row, not here.
+    fn draw_reps_for(&mut self, ui: &mut egui::Ui, mi: usize) -> bool {
         let mut view_dirty = false;
         let editing = self
             .editing_rep
@@ -814,16 +846,6 @@ impl App {
 
         let mol = &mut self.scene.molecules[mi];
         let mol_id = mol.id;
-
-        if ui
-            .button(format!("{}  Add representation", icon::PLUS))
-            .clicked()
-        {
-            mol.reps.push(Representation::new(default_rep));
-            mol.selected_rep = Some(mol.reps.len() - 1);
-            view_dirty = true;
-        }
-        ui.add_space(2.0);
 
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;

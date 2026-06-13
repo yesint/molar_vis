@@ -120,6 +120,9 @@ pub struct Molecule {
     pub visible: bool,
     pub reps: Vec<Representation>,
     pub selected_rep: Option<usize>,
+    /// Transient UI state: whether this molecule's representations block is
+    /// expanded in the panel. Not part of `EditState` (view state, not undoable).
+    pub reps_open: bool,
 }
 
 impl Molecule {
@@ -135,6 +138,7 @@ impl Molecule {
             visible: true,
             reps: vec![Representation::new(default_rep)],
             selected_rep: Some(0),
+            reps_open: true,
         }
     }
 }
