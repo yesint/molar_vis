@@ -73,6 +73,23 @@ fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: RepKind, co
                 painter.line_segment([seg[0], seg[1]], s);
             }
         }
+        RepKind::Cartoon => {
+            // A flat β-arrow: rectangular body + triangular head.
+            let bh = r * 0.42;
+            let x0 = c.x - hw * 0.92;
+            let xbody = c.x + hw * 0.15;
+            painter.rect_filled(
+                egui::Rect::from_min_max(Pos2::new(x0, c.y - bh), Pos2::new(xbody, c.y + bh)),
+                0.0,
+                color,
+            );
+            let head = vec![
+                Pos2::new(xbody, c.y - bh * 2.0),
+                Pos2::new(c.x + hw * 0.92, c.y),
+                Pos2::new(xbody, c.y + bh * 2.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
+        }
     }
 }
 
@@ -251,6 +268,28 @@ fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMeth
                 Color32::BLACK,
             );
         }
+        ColorMethod::SecStruct => {
+            // A ribbon: magenta helix body + yellow sheet arrowhead.
+            let mid = rect.center().y;
+            let h = rect.height() * 0.26;
+            let x0 = rect.left() + 1.0;
+            let xbody = rect.left() + rect.width() * 0.58;
+            painter.rect_filled(
+                egui::Rect::from_min_max(pos2(x0, mid - h), pos2(xbody, mid + h)),
+                0.0,
+                Color32::from_rgb(233, 43, 142),
+            );
+            let head = vec![
+                pos2(xbody, mid - h * 2.0),
+                pos2(rect.right() - 1.0, mid),
+                pos2(xbody, mid + h * 2.0),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                head,
+                Color32::from_rgb(255, 200, 40),
+                Stroke::NONE,
+            ));
+        }
     }
 }
 
@@ -300,28 +339,33 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
     egui::Grid::new("rep_params")
         .num_columns(2)
         .spacing(egui::vec2(8.0, 4.0))
-        .show(ui, |ui| match rep.kind {
-            RepKind::Vdw | RepKind::Lines => {
+        .show(ui, |ui| match &mut rep.params {
+            RepParams::Vdw | RepParams::Lines => {
                 ui.weak("No tunable parameters.");
                 ui.end_row();
             }
-            RepKind::Licorice => {
+            RepParams::Licorice { bond_radius } => {
                 ui.label("Bond radius (nm)");
-                changed |= ui
-                    .add(egui::Slider::new(&mut rep.params.bond_radius, 0.005..=0.10))
-                    .changed();
+                changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.10)).changed();
                 ui.end_row();
             }
-            RepKind::BallAndStick => {
+            RepParams::BallAndStick { sphere_scale, bond_radius } => {
                 ui.label("Sphere scale");
-                changed |= ui
-                    .add(egui::Slider::new(&mut rep.params.sphere_scale, 0.05..=0.6))
-                    .changed();
+                changed |= ui.add(egui::Slider::new(sphere_scale, 0.05..=0.6)).changed();
                 ui.end_row();
                 ui.label("Bond radius (nm)");
-                changed |= ui
-                    .add(egui::Slider::new(&mut rep.params.bond_radius, 0.005..=0.05))
-                    .changed();
+                changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.05)).changed();
+                ui.end_row();
+            }
+            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness } => {
+                ui.label("Coil radius (nm)");
+                changed |= ui.add(egui::Slider::new(coil_radius, 0.02..=0.08)).changed();
+                ui.end_row();
+                ui.label("Ribbon width (nm)");
+                changed |= ui.add(egui::Slider::new(ribbon_width, 0.05..=0.35)).changed();
+                ui.end_row();
+                ui.label("Ribbon thickness (nm)");
+                changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
                 ui.end_row();
             }
         });
@@ -411,6 +455,7 @@ impl App {
                 "resname" => Some(ColorMethod::ResName),
                 "index" => Some(ColorMethod::Index),
                 "beta" => Some(ColorMethod::Beta),
+                "secstruct" | "structure" | "ss" => Some(ColorMethod::SecStruct),
                 _ => None,
             }
         }) {
@@ -498,14 +543,8 @@ impl App {
                 }
                 if rep.geom_dirty {
                     if let Some(sel) = &rep.sel {
-                        let geom = geometry::build(
-                            &mol.system,
-                            sel,
-                            &mol.bonds,
-                            rep.kind,
-                            &rep.params,
-                            rep.color,
-                        );
+                        let geom =
+                            geometry::build(&mol.system, sel, &mol.bonds, &rep.params, rep.color);
                         rep.gpu = self.renderer.upload(rs, &geom);
                     }
                     rep.geom_dirty = false;

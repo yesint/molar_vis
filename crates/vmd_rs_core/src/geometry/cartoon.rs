@@ -1,0 +1,389 @@
+//! Secondary-structure cartoon mesh.
+//!
+//! For each protein chain we run a Catmull-Rom spline through the Cα atoms,
+//! build a per-residue orientation frame from the carbonyl direction (with
+//! flip-consistency so the ribbon doesn't twist 180° between residues), and
+//! extrude an elliptical cross-section along the spline. The cross-section
+//! morphs by DSSP class: a thin tube for coil/turn, a wide flat ribbon for
+//! helices and sheets, with an arrowhead at each β-strand C-terminus. Helix and
+//! sheet Cα paths are Laplacian-smoothed first so ribbons run down the axis
+//! instead of corkscrewing along the raw Cα trace.
+
+use glam::Vec3;
+use molar::prelude::*;
+
+use std::collections::BTreeMap;
+
+use super::MeshData;
+use crate::color::Colorizer;
+use crate::render::MeshVertex;
+use crate::secstruct::{SsClass, SsMap};
+
+/// Spline subdivisions per residue (along the backbone). Matches VMD's
+/// `BONDRES` default of 12 — enough that the tight helix loops read as smooth.
+const STEPS: usize = 12;
+/// Vertices around each cross-section ring.
+const RING: usize = 12;
+/// Catmull-Rom tension VMD uses for NewCartoon (`create_modified_CR_spline_basis`
+/// slope): tangent = (P₂−P₀)/slope. 1.25 (vs standard CR's 2.0) gives fuller,
+/// rounder loops through the helix turns, which is most of the "smoothness".
+const CR_SLOPE: f32 = 1.25;
+
+struct Residue {
+    ca: Vec3,
+    /// Carbonyl O position, if present (for the ribbon orientation).
+    o: Option<Vec3>,
+    color: u32,
+    class: SsClass,
+    chain: char,
+    resindex: usize,
+}
+
+pub fn build(
+    bound: &impl ParticleIterProvider,
+    colorizer: &Colorizer,
+    ss: &SsMap,
+    coil_radius: f32,
+    ribbon_width: f32,
+    ribbon_thickness: f32,
+) -> MeshData {
+    // Group atoms by residue (BTreeMap keeps ascending resindex order).
+    struct Acc {
+        ca: Option<(Vec3, u32)>,
+        o: Option<Vec3>,
+        chain: char,
+    }
+    let mut by_res: BTreeMap<usize, Acc> = BTreeMap::new();
+    for p in bound.iter_particle() {
+        let acc = by_res.entry(p.atom.resindex).or_insert(Acc {
+            ca: None,
+            o: None,
+            chain: p.atom.chain,
+        });
+        match p.atom.name.as_str() {
+            "CA" => acc.ca = Some((v3(p.pos), colorizer.color(p.atom, p.id))),
+            "O" | "OT1" | "OXT" => {
+                if acc.o.is_none() {
+                    acc.o = Some(v3(p.pos));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Keep only residues with a Cα (the spline control points).
+    let residues: Vec<Residue> = by_res
+        .into_iter()
+        .filter_map(|(ri, a)| {
+            a.ca.map(|(ca, color)| Residue {
+                ca,
+                o: a.o,
+                color,
+                class: ss.class(ri),
+                chain: a.chain,
+                resindex: ri,
+            })
+        })
+        .collect();
+
+    let shape = Shape {
+        coil_radius,
+        ribbon_width,
+        ribbon_thickness,
+    };
+    let mut mesh = MeshData::default();
+
+    // Split into runs of consecutive, same-chain residues (break on chain change
+    // or a gap in resindex — i.e. a chain break / missing residues).
+    let mut start = 0;
+    while start < residues.len() {
+        let mut end = start + 1;
+        while end < residues.len()
+            && residues[end].chain == residues[start].chain
+            && residues[end].resindex == residues[end - 1].resindex + 1
+        {
+            end += 1;
+        }
+        build_run(&residues[start..end], &shape, &mut mesh);
+        start = end;
+    }
+    mesh
+}
+
+/// Cross-section dimensions per DSSP class.
+struct Shape {
+    coil_radius: f32,
+    ribbon_width: f32,
+    ribbon_thickness: f32,
+}
+
+impl Shape {
+    /// (half-width, half-thickness) of the cross-section for a class. Helix and
+    /// sheet are the same flat ribbon (VMD); coil is a circular tube.
+    fn dims(&self, class: SsClass) -> (f32, f32) {
+        match class {
+            SsClass::Helix | SsClass::Sheet => (self.ribbon_width, self.ribbon_thickness),
+            SsClass::Coil => (self.coil_radius, self.coil_radius),
+        }
+    }
+}
+
+fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
+    let n = run.len();
+    if n < 2 {
+        return;
+    }
+
+    // Per-residue SS class, with single-residue helix/sheet runs demoted to coil
+    // (they render as spurious stubs/arrows otherwise).
+    let mut classes: Vec<SsClass> = run.iter().map(|r| r.class).collect();
+    demote_singletons(&mut classes);
+
+    // Spline control points. β-strands get their pleat zig-zag cancelled with a
+    // weighted neighbor average `(2·CAᵢ + CAᵢ₋₁ + CAᵢ₊₁)/4` (VMD); helix and coil
+    // keep the raw Cα — the smooth helix ribbon comes from the orientation, not
+    // from moving the centerline.
+    let coords: Vec<Vec3> = (0..n)
+        .map(|i| {
+            if classes[i] == SsClass::Sheet {
+                let prev = run[i.saturating_sub(1)].ca;
+                let next = run[(i + 1).min(n - 1)].ca;
+                run[i].ca * 0.5 + (prev + next) * 0.25
+            } else {
+                run[i].ca
+            }
+        })
+        .collect();
+
+    // Ribbon orientation ("perp"), exactly VMD's scheme: at each residue take the
+    // in-plane normal of the peptide plane built from the *previous* carbonyl,
+    // `D = (A×B)×A` with `A = CAᵢ−CAᵢ₋₁`, `B = Oᵢ₋₁−CAᵢ₋₁`; flip it to agree with
+    // the running direction `g`, then fold it into a renormalized cumulative
+    // average. The running average is what keeps the frame steady through a helix
+    // (where `D` is tiny and noisy because the carbonyl runs along the axis).
+    // NOTE on scale: this running average mixes the unit-length `g` with the raw
+    // `D` (∝ length³), so the smoothing strength depends on the absolute |D|. VMD
+    // is calibrated for Ångström coords (|D|~17 ≫ |g|=1, so D leads where it is
+    // reliable — sheets — and `g` coasts through helices where D is tiny). Our
+    // coords are nm, where |D|~0.02 ≪ 1 would freeze `g` (→ rippled helices,
+    // mis-oriented sheets), so we scale the direction vectors to Ångström.
+    const NM_TO_ANGSTROM: f32 = 10.0;
+    let mut perps = vec![Vec3::ZERO; n];
+    let mut g = Vec3::ZERO;
+    let mut last_ca = run[0].ca;
+    let mut last_o = run[0].o.unwrap_or(run[0].ca);
+    for i in 0..n {
+        let ca = run[i].ca;
+        let a = (ca - last_ca) * NM_TO_ANGSTROM;
+        let b = (last_o - last_ca) * NM_TO_ANGSTROM;
+        let d = a.cross(b).cross(a);
+        let dd = if d.dot(g) < 0.0 { -d } else { d };
+        g = (g + dd).normalize_or_zero();
+        perps[i] = g;
+        last_ca = ca;
+        last_o = run[i].o.unwrap_or(last_o);
+    }
+    perps[0] = perps[1]; // first residue had no previous data to work with
+
+    // β-strand C-termini get an arrowhead: a Sheet residue whose successor isn't.
+    let is_arrow: Vec<bool> = (0..n)
+        .map(|i| classes[i] == SsClass::Sheet && (i + 1 >= n || classes[i + 1] != SsClass::Sheet))
+        .collect();
+    let arrow_base = shape.ribbon_width * 1.75;
+
+    let ctx = RunCtx {
+        run,
+        coords: &coords,
+        perps: &perps,
+        classes: &classes,
+        is_arrow: &is_arrow,
+        shape,
+        arrow_base,
+    };
+
+    // Sample the spline into cross-section rings.
+    let mut rings: Vec<Ring> = Vec::with_capacity((n - 1) * STEPS + 1);
+    for i in 0..n - 1 {
+        for s in 0..STEPS {
+            rings.push(sample(&ctx, i, s as f32 / STEPS as f32));
+        }
+    }
+    rings.push(sample(&ctx, n - 2, 1.0));
+
+    emit(&rings, mesh);
+}
+
+/// Demote single-residue helix/sheet runs to coil.
+fn demote_singletons(classes: &mut [SsClass]) {
+    let n = classes.len();
+    let mut i = 0;
+    while i < n {
+        let c = classes[i];
+        let mut j = i + 1;
+        while j < n && classes[j] == c {
+            j += 1;
+        }
+        if c != SsClass::Coil && (j - i) < 2 {
+            classes[i..j].fill(SsClass::Coil);
+        }
+        i = j;
+    }
+}
+
+/// Everything the per-sample cross-section builder needs for one run.
+struct RunCtx<'a> {
+    run: &'a [Residue],
+    coords: &'a [Vec3],
+    perps: &'a [Vec3],
+    classes: &'a [SsClass],
+    is_arrow: &'a [bool],
+    shape: &'a Shape,
+    arrow_base: f32,
+}
+
+/// One cross-section: a center frame + ellipse dimensions + color.
+struct Ring {
+    center: Vec3,
+    tangent: Vec3,
+    width: Vec3,
+    normal: Vec3,
+    hw: f32,
+    ht: f32,
+    color: u32,
+}
+
+fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
+    let n = c.coords.len();
+    let p0 = c.coords[i.saturating_sub(1)];
+    let p1 = c.coords[i];
+    let p2 = c.coords[i + 1];
+    let p3 = c.coords[(i + 2).min(n - 1)];
+
+    let (center, tan) = cr_eval(p0, p1, p2, p3, u);
+    let tangent = tan.normalize_or_zero();
+
+    // Width axis = interpolated perp; thickness axis = tangent × perp (VMD's
+    // updir). The perp need not be exactly ⟂ to the tangent — `normal` is ⟂ to
+    // both, and the two cross-section axes (perp, normal) are mutually ⟂.
+    let perp = (c.perps[i] * (1.0 - u) + c.perps[i + 1] * u).normalize_or_zero();
+    let normal = tangent.cross(perp).normalize_or_zero();
+
+    let (hw_a, ht_a) = c.shape.dims(c.classes[i]);
+    let (hw_b, ht_b) = c.shape.dims(c.classes[i + 1]);
+    let ht = ht_a * (1.0 - u) + ht_b * u;
+    let hw = if c.is_arrow[i] {
+        // Arrowhead: widest at the base, tapering to a point at the tip.
+        c.arrow_base * (1.0 - u) + 0.01 * u
+    } else if c.is_arrow[i + 1] {
+        // Lead-in segment that widens up to the arrow base.
+        hw_a * (1.0 - u) + c.arrow_base * u
+    } else {
+        hw_a * (1.0 - u) + hw_b * u
+    };
+
+    Ring {
+        center,
+        tangent,
+        width: perp,
+        normal,
+        hw,
+        ht,
+        color: lerp_color(c.run[i].color, c.run[i + 1].color, u),
+    }
+}
+
+/// Turn the list of rings into a triangle mesh (ribbon body + end caps).
+fn emit(rings: &[Ring], mesh: &mut MeshData) {
+    let base = mesh.vertices.len() as u32;
+
+    for r in rings {
+        for k in 0..RING {
+            let theta = std::f32::consts::TAU * k as f32 / RING as f32;
+            let (s, c) = theta.sin_cos();
+            let offset = r.width * (r.hw * c) + r.normal * (r.ht * s);
+            // Analytic outward normal of the ellipse cross-section.
+            let nrm = (r.width * (c / r.hw.max(1e-4)) + r.normal * (s / r.ht.max(1e-4)))
+                .normalize_or_zero();
+            mesh.vertices.push(MeshVertex {
+                pos: (r.center + offset).to_array(),
+                normal: nrm.to_array(),
+                color: r.color,
+            });
+        }
+    }
+
+    // Quad strip between consecutive rings.
+    for r in 0..rings.len() - 1 {
+        let a0 = base + (r * RING) as u32;
+        let b0 = base + ((r + 1) * RING) as u32;
+        for k in 0..RING {
+            let k2 = (k + 1) % RING;
+            let a = a0 + k as u32;
+            let b = a0 + k2 as u32;
+            let c = b0 + k2 as u32;
+            let d = b0 + k as u32;
+            mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+    }
+
+    // Flat end caps (fan around a center vertex).
+    add_cap(mesh, rings.first().unwrap(), base, true);
+    let last_base = base + ((rings.len() - 1) * RING) as u32;
+    add_cap(mesh, rings.last().unwrap(), last_base, false);
+}
+
+fn add_cap(mesh: &mut MeshData, ring: &Ring, ring_base: u32, front: bool) {
+    let normal = if front { -ring.tangent } else { ring.tangent };
+    let center_idx = mesh.vertices.len() as u32;
+    mesh.vertices.push(MeshVertex {
+        pos: ring.center.to_array(),
+        normal: normal.to_array(),
+        color: ring.color,
+    });
+    for k in 0..RING {
+        let k2 = (k + 1) % RING;
+        let a = ring_base + k as u32;
+        let b = ring_base + k2 as u32;
+        if front {
+            mesh.indices.extend_from_slice(&[center_idx, b, a]);
+        } else {
+            mesh.indices.extend_from_slice(&[center_idx, a, b]);
+        }
+    }
+}
+
+//──────────────────────────────────────────────────────────────────────────────
+// Math helpers
+//──────────────────────────────────────────────────────────────────────────────
+
+fn v3(p: &Pos) -> Vec3 {
+    Vec3::new(p.x, p.y, p.z)
+}
+
+/// Evaluate VMD's modified Catmull-Rom (slope `CR_SLOPE`) on the segment from
+/// `p1` to `p2`, returning (position, tangent) at `w ∈ [0,1]`. Interpolates the
+/// control points; the slope controls loop fullness. Matches VMD's
+/// `create_modified_CR_spline_basis` + `make_spline_interpolation`.
+fn cr_eval(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, w: f32) -> (Vec3, Vec3) {
+    let is = 1.0 / CR_SLOPE;
+    let q0 = p0 * (-is) + p1 * (2.0 - is) + p2 * (is - 2.0) + p3 * is; // w³
+    let q1 = p0 * (2.0 * is) + p1 * (is - 3.0) + p2 * (3.0 - 2.0 * is) + p3 * (-is); // w²
+    let q2 = p0 * (-is) + p2 * is; // w¹
+    let q3 = p1; // w⁰
+    let pos = ((q0 * w + q1) * w + q2) * w + q3;
+    let tan = (q0 * (3.0 * w) + q1 * 2.0) * w + q2;
+    (pos, tan)
+}
+
+fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
+    let mix = |sa: u32, sb: u32| -> u32 {
+        let fa = sa as f32;
+        let fb = sb as f32;
+        (fa + (fb - fa) * t).round().clamp(0.0, 255.0) as u32
+    };
+    let chan = |c: u32, sh: u32| (c >> sh) & 0xff;
+    mix(chan(a, 0), chan(b, 0))
+        | (mix(chan(a, 8), chan(b, 8)) << 8)
+        | (mix(chan(a, 16), chan(b, 16)) << 16)
+        | (0xff << 24)
+}

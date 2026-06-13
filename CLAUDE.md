@@ -22,8 +22,9 @@ cargo build -p vmd_rs_core --target wasm32-unknown-unknown   # WASM-readiness ch
   generated — **not in git**; regenerate per `tests/README.md` with `gmx genconf`).
 - Dev machine is **Wayland**; screenshot a running window with
   `spectacle -b -n -f -o out.png` (`-a` = active window).
-- Headless verification env hooks (native only): `VMD_RS_DEBUG_REP=vdw|licorice|ballstick|lines`,
-  `VMD_RS_DEBUG_SEL="<selection>"`, `VMD_RS_DEBUG_COLOR=element|chain|resid|resname|index|beta`,
+- Headless verification env hooks (native only): `VMD_RS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon`,
+  `VMD_RS_DEBUG_SEL="<selection>"`,
+  `VMD_RS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
   `VMD_RS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
   `VMD_RS_DEBUG_ORBIT=<deg>`, `VMD_RS_DEBUG_ORTHO=1`.
 
@@ -47,11 +48,28 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `theme.rs` — installs the Phosphor icon font + a high-contrast dark style, larger fonts.
 - `camera.rs` — quaternion arcball `Camera` (orbit/pan/zoom), perspective **and**
   orthographic projection, `frame_bbox`. `#[derive(PartialEq)]` drives render-skip.
-- `color.rs` — CPK element colors → packed RGBA8 (`u32`).
-- `geometry.rs` — `RepKind`, `RepParams`, `GeometryData`; `build(system, sel, bonds, …)`
-  binds the `Sel` (`system.bind`) and reads positions/atoms via `iter_particle` — nothing
-  cached. Spheres come from the selected atoms; bonds are emitted where both endpoints are
-  selected (half-bond split, colored by each atom).
+- `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `Colorizer`.
+- `secstruct.rs` — `SsMap` (molar `Dssp` keyed by `resindex`), `SsClass` (helix/sheet/coil),
+  VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme.
+- `geometry.rs` — `RepKind`, `RepParams` (**per-style enum**), `GeometryData`/`MeshData`;
+  `build(system, sel, bonds, params, color)` binds the `Sel` (`system.bind`), reads
+  positions/atoms via `iter_particle` (nothing cached), and dispatches on `params`. Spheres
+  come from the selected atoms; bonds are half-bond split, colored by each atom. Computes a
+  `SsMap` once when the rep is Cartoon or colored by SecStruct.
+- `geometry/cartoon.rs` — per-chain spline through Cα using VMD's **modified Catmull-Rom
+  basis (slope 1.25, interpolating)** + 12 subdivisions — helices genuinely coil but the
+  slope-1.25 tangents make the loops round/smooth (standard CR slope 2 looked angular). SS
+  classes are cleaned first: β-bridge → coil and single-residue helix/sheet runs demoted to
+  coil (else spurious stubs/arrows). Ribbon orientation = VMD's
+  **renormalized cumulative-average perp** (`D=(A×B)×A` from the previous carbonyl, flipped to
+  the running `g`, then `g=normalize(g+D)`; the running average is what keeps helix ribbons
+  flat — using the raw per-residue normal garbles them). **`g`/`D` must be at Ångström scale**
+  (`NM_TO_ANGSTROM`): the average mixes unit `g` with `|D|∝length³`, so nm coords (|D|≈0.02)
+  freeze the frame → rippled helices + ~90°-rotated sheets; Å (|D|≈17) is what VMD relies on.
+  Only β-strand coords are smoothed
+  (`(2·CAᵢ+CAᵢ₋₁+CAᵢ₊₁)/4`); helix/coil keep raw Cα. Elliptical cross-section (width axis =
+  perp, thickness axis = tangent×perp) morphing by `SsClass` (helix=sheet flat ribbon, coil
+  tube) with β-arrowheads; emits indexed `MeshData`. Mirrors VMD `draw_cartoon_ribbons`.
 - `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
   guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
@@ -60,9 +78,10 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `data.rs` + `data/loader.rs` (`RawMolecule`: System + guessed bonds + bbox; positions/
   radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter).
 - `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A),
-  camera UBO (bind group 0), sphere/cylinder/line pipelines, `RepGpu` (per-rep buffers),
-  `upload()`, `render_scene()`, `texture_id()`. Plus `render/{sphere,cylinder,line,
-  camera_uniform}.rs` and `render/shaders/*.wgsl`.
+  camera UBO (bind group 0), sphere/cylinder/line/**mesh** pipelines, `RepGpu` (per-rep
+  buffers; mesh = vertex + u32 index buffer), `upload()`, `render_scene()`, `texture_id()`.
+  Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl`.
+  The cartoon mesh writes real depth and interleaves correctly with the impostors.
 
 ## Key architecture
 
@@ -162,10 +181,17 @@ History labels via `describe_change` ("edit selection", "change coloring",
   perspective/orthographic toggle + scene-dirty render-skip
 - ✅ Undo/Redo (history.rs) + big rep-row UI revamp (drag/expand/style-icon/gear)
 - ✅ M5 coloring schemes — `color.rs` `ColorMethod` {Element, Chain, ResID, ResName,
-  Index, Beta} + `Colorizer` (per-method, with B-factor range / index gradient context);
-  `geometry::build` colors each atom via the rep's `color`. Per-rep color dropdown in the
-  table next to the style dropdown, with drawn descriptive icons (`paint_color_icon`: CPK
-  dots / categorical bars / rainbow / blue-white-red). **Secondary-structure coloring is
-  deferred to M6** (molar `Dssp::ss()` is an ordered backbone array with no resindex map;
-  build that mapping with the cartoon work).
-- ⏭ Next: **M6 cartoon** (spline + DSSP), which also unlocks secondary-structure coloring.
+  Index, Beta, **SecStruct**} + `Colorizer` (per-method, with B-factor range / index
+  gradient context / DSSP map). `geometry::build` colors each atom via the rep's `color`.
+  Per-rep color dropdown next to the style dropdown, with drawn descriptive icons
+  (`paint_color_icon`: CPK dots / categorical bars / rainbow / blue-white-red / SS ribbon).
+- ✅ M6 **Cartoon** + secondary-structure coloring — `secstruct.rs` (`SsMap`: molar
+  `Dssp` keyed by `resindex`, `SsClass` helix/sheet/coil, VMD `ss_color`); `geometry/
+  cartoon.rs` (per-chain Catmull-Rom spline through Cα, carbonyl-derived ribbon frame with
+  flip-consistency, Laplacian smoothing of helix/sheet Cα, elliptical cross-section morphing
+  by SS class with β-arrowheads → indexed `MeshData`); `render/mesh.rs` + `shaders/mesh.wgsl`
+  (Lambert-shaded `MeshVertex` pipeline, writes real depth, shares the offscreen buffer with
+  the impostors). `RepKind::Cartoon` + `RepParams::Cartoon{coil_radius,ribbon_width,
+  ribbon_thickness}`. **`RepParams` is now a per-style enum** (each variant carries only its
+  own knobs); `geometry::build` dispatches on it (no more `kind` arg).
+- ✅ MVP complete (M0–M6, all five representations).

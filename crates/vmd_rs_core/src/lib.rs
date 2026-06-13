@@ -13,6 +13,7 @@ mod history;
 mod launch;
 mod render;
 mod scene;
+mod secstruct;
 mod theme;
 
 pub use app::App;

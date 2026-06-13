@@ -7,7 +7,10 @@
 use molar::prelude::*;
 
 use crate::color::{ColorMethod, Colorizer};
-use crate::render::{CylinderInstance, LineVertex, SphereInstance};
+use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
+use crate::secstruct::SsMap;
+
+mod cartoon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepKind {
@@ -15,14 +18,16 @@ pub enum RepKind {
     Licorice,
     BallAndStick,
     Lines,
+    Cartoon,
 }
 
 impl RepKind {
-    pub const ALL: [RepKind; 4] = [
+    pub const ALL: [RepKind; 5] = [
         RepKind::Vdw,
         RepKind::Licorice,
         RepKind::BallAndStick,
         RepKind::Lines,
+        RepKind::Cartoon,
     ];
 
     pub fn label(self) -> &'static str {
@@ -31,6 +36,7 @@ impl RepKind {
             RepKind::Licorice => "Licorice",
             RepKind::BallAndStick => "Ball and Stick",
             RepKind::Lines => "Lines",
+            RepKind::Cartoon => "Cartoon",
         }
     }
 
@@ -41,6 +47,7 @@ impl RepKind {
             "licorice" => Some(RepKind::Licorice),
             "ballstick" | "ball_and_stick" | "ball-and-stick" => Some(RepKind::BallAndStick),
             "lines" => Some(RepKind::Lines),
+            "cartoon" => Some(RepKind::Cartoon),
             _ => None,
         }
     }
@@ -48,21 +55,49 @@ impl RepKind {
 
 /// Tunable representation parameters (nm). Defaults follow VMD conventions
 /// converted to nm (VMD's Å values / 10).
+/// Tunable parameters for a representation (nm). Each style carries only the
+/// knobs it actually uses; `for_kind` resets to that style's VMD-derived
+/// defaults (VMD's Å values / 10). The variant always matches the rep's
+/// `RepKind` — switching style replaces it wholesale.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RepParams {
-    /// VDW radius multiplier for sphere reps.
-    pub sphere_scale: f32,
-    /// Cylinder (and licorice cap) radius, nm.
-    pub bond_radius: f32,
+pub enum RepParams {
+    Vdw,
+    Licorice {
+        /// Cylinder + cap radius.
+        bond_radius: f32,
+    },
+    BallAndStick {
+        /// VDW radius multiplier for the balls.
+        sphere_scale: f32,
+        /// Stick radius.
+        bond_radius: f32,
+    },
+    Lines,
+    Cartoon {
+        /// Coil/turn tube radius.
+        coil_radius: f32,
+        /// Helix/sheet ribbon half-width.
+        ribbon_width: f32,
+        /// Helix/sheet ribbon half-thickness.
+        ribbon_thickness: f32,
+    },
 }
 
 impl RepParams {
     pub fn for_kind(kind: RepKind) -> Self {
         match kind {
-            RepKind::Vdw => Self { sphere_scale: 1.0, bond_radius: 0.0 },
-            RepKind::Licorice => Self { sphere_scale: 1.0, bond_radius: 0.03 },
-            RepKind::BallAndStick => Self { sphere_scale: 0.25, bond_radius: 0.015 },
-            RepKind::Lines => Self { sphere_scale: 1.0, bond_radius: 0.0 },
+            RepKind::Vdw => RepParams::Vdw,
+            RepKind::Licorice => RepParams::Licorice { bond_radius: 0.03 },
+            RepKind::BallAndStick => RepParams::BallAndStick {
+                sphere_scale: 0.25,
+                bond_radius: 0.015,
+            },
+            RepKind::Lines => RepParams::Lines,
+            RepKind::Cartoon => RepParams::Cartoon {
+                coil_radius: 0.03,
+                ribbon_width: 0.15,
+                ribbon_thickness: 0.03,
+            },
         }
     }
 }
@@ -72,6 +107,14 @@ pub struct GeometryData {
     pub spheres: Vec<SphereInstance>,
     pub cylinders: Vec<CylinderInstance>,
     pub lines: Vec<LineVertex>,
+    pub mesh: MeshData,
+}
+
+/// An indexed triangle mesh (Cartoon representation).
+#[derive(Default)]
+pub struct MeshData {
+    pub vertices: Vec<MeshVertex>,
+    pub indices: Vec<u32>,
 }
 
 /// Build GPU geometry for one representation. `sel` is bound to its `System` to
@@ -82,37 +125,53 @@ pub fn build(
     system: &System,
     sel: &Sel,
     bonds: &[[usize; 2]],
-    kind: RepKind,
     params: &RepParams,
     color: ColorMethod,
 ) -> GeometryData {
     let bound = system.bind(sel);
-    let colorizer = Colorizer::new(color, &bound, system.len());
-    match kind {
-        RepKind::Vdw => GeometryData {
+    // DSSP is needed for the Cartoon shape and for the SecStruct color scheme.
+    let ss = (matches!(params, RepParams::Cartoon { .. }) || color.needs_ss())
+        .then(|| SsMap::compute(&bound));
+    let colorizer = Colorizer::new(color, &bound, system.len(), ss.as_ref());
+    match *params {
+        RepParams::Vdw => GeometryData {
             spheres: spheres(&bound, &colorizer, |a| a.vdw()),
             ..Default::default()
         },
-        RepKind::Licorice => {
+        RepParams::Licorice { bond_radius } => {
             let lut = selected_lut(&bound, &colorizer, system.len());
             GeometryData {
-                spheres: spheres(&bound, &colorizer, |_| params.bond_radius),
-                cylinders: cylinders(&lut, bonds, params.bond_radius),
+                spheres: spheres(&bound, &colorizer, |_| bond_radius),
+                cylinders: cylinders(&lut, bonds, bond_radius),
                 ..Default::default()
             }
         }
-        RepKind::BallAndStick => {
+        RepParams::BallAndStick { sphere_scale, bond_radius } => {
             let lut = selected_lut(&bound, &colorizer, system.len());
             GeometryData {
-                spheres: spheres(&bound, &colorizer, |a| a.vdw() * params.sphere_scale),
-                cylinders: cylinders(&lut, bonds, params.bond_radius),
+                spheres: spheres(&bound, &colorizer, |a| a.vdw() * sphere_scale),
+                cylinders: cylinders(&lut, bonds, bond_radius),
                 ..Default::default()
             }
         }
-        RepKind::Lines => {
+        RepParams::Lines => {
             let lut = selected_lut(&bound, &colorizer, system.len());
             GeometryData {
                 lines: lines(&lut, bonds),
+                ..Default::default()
+            }
+        }
+        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness } => {
+            let ss = ss.as_ref().expect("ss computed for cartoon");
+            GeometryData {
+                mesh: cartoon::build(
+                    &bound,
+                    &colorizer,
+                    ss,
+                    coil_radius,
+                    ribbon_width,
+                    ribbon_thickness,
+                ),
                 ..Default::default()
             }
         }

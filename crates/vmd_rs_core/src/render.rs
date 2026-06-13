@@ -10,10 +10,12 @@
 mod camera_uniform;
 mod cylinder;
 mod line;
+mod mesh;
 mod sphere;
 
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
+pub use mesh::MeshVertex;
 pub use sphere::SphereInstance;
 
 use camera_uniform::CameraUniform;
@@ -80,12 +82,20 @@ struct DrawBuffer {
     count: u32,
 }
 
+/// An indexed triangle mesh (vertex + u32 index buffer).
+struct MeshBuffers {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+}
+
 /// Per-representation GPU geometry (any subset may be present).
 #[derive(Default)]
 pub struct RepGpu {
     spheres: Option<DrawBuffer>,   // 4 verts/instance
     cylinders: Option<DrawBuffer>, // 4 verts/instance
     lines: Option<DrawBuffer>,     // vertex count (LineList)
+    mesh: Option<MeshBuffers>,     // indexed triangles (cartoon)
 }
 
 fn upload_buf<T: bytemuck::Pod>(
@@ -107,6 +117,27 @@ fn upload_buf<T: bytemuck::Pod>(
     })
 }
 
+fn upload_mesh(device: &wgpu::Device, mesh: &crate::geometry::MeshData) -> Option<MeshBuffers> {
+    if mesh.indices.is_empty() {
+        return None;
+    }
+    let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh-verts"),
+        contents: bytemuck::cast_slice(&mesh.vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mesh-indices"),
+        contents: bytemuck::cast_slice(&mesh.indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    Some(MeshBuffers {
+        vertices,
+        indices,
+        index_count: mesh.indices.len() as u32,
+    })
+}
+
 pub struct SceneRenderer {
     color_format: wgpu::TextureFormat,
     targets: Targets,
@@ -118,6 +149,7 @@ pub struct SceneRenderer {
     sphere_pipeline: wgpu::RenderPipeline,
     cylinder_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    mesh_pipeline: wgpu::RenderPipeline,
 }
 
 impl SceneRenderer {
@@ -158,6 +190,7 @@ impl SceneRenderer {
         let cylinder_pipeline =
             cylinder::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
         let line_pipeline = line::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
+        let mesh_pipeline = mesh::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
 
         let targets = Targets::new(device, color_format, [1, 1]);
         let egui_texture = rs.renderer.write().register_native_texture(
@@ -175,6 +208,7 @@ impl SceneRenderer {
             sphere_pipeline,
             cylinder_pipeline,
             line_pipeline,
+            mesh_pipeline,
         }
     }
 
@@ -190,6 +224,7 @@ impl SceneRenderer {
             spheres: upload_buf(device, &geom.spheres, "spheres"),
             cylinders: upload_buf(device, &geom.cylinders, "cylinders"),
             lines: upload_buf(device, &geom.lines, "lines"),
+            mesh: upload_mesh(device, &geom.mesh),
         }
     }
 
@@ -277,6 +312,12 @@ impl SceneRenderer {
                         pass.set_pipeline(&self.line_pipeline);
                         pass.set_vertex_buffer(0, l.buffer.slice(..));
                         pass.draw(0..l.count, 0..1);
+                    }
+                    if let Some(m) = &rep.gpu.mesh {
+                        pass.set_pipeline(&self.mesh_pipeline);
+                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                        pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..m.index_count, 0, 0..1);
                     }
                 }
             }
