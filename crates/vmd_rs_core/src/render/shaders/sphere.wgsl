@@ -7,9 +7,18 @@ struct Camera {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
     params: vec4<f32>, // params.x: 1.0 = perspective, 0.0 = orthographic
+    cue: vec4<f32>,    // depth cue: near, far, strength, _
+    fog_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// Linear depth cueing: fade toward the background as eye-space distance grows.
+fn apply_fog(color: vec3<f32>, eye_z: f32) -> vec3<f32> {
+    let d = -eye_z; // eye-space distance (camera looks down -Z)
+    let f = clamp((d - camera.cue.x) / max(camera.cue.y - camera.cue.x, 1e-6), 0.0, 1.0) * camera.cue.z;
+    return mix(color, camera.fog_color.rgb, f);
+}
 
 struct Instance {
     @location(0) center: vec3<f32>,
@@ -106,6 +115,6 @@ fn fs_main(in: VsOut) -> FsOut {
 
     var out: FsOut;
     out.depth = clip.z / clip.w;
-    out.color = vec4<f32>(in.color * shade, 1.0);
+    out.color = vec4<f32>(apply_fog(in.color * shade, hit.z), 1.0);
     return out;
 }

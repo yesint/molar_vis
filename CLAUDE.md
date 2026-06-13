@@ -95,6 +95,13 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   plane (z=0)** so the near hit has t>0 (a past bug black-screened ortho). Lines are
   plain 1px GL lines. Half-bond coloring = two half-segments per bond, colored by each
   endpoint atom.
+- **Depth cueing (fog)** — linear fog fades all geometry toward the background (`BG` in
+  `render.rs`, also the clear color) by eye-space distance. The camera uniform carries
+  `cue = [near, far, strength, _]` (eye-space, derived per frame by `Camera::cue_uniform`
+  from `distance`/`scene_radius` + the scene-relative `DepthCue { enabled, start, strength }`
+  on `Camera`) + `fog_color`. Every fragment shader applies the shared `apply_fog(color,
+  eye_z)`; line/mesh pass eye-space `z` as a varying, the impostors use their ray hit. Lives
+  in `Camera` so its `PartialEq` re-renders on change; controls in the Scene panel.
 - **Scene graph** — N molecules × M reps. Each rep has a molar **selection string**
   compiled to atom indices (`compile_selection` → `system.select`). Geometry is built
   only for selected atoms (and bonds whose endpoints are both selected).
@@ -148,7 +155,8 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 
 History toolbar (undo/redo buttons, each with a `▼` dropdown listing named actions for
 **cumulative** undo/redo; also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
-toggles; **orthographic is the default**) → `Molecules` (one row each: name + atom count,
+toggles, **orthographic is the default**; **depth-cue** on/off + Strength/Start sliders) →
+`Molecules` (one row each: name + atom count,
 right-justified eye/trash) → `Representations` ("Add" button, then rich rows). No
 standalone controls section — params live in a per-rep gear popup.
 

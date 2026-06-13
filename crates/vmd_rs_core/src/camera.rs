@@ -13,6 +13,26 @@ pub enum Projection {
     Orthographic,
 }
 
+/// Linear depth cueing (fog): geometry fades toward the background color as it
+/// recedes from the camera, adding depth perception (VMD's "Depth Cueing").
+/// `start`/`strength` are unitless and scene-relative so they stay meaningful at
+/// any zoom; the actual eye-space range is derived from the camera each frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepthCue {
+    pub enabled: bool,
+    /// Where the fog begins, as a fraction of the molecule's front→back depth
+    /// span (0 = front of the scene, 1 = back).
+    pub start: f32,
+    /// Fog opacity at the back of the scene (0 = none, 1 = fully background).
+    pub strength: f32,
+}
+
+impl Default for DepthCue {
+    fn default() -> Self {
+        Self { enabled: true, start: 0.3, strength: 0.55 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     /// Point the camera looks at (pannable).
@@ -25,6 +45,7 @@ pub struct Camera {
     pub scene_radius: f32,
     pub fov_y: f32,
     pub projection: Projection,
+    pub depth_cue: DepthCue,
 }
 
 impl Default for Camera {
@@ -46,11 +67,23 @@ impl Camera {
             scene_radius: radius,
             fov_y,
             projection: Projection::Orthographic,
+            depth_cue: DepthCue::default(),
         }
     }
 
     pub fn is_perspective(&self) -> bool {
         matches!(self.projection, Projection::Perspective)
+    }
+
+    /// Depth-cue parameters for the GPU camera uniform: `[near, far, strength, _]`
+    /// in eye-space distance (positive, away from the camera). The fog ramps from
+    /// `near` (no fog) to `far` (full `strength`), spanning the molecule's depth.
+    /// When disabled, `strength` is 0 so the shaders apply no fog.
+    pub fn cue_uniform(&self) -> [f32; 4] {
+        let near = (self.distance - self.scene_radius) + self.depth_cue.start * 2.0 * self.scene_radius;
+        let far = (self.distance + self.scene_radius).max(near + 1e-3);
+        let strength = if self.depth_cue.enabled { self.depth_cue.strength } else { 0.0 };
+        [near, far, strength, 0.0]
     }
 
     fn right(&self) -> Vec3 {

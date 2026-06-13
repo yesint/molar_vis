@@ -30,6 +30,10 @@ use crate::scene::Scene;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Scene background. Used both as the render-pass clear color and as the depth-cue
+/// fog color, so distant geometry dissolves seamlessly into the background.
+const BG: [f32; 4] = [0.02, 0.02, 0.05, 1.0];
+
 /// Offscreen render targets, recreated when the viewport size changes.
 struct Targets {
     size: [u32; 2],
@@ -237,6 +241,7 @@ impl SceneRenderer {
         view: Mat4,
         proj: Mat4,
         perspective: bool,
+        cue: [f32; 4],
         scene: &Scene,
     ) -> TextureId {
         if size_px != self.targets.size {
@@ -249,7 +254,7 @@ impl SceneRenderer {
             );
         }
 
-        let cam = CameraUniform::new(view, proj, perspective);
+        let cam = CameraUniform::new(view, proj, perspective, cue, BG);
         rs.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
 
@@ -267,10 +272,10 @@ impl SceneRenderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.05,
-                            a: 1.0,
+                            r: BG[0] as f64,
+                            g: BG[1] as f64,
+                            b: BG[2] as f64,
+                            a: BG[3] as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },

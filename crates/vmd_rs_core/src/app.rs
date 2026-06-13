@@ -697,6 +697,26 @@ impl App {
                 self.camera.projection = Projection::Orthographic;
             }
         });
+
+        let cue = &mut self.camera.depth_cue;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut cue.enabled, "Depth cue")
+                .on_hover_text("Fade distant geometry toward the background for depth perception");
+        });
+        ui.add_enabled_ui(cue.enabled, |ui| {
+            ui.add(
+                egui::Slider::new(&mut cue.strength, 0.0..=1.0)
+                    .text("Strength")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text("How strongly the far side fades to the background");
+            ui.add(
+                egui::Slider::new(&mut cue.start, 0.0..=1.0)
+                    .text("Start")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text("Where the fog begins, from the front (0) to the back (1) of the scene");
+        });
     }
 
     /// Undo/redo buttons, each with a dropdown listing the named actions on the
@@ -1055,6 +1075,7 @@ impl App {
                     view,
                     proj,
                     self.camera.is_perspective(),
+                    self.camera.cue_uniform(),
                     &self.scene,
                 );
                 self.last_render_camera = Some(self.camera);

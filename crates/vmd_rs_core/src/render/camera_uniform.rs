@@ -13,14 +13,29 @@ pub struct CameraUniform {
     /// x = 1.0 for perspective (eye-ray impostors), 0.0 for orthographic
     /// (parallel-ray impostors). y,z,w reserved.
     pub params: [f32; 4],
+    /// Depth cueing: `[near, far, strength, _]` in eye-space distance. Geometry
+    /// fades to `fog_color` from `near` (none) to `far` (full `strength`).
+    /// `strength == 0` disables fog.
+    pub cue: [f32; 4],
+    /// Background color geometry fades toward under depth cueing (matches the
+    /// scene clear color so distant geometry dissolves into the background).
+    pub fog_color: [f32; 4],
 }
 
 impl CameraUniform {
-    pub fn new(view: Mat4, proj: Mat4, perspective: bool) -> Self {
+    pub fn new(
+        view: Mat4,
+        proj: Mat4,
+        perspective: bool,
+        cue: [f32; 4],
+        fog_color: [f32; 4],
+    ) -> Self {
         Self {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
             params: [if perspective { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            cue,
+            fog_color,
         }
     }
 }
