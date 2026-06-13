@@ -81,7 +81,9 @@ fn fs_main(in: VsOut) -> FsOut {
         ro = vec3<f32>(0.0, 0.0, 0.0);
         rd = normalize(in.view_pos);
     } else {
-        ro = in.view_pos;
+        // Parallel ray; origin on the camera plane (z=0) so the whole scene
+        // (which lies at z<0) is in front and the near intersection has t>0.
+        ro = vec3<f32>(in.view_pos.x, in.view_pos.y, 0.0);
         rd = vec3<f32>(0.0, 0.0, -1.0);
     }
     let ua = in.axis;
