@@ -30,6 +30,10 @@ pub struct Representation {
     /// Last selection error, shown in the UI; `None` if the selection is valid.
     pub sel_error: Option<String>,
     pub visible: bool,
+    /// Re-evaluate the (compiled) selection every time the System's State changes
+    /// (i.e. each trajectory frame). For coordinate-dependent selections like
+    /// `within …`; honored once trajectory playback lands.
+    pub dynamic: bool,
     /// `sel_text` changed → recompile the selection.
     pub sel_dirty: bool,
     /// Selection/params/style changed → rebuild + reupload geometry.
@@ -39,23 +43,30 @@ pub struct Representation {
 
 impl Representation {
     pub fn new(kind: RepKind) -> Self {
-        Self::restore(kind, RepParams::for_kind(kind), "all".to_string(), true)
-    }
-
-    /// Row label: "<selection>/<style>", e.g. "name CA/VDW".
-    pub fn summary(&self) -> String {
-        format!("{}/{}", self.sel_text, self.kind.label())
+        Self::restore(kind, RepParams::for_kind(kind), "all".to_string(), true, false)
     }
 
     /// A copy with the same style/selection but fresh (unbuilt) GPU state, so it
     /// recompiles and uploads its own geometry on the next frame.
     pub fn duplicate(&self) -> Self {
-        Self::restore(self.kind, self.params, self.sel_text.clone(), self.visible)
+        Self::restore(
+            self.kind,
+            self.params,
+            self.sel_text.clone(),
+            self.visible,
+            self.dynamic,
+        )
     }
 
     /// Reconstruct a representation from saved editable fields (used by undo/redo).
     /// Starts dirty so its selection recompiles and geometry rebuilds next frame.
-    pub fn restore(kind: RepKind, params: RepParams, sel_text: String, visible: bool) -> Self {
+    pub fn restore(
+        kind: RepKind,
+        params: RepParams,
+        sel_text: String,
+        visible: bool,
+        dynamic: bool,
+    ) -> Self {
         Self {
             kind,
             params,
@@ -64,6 +75,7 @@ impl Representation {
             sel: None,
             sel_error: None,
             visible,
+            dynamic,
             sel_dirty: true,
             geom_dirty: false,
             gpu: RepGpu::default(),

@@ -125,10 +125,15 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 
 ## UI layout (left panel)
 
-`Scene` (projection: icon toggle buttons) → `Molecules` (name + right-justified
-eye/trash icon group; click to select) → `Representations` ("Add" button before the
-list; each row `<sel>/<style>` + right-justified eye/duplicate/trash) → `Representation
-controls` (selection text box, style dropdown, param sliders). FPS readout in the footer.
+History toolbar (undo/redo buttons, each with a `▼` dropdown listing named actions for
+**cumulative** undo/redo; also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
+toggles; **orthographic is the default**) → `Molecules` **table** (`egui::Grid`: File |
+Atoms | actions = eye, trash) → `Representations` ("Add" button, then a **table**:
+Selection (editable `TextEdit`) | Style (`ComboBox`) | actions = eye, update-every-frame
+(`rep.dynamic`, ↻), duplicate, trash) → `Representation controls` (param sliders +
+selection error for the selected rep). Action-button groups use tight 2px spacing. FPS in
+the footer. History entries get descriptive labels via `describe_change` ("edit selection",
+"add representation", "delete molecule", …).
 
 ## Milestone status
 

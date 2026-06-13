@@ -45,7 +45,7 @@ impl Camera {
             distance: radius / (fov_y * 0.5).sin() * 1.3,
             scene_radius: radius,
             fov_y,
-            projection: Projection::Perspective,
+            projection: Projection::Orthographic,
         }
     }
 

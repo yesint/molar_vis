@@ -37,8 +37,10 @@ pub struct App {
     view_dirty: bool,
     status: String,
     history: History,
-    pending_undo: bool,
-    pending_redo: bool,
+    /// Number of steps to undo/redo this frame (set by keyboard or the toolbar
+    /// dropdowns), applied after the panel is drawn.
+    pending_undo_n: Option<usize>,
+    pending_redo_n: Option<usize>,
 }
 
 impl App {
@@ -117,8 +119,8 @@ impl App {
             view_dirty: true,
             status,
             history,
-            pending_undo: false,
-            pending_redo: false,
+            pending_undo_n: None,
+            pending_redo_n: None,
         })
     }
 
@@ -170,13 +172,13 @@ impl eframe::App for App {
         ctx.input(|i| {
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
-                    self.pending_redo = true;
+                    self.pending_redo_n = Some(1);
                 } else {
-                    self.pending_undo = true;
+                    self.pending_undo_n = Some(1);
                 }
             }
             if i.modifiers.command && i.key_pressed(egui::Key::Y) {
-                self.pending_redo = true;
+                self.pending_redo_n = Some(1);
             }
         });
 
@@ -184,15 +186,10 @@ impl eframe::App for App {
         self.view_dirty |= panel_dirty;
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
-        let (do_undo, do_redo) = (self.pending_undo, self.pending_redo && !self.pending_undo);
-        self.pending_undo = false;
-        self.pending_redo = false;
-        let applied = if do_undo {
-            self.history.undo()
-        } else if do_redo {
-            self.history.redo()
-        } else {
-            None
+        let applied = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {
+            (Some(n), _) => self.history.undo_n(n),
+            (None, Some(n)) => self.history.redo_n(n),
+            (None, None) => None,
         };
         if let Some(state) = applied {
             state.apply(&mut self.scene);
@@ -219,24 +216,7 @@ impl App {
             .show_inside(ui, |ui| {
                 ui.add_space(8.0);
 
-                ui.horizontal(|ui| {
-                    let can_undo = self.history.can_undo();
-                    let can_redo = self.history.can_redo();
-                    if ui
-                        .add_enabled(can_undo, egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE))
-                        .on_hover_text("Undo (Ctrl+Z)")
-                        .clicked()
-                    {
-                        self.pending_undo = true;
-                    }
-                    if ui
-                        .add_enabled(can_redo, egui::Button::new(icon::ARROW_CLOCKWISE))
-                        .on_hover_text("Redo (Ctrl+Shift+Z)")
-                        .clicked()
-                    {
-                        self.pending_redo = true;
-                    }
-                });
+                self.draw_history_toolbar(ui);
                 ui.add_space(4.0);
 
                 egui::CollapsingHeader::new("Scene")
@@ -246,12 +226,12 @@ impl App {
                 ui.separator();
                 egui::CollapsingHeader::new("Molecules")
                     .default_open(true)
-                    .show(ui, |ui| view_dirty |= self.draw_molecule_list(ui));
+                    .show(ui, |ui| view_dirty |= self.draw_molecule_table(ui));
 
                 ui.separator();
                 egui::CollapsingHeader::new("Representations")
                     .default_open(true)
-                    .show(ui, |ui| view_dirty |= self.draw_rep_list(ui));
+                    .show(ui, |ui| view_dirty |= self.draw_rep_table(ui));
 
                 ui.separator();
                 egui::CollapsingHeader::new("Representation controls")
@@ -291,9 +271,62 @@ impl App {
         });
     }
 
-    /// Loaded molecules: name on the left, a right-justified icon group
-    /// (visibility eye, delete trash). Returns true if a re-render is needed.
-    fn draw_molecule_list(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Undo/redo buttons, each with a dropdown listing the named actions on the
+    /// stack; selecting an entry undoes/redoes cumulatively up to it.
+    fn draw_history_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+
+            let can_undo = self.history.can_undo();
+            if ui
+                .add_enabled(can_undo, egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE))
+                .on_hover_text("Undo (Ctrl+Z)")
+                .clicked()
+            {
+                self.pending_undo_n = Some(1);
+            }
+            if can_undo {
+                ui.menu_button(icon::CARET_DOWN, |ui| {
+                    for d in 0..self.history.undo_len() {
+                        let label = format!("{}.  {}", d + 1, self.history.undo_label(d));
+                        if ui.button(label).clicked() {
+                            self.pending_undo_n = Some(d + 1);
+                            ui.close();
+                        }
+                    }
+                });
+            } else {
+                ui.add_enabled(false, egui::Button::new(icon::CARET_DOWN));
+            }
+
+            ui.add_space(8.0);
+
+            let can_redo = self.history.can_redo();
+            if ui
+                .add_enabled(can_redo, egui::Button::new(icon::ARROW_CLOCKWISE))
+                .on_hover_text("Redo (Ctrl+Shift+Z)")
+                .clicked()
+            {
+                self.pending_redo_n = Some(1);
+            }
+            if can_redo {
+                ui.menu_button(icon::CARET_DOWN, |ui| {
+                    for d in 0..self.history.redo_len() {
+                        let label = format!("{}.  {}", d + 1, self.history.redo_label(d));
+                        if ui.button(label).clicked() {
+                            self.pending_redo_n = Some(d + 1);
+                            ui.close();
+                        }
+                    }
+                });
+            } else {
+                ui.add_enabled(false, egui::Button::new(icon::CARET_DOWN));
+            }
+        });
+    }
+
+    /// Loaded molecules as a table: file name | atoms | actions (eye, trash).
+    fn draw_molecule_table(&mut self, ui: &mut egui::Ui) -> bool {
         if self.scene.molecules.is_empty() {
             ui.weak(&self.status);
             return false;
@@ -302,33 +335,41 @@ impl App {
         let mut new_selected = self.scene.selected_mol;
         let mut delete: Option<usize> = None;
 
-        for i in 0..self.scene.molecules.len() {
-            let selected = self.scene.selected_mol == Some(i);
-            let mol = &mut self.scene.molecules[i];
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
-                        delete = Some(i);
+        egui::Grid::new("molecule_table")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("File");
+                ui.strong("Atoms");
+                ui.label("");
+                ui.end_row();
+
+                for i in 0..self.scene.molecules.len() {
+                    let selected = self.scene.selected_mol == Some(i);
+                    let mol = &mut self.scene.molecules[i];
+
+                    if ui.selectable_label(selected, mol.name.as_str()).clicked() {
+                        new_selected = Some(i);
                     }
-                    let (eye, tip) = if mol.visible {
-                        (icon::EYE, "Hide")
-                    } else {
-                        (icon::EYE_SLASH, "Show")
-                    };
-                    if icon_button(ui, eye, tip).clicked() {
-                        mol.visible = !mol.visible;
-                        view_dirty = true;
-                    }
-                    // Name fills the remaining space, left-aligned.
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let label = format!("{}  ({} atoms)", mol.name, mol.n_atoms);
-                        if ui.selectable_label(selected, label).clicked() {
-                            new_selected = Some(i);
+                    ui.label(format!("{}", mol.n_atoms));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let (eye, tip) = if mol.visible {
+                            (icon::EYE, "Hide")
+                        } else {
+                            (icon::EYE_SLASH, "Show")
+                        };
+                        if icon_button(ui, eye, tip).clicked() {
+                            mol.visible = !mol.visible;
+                            view_dirty = true;
+                        }
+                        if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
+                            delete = Some(i);
                         }
                     });
-                });
+                    ui.end_row();
+                }
             });
-        }
         self.scene.selected_mol = new_selected;
 
         if let Some(i) = delete {
@@ -341,10 +382,10 @@ impl App {
         view_dirty
     }
 
-    /// Representations of the selected molecule. An "Add" button precedes the
-    /// list; each row shows the "<sel>/<style>" name with a right-justified icon
-    /// group (visibility eye, duplicate, delete).
-    fn draw_rep_list(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Representations of the selected molecule as a table: selection | style |
+    /// actions (visibility eye, update-every-frame, duplicate, delete). An "Add"
+    /// button precedes the table.
+    fn draw_rep_table(&mut self, ui: &mut egui::Ui) -> bool {
         let default_rep = self.default_rep;
         let Some(mi) = self.scene.selected_mol else {
             ui.weak("Select a molecule above.");
@@ -353,7 +394,7 @@ impl App {
         let mut view_dirty = false;
         let mol = &mut self.scene.molecules[mi];
 
-        // Add button BEFORE the list.
+        // Add button BEFORE the table.
         if ui
             .button(format!("{}  Add representation", icon::PLUS))
             .clicked()
@@ -368,34 +409,73 @@ impl App {
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;
 
-        for j in 0..mol.reps.len() {
-            let selected = mol.selected_rep == Some(j);
-            let rep = &mut mol.reps[j];
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icon_button(ui, icon::TRASH, "Delete").clicked() {
-                        delete = Some(j);
+        egui::Grid::new("rep_table")
+            .num_columns(3)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Selection");
+                ui.strong("Style");
+                ui.label("");
+                ui.end_row();
+
+                for j in 0..mol.reps.len() {
+                    let rep = &mut mol.reps[j];
+
+                    // Selection text (editable). Editing it / focusing selects the row.
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut rep.sel_text).desired_width(100.0),
+                    );
+                    if resp.lost_focus() {
+                        rep.sel_dirty = true;
                     }
-                    if icon_button(ui, icon::COPY, "Duplicate").clicked() {
-                        duplicate = Some(j);
+                    if resp.gained_focus() {
+                        new_sel_rep = Some(j);
                     }
-                    let (eye, tip) = if rep.visible {
-                        (icon::EYE, "Hide")
-                    } else {
-                        (icon::EYE_SLASH, "Show")
-                    };
-                    if icon_button(ui, eye, tip).clicked() {
-                        rep.visible = !rep.visible;
-                        view_dirty = true;
-                    }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        if ui.selectable_label(selected, rep.summary()).clicked() {
-                            new_sel_rep = Some(j);
+
+                    // Style dropdown.
+                    egui::ComboBox::from_id_salt(("rep_style", j))
+                        .selected_text(rep.kind.label())
+                        .width(72.0)
+                        .show_ui(ui, |ui| {
+                            for kind in RepKind::ALL {
+                                if ui.selectable_value(&mut rep.kind, kind, kind.label()).clicked()
+                                {
+                                    rep.params = RepParams::for_kind(kind);
+                                    rep.geom_dirty = true;
+                                    new_sel_rep = Some(j);
+                                }
+                            }
+                        });
+
+                    // Action buttons (tight spacing).
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let (eye, tip) = if rep.visible {
+                            (icon::EYE, "Hide")
+                        } else {
+                            (icon::EYE_SLASH, "Show")
+                        };
+                        if icon_button(ui, eye, tip).clicked() {
+                            rep.visible = !rep.visible;
+                            view_dirty = true;
+                        }
+                        if ui
+                            .selectable_label(rep.dynamic, icon::ARROWS_CLOCKWISE)
+                            .on_hover_text("Update every frame")
+                            .clicked()
+                        {
+                            rep.dynamic = !rep.dynamic;
+                        }
+                        if icon_button(ui, icon::COPY, "Duplicate").clicked() {
+                            duplicate = Some(j);
+                        }
+                        if icon_button(ui, icon::TRASH, "Delete").clicked() {
+                            delete = Some(j);
                         }
                     });
-                });
+                    ui.end_row();
+                }
             });
-        }
         mol.selected_rep = new_sel_rep;
 
         if let Some(j) = duplicate {
@@ -416,8 +496,8 @@ impl App {
         view_dirty
     }
 
-    /// Controls for the selected representation: selection text, style, params.
-    /// Mutates rep dirty-flags; the viewport rebuilds geometry next.
+    /// Parameter controls for the selected representation (selection text and
+    /// style live in the rep table). Surfaces selection errors.
     fn draw_rep_controls(&mut self, ui: &mut egui::Ui) {
         let Some(mi) = self.scene.selected_mol else {
             ui.weak("—");
@@ -430,29 +510,9 @@ impl App {
         };
         let rep = &mut mol.reps[ri];
 
-        ui.label("Selection");
-        let resp = ui.text_edit_singleline(&mut rep.sel_text);
-        if resp.lost_focus() {
-            rep.sel_dirty = true;
-        }
         if let Some(err) = &rep.sel_error {
             ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
         }
-
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label("Style");
-            egui::ComboBox::from_id_salt("rep_kind")
-                .selected_text(rep.kind.label())
-                .show_ui(ui, |ui| {
-                    for kind in RepKind::ALL {
-                        if ui.selectable_value(&mut rep.kind, kind, kind.label()).clicked() {
-                            rep.params = RepParams::for_kind(kind);
-                            rep.geom_dirty = true;
-                        }
-                    }
-                });
-        });
 
         match rep.kind {
             RepKind::Vdw => {
