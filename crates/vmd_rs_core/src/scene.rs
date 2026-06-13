@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use glam::Vec3;
 use molar::prelude::*;
 
+use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
 use crate::render::RepGpu;
@@ -18,6 +19,7 @@ pub struct MolId(pub u64);
 pub struct Representation {
     pub kind: RepKind,
     pub params: RepParams,
+    pub color: ColorMethod,
     /// Editable selection text — the UI buffer / draft (egui needs a `&mut String`,
     /// and it can hold not-yet-valid input). The committed text also lives in
     /// `expr` (`SelectionExpr::get_str`) once it parses.
@@ -46,7 +48,14 @@ pub struct Representation {
 
 impl Representation {
     pub fn new(kind: RepKind) -> Self {
-        Self::restore(kind, RepParams::for_kind(kind), "all".to_string(), true, false)
+        Self::restore(
+            kind,
+            RepParams::for_kind(kind),
+            ColorMethod::Element,
+            "all".to_string(),
+            true,
+            false,
+        )
     }
 
     /// A copy with the same style/selection but fresh (unbuilt) GPU state, so it
@@ -55,6 +64,7 @@ impl Representation {
         Self::restore(
             self.kind,
             self.params,
+            self.color,
             self.sel_text.clone(),
             self.visible,
             self.dynamic,
@@ -66,6 +76,7 @@ impl Representation {
     pub fn restore(
         kind: RepKind,
         params: RepParams,
+        color: ColorMethod,
         sel_text: String,
         visible: bool,
         dynamic: bool,
@@ -73,6 +84,7 @@ impl Representation {
         Self {
             kind,
             params,
+            color,
             sel_text,
             expr: None,
             sel: None,

@@ -6,6 +6,7 @@
 use eframe::egui;
 
 use crate::camera::{Camera, Projection};
+use crate::color::ColorMethod;
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
@@ -130,6 +131,118 @@ fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     });
 }
 
+/// Draw a small icon depicting a color scheme into `rect` (uses the scheme's own
+/// colors, so unlike the style icons it is not theme-tinted).
+fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMethod) {
+    use crate::color;
+    let rgb = |c: [u8; 4]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+    match method {
+        ColorMethod::Element => {
+            // CPK dots: carbon (grey), oxygen (red), nitrogen (blue).
+            let r = rect.height() * 0.22;
+            let y = rect.center().y;
+            let w = rect.width();
+            for (k, an) in [0.22_f32, 0.5, 0.78].iter().zip([6u8, 8, 7]) {
+                painter.circle_filled(
+                    egui::pos2(rect.left() + k * w, y),
+                    r,
+                    rgb(color::element_color(an)),
+                );
+            }
+        }
+        ColorMethod::Chain | ColorMethod::ResName | ColorMethod::ResId => {
+            // Categorical color bars (different palette offset per scheme).
+            let n = 4usize;
+            let off = match method {
+                ColorMethod::Chain => 0,
+                ColorMethod::ResName => 4,
+                _ => 8,
+            };
+            let w = rect.width() / n as f32;
+            for i in 0..n {
+                let c = color::PALETTE[(off + i) % color::PALETTE.len()];
+                let x0 = rect.left() + i as f32 * w;
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(x0 + 0.5, rect.top() + 2.0),
+                    egui::pos2(x0 + w - 0.5, rect.bottom() - 2.0),
+                );
+                painter.rect_filled(bar, 1.0, rgb([c[0], c[1], c[2], 255]));
+            }
+        }
+        ColorMethod::Index | ColorMethod::Beta => {
+            // Continuous gradient bars.
+            let n = 12usize;
+            let w = rect.width() / n as f32;
+            for i in 0..n {
+                let t = i as f32 / (n - 1) as f32;
+                let c = if matches!(method, ColorMethod::Index) {
+                    color::rainbow(t)
+                } else {
+                    color::beta_ramp(t)
+                };
+                let x0 = rect.left() + i as f32 * w;
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(x0, rect.top() + 2.0),
+                    egui::pos2(x0 + w + 0.5, rect.bottom() - 2.0),
+                );
+                painter.rect_filled(bar, 0.0, rgb(c));
+            }
+        }
+    }
+}
+
+/// A clickable icon+label row inside the color dropdown. Returns true if clicked.
+fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(160.0, 22.0), egui::Sense::click());
+    if selected || resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let icon_rect =
+        egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
+    paint_color_icon(ui.painter(), icon_rect, method);
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        method.label(),
+        egui::FontId::proportional(15.0),
+        ui.visuals().text_color(),
+    );
+    resp.clicked()
+}
+
+/// A drawn color-scheme button that opens a dropdown of icon+label options.
+fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(42.0, 18.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let icon_rect = egui::Rect::from_min_size(
+        rect.left_center() + egui::vec2(3.0, -8.0),
+        egui::vec2(26.0, 16.0),
+    );
+    paint_color_icon(ui.painter(), icon_rect, rep.color);
+    ui.painter().text(
+        egui::pos2(rect.right() - 5.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        icon::CARET_DOWN,
+        egui::FontId::proportional(10.0),
+        ui.visuals().text_color(),
+    );
+    let resp = resp.on_hover_text(rep.color.label());
+
+    egui::Popup::menu(&resp).show(|ui| {
+        for method in ColorMethod::ALL {
+            if color_option(ui, method, method == rep.color) {
+                rep.color = method;
+                rep.geom_dirty = true;
+                ui.close();
+            }
+        }
+    });
+}
+
 /// Parameter controls for a representation, shown inline under its row as a tidy
 /// two-column table (parameter name on the left, control on the right).
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
@@ -242,6 +355,24 @@ impl App {
                 }
             }
         }
+        // Verification hook: VMD_RS_DEBUG_COLOR sets the first rep's color scheme.
+        if let Some(cm) = std::env::var("VMD_RS_DEBUG_COLOR").ok().and_then(|c| {
+            match c.to_ascii_lowercase().as_str() {
+                "element" => Some(ColorMethod::Element),
+                "chain" => Some(ColorMethod::Chain),
+                "resid" => Some(ColorMethod::ResId),
+                "resname" => Some(ColorMethod::ResName),
+                "index" => Some(ColorMethod::Index),
+                "beta" => Some(ColorMethod::Beta),
+                _ => None,
+            }
+        }) {
+            for mol in &mut scene.molecules {
+                if let Some(rep) = mol.reps.first_mut() {
+                    rep.color = cm;
+                }
+            }
+        }
 
         let mut camera = match scene.bbox() {
             Some((min, max)) => Camera::frame_bbox(min, max),
@@ -306,8 +437,14 @@ impl App {
                 }
                 if rep.geom_dirty {
                     if let Some(sel) = &rep.sel {
-                        let geom =
-                            geometry::build(&mol.system, sel, &mol.bonds, rep.kind, &rep.params);
+                        let geom = geometry::build(
+                            &mol.system,
+                            sel,
+                            &mol.bonds,
+                            rep.kind,
+                            &rep.params,
+                            rep.color,
+                        );
                         rep.gpu = self.renderer.upload(rs, &geom);
                     }
                     rep.geom_dirty = false;
@@ -629,7 +766,9 @@ impl App {
                             rep.params_open = !rep.params_open;
                         }
 
-                        // Style dropdown, right-aligned just left of the actions.
+                        // Color and style dropdowns, right-aligned just left of
+                        // the actions (style | color, adjacent).
+                        color_picker(ui, rep);
                         style_picker(ui, rep);
 
                         // Selection field fills the remaining width on the left.

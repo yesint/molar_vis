@@ -12,6 +12,7 @@
 //! whole slider drag becomes one undo step. Each step is tagged with a descriptive
 //! label (derived by diffing the two states) shown in the undo/redo dropdowns.
 
+use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::scene::{MolId, Molecule, Representation, Scene};
 
@@ -19,6 +20,7 @@ use crate::scene::{MolId, Molecule, Representation, Scene};
 struct RepState {
     kind: RepKind,
     params: RepParams,
+    color: ColorMethod,
     sel_text: String,
     visible: bool,
     dynamic: bool,
@@ -53,6 +55,7 @@ impl EditState {
                         .map(|r| RepState {
                             kind: r.kind,
                             params: r.params,
+                            color: r.color,
                             sel_text: r.sel_text.clone(),
                             visible: r.visible,
                             dynamic: r.dynamic,
@@ -94,7 +97,10 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
     for (i, s) in target.iter().enumerate() {
         let needs_rebuild = {
             let cur = &mol.reps[i];
-            cur.kind != s.kind || cur.params != s.params || cur.sel_text != s.sel_text
+            cur.kind != s.kind
+                || cur.params != s.params
+                || cur.color != s.color
+                || cur.sel_text != s.sel_text
         };
         if needs_rebuild {
             mol.reps[i] = rep_from_state(s);
@@ -107,7 +113,7 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
 }
 
 fn rep_from_state(s: &RepState) -> Representation {
-    Representation::restore(s.kind, s.params, s.sel_text.clone(), s.visible, s.dynamic)
+    Representation::restore(s.kind, s.params, s.color, s.sel_text.clone(), s.visible, s.dynamic)
 }
 
 /// A short human-readable label for the change from `old` to `new`, shown in the
@@ -143,6 +149,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             }
             if o.params != n.params {
                 return "change parameters".into();
+            }
+            if o.color != n.color {
+                return "change coloring".into();
             }
             if o.dynamic != n.dynamic {
                 return "toggle dynamic".into();

@@ -6,7 +6,7 @@
 
 use molar::prelude::*;
 
-use crate::color;
+use crate::color::{ColorMethod, Colorizer};
 use crate::render::{CylinderInstance, LineVertex, SphereInstance};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,31 +84,33 @@ pub fn build(
     bonds: &[[usize; 2]],
     kind: RepKind,
     params: &RepParams,
+    color: ColorMethod,
 ) -> GeometryData {
     let bound = system.bind(sel);
+    let colorizer = Colorizer::new(color, &bound, system.len());
     match kind {
         RepKind::Vdw => GeometryData {
-            spheres: spheres(&bound, |a| a.vdw()),
+            spheres: spheres(&bound, &colorizer, |a| a.vdw()),
             ..Default::default()
         },
         RepKind::Licorice => {
-            let lut = selected_lut(&bound, system.len());
+            let lut = selected_lut(&bound, &colorizer, system.len());
             GeometryData {
-                spheres: spheres(&bound, |_| params.bond_radius),
+                spheres: spheres(&bound, &colorizer, |_| params.bond_radius),
                 cylinders: cylinders(&lut, bonds, params.bond_radius),
                 ..Default::default()
             }
         }
         RepKind::BallAndStick => {
-            let lut = selected_lut(&bound, system.len());
+            let lut = selected_lut(&bound, &colorizer, system.len());
             GeometryData {
-                spheres: spheres(&bound, |a| a.vdw() * params.sphere_scale),
+                spheres: spheres(&bound, &colorizer, |a| a.vdw() * params.sphere_scale),
                 cylinders: cylinders(&lut, bonds, params.bond_radius),
                 ..Default::default()
             }
         }
         RepKind::Lines => {
-            let lut = selected_lut(&bound, system.len());
+            let lut = selected_lut(&bound, &colorizer, system.len());
             GeometryData {
                 lines: lines(&lut, bonds),
                 ..Default::default()
@@ -117,27 +119,31 @@ pub fn build(
     }
 }
 
-fn atom_color(a: &Atom) -> u32 {
-    color::pack_rgba8(color::element_color(a.atomic_number))
-}
-
-fn spheres(bound: &impl ParticleIterProvider, radius: impl Fn(&Atom) -> f32) -> Vec<SphereInstance> {
+fn spheres(
+    bound: &impl ParticleIterProvider,
+    colorizer: &Colorizer,
+    radius: impl Fn(&Atom) -> f32,
+) -> Vec<SphereInstance> {
     bound
         .iter_particle()
         .map(|p| SphereInstance {
             center: [p.pos.x, p.pos.y, p.pos.z],
             radius: radius(p.atom),
-            color: atom_color(p.atom),
+            color: colorizer.color(p.atom, p.id),
         })
         .collect()
 }
 
 /// Per-atom (position, color) lookup keyed by global atom index, populated only
 /// for the selected atoms. `None` doubles as the "not selected" test for bonds.
-fn selected_lut(bound: &impl ParticleIterProvider, n_atoms: usize) -> Vec<Option<([f32; 3], u32)>> {
+fn selected_lut(
+    bound: &impl ParticleIterProvider,
+    colorizer: &Colorizer,
+    n_atoms: usize,
+) -> Vec<Option<([f32; 3], u32)>> {
     let mut lut = vec![None; n_atoms];
     for p in bound.iter_particle() {
-        lut[p.id] = Some(([p.pos.x, p.pos.y, p.pos.z], atom_color(p.atom)));
+        lut[p.id] = Some(([p.pos.x, p.pos.y, p.pos.z], colorizer.color(p.atom, p.id)));
     }
     lut
 }

@@ -150,4 +150,12 @@ eye · update-every-frame (`rep.dynamic`, ↻) · duplicate · trash. History la
 - ✅ M3 bonds → Licorice / Ball-and-Stick / Lines (cylinder impostors, half-bond lines)
 - ✅ M4 multi-molecule / multi-rep scene + selection strings + icon panel UI +
   perspective/orthographic toggle + scene-dirty render-skip
-- ⏭ Next: **Undo/Redo system** (being designed), then **M5 coloring schemes**, **M6 cartoon**
+- ✅ Undo/Redo (history.rs) + big rep-row UI revamp (drag/expand/style-icon/gear)
+- ✅ M5 coloring schemes — `color.rs` `ColorMethod` {Element, Chain, ResID, ResName,
+  Index, Beta} + `Colorizer` (per-method, with B-factor range / index gradient context);
+  `geometry::build` colors each atom via the rep's `color`. Per-rep color dropdown in the
+  table next to the style dropdown, with drawn descriptive icons (`paint_color_icon`: CPK
+  dots / categorical bars / rainbow / blue-white-red). **Secondary-structure coloring is
+  deferred to M6** (molar `Dssp::ss()` is an ordered backbone array with no resindex map;
+  build that mapping with the cartoon work).
+- ⏭ Next: **M6 cartoon** (spline + DSSP), which also unlocks secondary-structure coloring.
