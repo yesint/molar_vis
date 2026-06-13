@@ -11,6 +11,7 @@ mod data;
 mod geometry;
 mod launch;
 mod render;
+mod scene;
 mod theme;
 
 pub use app::App;

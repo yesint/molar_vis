@@ -1,8 +1,9 @@
-//! CPU geometry builders: turn a [`LoadedMolecule`] + representation into GPU
-//! instance/vertex data. Bonds are split at their midpoint into two half-bonds,
-//! each colored by its endpoint atom (VMD-style half-bond coloring).
+//! CPU geometry builders: turn a molecule's per-atom arrays + a selection +
+//! representation into GPU instance/vertex data. Bonds are split at their
+//! midpoint into two half-bonds, each colored by its endpoint atom (VMD-style
+//! half-bond coloring). Only atoms in the selection (and bonds whose endpoints
+//! are both selected) are emitted.
 
-use crate::data::LoadedMolecule;
 use crate::render::{CylinderInstance, LineVertex, SphereInstance};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,71 +71,89 @@ pub struct GeometryData {
     pub lines: Vec<LineVertex>,
 }
 
-/// Build GPU geometry for one representation of `mol`.
-pub fn build(mol: &LoadedMolecule, kind: RepKind, params: &RepParams) -> GeometryData {
+/// Per-atom arrays of a molecule, borrowed for geometry building.
+pub struct AtomArrays<'a> {
+    pub positions: &'a [[f32; 3]],
+    pub vdw: &'a [f32],
+    pub colors: &'a [u32],
+    pub bonds: &'a [[usize; 2]],
+}
+
+/// Build GPU geometry for one representation over the selected atom indices.
+pub fn build(
+    atoms: &AtomArrays,
+    sel: &[usize],
+    kind: RepKind,
+    params: &RepParams,
+) -> GeometryData {
+    // Membership mask so bonds can be filtered to selected endpoints.
+    let mut in_sel = vec![false; atoms.positions.len()];
+    for &i in sel {
+        in_sel[i] = true;
+    }
+
     match kind {
         RepKind::Vdw => GeometryData {
-            spheres: spheres(mol, |i| mol.vdw[i]),
+            spheres: spheres(atoms, sel, |i| atoms.vdw[i]),
             ..Default::default()
         },
         RepKind::Licorice => GeometryData {
-            // Sphere caps at the joints share the cylinder radius.
-            spheres: spheres(mol, |_| params.bond_radius),
-            cylinders: cylinders(mol, params.bond_radius),
+            spheres: spheres(atoms, sel, |_| params.bond_radius),
+            cylinders: cylinders(atoms, &in_sel, params.bond_radius),
             ..Default::default()
         },
         RepKind::BallAndStick => GeometryData {
-            spheres: spheres(mol, |i| mol.vdw[i] * params.sphere_scale),
-            cylinders: cylinders(mol, params.bond_radius),
+            spheres: spheres(atoms, sel, |i| atoms.vdw[i] * params.sphere_scale),
+            cylinders: cylinders(atoms, &in_sel, params.bond_radius),
             ..Default::default()
         },
         RepKind::Lines => GeometryData {
-            lines: lines(mol),
+            lines: lines(atoms, &in_sel),
             ..Default::default()
         },
     }
 }
 
-fn spheres(mol: &LoadedMolecule, radius: impl Fn(usize) -> f32) -> Vec<SphereInstance> {
-    (0..mol.n_atoms)
-        .map(|i| SphereInstance {
-            center: mol.positions[i],
+fn spheres(atoms: &AtomArrays, sel: &[usize], radius: impl Fn(usize) -> f32) -> Vec<SphereInstance> {
+    sel.iter()
+        .map(|&i| SphereInstance {
+            center: atoms.positions[i],
             radius: radius(i),
-            color: mol.colors[i],
+            color: atoms.colors[i],
         })
         .collect()
 }
 
 fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        (a[0] + b[0]) * 0.5,
-        (a[1] + b[1]) * 0.5,
-        (a[2] + b[2]) * 0.5,
-    ]
+    [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5]
 }
 
-fn cylinders(mol: &LoadedMolecule, radius: f32) -> Vec<CylinderInstance> {
-    let mut v = Vec::with_capacity(mol.bonds.len() * 2);
-    for &[a, b] in &mol.bonds {
-        let (a, b) = (a as usize, b as usize);
-        let (pa, pb) = (mol.positions[a], mol.positions[b]);
+fn cylinders(atoms: &AtomArrays, in_sel: &[bool], radius: f32) -> Vec<CylinderInstance> {
+    let mut v = Vec::new();
+    for &[a, b] in atoms.bonds {
+        if !(in_sel[a] && in_sel[b]) {
+            continue;
+        }
+        let (pa, pb) = (atoms.positions[a], atoms.positions[b]);
         let m = midpoint(pa, pb);
-        v.push(CylinderInstance { p0: pa, radius, p1: m, color: mol.colors[a] });
-        v.push(CylinderInstance { p0: m, radius, p1: pb, color: mol.colors[b] });
+        v.push(CylinderInstance { p0: pa, radius, p1: m, color: atoms.colors[a] });
+        v.push(CylinderInstance { p0: m, radius, p1: pb, color: atoms.colors[b] });
     }
     v
 }
 
-fn lines(mol: &LoadedMolecule) -> Vec<LineVertex> {
-    let mut v = Vec::with_capacity(mol.bonds.len() * 4);
-    for &[a, b] in &mol.bonds {
-        let (a, b) = (a as usize, b as usize);
-        let (pa, pb) = (mol.positions[a], mol.positions[b]);
+fn lines(atoms: &AtomArrays, in_sel: &[bool]) -> Vec<LineVertex> {
+    let mut v = Vec::new();
+    for &[a, b] in atoms.bonds {
+        if !(in_sel[a] && in_sel[b]) {
+            continue;
+        }
+        let (pa, pb) = (atoms.positions[a], atoms.positions[b]);
         let m = midpoint(pa, pb);
-        v.push(LineVertex { pos: pa, color: mol.colors[a] });
-        v.push(LineVertex { pos: m, color: mol.colors[a] });
-        v.push(LineVertex { pos: m, color: mol.colors[b] });
-        v.push(LineVertex { pos: pb, color: mol.colors[b] });
+        v.push(LineVertex { pos: pa, color: atoms.colors[a] });
+        v.push(LineVertex { pos: m, color: atoms.colors[a] });
+        v.push(LineVertex { pos: m, color: atoms.colors[b] });
+        v.push(LineVertex { pos: pb, color: atoms.colors[b] });
     }
     v
 }

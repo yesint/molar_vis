@@ -14,7 +14,7 @@ const MIN_DIST: f32 = 0.04;
 /// Guess bonds for all atoms. `sel` is the bound all-selection (the position
 /// source for the grid search); `positions`/`vdw` are the extracted per-atom
 /// arrays (nm) used to score candidate pairs.
-pub fn guess(sel: &impl PosProvider, positions: &[[f32; 3]], vdw: &[f32]) -> Vec<[u32; 2]> {
+pub fn guess(sel: &impl PosProvider, positions: &[[f32; 3]], vdw: &[f32]) -> Vec<[usize; 2]> {
     let n = positions.len();
     if n < 2 {
         return Vec::new();
@@ -24,7 +24,7 @@ pub fn guess(sel: &impl PosProvider, positions: &[[f32; 3]], vdw: &[f32]) -> Vec
         distance_search_single::<(usize, usize), Vec<_>>(SEARCH_CUTOFF, sel, 0..n);
 
     let min2 = MIN_DIST * MIN_DIST;
-    let mut bonds: Vec<[u32; 2]> = Vec::new();
+    let mut bonds: Vec<[usize; 2]> = Vec::new();
     for (i, j) in candidates {
         if i == j {
             continue;
@@ -39,7 +39,7 @@ pub fn guess(sel: &impl PosProvider, positions: &[[f32; 3]], vdw: &[f32]) -> Vec
         };
         let thresh = BOND_FACTOR * (vdw[a] + vdw[b]);
         if d2 > min2 && d2 < thresh * thresh {
-            bonds.push([a as u32, b as u32]);
+            bonds.push([a, b]);
         }
     }
 

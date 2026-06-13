@@ -24,6 +24,7 @@ use eframe::egui_wgpu::RenderState;
 use egui::TextureId;
 
 use crate::geometry::GeometryData;
+use crate::scene::Scene;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -79,7 +80,15 @@ struct DrawBuffer {
     count: u32,
 }
 
-fn upload<T: bytemuck::Pod>(
+/// Per-representation GPU geometry (any subset may be present).
+#[derive(Default)]
+pub struct RepGpu {
+    spheres: Option<DrawBuffer>,   // 4 verts/instance
+    cylinders: Option<DrawBuffer>, // 4 verts/instance
+    lines: Option<DrawBuffer>,     // vertex count (LineList)
+}
+
+fn upload_buf<T: bytemuck::Pod>(
     device: &wgpu::Device,
     data: &[T],
     label: &str,
@@ -109,10 +118,6 @@ pub struct SceneRenderer {
     sphere_pipeline: wgpu::RenderPipeline,
     cylinder_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
-
-    spheres: Option<DrawBuffer>,   // 4 verts/instance
-    cylinders: Option<DrawBuffer>, // 4 verts/instance
-    lines: Option<DrawBuffer>,     // vertex count (LineList)
 }
 
 impl SceneRenderer {
@@ -170,29 +175,34 @@ impl SceneRenderer {
             sphere_pipeline,
             cylinder_pipeline,
             line_pipeline,
-            spheres: None,
-            cylinders: None,
-            lines: None,
         }
     }
 
-    /// Upload all geometry for the current representation (replacing previous).
-    pub fn set_geometry(&mut self, rs: &RenderState, geom: &GeometryData) {
-        let device = &rs.device;
-        self.spheres = upload(device, &geom.spheres, "spheres");
-        self.cylinders = upload(device, &geom.cylinders, "cylinders");
-        self.lines = upload(device, &geom.lines, "lines");
+    /// The egui texture id of the offscreen color target (for `egui::Image`).
+    pub fn texture_id(&self) -> TextureId {
+        self.egui_texture
     }
 
-    /// Resize offscreen targets if needed, render with the given camera matrices,
-    /// and return the egui texture id to display in the central panel.
-    pub fn render(
+    /// Build GPU buffers for one representation's geometry.
+    pub fn upload(&self, rs: &RenderState, geom: &GeometryData) -> RepGpu {
+        let device = &rs.device;
+        RepGpu {
+            spheres: upload_buf(device, &geom.spheres, "spheres"),
+            cylinders: upload_buf(device, &geom.cylinders, "cylinders"),
+            lines: upload_buf(device, &geom.lines, "lines"),
+        }
+    }
+
+    /// Render every visible representation of every visible molecule into the
+    /// offscreen target with the given camera. Returns the egui texture id.
+    pub fn render_scene(
         &mut self,
         rs: &RenderState,
         size_px: [u32; 2],
         view: Mat4,
         proj: Mat4,
         perspective: bool,
+        scene: &Scene,
     ) -> TextureId {
         if size_px != self.targets.size {
             self.targets = Targets::new(&rs.device, self.color_format, size_px);
@@ -245,20 +255,30 @@ impl SceneRenderer {
 
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            if let Some(s) = &self.spheres {
-                pass.set_pipeline(&self.sphere_pipeline);
-                pass.set_vertex_buffer(0, s.buffer.slice(..));
-                pass.draw(0..4, 0..s.count);
-            }
-            if let Some(c) = &self.cylinders {
-                pass.set_pipeline(&self.cylinder_pipeline);
-                pass.set_vertex_buffer(0, c.buffer.slice(..));
-                pass.draw(0..4, 0..c.count);
-            }
-            if let Some(l) = &self.lines {
-                pass.set_pipeline(&self.line_pipeline);
-                pass.set_vertex_buffer(0, l.buffer.slice(..));
-                pass.draw(0..l.count, 0..1);
+            for mol in &scene.molecules {
+                if !mol.visible {
+                    continue;
+                }
+                for rep in &mol.reps {
+                    if !rep.visible {
+                        continue;
+                    }
+                    if let Some(s) = &rep.gpu.spheres {
+                        pass.set_pipeline(&self.sphere_pipeline);
+                        pass.set_vertex_buffer(0, s.buffer.slice(..));
+                        pass.draw(0..4, 0..s.count);
+                    }
+                    if let Some(c) = &rep.gpu.cylinders {
+                        pass.set_pipeline(&self.cylinder_pipeline);
+                        pass.set_vertex_buffer(0, c.buffer.slice(..));
+                        pass.draw(0..4, 0..c.count);
+                    }
+                    if let Some(l) = &rep.gpu.lines {
+                        pass.set_pipeline(&self.line_pipeline);
+                        pass.set_vertex_buffer(0, l.buffer.slice(..));
+                        pass.draw(0..l.count, 0..1);
+                    }
+                }
             }
         }
         rs.queue.submit(std::iter::once(encoder.finish()));

@@ -5,6 +5,12 @@ use egui::{Color32, FontFamily, FontId, TextStyle};
 
 /// Apply the vmd_rs look. Call once at startup with the egui context.
 pub fn apply(ctx: &egui::Context) {
+    // Merge in the Phosphor icon font (eye / trash / copy / plus / projection
+    // glyphs used by the panel) alongside the default fonts.
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    ctx.set_fonts(fonts);
+
     let mut style = (*ctx.global_style()).clone();
 
     // Larger, more legible type scale.

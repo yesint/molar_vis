@@ -13,7 +13,7 @@ pub enum Projection {
     Orthographic,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
     /// Point the camera looks at (pannable).
     pub target: Vec3,

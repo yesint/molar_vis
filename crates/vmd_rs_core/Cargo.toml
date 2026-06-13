@@ -18,3 +18,4 @@ glam.workspace = true
 bytemuck.workspace = true
 log.workspace = true
 molar = { workspace = true }
+egui-phosphor = "0.12.0"

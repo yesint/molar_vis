@@ -3,4 +3,4 @@
 mod bonds;
 mod loader;
 
-pub use loader::{load, LoadedMolecule};
+pub use loader::{load, RawMolecule};
