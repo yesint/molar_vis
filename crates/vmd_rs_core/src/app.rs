@@ -4,6 +4,7 @@
 //! central 3D viewport, and only re-renders the scene when something changed.
 
 use eframe::egui;
+use molar::prelude::SsAlgorithm;
 
 use crate::camera::{Camera, Projection};
 use crate::color::ColorMethod;
@@ -369,6 +370,30 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                 ui.end_row();
             }
         });
+
+    // Secondary-structure algorithm — used by the Cartoon shape and the
+    // "Structure" color scheme; offer the two sensible choices.
+    if matches!(rep.kind, RepKind::Cartoon) || rep.color == ColorMethod::SecStruct {
+        let label = match rep.ss_algo {
+            SsAlgorithm::Dssp => "DSSP",
+            SsAlgorithm::DsspGmx => "DSSP (gmx)",
+            SsAlgorithm::Dss => "dss (PyMOL)",
+        };
+        ui.horizontal(|ui| {
+            ui.label("SS algorithm");
+            egui::ComboBox::from_id_salt("ss_algo")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut rep.ss_algo, SsAlgorithm::Dssp, "DSSP")
+                        .changed();
+                    changed |= ui
+                        .selectable_value(&mut rep.ss_algo, SsAlgorithm::Dss, "dss (PyMOL)")
+                        .changed();
+                });
+        });
+    }
+
     if changed {
         rep.geom_dirty = true;
     }
@@ -543,8 +568,14 @@ impl App {
                 }
                 if rep.geom_dirty {
                     if let Some(sel) = &rep.sel {
-                        let geom =
-                            geometry::build(&mol.system, sel, &mol.bonds, &rep.params, rep.color);
+                        let geom = geometry::build(
+                            &mol.system,
+                            sel,
+                            &mol.bonds,
+                            &rep.params,
+                            rep.color,
+                            rep.ss_algo,
+                        );
                         rep.gpu = self.renderer.upload(rs, &geom);
                     }
                     rep.geom_dirty = false;

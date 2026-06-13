@@ -20,6 +20,9 @@ pub struct Representation {
     pub kind: RepKind,
     pub params: RepParams,
     pub color: ColorMethod,
+    /// Secondary-structure algorithm driving the Cartoon shape and the
+    /// "Structure" color scheme (DSSP vanilla / PyMOL dss).
+    pub ss_algo: SsAlgorithm,
     /// Editable selection text — the UI buffer / draft (egui needs a `&mut String`,
     /// and it can hold not-yet-valid input). The committed text also lives in
     /// `expr` (`SelectionExpr::get_str`) once it parses.
@@ -52,6 +55,7 @@ impl Representation {
             kind,
             RepParams::for_kind(kind),
             ColorMethod::Element,
+            SsAlgorithm::default(),
             "all".to_string(),
             true,
             false,
@@ -65,6 +69,7 @@ impl Representation {
             self.kind,
             self.params,
             self.color,
+            self.ss_algo,
             self.sel_text.clone(),
             self.visible,
             self.dynamic,
@@ -77,6 +82,7 @@ impl Representation {
         kind: RepKind,
         params: RepParams,
         color: ColorMethod,
+        ss_algo: SsAlgorithm,
         sel_text: String,
         visible: bool,
         dynamic: bool,
@@ -85,6 +91,7 @@ impl Representation {
             kind,
             params,
             color,
+            ss_algo,
             sel_text,
             expr: None,
             sel: None,

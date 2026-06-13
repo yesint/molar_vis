@@ -12,6 +12,8 @@
 //! whole slider drag becomes one undo step. Each step is tagged with a descriptive
 //! label (derived by diffing the two states) shown in the undo/redo dropdowns.
 
+use molar::prelude::SsAlgorithm;
+
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::scene::{MolId, Molecule, Representation, Scene};
@@ -21,6 +23,7 @@ struct RepState {
     kind: RepKind,
     params: RepParams,
     color: ColorMethod,
+    ss_algo: SsAlgorithm,
     sel_text: String,
     visible: bool,
     dynamic: bool,
@@ -56,6 +59,7 @@ impl EditState {
                             kind: r.kind,
                             params: r.params,
                             color: r.color,
+                            ss_algo: r.ss_algo,
                             sel_text: r.sel_text.clone(),
                             visible: r.visible,
                             dynamic: r.dynamic,
@@ -100,6 +104,7 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
             cur.kind != s.kind
                 || cur.params != s.params
                 || cur.color != s.color
+                || cur.ss_algo != s.ss_algo
                 || cur.sel_text != s.sel_text
         };
         if needs_rebuild {
@@ -113,7 +118,15 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
 }
 
 fn rep_from_state(s: &RepState) -> Representation {
-    Representation::restore(s.kind, s.params, s.color, s.sel_text.clone(), s.visible, s.dynamic)
+    Representation::restore(
+        s.kind,
+        s.params,
+        s.color,
+        s.ss_algo,
+        s.sel_text.clone(),
+        s.visible,
+        s.dynamic,
+    )
 }
 
 /// A short human-readable label for the change from `old` to `new`, shown in the
@@ -152,6 +165,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             }
             if o.color != n.color {
                 return "change coloring".into();
+            }
+            if o.ss_algo != n.ss_algo {
+                return "change SS algorithm".into();
             }
             if o.dynamic != n.dynamic {
                 return "toggle dynamic".into();

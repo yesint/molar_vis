@@ -127,11 +127,13 @@ pub fn build(
     bonds: &[[usize; 2]],
     params: &RepParams,
     color: ColorMethod,
+    ss_algo: SsAlgorithm,
 ) -> GeometryData {
     let bound = system.bind(sel);
-    // DSSP is needed for the Cartoon shape and for the SecStruct color scheme.
+    // Secondary structure is needed for the Cartoon shape and the SecStruct
+    // color scheme; the algorithm is chosen per-rep (`ss_algo`).
     let ss = (matches!(params, RepParams::Cartoon { .. }) || color.needs_ss())
-        .then(|| SsMap::compute(&bound));
+        .then(|| SsMap::compute(&bound, ss_algo));
     let colorizer = Colorizer::new(color, &bound, system.len(), ss.as_ref());
     match *params {
         RepParams::Vdw => GeometryData {

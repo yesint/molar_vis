@@ -40,16 +40,17 @@ impl SsMap {
     /// ascending residue index, one entry per distinct `resindex`, so it zips 1:1
     /// against the sorted distinct resindices (both from a `BTreeMap` over the
     /// same particles).
-    pub fn compute(bound: &(impl ParticleIterProvider + PosProvider)) -> Self {
+    pub fn compute(bound: &(impl ParticleIterProvider + PosProvider), algo: SsAlgorithm) -> Self {
         let mut resindices: BTreeMap<usize, ()> = BTreeMap::new();
         for p in bound.iter_particle() {
             resindices.insert(p.atom.resindex, ());
         }
-        let assigned = Dss::new(bound);
-        let map = resindices
-            .into_keys()
-            .zip(assigned.ss().iter().copied())
-            .collect();
+        let ss = match algo {
+            SsAlgorithm::Dssp => Dssp::new(bound).ss().to_vec(),
+            SsAlgorithm::DsspGmx => Dssp::new_gmx(bound).ss().to_vec(),
+            SsAlgorithm::Dss => Dss::new(bound).ss().to_vec(),
+        };
+        let map = resindices.into_keys().zip(ss).collect();
         Self { map }
     }
 
