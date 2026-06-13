@@ -1,0 +1,20 @@
+[package]
+name = "vmd_rs_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "vmd_rs_core"
+path = "src/lib.rs"
+
+[dependencies]
+egui.workspace = true
+eframe.workspace = true
+egui-wgpu.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+molar = { workspace = true }

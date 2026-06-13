@@ -1,0 +1,5 @@
+# Rust build artifacts
+/target
+
+# Large generated test system (regenerate with gmx genconf; see tests/README.md)
+/tests/large_375k.gro
