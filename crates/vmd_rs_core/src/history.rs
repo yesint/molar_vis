@@ -131,6 +131,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             Less => return "delete representation".into(),
             Equal => {}
         }
+        if om.reps != nm.reps && is_permutation(&om.reps, &nm.reps) {
+            return "reorder representations".into();
+        }
         for (o, n) in om.reps.iter().zip(nm.reps.iter()) {
             if o.sel_text != n.sel_text {
                 return "edit selection".into();
@@ -150,6 +153,23 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
         }
     }
     "edit".into()
+}
+
+/// Whether `b` is a reordering of `a` (same multiset of rep states).
+fn is_permutation(a: &[RepState], b: &[RepState]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut remaining: Vec<&RepState> = b.iter().collect();
+    for x in a {
+        match remaining.iter().position(|y| *y == x) {
+            Some(p) => {
+                remaining.swap_remove(p);
+            }
+            None => return false,
+        }
+    }
+    remaining.is_empty()
 }
 
 struct Entry {

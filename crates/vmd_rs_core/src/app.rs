@@ -23,6 +23,153 @@ fn icon_button(ui: &mut egui::Ui, glyph: &str, hover: &str) -> egui::Response {
     ui.selectable_label(false, glyph).on_hover_text(hover)
 }
 
+/// Tighten spacing for a group of action icons (call first in the group's `ui`).
+fn compact_actions(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
+}
+
+/// Draw a small vector icon depicting a representation style into `rect`.
+fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: RepKind, color: egui::Color32) {
+    use egui::{Pos2, Stroke, Vec2};
+    let c = rect.center();
+    let r = rect.height() * 0.5;
+    let hw = rect.width() * 0.5;
+    match kind {
+        RepKind::Vdw => {
+            painter.circle_filled(c, r * 0.9, color);
+        }
+        RepKind::BallAndStick => {
+            let off = Vec2::new(hw * 0.6, 0.0);
+            painter.line_segment([c - off, c + off], Stroke::new(r * 0.5, color));
+            painter.circle_filled(c - off, r * 0.45, color);
+            painter.circle_filled(c + off, r * 0.45, color);
+        }
+        RepKind::Licorice => {
+            let off = Vec2::new(hw * 0.55, 0.0);
+            let rod = r * 0.55;
+            painter.line_segment([c - off, c + off], Stroke::new(rod * 2.0, color));
+            painter.circle_filled(c - off, rod, color);
+            painter.circle_filled(c + off, rod, color);
+        }
+        RepKind::Lines => {
+            // An irregular squiggle (uneven node spacing + heights), so it reads
+            // as a hand-drawn line rather than a regular "M"/"W".
+            let s = Stroke::new(1.5, color);
+            let nodes = [
+                (-0.95_f32, 0.30_f32),
+                (-0.55, -0.50),
+                (-0.10, 0.10),
+                (0.35, -0.30),
+                (0.62, 0.45),
+                (0.95, -0.15),
+            ];
+            let pts: Vec<Pos2> = nodes
+                .iter()
+                .map(|&(x, y)| Pos2::new(c.x + x * hw, c.y + y * r))
+                .collect();
+            for seg in pts.windows(2) {
+                painter.line_segment([seg[0], seg[1]], s);
+            }
+        }
+    }
+}
+
+/// A clickable icon+label row inside the style dropdown. Returns true if clicked.
+fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 22.0), egui::Sense::click());
+    if selected || resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let color = ui.visuals().text_color();
+    let icon_rect =
+        egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
+    paint_style_icon(ui.painter(), icon_rect, kind, color);
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        kind.label(),
+        egui::FontId::proportional(15.0),
+        color,
+    );
+    resp.clicked()
+}
+
+/// A drawn style-icon button that opens a dropdown of icon+label style options.
+fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(42.0, 18.0), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let color = ui.visuals().text_color();
+    let icon_rect = egui::Rect::from_min_size(
+        rect.left_center() + egui::vec2(3.0, -8.0),
+        egui::vec2(26.0, 16.0),
+    );
+    paint_style_icon(ui.painter(), icon_rect, rep.kind, color);
+    ui.painter().text(
+        egui::pos2(rect.right() - 5.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        icon::CARET_DOWN,
+        egui::FontId::proportional(10.0),
+        color,
+    );
+    let resp = resp.on_hover_text(rep.kind.label());
+
+    egui::Popup::menu(&resp).show(|ui| {
+        for kind in RepKind::ALL {
+            if style_option(ui, kind, kind == rep.kind) {
+                rep.kind = kind;
+                rep.params = RepParams::for_kind(kind);
+                rep.geom_dirty = true;
+                ui.close();
+            }
+        }
+    });
+}
+
+/// Parameter controls for a representation, shown inline under its row as a tidy
+/// two-column table (parameter name on the left, control on the right).
+fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
+    if let Some(err) = &rep.sel_error {
+        ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
+    }
+    let mut changed = false;
+    egui::Grid::new("rep_params")
+        .num_columns(2)
+        .spacing(egui::vec2(8.0, 4.0))
+        .show(ui, |ui| match rep.kind {
+            RepKind::Vdw | RepKind::Lines => {
+                ui.weak("No tunable parameters.");
+                ui.end_row();
+            }
+            RepKind::Licorice => {
+                ui.label("Bond radius (nm)");
+                changed |= ui
+                    .add(egui::Slider::new(&mut rep.params.bond_radius, 0.005..=0.10))
+                    .changed();
+                ui.end_row();
+            }
+            RepKind::BallAndStick => {
+                ui.label("Sphere scale");
+                changed |= ui
+                    .add(egui::Slider::new(&mut rep.params.sphere_scale, 0.05..=0.6))
+                    .changed();
+                ui.end_row();
+                ui.label("Bond radius (nm)");
+                changed |= ui
+                    .add(egui::Slider::new(&mut rep.params.bond_radius, 0.005..=0.05))
+                    .changed();
+                ui.end_row();
+            }
+        });
+    if changed {
+        rep.geom_dirty = true;
+    }
+}
+
 pub struct App {
     renderer: SceneRenderer,
     camera: Camera,
@@ -41,6 +188,8 @@ pub struct App {
     /// dropdowns), applied after the panel is drawn.
     pending_undo_n: Option<usize>,
     pending_redo_n: Option<usize>,
+    /// `(molecule index, rep index)` whose selection field is focused/expanded.
+    editing_rep: Option<(usize, usize)>,
 }
 
 impl App {
@@ -109,6 +258,13 @@ impl App {
 
         let history = History::new(EditState::capture(&scene));
 
+        // Verification hook: VMD_RS_DEBUG_PARAMS=1 opens the first rep's gear panel.
+        if std::env::var("VMD_RS_DEBUG_PARAMS").is_ok() {
+            if let Some(rep) = scene.molecules.first_mut().and_then(|m| m.reps.first_mut()) {
+                rep.params_open = true;
+            }
+        }
+
         Ok(Self {
             renderer,
             camera,
@@ -121,6 +277,7 @@ impl App {
             history,
             pending_undo_n: None,
             pending_redo_n: None,
+            editing_rep: None,
         })
     }
 
@@ -226,17 +383,12 @@ impl App {
                 ui.separator();
                 egui::CollapsingHeader::new("Molecules")
                     .default_open(true)
-                    .show(ui, |ui| view_dirty |= self.draw_molecule_table(ui));
+                    .show(ui, |ui| view_dirty |= self.draw_molecule_list(ui));
 
                 ui.separator();
                 egui::CollapsingHeader::new("Representations")
                     .default_open(true)
-                    .show(ui, |ui| view_dirty |= self.draw_rep_table(ui));
-
-                ui.separator();
-                egui::CollapsingHeader::new("Representation controls")
-                    .default_open(true)
-                    .show(ui, |ui| self.draw_rep_controls(ui));
+                    .show(ui, |ui| view_dirty |= self.draw_rep_list(ui));
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(4.0);
@@ -325,8 +477,9 @@ impl App {
         });
     }
 
-    /// Loaded molecules as a table: file name | atoms | actions (eye, trash).
-    fn draw_molecule_table(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Loaded molecules, one row each: name + atom count on the left, a
+    /// right-justified compact action group (visibility eye, delete trash).
+    fn draw_molecule_list(&mut self, ui: &mut egui::Ui) -> bool {
         if self.scene.molecules.is_empty() {
             ui.weak(&self.status);
             return false;
@@ -335,41 +488,32 @@ impl App {
         let mut new_selected = self.scene.selected_mol;
         let mut delete: Option<usize> = None;
 
-        egui::Grid::new("molecule_table")
-            .num_columns(3)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.strong("File");
-                ui.strong("Atoms");
-                ui.label("");
-                ui.end_row();
-
-                for i in 0..self.scene.molecules.len() {
-                    let selected = self.scene.selected_mol == Some(i);
-                    let mol = &mut self.scene.molecules[i];
-
-                    if ui.selectable_label(selected, mol.name.as_str()).clicked() {
-                        new_selected = Some(i);
-                    }
-                    ui.label(format!("{}", mol.n_atoms));
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        let (eye, tip) = if mol.visible {
-                            (icon::EYE, "Hide")
-                        } else {
-                            (icon::EYE_SLASH, "Show")
-                        };
-                        if icon_button(ui, eye, tip).clicked() {
-                            mol.visible = !mol.visible;
-                            view_dirty = true;
-                        }
-                        if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
-                            delete = Some(i);
-                        }
-                    });
-                    ui.end_row();
+        for i in 0..self.scene.molecules.len() {
+            let selected = self.scene.selected_mol == Some(i);
+            let mol = &mut self.scene.molecules[i];
+            ui.horizontal(|ui| {
+                if ui.selectable_label(selected, mol.name.as_str()).clicked() {
+                    new_selected = Some(i);
                 }
+                ui.weak(format!("({})", mol.n_atoms));
+                // Right-justified, compact action group.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    compact_actions(ui);
+                    if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
+                        delete = Some(i);
+                    }
+                    let eye = if mol.visible { icon::EYE } else { icon::EYE_SLASH };
+                    if ui
+                        .selectable_label(mol.visible, eye)
+                        .on_hover_text(if mol.visible { "Hide" } else { "Show" })
+                        .clicked()
+                    {
+                        mol.visible = !mol.visible;
+                        view_dirty = true;
+                    }
+                });
             });
+        }
         self.scene.selected_mol = new_selected;
 
         if let Some(i) = delete {
@@ -382,19 +526,27 @@ impl App {
         view_dirty
     }
 
-    /// Representations of the selected molecule as a table: selection | style |
-    /// actions (visibility eye, update-every-frame, duplicate, delete). An "Add"
-    /// button precedes the table.
-    fn draw_rep_table(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Representations of the selected molecule as rich rows: a drag handle
+    /// (reorder by dragging), the selection text (expands to full width while
+    /// focused, collapses on Enter/blur), a drawn style-icon dropdown, and a
+    /// right-justified action group (gear→params, eye, update-every-frame,
+    /// duplicate, trash). An "Add" button precedes the list.
+    fn draw_rep_list(&mut self, ui: &mut egui::Ui) -> bool {
         let default_rep = self.default_rep;
         let Some(mi) = self.scene.selected_mol else {
             ui.weak("Select a molecule above.");
             return false;
         };
         let mut view_dirty = false;
-        let mol = &mut self.scene.molecules[mi];
+        let editing = self
+            .editing_rep
+            .filter(|&(m, _)| m == mi)
+            .map(|(_, r)| r);
+        let mut new_editing = self.editing_rep;
 
-        // Add button BEFORE the table.
+        let mol = &mut self.scene.molecules[mi];
+        let mol_id = mol.id;
+
         if ui
             .button(format!("{}  Add representation", icon::PLUS))
             .clicked()
@@ -405,59 +557,49 @@ impl App {
         }
         ui.add_space(2.0);
 
-        let mut new_sel_rep = mol.selected_rep;
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;
+        let mut reorder: Option<(usize, usize)> = None;
 
-        egui::Grid::new("rep_table")
-            .num_columns(3)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.strong("Selection");
-                ui.strong("Style");
-                ui.label("");
-                ui.end_row();
+        for j in 0..mol.reps.len() {
+            let sel_id = egui::Id::new(("rep_sel", mol_id, j));
+            let rep = &mut mol.reps[j];
 
-                for j in 0..mol.reps.len() {
-                    let rep = &mut mol.reps[j];
+            // Expanded editor: just a full-width selection field for this rep.
+            if editing == Some(j) {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut rep.sel_text)
+                        .id(sel_id)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("selection"),
+                );
+                if resp.lost_focus() {
+                    rep.sel_dirty = true;
+                    new_editing = None;
+                }
+                continue;
+            }
 
-                    // Selection text (editable). Editing it / focusing selects the row.
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut rep.sel_text).desired_width(100.0),
-                    );
-                    if resp.lost_focus() {
-                        rep.sel_dirty = true;
-                    }
-                    if resp.gained_focus() {
-                        new_sel_rep = Some(j);
-                    }
+            let row = ui
+                .horizontal(|ui| {
+                    // Drag handle (reorder source); payload = source index. Grab
+                    // cursor shows while hovering the handle itself.
+                    ui.dnd_drag_source(egui::Id::new(("rep_drag", mol_id, j)), j, |ui| {
+                        ui.add(egui::Label::new(icon::DOTS_SIX_VERTICAL).selectable(false));
+                    })
+                    .response
+                    .on_hover_cursor(egui::CursorIcon::Grab)
+                    .on_hover_text("Drag to reorder");
 
-                    // Style dropdown.
-                    egui::ComboBox::from_id_salt(("rep_style", j))
-                        .selected_text(rep.kind.label())
-                        .width(72.0)
-                        .show_ui(ui, |ui| {
-                            for kind in RepKind::ALL {
-                                if ui.selectable_value(&mut rep.kind, kind, kind.label()).clicked()
-                                {
-                                    rep.params = RepParams::for_kind(kind);
-                                    rep.geom_dirty = true;
-                                    new_sel_rep = Some(j);
-                                }
-                            }
-                        });
-
-                    // Action buttons (tight spacing).
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        let (eye, tip) = if rep.visible {
-                            (icon::EYE, "Hide")
-                        } else {
-                            (icon::EYE_SLASH, "Show")
-                        };
-                        if icon_button(ui, eye, tip).clicked() {
-                            rep.visible = !rep.visible;
-                            view_dirty = true;
+                    // Right group: actions + style on the right; the selection field
+                    // fills the remaining space on the left.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        compact_actions(ui);
+                        if icon_button(ui, icon::TRASH, "Delete").clicked() {
+                            delete = Some(j);
+                        }
+                        if icon_button(ui, icon::COPY, "Duplicate").clicked() {
+                            duplicate = Some(j);
                         }
                         if ui
                             .selectable_label(rep.dynamic, icon::ARROWS_CLOCKWISE)
@@ -466,18 +608,83 @@ impl App {
                         {
                             rep.dynamic = !rep.dynamic;
                         }
-                        if icon_button(ui, icon::COPY, "Duplicate").clicked() {
-                            duplicate = Some(j);
+                        // Eye toggle: open eye on a pressed button when shown,
+                        // crossed eye on an unpressed button when hidden.
+                        let eye = if rep.visible { icon::EYE } else { icon::EYE_SLASH };
+                        if ui
+                            .selectable_label(rep.visible, eye)
+                            .on_hover_text(if rep.visible { "Hide" } else { "Show" })
+                            .clicked()
+                        {
+                            rep.visible = !rep.visible;
+                            view_dirty = true;
                         }
-                        if icon_button(ui, icon::TRASH, "Delete").clicked() {
-                            delete = Some(j);
+                        // Gear (leftmost action) toggles this rep's inline params
+                        // panel; the button shows pressed while it is open.
+                        if ui
+                            .selectable_label(rep.params_open, icon::GEAR_SIX)
+                            .on_hover_text("Settings")
+                            .clicked()
+                        {
+                            rep.params_open = !rep.params_open;
                         }
-                    });
-                    ui.end_row();
-                }
-            });
-        mol.selected_rep = new_sel_rep;
 
+                        // Style dropdown, right-aligned just left of the actions.
+                        style_picker(ui, rep);
+
+                        // Selection field fills the remaining width on the left.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut rep.sel_text)
+                                    .id(sel_id)
+                                    .desired_width(ui.available_width())
+                                    .hint_text("selection"),
+                            );
+                            if resp.gained_focus() {
+                                new_editing = Some((mi, j));
+                            }
+                            if resp.lost_focus() {
+                                rep.sel_dirty = true;
+                            }
+                        });
+                    });
+                })
+                .response;
+
+            // Inline params panel (within the side panel), shown when the gear is on.
+            if rep.params_open {
+                ui.indent(egui::Id::new(("rep_params", mol_id, j)), |ui| {
+                    draw_rep_params(ui, rep);
+                });
+            }
+
+            // Reorder drop target: show an insertion line and capture the move.
+            if let (Some(ptr), Some(_)) = (
+                ui.input(|i| i.pointer.interact_pos()),
+                row.dnd_hover_payload::<usize>(),
+            ) {
+                let before = ptr.y < row.rect.center().y;
+                let y = if before { row.rect.top() } else { row.rect.bottom() };
+                ui.painter().hline(
+                    row.rect.x_range(),
+                    y,
+                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                );
+                if let Some(src) = row.dnd_release_payload::<usize>() {
+                    reorder = Some((*src, if before { j } else { j + 1 }));
+                }
+            }
+        }
+
+        if let Some((from, to)) = reorder {
+            if to != from && to != from + 1 {
+                let item = mol.reps.remove(from);
+                let target = (if from < to { to - 1 } else { to }).min(mol.reps.len());
+                mol.reps.insert(target, item);
+                mol.selected_rep = Some(target);
+                view_dirty = true;
+            }
+        }
         if let Some(j) = duplicate {
             let dup = mol.reps[j].duplicate();
             mol.reps.insert(j + 1, dup);
@@ -493,54 +700,9 @@ impl App {
             };
             view_dirty = true;
         }
+
+        self.editing_rep = new_editing;
         view_dirty
-    }
-
-    /// Parameter controls for the selected representation (selection text and
-    /// style live in the rep table). Surfaces selection errors.
-    fn draw_rep_controls(&mut self, ui: &mut egui::Ui) {
-        let Some(mi) = self.scene.selected_mol else {
-            ui.weak("—");
-            return;
-        };
-        let mol = &mut self.scene.molecules[mi];
-        let Some(ri) = mol.selected_rep else {
-            ui.weak("—");
-            return;
-        };
-        let rep = &mut mol.reps[ri];
-
-        if let Some(err) = &rep.sel_error {
-            ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
-        }
-
-        match rep.kind {
-            RepKind::Vdw => {
-                ui.weak("Spheres at van der Waals radius.");
-            }
-            RepKind::Lines => {
-                ui.weak("Half-bond colored lines (1 px).");
-            }
-            RepKind::Licorice => {
-                if ui
-                    .add(egui::Slider::new(&mut rep.params.bond_radius, 0.005..=0.10).text("bond radius (nm)"))
-                    .changed()
-                {
-                    rep.geom_dirty = true;
-                }
-            }
-            RepKind::BallAndStick => {
-                let mut changed = ui
-                    .add(egui::Slider::new(&mut rep.params.sphere_scale, 0.05..=0.6).text("sphere scale"))
-                    .changed();
-                changed |= ui
-                    .add(egui::Slider::new(&mut rep.params.bond_radius, 0.005..=0.05).text("bond radius (nm)"))
-                    .changed();
-                if changed {
-                    rep.geom_dirty = true;
-                }
-            }
-        }
     }
 
     /// Central panel: rebuild dirty geometry, route VMD-style mouse navigation,

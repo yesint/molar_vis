@@ -127,13 +127,20 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 
 History toolbar (undo/redo buttons, each with a `▼` dropdown listing named actions for
 **cumulative** undo/redo; also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
-toggles; **orthographic is the default**) → `Molecules` **table** (`egui::Grid`: File |
-Atoms | actions = eye, trash) → `Representations` ("Add" button, then a **table**:
-Selection (editable `TextEdit`) | Style (`ComboBox`) | actions = eye, update-every-frame
-(`rep.dynamic`, ↻), duplicate, trash) → `Representation controls` (param sliders +
-selection error for the selected rep). Action-button groups use tight 2px spacing. FPS in
-the footer. History entries get descriptive labels via `describe_change` ("edit selection",
-"add representation", "delete molecule", …).
+toggles; **orthographic is the default**) → `Molecules` (one row each: name + atom count,
+right-justified eye/trash) → `Representations` ("Add" button, then rich rows). No
+standalone controls section — params live in a per-rep gear popup.
+
+Each rep row (custom layout, not a Grid): **drag handle** (`DOTS_SIX_VERTICAL` wrapped in
+`dnd_drag_source(payload=index)`; rows are drop targets via `dnd_hover_payload`/
+`dnd_release_payload`, reorder applied after the loop) · **selection field** (narrow;
+focusing it sets `editing_rep` and re-renders the row as a single full-width editor,
+collapsing on Enter/blur) · **drawn style-icon dropdown** (`paint_style_icon` draws each
+`RepKind`; click → `egui::Popup::menu` with icon+label rows via `style_option`) ·
+**right-justified compact action group** (`Layout::right_to_left` + `compact_actions`:
+button_padding (3,1), item_spacing.x 2): gear (`GEAR_SIX`, opens `draw_rep_params` popup) ·
+eye · update-every-frame (`rep.dynamic`, ↻) · duplicate · trash. History labels via
+`describe_change` ("edit selection", "reorder representations", …). FPS in the footer.
 
 ## Milestone status
 

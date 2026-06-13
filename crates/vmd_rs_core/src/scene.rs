@@ -34,6 +34,9 @@ pub struct Representation {
     /// (i.e. each trajectory frame). For coordinate-dependent selections like
     /// `within …`; honored once trajectory playback lands.
     pub dynamic: bool,
+    /// Transient UI state: whether this rep's inline params panel is expanded.
+    /// Not part of `EditState` (view state, not undoable).
+    pub params_open: bool,
     /// `sel_text` changed → recompile the selection.
     pub sel_dirty: bool,
     /// Selection/params/style changed → rebuild + reupload geometry.
@@ -76,6 +79,7 @@ impl Representation {
             sel_error: None,
             visible,
             dynamic,
+            params_open: false,
             sel_dirty: true,
             geom_dirty: false,
             gpu: RepGpu::default(),
