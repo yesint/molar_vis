@@ -9,6 +9,7 @@ mod camera;
 mod color;
 mod data;
 mod geometry;
+mod history;
 mod launch;
 mod render;
 mod scene;

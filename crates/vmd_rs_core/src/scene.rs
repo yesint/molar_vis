@@ -1,11 +1,18 @@
 //! The scene graph: a set of molecules, each with its own representations.
 
+use std::collections::HashMap;
+
 use glam::Vec3;
 use molar::prelude::*;
 
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
 use crate::render::RepGpu;
+
+/// Stable per-molecule identity, so undo/redo can reference molecules across
+/// deletion (a deleted molecule is parked in [`Scene::trash`] by this id).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct MolId(pub u64);
 
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
@@ -48,13 +55,19 @@ impl Representation {
     /// A copy with the same style/selection but fresh (unbuilt) GPU state, so it
     /// recompiles and uploads its own geometry on the next frame.
     pub fn duplicate(&self) -> Self {
+        Self::restore(self.kind, self.params, self.sel_text.clone(), self.visible)
+    }
+
+    /// Reconstruct a representation from saved editable fields (used by undo/redo).
+    /// Starts dirty so its selection recompiles and geometry rebuilds next frame.
+    pub fn restore(kind: RepKind, params: RepParams, sel_text: String, visible: bool) -> Self {
         Self {
-            kind: self.kind,
-            params: self.params,
-            sel_text: self.sel_text.clone(),
+            kind,
+            params,
+            sel_text,
             sel_indices: Vec::new(),
             sel_error: None,
-            visible: self.visible,
+            visible,
             sel_dirty: true,
             geom_dirty: false,
             gpu: RepGpu::default(),
@@ -62,14 +75,13 @@ impl Representation {
     }
 }
 
-/// A loaded molecule: per-atom arrays, connectivity, the live molar `System`
-/// (for selection evaluation), and its representations.
+/// A loaded molecule. The live molar `System` is the single source of per-atom
+/// data (positions, elements, radii); we additionally keep only the guessed
+/// connectivity and a cached bounding box, plus the representations.
 pub struct Molecule {
+    pub id: MolId,
     pub name: String,
     pub system: System,
-    pub positions: Vec<[f32; 3]>,
-    pub vdw: Vec<f32>,
-    pub colors: Vec<u32>,
     pub bonds: Vec<[usize; 2]>,
     pub n_atoms: usize,
     pub bbox_min: Vec3,
@@ -80,13 +92,11 @@ pub struct Molecule {
 }
 
 impl Molecule {
-    pub fn new(raw: RawMolecule, default_rep: RepKind) -> Self {
+    pub fn new(id: MolId, raw: RawMolecule, default_rep: RepKind) -> Self {
         Self {
+            id,
             name: raw.name,
             system: raw.system,
-            positions: raw.positions,
-            vdw: raw.vdw,
-            colors: raw.colors,
             bonds: raw.bonds,
             n_atoms: raw.n_atoms,
             bbox_min: raw.bbox_min,
@@ -112,9 +122,38 @@ pub fn compile_selection(system: &System, text: &str) -> Result<Vec<usize>, Stri
 pub struct Scene {
     pub molecules: Vec<Molecule>,
     pub selected_mol: Option<usize>,
+    /// Molecules removed from the document but retained so a delete can be undone.
+    pub trash: HashMap<MolId, Molecule>,
+    next_id: u64,
 }
 
 impl Scene {
+    /// Load a molecule into the scene, assigning it a fresh [`MolId`].
+    pub fn add(&mut self, raw: RawMolecule, default_rep: RepKind) -> MolId {
+        let id = MolId(self.next_id);
+        self.next_id += 1;
+        self.molecules.push(Molecule::new(id, raw, default_rep));
+        id
+    }
+
+    /// Clamp `selected_mol`/`selected_rep` to valid ranges (after add/remove).
+    pub fn clamp_selection(&mut self) {
+        if self.molecules.is_empty() {
+            self.selected_mol = None;
+        } else {
+            let m = self.selected_mol.unwrap_or(0).min(self.molecules.len() - 1);
+            self.selected_mol = Some(m);
+        }
+        for mol in &mut self.molecules {
+            if mol.reps.is_empty() {
+                mol.selected_rep = None;
+            } else {
+                let r = mol.selected_rep.unwrap_or(0).min(mol.reps.len() - 1);
+                mol.selected_rep = Some(r);
+            }
+        }
+    }
+
     /// Combined bounding box over all molecules (for camera framing).
     pub fn bbox(&self) -> Option<(Vec3, Vec3)> {
         let mut iter = self.molecules.iter();

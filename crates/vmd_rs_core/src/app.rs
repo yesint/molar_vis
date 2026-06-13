@@ -7,17 +7,20 @@ use eframe::egui;
 
 use crate::camera::{Camera, Projection};
 use crate::data;
-use crate::geometry::{self, AtomArrays, RepKind, RepParams};
+use crate::geometry::{self, RepKind, RepParams};
+use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::render::SceneRenderer;
-use crate::scene::{self, Molecule, Representation, Scene};
+use crate::scene::{self, Representation, Scene};
 
 use egui_phosphor::regular as icon;
 
-/// A compact frameless icon button with a hover tooltip.
+/// A compact icon button: frameless at rest, with a background highlight on
+/// hover, plus a tooltip. Implemented via `selectable_label` (always unselected)
+/// because the theme overrides text color, so a frameless `Button` would show no
+/// hover feedback, whereas `selectable_label` highlights its background.
 fn icon_button(ui: &mut egui::Ui, glyph: &str, hover: &str) -> egui::Response {
-    ui.add(egui::Button::new(glyph).frame(false))
-        .on_hover_text(hover)
+    ui.selectable_label(false, glyph).on_hover_text(hover)
 }
 
 pub struct App {
@@ -33,6 +36,9 @@ pub struct App {
     /// don't capture (forces one re-render).
     view_dirty: bool,
     status: String,
+    history: History,
+    pending_undo: bool,
+    pending_redo: bool,
 }
 
 impl App {
@@ -59,7 +65,9 @@ impl App {
         let mut status = String::new();
         for path in &launch.files {
             match data::load(path) {
-                Ok(raw) => scene.molecules.push(Molecule::new(raw, default_rep)),
+                Ok(raw) => {
+                    scene.add(raw, default_rep);
+                }
                 Err(e) => {
                     log::error!("{e}");
                     status = e;
@@ -97,6 +105,8 @@ impl App {
             camera.projection = Projection::Orthographic;
         }
 
+        let history = History::new(EditState::capture(&scene));
+
         Ok(Self {
             renderer,
             camera,
@@ -106,6 +116,9 @@ impl App {
             last_size: [0, 0],
             view_dirty: true,
             status,
+            history,
+            pending_undo: false,
+            pending_redo: false,
         })
     }
 
@@ -114,6 +127,15 @@ impl App {
     fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
         let mut changed = false;
         for mol in &mut self.scene.molecules {
+            // Skip molecules with nothing to do — avoids binding an all-selection
+            // (which allocates a full index) every frame.
+            if !mol.reps.iter().any(|r| r.sel_dirty || r.geom_dirty) {
+                continue;
+            }
+            // Bound all-selection over the System: the source of positions/atoms
+            // for geometry (atom index == global index). Shares `mol.system` with
+            // compile_selection below (both immutable borrows).
+            let all = mol.system.select_all_bound();
             for rep in &mut mol.reps {
                 if rep.sel_dirty {
                     match scene::compile_selection(&mol.system, rep.sel_text.as_str()) {
@@ -127,13 +149,8 @@ impl App {
                     rep.sel_dirty = false;
                 }
                 if rep.geom_dirty {
-                    let atoms = AtomArrays {
-                        positions: &mol.positions,
-                        vdw: &mol.vdw,
-                        colors: &mol.colors,
-                        bonds: &mol.bonds,
-                    };
-                    let geom = geometry::build(&atoms, &rep.sel_indices, rep.kind, &rep.params);
+                    let geom =
+                        geometry::build(&all, &mol.bonds, &rep.sel_indices, rep.kind, &rep.params);
                     rep.gpu = self.renderer.upload(rs, &geom);
                     rep.geom_dirty = false;
                     changed = true;
@@ -148,9 +165,48 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).
+        let ctx = ui.ctx().clone();
+
+        // Keyboard: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
+        ctx.input(|i| {
+            if i.modifiers.command && i.key_pressed(egui::Key::Z) {
+                if i.modifiers.shift {
+                    self.pending_redo = true;
+                } else {
+                    self.pending_undo = true;
+                }
+            }
+            if i.modifiers.command && i.key_pressed(egui::Key::Y) {
+                self.pending_redo = true;
+            }
+        });
+
         let panel_dirty = self.draw_left_panel(ui);
         self.view_dirty |= panel_dirty;
+
+        // Apply undo/redo after the panel so list indices stay stable during draw.
+        let (do_undo, do_redo) = (self.pending_undo, self.pending_redo && !self.pending_undo);
+        self.pending_undo = false;
+        self.pending_redo = false;
+        let applied = if do_undo {
+            self.history.undo()
+        } else if do_redo {
+            self.history.redo()
+        } else {
+            None
+        };
+        if let Some(state) = applied {
+            state.apply(&mut self.scene);
+            self.view_dirty = true;
+        }
+
         self.draw_viewport(ui, frame);
+
+        // Record a checkpoint once the gesture has settled (coalesces drags/typing).
+        let settled = !ctx.egui_is_using_pointer() && !ctx.egui_wants_keyboard_input();
+        if settled {
+            self.history.maybe_record(EditState::capture(&self.scene));
+        }
     }
 }
 
@@ -163,6 +219,26 @@ impl App {
             .size_range(egui::Rangef::new(220.0, 520.0))
             .show_inside(ui, |ui| {
                 ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    let can_undo = self.history.can_undo();
+                    let can_redo = self.history.can_redo();
+                    if ui
+                        .add_enabled(can_undo, egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE))
+                        .on_hover_text("Undo (Ctrl+Z)")
+                        .clicked()
+                    {
+                        self.pending_undo = true;
+                    }
+                    if ui
+                        .add_enabled(can_redo, egui::Button::new(icon::ARROW_CLOCKWISE))
+                        .on_hover_text("Redo (Ctrl+Shift+Z)")
+                        .clicked()
+                    {
+                        self.pending_redo = true;
+                    }
+                });
+                ui.add_space(4.0);
 
                 egui::CollapsingHeader::new("Scene")
                     .default_open(true)
@@ -257,12 +333,10 @@ impl App {
         self.scene.selected_mol = new_selected;
 
         if let Some(i) = delete {
-            self.scene.molecules.remove(i);
-            self.scene.selected_mol = if self.scene.molecules.is_empty() {
-                None
-            } else {
-                Some(i.min(self.scene.molecules.len() - 1))
-            };
+            // Park the molecule in the trash so the delete can be undone.
+            let m = self.scene.molecules.remove(i);
+            self.scene.trash.insert(m.id, m);
+            self.scene.clamp_selection();
             view_dirty = true;
         }
         view_dirty
