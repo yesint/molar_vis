@@ -125,7 +125,7 @@ impl ColorMethod {
             ColorMethod::Element => "Element",
             ColorMethod::Chain => "Chain",
             ColorMethod::ResId => "ResID",
-            ColorMethod::ResName => "Residue name",
+            ColorMethod::ResName => "ResName",
             ColorMethod::Index => "Index",
             ColorMethod::Beta => "B-factor",
         }

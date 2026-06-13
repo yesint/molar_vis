@@ -97,27 +97,49 @@ fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> bool {
     resp.clicked()
 }
 
-/// A drawn style-icon button that opens a dropdown of icon+label style options.
-fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(42.0, 18.0), egui::Sense::click());
+/// A dropdown button showing a drawn icon + a text label + a caret. `draw_icon`
+/// paints into the given rect; returns the click response (drive a `Popup` off it).
+fn picker_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    draw_icon: impl FnOnce(&egui::Painter, egui::Rect),
+) -> egui::Response {
+    let txt = ui.visuals().text_color();
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), egui::FontId::proportional(14.0), txt);
+    let (icon_w, caret_w, pad, gap) = (26.0_f32, 11.0_f32, 5.0_f32, 5.0_f32);
+    let w = pad + icon_w + gap + galley.size().x + gap + caret_w + pad;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click());
     if resp.hovered() {
         ui.painter()
             .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
-    let color = ui.visuals().text_color();
     let icon_rect = egui::Rect::from_min_size(
-        rect.left_center() + egui::vec2(3.0, -8.0),
-        egui::vec2(26.0, 16.0),
+        egui::pos2(rect.left() + pad, rect.center().y - 8.0),
+        egui::vec2(icon_w, 16.0),
     );
-    paint_style_icon(ui.painter(), icon_rect, rep.kind, color);
+    draw_icon(ui.painter(), icon_rect);
+    ui.painter().galley(
+        egui::pos2(icon_rect.right() + gap, rect.center().y - galley.size().y * 0.5),
+        galley,
+        txt,
+    );
     ui.painter().text(
-        egui::pos2(rect.right() - 5.0, rect.center().y),
+        egui::pos2(rect.right() - pad - caret_w * 0.5, rect.center().y),
         egui::Align2::CENTER_CENTER,
         icon::CARET_DOWN,
         egui::FontId::proportional(10.0),
-        color,
+        txt,
     );
-    let resp = resp.on_hover_text(rep.kind.label());
+    resp
+}
+
+/// A drawn style-icon + label button that opens a dropdown of style options.
+fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
+    let color = ui.visuals().text_color();
+    let kind = rep.kind;
+    let resp = picker_button(ui, kind.label(), |p, r| paint_style_icon(p, r, kind, color));
 
     egui::Popup::menu(&resp).show(|ui| {
         for kind in RepKind::ALL {
@@ -135,7 +157,24 @@ fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 /// colors, so unlike the style icons it is not theme-tinted).
 fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMethod) {
     use crate::color;
-    let rgb = |c: [u8; 4]| egui::Color32::from_rgb(c[0], c[1], c[2]);
+    use egui::{pos2, Color32, Stroke};
+    let rgb3 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let rgb4 = |c: [u8; 4]| Color32::from_rgb(c[0], c[1], c[2]);
+    // Fill `rect` with a rainbow gradient (background for text-on-rainbow icons).
+    let rainbow_bg = || {
+        let n = 14usize;
+        let w = rect.width() / n as f32;
+        for i in 0..n {
+            let c = color::rainbow(i as f32 / (n - 1) as f32);
+            let x0 = rect.left() + i as f32 * w;
+            painter.rect_filled(
+                egui::Rect::from_min_max(pos2(x0, rect.top()), pos2(x0 + w + 1.0, rect.bottom())),
+                0.0,
+                Color32::from_rgb(c[0], c[1], c[2]),
+            );
+        }
+    };
+
     match method {
         ColorMethod::Element => {
             // CPK dots: carbon (grey), oxygen (red), nitrogen (blue).
@@ -143,50 +182,74 @@ fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMeth
             let y = rect.center().y;
             let w = rect.width();
             for (k, an) in [0.22_f32, 0.5, 0.78].iter().zip([6u8, 8, 7]) {
-                painter.circle_filled(
-                    egui::pos2(rect.left() + k * w, y),
-                    r,
-                    rgb(color::element_color(an)),
+                painter.circle_filled(pos2(rect.left() + k * w, y), r, rgb4(color::element_color(an)));
+            }
+        }
+        ColorMethod::Chain => {
+            // Interlocking colored chain links.
+            let r = rect.height() * 0.34;
+            let y = rect.center().y;
+            let cols = [color::PALETTE[0], color::PALETTE[6], color::PALETTE[2]];
+            let step = (rect.width() - r * 2.0) / (cols.len() as f32 - 1.0).max(1.0);
+            for (i, c) in cols.iter().enumerate() {
+                let x = rect.left() + r + step * i as f32;
+                painter.circle_stroke(pos2(x, y), r, Stroke::new(2.0, rgb3(*c)));
+            }
+        }
+        ColorMethod::ResId => {
+            // A backbone (horizontal line) with two residues hanging off it: one
+            // up-left, one down-right, each a different color (color-by-residue).
+            let line = Stroke::new(1.5, Color32::from_gray(180));
+            let mid = rect.center().y;
+            painter.line_segment(
+                [pos2(rect.left() + 2.0, mid), pos2(rect.right() - 2.0, mid)],
+                line,
+            );
+            let x1 = rect.left() + rect.width() * 0.33;
+            let top = rect.top() + 2.5;
+            painter.line_segment([pos2(x1, mid), pos2(x1, top)], line);
+            painter.circle_filled(pos2(x1, top), 2.6, rgb3(color::PALETTE[0]));
+            let x2 = rect.left() + rect.width() * 0.67;
+            let bot = rect.bottom() - 2.5;
+            painter.line_segment([pos2(x2, mid), pos2(x2, bot)], line);
+            painter.circle_filled(pos2(x2, bot), 2.6, rgb3(color::PALETTE[3]));
+        }
+        ColorMethod::ResName => {
+            // "ALA" on a rainbow background.
+            rainbow_bg();
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "ALA",
+                egui::FontId::proportional(9.0),
+                Color32::BLACK,
+            );
+        }
+        ColorMethod::Index => {
+            // "123" with each digit a different (rainbow) color.
+            let digits = ["1", "2", "3"];
+            let ts = [0.0_f32, 0.45, 0.85];
+            let w = rect.width() / 3.0;
+            for i in 0..3 {
+                painter.text(
+                    pos2(rect.left() + w * (i as f32 + 0.5), rect.center().y),
+                    egui::Align2::CENTER_CENTER,
+                    digits[i],
+                    egui::FontId::proportional(12.0),
+                    rgb4(color::rainbow(ts[i])),
                 );
             }
         }
-        ColorMethod::Chain | ColorMethod::ResName | ColorMethod::ResId => {
-            // Categorical color bars (different palette offset per scheme).
-            let n = 4usize;
-            let off = match method {
-                ColorMethod::Chain => 0,
-                ColorMethod::ResName => 4,
-                _ => 8,
-            };
-            let w = rect.width() / n as f32;
-            for i in 0..n {
-                let c = color::PALETTE[(off + i) % color::PALETTE.len()];
-                let x0 = rect.left() + i as f32 * w;
-                let bar = egui::Rect::from_min_max(
-                    egui::pos2(x0 + 0.5, rect.top() + 2.0),
-                    egui::pos2(x0 + w - 0.5, rect.bottom() - 2.0),
-                );
-                painter.rect_filled(bar, 1.0, rgb([c[0], c[1], c[2], 255]));
-            }
-        }
-        ColorMethod::Index | ColorMethod::Beta => {
-            // Continuous gradient bars.
-            let n = 12usize;
-            let w = rect.width() / n as f32;
-            for i in 0..n {
-                let t = i as f32 / (n - 1) as f32;
-                let c = if matches!(method, ColorMethod::Index) {
-                    color::rainbow(t)
-                } else {
-                    color::beta_ramp(t)
-                };
-                let x0 = rect.left() + i as f32 * w;
-                let bar = egui::Rect::from_min_max(
-                    egui::pos2(x0, rect.top() + 2.0),
-                    egui::pos2(x0 + w + 0.5, rect.bottom() - 2.0),
-                );
-                painter.rect_filled(bar, 0.0, rgb(c));
-            }
+        ColorMethod::Beta => {
+            // "B" on a rainbow background.
+            rainbow_bg();
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "B",
+                egui::FontId::proportional(12.0),
+                Color32::BLACK,
+            );
         }
     }
 }
@@ -211,26 +274,10 @@ fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool) -> bool 
     resp.clicked()
 }
 
-/// A drawn color-scheme button that opens a dropdown of icon+label options.
+/// A drawn color-scheme icon + label button that opens a dropdown of options.
 fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(42.0, 18.0), egui::Sense::click());
-    if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
-    }
-    let icon_rect = egui::Rect::from_min_size(
-        rect.left_center() + egui::vec2(3.0, -8.0),
-        egui::vec2(26.0, 16.0),
-    );
-    paint_color_icon(ui.painter(), icon_rect, rep.color);
-    ui.painter().text(
-        egui::pos2(rect.right() - 5.0, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        icon::CARET_DOWN,
-        egui::FontId::proportional(10.0),
-        ui.visuals().text_color(),
-    );
-    let resp = resp.on_hover_text(rep.color.label());
+    let method = rep.color;
+    let resp = picker_button(ui, method.label(), |p, r| paint_color_icon(p, r, method));
 
     egui::Popup::menu(&resp).show(|ui| {
         for method in ColorMethod::ALL {
@@ -371,6 +418,20 @@ impl App {
                 if let Some(rep) = mol.reps.first_mut() {
                     rep.color = cm;
                 }
+            }
+        }
+        // Verification hook: VMD_RS_DEBUG_ALLCOLORS lays out one rep per color
+        // scheme (cycling styles) so every style/color icon is visible at once.
+        if std::env::var("VMD_RS_DEBUG_ALLCOLORS").is_ok() {
+            for mol in &mut scene.molecules {
+                mol.reps.clear();
+                for (i, &cm) in ColorMethod::ALL.iter().enumerate() {
+                    let mut rep =
+                        Representation::new(crate::geometry::RepKind::ALL[i % 4]);
+                    rep.color = cm;
+                    mol.reps.push(rep);
+                }
+                mol.selected_rep = Some(0);
             }
         }
 
@@ -702,62 +763,90 @@ impl App {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
             let rep = &mut mol.reps[j];
 
-            // Expanded editor: just a full-width selection field for this rep.
-            if editing == Some(j) {
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut rep.sel_text)
-                        .id(sel_id)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("selection"),
-                );
-                if resp.lost_focus() {
-                    rep.sel_dirty = true;
-                    new_editing = None;
-                }
-                continue;
-            }
+            // Each rep is two rows, grouped: row 1 = handle | selection | actions,
+            // row 2 = style | color | gear. The whole block is the reorder target.
+            // Row 2 is indented by the drag-handle width so it aligns under the
+            // selection field rather than under the handle.
+            let mut row2_indent = 0.0_f32;
+            let block = ui
+                .vertical(|ui| {
+                    // Row 1: drag handle | selection | eye · update · copy · delete
+                    ui.horizontal(|ui| {
+                        let handle = ui
+                            .dnd_drag_source(egui::Id::new(("rep_drag", mol_id, j)), j, |ui| {
+                                ui.add(egui::Label::new(icon::DOTS_SIX_VERTICAL).selectable(false));
+                            })
+                            .response
+                            .on_hover_cursor(egui::CursorIcon::Grab)
+                            .on_hover_text("Drag to reorder");
+                        row2_indent = handle.rect.width();
 
-            let row = ui
-                .horizontal(|ui| {
-                    // Drag handle (reorder source); payload = source index. Grab
-                    // cursor shows while hovering the handle itself.
-                    ui.dnd_drag_source(egui::Id::new(("rep_drag", mol_id, j)), j, |ui| {
-                        ui.add(egui::Label::new(icon::DOTS_SIX_VERTICAL).selectable(false));
-                    })
-                    .response
-                    .on_hover_cursor(egui::CursorIcon::Grab)
-                    .on_hover_text("Drag to reorder");
+                        if editing == Some(j) {
+                            // Focused: the selection field fills the whole row.
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut rep.sel_text)
+                                    .id(sel_id)
+                                    .desired_width(f32::INFINITY)
+                                    .hint_text("selection"),
+                            );
+                            if resp.lost_focus() {
+                                rep.sel_dirty = true;
+                                new_editing = None;
+                            }
+                        } else {
+                            // Actions on the right; selection field fills the rest.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                compact_actions(ui);
+                                if icon_button(ui, icon::TRASH, "Delete").clicked() {
+                                    delete = Some(j);
+                                }
+                                if icon_button(ui, icon::COPY, "Duplicate").clicked() {
+                                    duplicate = Some(j);
+                                }
+                                if ui
+                                    .selectable_label(rep.dynamic, icon::ARROWS_CLOCKWISE)
+                                    .on_hover_text("Update every frame")
+                                    .clicked()
+                                {
+                                    rep.dynamic = !rep.dynamic;
+                                }
+                                // Eye: open when shown, crossed when hidden.
+                                let eye = if rep.visible { icon::EYE } else { icon::EYE_SLASH };
+                                if ui
+                                    .selectable_label(rep.visible, eye)
+                                    .on_hover_text(if rep.visible { "Hide" } else { "Show" })
+                                    .clicked()
+                                {
+                                    rep.visible = !rep.visible;
+                                    view_dirty = true;
+                                }
+                                // Selection field fills the remaining width.
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let resp = ui.add(
+                                            egui::TextEdit::singleline(&mut rep.sel_text)
+                                                .id(sel_id)
+                                                .desired_width(ui.available_width())
+                                                .hint_text("selection"),
+                                        );
+                                        if resp.gained_focus() {
+                                            new_editing = Some((mi, j));
+                                        }
+                                        if resp.lost_focus() {
+                                            rep.sel_dirty = true;
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
 
-                    // Right group: actions + style on the right; the selection field
-                    // fills the remaining space on the left.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        compact_actions(ui);
-                        if icon_button(ui, icon::TRASH, "Delete").clicked() {
-                            delete = Some(j);
-                        }
-                        if icon_button(ui, icon::COPY, "Duplicate").clicked() {
-                            duplicate = Some(j);
-                        }
-                        if ui
-                            .selectable_label(rep.dynamic, icon::ARROWS_CLOCKWISE)
-                            .on_hover_text("Update every frame")
-                            .clicked()
-                        {
-                            rep.dynamic = !rep.dynamic;
-                        }
-                        // Eye toggle: open eye on a pressed button when shown,
-                        // crossed eye on an unpressed button when hidden.
-                        let eye = if rep.visible { icon::EYE } else { icon::EYE_SLASH };
-                        if ui
-                            .selectable_label(rep.visible, eye)
-                            .on_hover_text(if rep.visible { "Hide" } else { "Show" })
-                            .clicked()
-                        {
-                            rep.visible = !rep.visible;
-                            view_dirty = true;
-                        }
-                        // Gear (leftmost action) toggles this rep's inline params
-                        // panel; the button shows pressed while it is open.
+                    // Row 2: style | color (icon+text dropdowns) | gear (params toggle).
+                    ui.horizontal(|ui| {
+                        ui.add_space(row2_indent);
+                        style_picker(ui, rep);
+                        color_picker(ui, rep);
                         if ui
                             .selectable_label(rep.params_open, icon::GEAR_SIX)
                             .on_hover_text("Settings")
@@ -765,27 +854,6 @@ impl App {
                         {
                             rep.params_open = !rep.params_open;
                         }
-
-                        // Color and style dropdowns, right-aligned just left of
-                        // the actions (style | color, adjacent).
-                        color_picker(ui, rep);
-                        style_picker(ui, rep);
-
-                        // Selection field fills the remaining width on the left.
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut rep.sel_text)
-                                    .id(sel_id)
-                                    .desired_width(ui.available_width())
-                                    .hint_text("selection"),
-                            );
-                            if resp.gained_focus() {
-                                new_editing = Some((mi, j));
-                            }
-                            if resp.lost_focus() {
-                                rep.sel_dirty = true;
-                            }
-                        });
                     });
                 })
                 .response;
@@ -797,22 +865,24 @@ impl App {
                 });
             }
 
-            // Reorder drop target: show an insertion line and capture the move.
+            // Reorder drop target spans the whole two-row block.
             if let (Some(ptr), Some(_)) = (
                 ui.input(|i| i.pointer.interact_pos()),
-                row.dnd_hover_payload::<usize>(),
+                block.dnd_hover_payload::<usize>(),
             ) {
-                let before = ptr.y < row.rect.center().y;
-                let y = if before { row.rect.top() } else { row.rect.bottom() };
+                let before = ptr.y < block.rect.center().y;
+                let y = if before { block.rect.top() } else { block.rect.bottom() };
                 ui.painter().hline(
-                    row.rect.x_range(),
+                    block.rect.x_range(),
                     y,
                     egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
                 );
-                if let Some(src) = row.dnd_release_payload::<usize>() {
+                if let Some(src) = block.dnd_release_payload::<usize>() {
                     reorder = Some((*src, if before { j } else { j + 1 }));
                 }
             }
+
+            ui.add_space(6.0);
         }
 
         if let Some((from, to)) = reorder {

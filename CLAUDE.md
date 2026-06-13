@@ -23,7 +23,9 @@ cargo build -p vmd_rs_core --target wasm32-unknown-unknown   # WASM-readiness ch
 - Dev machine is **Wayland**; screenshot a running window with
   `spectacle -b -n -f -o out.png` (`-a` = active window).
 - Headless verification env hooks (native only): `VMD_RS_DEBUG_REP=vdw|licorice|ballstick|lines`,
-  `VMD_RS_DEBUG_SEL="<selection>"`, `VMD_RS_DEBUG_ORBIT=<deg>`, `VMD_RS_DEBUG_ORTHO=1`.
+  `VMD_RS_DEBUG_SEL="<selection>"`, `VMD_RS_DEBUG_COLOR=element|chain|resid|resname|index|beta`,
+  `VMD_RS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
+  `VMD_RS_DEBUG_ORBIT=<deg>`, `VMD_RS_DEBUG_ORTHO=1`.
 
 ## Tech stack (working versions)
 
@@ -131,16 +133,24 @@ toggles; **orthographic is the default**) → `Molecules` (one row each: name + 
 right-justified eye/trash) → `Representations` ("Add" button, then rich rows). No
 standalone controls section — params live in a per-rep gear popup.
 
-Each rep row (custom layout, not a Grid): **drag handle** (`DOTS_SIX_VERTICAL` wrapped in
-`dnd_drag_source(payload=index)`; rows are drop targets via `dnd_hover_payload`/
-`dnd_release_payload`, reorder applied after the loop) · **selection field** (narrow;
-focusing it sets `editing_rep` and re-renders the row as a single full-width editor,
-collapsing on Enter/blur) · **drawn style-icon dropdown** (`paint_style_icon` draws each
-`RepKind`; click → `egui::Popup::menu` with icon+label rows via `style_option`) ·
-**right-justified compact action group** (`Layout::right_to_left` + `compact_actions`:
-button_padding (3,1), item_spacing.x 2): gear (`GEAR_SIX`, opens `draw_rep_params` popup) ·
-eye · update-every-frame (`rep.dynamic`, ↻) · duplicate · trash. History labels via
-`describe_change` ("edit selection", "reorder representations", …). FPS in the footer.
+Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
+via `dnd_hover_payload`/`dnd_release_payload`):
+- **Row 1**: **drag handle** (`DOTS_SIX_VERTICAL` in `dnd_drag_source(payload=index)`) ·
+  **selection field** (fills width; focusing sets `editing_rep` and expands it to a
+  full-width editor, collapsing on Enter/blur) · right-justified compact actions
+  (`Layout::right_to_left` + `compact_actions`): eye · update-every-frame (`rep.dynamic`, ↻) ·
+  duplicate · trash.
+- **Row 2** (indented by the drag-handle width, so it aligns under the selection field):
+  **style** dropdown · **color** dropdown · **gear** (`GEAR_SIX`, toggles the inline
+  `draw_rep_params` expander). Style and color are **icon+text** buttons built by the shared
+  `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
+  of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
+  `ColorMethod` (Element = CPK dots, Chain = interlocking colored links, ResID =
+  backbone-with-residues diagram, ResName = "ALA" on rainbow, Index = "123" colored digits,
+  Beta = "B" on rainbow).
+
+History labels via `describe_change` ("edit selection", "change coloring",
+"reorder representations", …). FPS in the footer.
 
 ## Milestone status
 
