@@ -127,20 +127,17 @@ impl App {
     fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
         let mut changed = false;
         for mol in &mut self.scene.molecules {
-            // Skip molecules with nothing to do — avoids binding an all-selection
-            // (which allocates a full index) every frame.
             if !mol.reps.iter().any(|r| r.sel_dirty || r.geom_dirty) {
                 continue;
             }
-            // Bound all-selection over the System: the source of positions/atoms
-            // for geometry (atom index == global index). Shares `mol.system` with
-            // compile_selection below (both immutable borrows).
-            let all = mol.system.select_all_bound();
             for rep in &mut mol.reps {
                 if rep.sel_dirty {
-                    match scene::compile_selection(&mol.system, rep.sel_text.as_str()) {
-                        Ok(idx) => {
-                            rep.sel_indices = idx;
+                    // Parse + evaluate the selection. On error keep the previous
+                    // selection/geometry and just surface the message.
+                    match scene::evaluate(&mol.system, rep.sel_text.as_str()) {
+                        Ok((expr, sel)) => {
+                            rep.expr = Some(expr);
+                            rep.sel = Some(sel);
                             rep.sel_error = None;
                             rep.geom_dirty = true;
                         }
@@ -149,9 +146,11 @@ impl App {
                     rep.sel_dirty = false;
                 }
                 if rep.geom_dirty {
-                    let geom =
-                        geometry::build(&all, &mol.bonds, &rep.sel_indices, rep.kind, &rep.params);
-                    rep.gpu = self.renderer.upload(rs, &geom);
+                    if let Some(sel) = &rep.sel {
+                        let geom =
+                            geometry::build(&mol.system, sel, &mol.bonds, rep.kind, &rep.params);
+                        rep.gpu = self.renderer.upload(rs, &geom);
+                    }
                     rep.geom_dirty = false;
                     changed = true;
                 }

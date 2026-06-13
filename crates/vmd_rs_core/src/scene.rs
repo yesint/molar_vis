@@ -18,10 +18,15 @@ pub struct MolId(pub u64);
 pub struct Representation {
     pub kind: RepKind,
     pub params: RepParams,
-    /// VMD-like selection string (e.g. "protein", "name CA", "all").
+    /// Editable selection text — the UI buffer / draft (egui needs a `&mut String`,
+    /// and it can hold not-yet-valid input). The committed text also lives in
+    /// `expr` (`SelectionExpr::get_str`) once it parses.
     pub sel_text: String,
-    /// Compiled atom indices for `sel_text` (into the molecule's arrays).
-    pub sel_indices: Vec<usize>,
+    /// Compiled selection (molar `SelectionExpr`), parsed from `sel_text` on commit.
+    /// Re-evaluated per trajectory frame later; `None` until first successful parse.
+    pub expr: Option<SelectionExpr>,
+    /// Evaluated atom set for the current state; bind to the `System` for coords.
+    pub sel: Option<Sel>,
     /// Last selection error, shown in the UI; `None` if the selection is valid.
     pub sel_error: Option<String>,
     pub visible: bool,
@@ -34,17 +39,7 @@ pub struct Representation {
 
 impl Representation {
     pub fn new(kind: RepKind) -> Self {
-        Self {
-            kind,
-            params: RepParams::for_kind(kind),
-            sel_text: "all".to_string(),
-            sel_indices: Vec::new(),
-            sel_error: None,
-            visible: true,
-            sel_dirty: true, // compile + build on the first frame
-            geom_dirty: false,
-            gpu: RepGpu::default(),
-        }
+        Self::restore(kind, RepParams::for_kind(kind), "all".to_string(), true)
     }
 
     /// Row label: "<selection>/<style>", e.g. "name CA/VDW".
@@ -65,7 +60,8 @@ impl Representation {
             kind,
             params,
             sel_text,
-            sel_indices: Vec::new(),
+            expr: None,
+            sel: None,
             sel_error: None,
             visible,
             sel_dirty: true,
@@ -108,14 +104,15 @@ impl Molecule {
     }
 }
 
-/// Compile a VMD-like selection string against a molar `System` into atom
-/// indices. Empty/invalid selections come back as `Err` (molar treats an empty
-/// match as an error), which the UI surfaces without disturbing the geometry.
-pub fn compile_selection(system: &System, text: &str) -> Result<Vec<usize>, String> {
-    match system.select(text) {
-        Ok(sel) => Ok(sel.get_index_slice().to_vec()),
-        Err(e) => Err(e.to_string()),
-    }
+/// Parse a VMD-like selection string into a compiled `SelectionExpr` and evaluate
+/// it against `system` to produce the current `Sel`. Returns both so the caller
+/// can keep the compiled expression (for per-frame re-evaluation in trajectories)
+/// alongside the evaluated index set. Syntax errors and empty matches come back as
+/// `Err`, which the UI surfaces without disturbing the existing geometry.
+pub fn evaluate(system: &System, text: &str) -> Result<(SelectionExpr, Sel), String> {
+    let expr = SelectionExpr::new(text).map_err(|e| e.to_string())?;
+    let sel = system.select(&expr).map_err(|e| e.to_string())?;
+    Ok((expr, sel))
 }
 
 #[derive(Default)]

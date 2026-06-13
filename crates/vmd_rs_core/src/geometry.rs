@@ -74,73 +74,72 @@ pub struct GeometryData {
     pub lines: Vec<LineVertex>,
 }
 
-/// Source of atom data for geometry building — a molar all-selection bound to the
-/// molecule's `System` (so atom index == global index). `get_pos`/`get_atom`
-/// read straight from the live `State`/`Topology`; nothing is cached.
-pub trait AtomSource: PosProvider + AtomProvider + LenProvider {}
-impl<T: PosProvider + AtomProvider + LenProvider> AtomSource for T {}
-
-fn pos3(src: &impl PosProvider, i: usize) -> [f32; 3] {
-    let p = src.get_pos(i).expect("atom index in range");
-    [p.x, p.y, p.z]
-}
-
-fn atom_color(src: &impl AtomProvider, i: usize) -> u32 {
-    let a = src.get_atom(i).expect("atom index in range");
-    color::pack_rgba8(color::element_color(a.atomic_number))
-}
-
-/// Build GPU geometry for one representation over the selected atom indices.
+/// Build GPU geometry for one representation. `sel` is bound to its `System` to
+/// read positions/atoms straight from the live `State`/`Topology` (nothing is
+/// cached). Spheres come from the selected atoms; bonds are emitted only where
+/// both endpoints are selected.
 pub fn build(
-    src: &impl AtomSource,
+    system: &System,
+    sel: &Sel,
     bonds: &[[usize; 2]],
-    sel: &[usize],
     kind: RepKind,
     params: &RepParams,
 ) -> GeometryData {
-    // Membership mask so bonds can be filtered to selected endpoints.
-    let mut in_sel = vec![false; src.len()];
-    for &i in sel {
-        in_sel[i] = true;
-    }
-
+    let bound = system.bind(sel);
     match kind {
         RepKind::Vdw => GeometryData {
-            spheres: spheres(src, sel, |a| a.vdw()),
+            spheres: spheres(&bound, |a| a.vdw()),
             ..Default::default()
         },
-        RepKind::Licorice => GeometryData {
-            spheres: spheres(src, sel, |_| params.bond_radius),
-            cylinders: cylinders(src, bonds, &in_sel, params.bond_radius),
-            ..Default::default()
-        },
-        RepKind::BallAndStick => GeometryData {
-            spheres: spheres(src, sel, |a| a.vdw() * params.sphere_scale),
-            cylinders: cylinders(src, bonds, &in_sel, params.bond_radius),
-            ..Default::default()
-        },
-        RepKind::Lines => GeometryData {
-            lines: lines(src, bonds, &in_sel),
-            ..Default::default()
-        },
+        RepKind::Licorice => {
+            let lut = selected_lut(&bound, system.len());
+            GeometryData {
+                spheres: spheres(&bound, |_| params.bond_radius),
+                cylinders: cylinders(&lut, bonds, params.bond_radius),
+                ..Default::default()
+            }
+        }
+        RepKind::BallAndStick => {
+            let lut = selected_lut(&bound, system.len());
+            GeometryData {
+                spheres: spheres(&bound, |a| a.vdw() * params.sphere_scale),
+                cylinders: cylinders(&lut, bonds, params.bond_radius),
+                ..Default::default()
+            }
+        }
+        RepKind::Lines => {
+            let lut = selected_lut(&bound, system.len());
+            GeometryData {
+                lines: lines(&lut, bonds),
+                ..Default::default()
+            }
+        }
     }
 }
 
-fn spheres(
-    src: &impl AtomSource,
-    sel: &[usize],
-    radius: impl Fn(&Atom) -> f32,
-) -> Vec<SphereInstance> {
-    sel.iter()
-        .map(|&i| {
-            let a = src.get_atom(i).expect("atom index in range");
-            SphereInstance {
-                center: pos3(src, i),
-                radius: radius(a),
-                color: color::pack_rgba8(color::element_color(a.atomic_number)),
-            }
+fn atom_color(a: &Atom) -> u32 {
+    color::pack_rgba8(color::element_color(a.atomic_number))
+}
+
+fn spheres(bound: &impl ParticleIterProvider, radius: impl Fn(&Atom) -> f32) -> Vec<SphereInstance> {
+    bound
+        .iter_particle()
+        .map(|p| SphereInstance {
+            center: [p.pos.x, p.pos.y, p.pos.z],
+            radius: radius(p.atom),
+            color: atom_color(p.atom),
         })
         .collect()
+}
+
+/// Per-atom (position, color) lookup keyed by global atom index, populated only
+/// for the selected atoms. `None` doubles as the "not selected" test for bonds.
+fn selected_lut(bound: &impl ParticleIterProvider, n_atoms: usize) -> Vec<Option<([f32; 3], u32)>> {
+    let mut lut = vec![None; n_atoms];
+    for p in bound.iter_particle() {
+        lut[p.id] = Some(([p.pos.x, p.pos.y, p.pos.z], atom_color(p.atom)));
+    }
+    lut
 }
 
 fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -148,36 +147,31 @@ fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 fn cylinders(
-    src: &impl AtomSource,
+    lut: &[Option<([f32; 3], u32)>],
     bonds: &[[usize; 2]],
-    in_sel: &[bool],
     radius: f32,
 ) -> Vec<CylinderInstance> {
     let mut v = Vec::new();
     for &[a, b] in bonds {
-        if !(in_sel[a] && in_sel[b]) {
-            continue;
+        if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
+            let m = midpoint(pa, pb);
+            v.push(CylinderInstance { p0: pa, radius, p1: m, color: ca });
+            v.push(CylinderInstance { p0: m, radius, p1: pb, color: cb });
         }
-        let (pa, pb) = (pos3(src, a), pos3(src, b));
-        let m = midpoint(pa, pb);
-        v.push(CylinderInstance { p0: pa, radius, p1: m, color: atom_color(src, a) });
-        v.push(CylinderInstance { p0: m, radius, p1: pb, color: atom_color(src, b) });
     }
     v
 }
 
-fn lines(src: &impl AtomSource, bonds: &[[usize; 2]], in_sel: &[bool]) -> Vec<LineVertex> {
+fn lines(lut: &[Option<([f32; 3], u32)>], bonds: &[[usize; 2]]) -> Vec<LineVertex> {
     let mut v = Vec::new();
     for &[a, b] in bonds {
-        if !(in_sel[a] && in_sel[b]) {
-            continue;
+        if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
+            let m = midpoint(pa, pb);
+            v.push(LineVertex { pos: pa, color: ca });
+            v.push(LineVertex { pos: m, color: ca });
+            v.push(LineVertex { pos: m, color: cb });
+            v.push(LineVertex { pos: pb, color: cb });
         }
-        let (pa, pb) = (pos3(src, a), pos3(src, b));
-        let m = midpoint(pa, pb);
-        v.push(LineVertex { pos: pa, color: atom_color(src, a) });
-        v.push(LineVertex { pos: m, color: atom_color(src, a) });
-        v.push(LineVertex { pos: m, color: atom_color(src, b) });
-        v.push(LineVertex { pos: pb, color: atom_color(src, b) });
     }
     v
 }

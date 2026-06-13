@@ -46,13 +46,17 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `camera.rs` — quaternion arcball `Camera` (orbit/pan/zoom), perspective **and**
   orthographic projection, `frame_bbox`. `#[derive(PartialEq)]` drives render-skip.
 - `color.rs` — CPK element colors → packed RGBA8 (`u32`).
-- `geometry.rs` — `RepKind`, `RepParams`, `AtomArrays`, `GeometryData`; `build()` turns
-  a selection subset + style into sphere/cylinder/line instances (half-bond split).
-- `scene.rs` — `Scene { molecules, selected_mol }`, `Molecule` (molar `System` + per-atom
-  arrays + bonds + `reps`), `Representation` (kind/params/sel_text/sel_indices/visible/
-  dirty flags/`RepGpu`), `compile_selection()`.
-- `data.rs` + `data/loader.rs` (`RawMolecule`: System + arrays + bonds) + `data/bonds.rs`
-  (bond guessing via molar distance search + VDW-fraction filter).
+- `geometry.rs` — `RepKind`, `RepParams`, `GeometryData`; `build(system, sel, bonds, …)`
+  binds the `Sel` (`system.bind`) and reads positions/atoms via `iter_particle` — nothing
+  cached. Spheres come from the selected atoms; bonds are emitted where both endpoints are
+  selected (half-bond split, colored by each atom).
+- `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
+  guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
+  `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
+  (compiled) / `sel: Sel` (evaluated) / visible / dirty flags / `RepGpu`), `evaluate()`
+  (text → `SelectionExpr` → `Sel`).
+- `data.rs` + `data/loader.rs` (`RawMolecule`: System + guessed bonds + bbox; positions/
+  radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter).
 - `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A),
   camera UBO (bind group 0), sphere/cylinder/line pipelines, `RepGpu` (per-rep buffers),
   `upload()`, `render_scene()`, `texture_id()`. Plus `render/{sphere,cylinder,line,
@@ -83,10 +87,20 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 
 - Coordinates and `atom.vdw()` are in **nanometers** — do all geometry/camera/clip in nm.
 - `const _: () = assert!(size_of::<molar::Float>()==4)` in the loader guards f32.
-- The `System` is kept alive per molecule for selections. Empty/invalid selection →
-  `Err` (shown in red), keeps prior geometry.
+- The `System` is kept alive per molecule and is the single source of per-atom data
+  (positions, elements, radii). Each rep keeps a compiled `SelectionExpr`
+  (`SelectionExpr::new(text)`, stores the text via `get_str()`) and the evaluated `Sel`
+  (`system.select(&expr)`). Read coords by binding: `system.bind(&sel)` → `SelBound` →
+  `iter_particle()` (`Particle { id, atom, pos }`). Empty/invalid selection → `Err`
+  (shown in red), keeps prior geometry.
 - Selection grammar incl.: `all`, `protein`, `backbone`, `water`, `name`, `resid`,
   `resindex`, `resname`, `index`, `chain`, `within …`.
+- **Trajectory plan (future):** `System::set_state(&mut self, State) -> Result<State>` —
+  plain `&mut`, **no interior mutability needed** (the App owns the `Scene` mutably). Per
+  frame: read a `State` (`FileHandler::read_state`), `mol.system.set_state(frame)`, then
+  re-evaluate each rep's stored `SelectionExpr` → fresh `Sel` (required for coordinate-
+  dependent selections like `within …`) and rebuild geometry. `Sel`s stay valid across
+  `set_state` as long as topology is unchanged.
 - Bonds aren't in GRO (partial in PDB); guessed at load (`distance_search_single` +
   `dist < 0.6*(vdw_i+vdw_j)`).
 - Secondary structure for M6 cartoon: `molar::Dssp` (10-variant `SS` enum).
