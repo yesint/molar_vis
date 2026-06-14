@@ -280,7 +280,17 @@ History labels via `describe_change` ("edit selection", "change coloring",
     (zero-copy). `SelBoundParts` impls the element providers directly (no `SystemProvider`), so it
     gets `iter_particle`/`Measure`/`Analysis` via the blankets but can't derive sub-selections (the
     viewer doesn't need that). Test `system::tests::bind_with_state_reads_external_coords`.
+- ✅ **Zoom-to-selection / zoom-to-molecule** (`Camera::focus_bbox`) + **periodic-box wireframe**
+  toggle (`geometry::box_wireframe`, per-molecule `box_gpu`).
 - ⏳ M8 **Browser streaming** (not yet) — `WasmBlobReader` (Read+Seek via worker-only
   `FileReaderSync` over a `Blob`), a wasm Web Worker loader (wasm-threads), `web_sys::File` picker,
   `eframe::WebRunner` entry + `index.html` served with COOP/COEP. The `from_reader` core above is
   the foundation; only the wasm runtime assembly remains.
+- ⏳ M9 **Materials** — VMD-style per-rep materials incl. **transparent** (opacity); needs
+  ambient/specular in the shaders + an alpha-blended (or OIT) pass in `render.rs` + a material
+  dropdown in the rep row.
+- ⏳ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` + an egui color-picker
+  submenu in the color dropdown (undoable via `RepState`).
+- ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs
+  impostors) and lasso-select (polygon over projected positions) → feed a selection; hooks into
+  `draw_viewport` input.
