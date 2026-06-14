@@ -41,7 +41,7 @@ reimplementation of every VMD feature.
 
 ## Features
 
-**Representations** — five styles, all GPU-accelerated:
+**Representations** — six styles, all GPU-accelerated:
 
 | Style | Rendering | Notes |
 |---|---|---|
@@ -50,6 +50,7 @@ reimplementation of every VMD feature.
 | **Ball and Stick** | sphere + cylinder impostors | scaled VDW balls + thin sticks |
 | **VDW** | sphere impostors | space-filling, true van der Waals radii |
 | **Cartoon** | indexed triangle mesh | secondary-structure ribbons (see below) |
+| **Surface** | grid + Surface Nets mesh | solvent-excluded (rolling-probe) surface (see below) |
 
 **Cartoon ribbons** — a faithful port of VMD's *NewCartoon*: a per-chain
 modified Catmull–Rom spline through the Cα trace, a carbonyl-derived ribbon frame with
@@ -57,6 +58,22 @@ running-average orientation, elliptical cross-sections that morph by secondary-s
 class, and β-strand arrowheads. Secondary structure is assigned by molar's built-in
 **DSSP** (Kabsch–Sander) or **`dss`** (a clean-room port of PyMOL's algorithm),
 selectable per representation.
+
+**Molecular surface** — the **solvent-excluded (rolling-probe) surface**, computed the
+robust way modern tools (PyMOL/Chimera/EDTSurf) use: a distance field on a grid (the SAS
+solid, then a Felzenszwalb–Huttenlocher distance transform carving the probe) is contoured
+with **Surface Nets** for a watertight, smooth mesh — no fragile analytic patch stitching.
+Per-rep **probe radius**, **grid resolution** and **smoothing** controls; scales to 100k+
+atoms. (molar's PowerSASA backend also exposes exact SASA areas + analytic SAS/SES meshes.)
+
+**Materials** — eight VMD-style presets (Opaque, Transparent, Glass, Translucent, Ghost,
+Glossy, Diffuse, Metal): per-rep ambient/diffuse/specular/shininess (Blinn-Phong) plus
+**opacity**, with a two-phase transparent render pass.
+
+**Trajectories** (native) — load multi-frame trajectories (xtc/trr/dcd/gro/multi-MODEL pdb)
+into a molecule with a VMD-style playback bar (first / step / play-pause / step / last,
+editable frame field, loop, fps) and a frame slider; sync or background-async loading.
+Frame changes are zero-copy (rendered by reference) with incremental GPU updates.
 
 **Coloring schemes** — Element (CPK), Chain, ResID, ResName, Index, B-factor, and
 Secondary structure, each with a drawn descriptive icon in the picker.
@@ -66,14 +83,16 @@ Secondary structure, each with a drawn descriptive icon in the picker.
 Selections are compiled once and re-evaluated only when needed.
 
 **Camera & display**
-- Quaternion arcball camera with VMD mouse mapping (rotate / pan / zoom).
-- **Perspective and orthographic** projection (orthographic is the default).
-- Adjustable **depth cueing** (linear fog) for depth perception.
+- Quaternion arcball camera with VMD mouse mapping (rotate / roll / pan / dolly / zoom).
+- **Perspective and orthographic** projection (orthographic is the default), and adjustable
+  **depth cueing** (linear fog) — both in a small overlay panel over the viewport.
+- Zoom-to-selection and zoom-to-molecule; per-molecule periodic-box wireframe.
 
 **Scene**
 - Multiple molecules, each with multiple representations.
-- Per-representation visibility, color, style and inline parameters.
-- Drag-to-reorder representations; duplicate; per-rep gear popup for tunables.
+- Per-representation selection, style, color and material, with a tabbed settings panel
+  (**Style** / **Traj** / **Periodic**) for per-rep tunables.
+- Drag-to-reorder representations; duplicate; show/hide.
 - Full **undo/redo** with named history (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y).
 
 **Efficient by default** — the scene is only re-rendered when geometry, the camera, the
@@ -82,12 +101,10 @@ input. The impostor pipeline scales to hundreds of thousands of atoms.
 
 ## Building
 
-With a [Rust toolchain](https://rustup.rs) installed and a checkout of
-[molar](https://github.com/yesint/molar) next to this repository (it is a local path
-dependency):
+With a [Rust toolchain](https://rustup.rs) installed — `molar` and its `powersasa`
+dependency are pulled directly from GitHub, so no sibling checkouts are needed:
 
 ```sh
-git clone https://github.com/yesint/molar    # path dependency: ../molar
 git clone https://github.com/yesint/molar_vis
 cd molar_vis
 cargo build --release
@@ -103,13 +120,23 @@ cargo run --release -p molar_vis -- system.gro ligand.pdb  # two molecules
 Supported input formats are whatever molar reads — including **PDB**, **GRO**, and
 (with the appropriate molar features) trajectory and topology formats.
 
-### WebAssembly
+### WebAssembly — partial / in progress
 
-The core crate is WASM-safe; you can check it builds for the web with:
+The viewer is built to target the browser, but the WASM path is **not finished yet**.
+What works today: the core crate (all logic + rendering) **compiles** to
+`wasm32-unknown-unknown`, and `molar` was made wasm-friendly (the GROMACS/`libloading`
+dependency is dropped on wasm; xtc/trr/dcd/gro/pdb/xyz survive). A byte-source
+abstraction (`FileHandler::from_reader`) and a generic XTC seek are in place as the
+foundation for browser streaming.
 
 ```sh
-cargo build -p molar_vis_core --target wasm32-unknown-unknown
+cargo build -p molar_vis_core --target wasm32-unknown-unknown   # compiles (readiness check)
 ```
+
+What's **still missing** for an actual web build: the `eframe::WebRunner` entry point +
+`index.html`, a `web_sys::File` picker, and the Web-Worker trajectory streamer
+(`FileReaderSync` over a `Blob`, served cross-origin-isolated with COOP/COEP). Until
+those land there is no runnable browser app — use the native binary.
 
 ## Selections
 
@@ -136,8 +163,10 @@ Standard VMD-style mouse mapping inside the 3D viewport:
 | Action | Mouse |
 |---|---|
 | Rotate (arcball) | left-drag |
-| Pan | middle-drag |
-| Zoom | right-drag / scroll wheel |
+| Roll (screen-plane) | Shift + left-drag |
+| Pan | right-drag (or middle-drag) |
+| Dolly (move along view axis) | Shift + right-drag |
+| Zoom (scale) | scroll wheel |
 
 ## How it works
 
@@ -163,10 +192,20 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 
 ## Status
 
-The MVP is complete: load molecules, all five representations, every coloring scheme,
-selections, multi-molecule / multi-representation scenes, undo/redo, perspective /
-orthographic projection, and depth cueing. Trajectory playback is the next major
-milestone.
+**Works today (native, Linux/Windows/macOS):**
+- Load one or more molecules; multi-molecule / multi-representation scenes.
+- All six representations (Lines, Licorice, Ball-and-Stick, VDW, Cartoon, Surface).
+- Every coloring scheme; the full molar selection language.
+- Eight materials incl. transparency; perspective/orthographic; depth cueing.
+- **Trajectory** loading + VMD-style playback (native).
+- Undo/redo; drag-reorder reps; zoom-to-selection/molecule; periodic-box wireframe.
+
+**In progress / not done:**
+- **WebAssembly / browser app — incomplete.** The core compiles to wasm and `molar` was
+  made wasm-friendly, but there is no runnable in-browser build yet (no web entry point,
+  file picker, or streaming worker — see [WebAssembly](#webassembly--partial--in-progress)).
+- Smooth-surface tuning, atom picking / lasso selection, and custom solid colors are
+  planned.
 
 This is a young project under active development; expect rough edges.
 
