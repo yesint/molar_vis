@@ -3,3 +3,7 @@
 
 # Large generated test system (regenerate with gmx genconf; see tests/README.md)
 /tests/large_375k.gro
+
+# Generated multi-MODEL trajectory of 2lao for verifying trajectory playback
+# (regenerate with the Python snippet in tests/README.md)
+/tests/2lao_traj.pdb

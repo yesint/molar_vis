@@ -9,6 +9,8 @@ use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
 use crate::render::RepGpu;
+use crate::secstruct::SsMap;
+use crate::trajectory::Trajectory;
 
 /// Stable per-molecule identity, so undo/redo can reference molecules across
 /// deletion (a deleted molecule is parked in [`Scene::trash`] by this id).
@@ -37,15 +39,27 @@ pub struct Representation {
     pub visible: bool,
     /// Re-evaluate the (compiled) selection every time the System's State changes
     /// (i.e. each trajectory frame). For coordinate-dependent selections like
-    /// `within …`; honored once trajectory playback lands.
+    /// `within …`.
     pub dynamic: bool,
+    /// For Cartoon / SecStruct reps: recompute secondary structure on every
+    /// trajectory frame (else compute once and reuse `ss_cache`). DSSP is the main
+    /// per-frame cost, so this defaults to off. Part of `EditState` (undoable).
+    pub ss_per_frame: bool,
+    /// Cached secondary structure from the last full (structural) build, reused
+    /// for coordinate-only frame updates when `ss_per_frame` is off. Transient.
+    pub ss_cache: Option<SsMap>,
     /// Transient UI state: whether this rep's inline params panel is expanded.
     /// Not part of `EditState` (view state, not undoable).
     pub params_open: bool,
     /// `sel_text` changed → recompile the selection.
     pub sel_dirty: bool,
-    /// Selection/params/style changed → rebuild + reupload geometry.
+    /// Selection/style/color/params changed → full geometry rebuild + buffer
+    /// re-create (`renderer.upload`).
     pub geom_dirty: bool,
+    /// Only coordinates changed (a trajectory frame, same selection/structure) →
+    /// recompute geometry and update existing GPU buffers in place
+    /// (`renderer.update`), avoiding reallocation. Ignored if `geom_dirty` is set.
+    pub coords_dirty: bool,
     pub gpu: RepGpu,
 }
 
@@ -58,6 +72,7 @@ impl Representation {
             SsAlgorithm::default(),
             "all".to_string(),
             true,
+            false,
             false,
         )
     }
@@ -73,6 +88,7 @@ impl Representation {
             self.sel_text.clone(),
             self.visible,
             self.dynamic,
+            self.ss_per_frame,
         )
     }
 
@@ -86,6 +102,7 @@ impl Representation {
         sel_text: String,
         visible: bool,
         dynamic: bool,
+        ss_per_frame: bool,
     ) -> Self {
         Self {
             kind,
@@ -98,9 +115,12 @@ impl Representation {
             sel_error: None,
             visible,
             dynamic,
+            ss_per_frame,
+            ss_cache: None,
             params_open: false,
             sel_dirty: true,
             geom_dirty: false,
+            coords_dirty: false,
             gpu: RepGpu::default(),
         }
     }
@@ -123,6 +143,10 @@ pub struct Molecule {
     /// Transient UI state: whether this molecule's representations block is
     /// expanded in the panel. Not part of `EditState` (view state, not undoable).
     pub reps_open: bool,
+    /// Loaded MD frames + playback state. Empty until a trajectory is loaded
+    /// (then frame 0 is the structure coords; see [`Molecule::seed_frame0`]).
+    /// Not part of `EditState` — frame/playback is view state, like the camera.
+    pub trajectory: Trajectory,
 }
 
 impl Molecule {
@@ -139,6 +163,64 @@ impl Molecule {
             reps: vec![Representation::new(default_rep)],
             selected_rep: Some(0),
             reps_open: true,
+            trajectory: Trajectory::default(),
+        }
+    }
+
+    /// Capture the molecule's current structure coordinates as trajectory frame 0,
+    /// if no frames are loaded yet. `System` has no state getter, so we use the
+    /// `set_state` swap trick: swap in a same-length placeholder to take ownership
+    /// of the real state, clone it, and swap the real state back.
+    pub fn seed_frame0(&mut self) {
+        if !self.trajectory.frames.is_empty() {
+            return;
+        }
+        let placeholder = State::new_fake(self.n_atoms);
+        if let Ok(real) = self.system.set_state(placeholder) {
+            self.trajectory.frames.push(real.clone());
+            let _ = self.system.set_state(real); // restore the live state
+        }
+    }
+
+    /// Append loaded frames to the trajectory (sync load).
+    pub fn append_frames(&mut self, frames: Vec<State>) {
+        self.trajectory.frames.extend(frames);
+    }
+
+    /// Append one streamed frame (async load).
+    pub fn push_frame(&mut self, frame: State) {
+        self.trajectory.frames.push(frame);
+    }
+
+    /// Mark representations dirty for the current trajectory frame. The frame's
+    /// coordinates are read **by reference** at rebuild time (`bind_with_state`),
+    /// so the per-frame state is NOT copied into the `System` — except for
+    /// molecules with `dynamic` reps, whose selections are re-evaluated against
+    /// the system's own state, so those (rare) get the frame copied in.
+    ///
+    /// Routing per rep:
+    /// - `dynamic` → `sel_dirty` (re-evaluate selection, full rebuild);
+    /// - Cartoon/SecStruct with `ss_per_frame` → `geom_dirty` (SS may restructure);
+    /// - otherwise → `coords_dirty` (coords only → incremental in-place GPU update,
+    ///   reusing the cached secondary structure — no DSSP).
+    pub fn apply_current_frame(&mut self) {
+        if self.trajectory.frames.get(self.trajectory.current).is_none() {
+            return;
+        }
+        let needs_eval = self.reps.iter().any(|r| r.dynamic);
+        if needs_eval {
+            if let Some(frame) = self.trajectory.frames.get(self.trajectory.current) {
+                let _ = self.system.set_state(frame.clone());
+            }
+        }
+        for rep in &mut self.reps {
+            if rep.dynamic {
+                rep.sel_dirty = true;
+            } else if rep.ss_per_frame && crate::geometry::needs_ss(&rep.params, rep.color) {
+                rep.geom_dirty = true;
+            } else {
+                rep.coords_dirty = true;
+            }
         }
     }
 }

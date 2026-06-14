@@ -27,6 +27,7 @@ struct RepState {
     sel_text: String,
     visible: bool,
     dynamic: bool,
+    ss_per_frame: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -63,6 +64,7 @@ impl EditState {
                             sel_text: r.sel_text.clone(),
                             visible: r.visible,
                             dynamic: r.dynamic,
+                            ss_per_frame: r.ss_per_frame,
                         })
                         .collect(),
                 })
@@ -113,6 +115,7 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
             // Cheap, no-geometry changes.
             mol.reps[i].visible = s.visible;
             mol.reps[i].dynamic = s.dynamic;
+            mol.reps[i].ss_per_frame = s.ss_per_frame;
         }
     }
 }
@@ -126,6 +129,7 @@ fn rep_from_state(s: &RepState) -> Representation {
         s.sel_text.clone(),
         s.visible,
         s.dynamic,
+        s.ss_per_frame,
     )
 }
 

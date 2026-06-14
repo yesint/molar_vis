@@ -15,9 +15,12 @@ mod render;
 mod scene;
 mod secstruct;
 mod theme;
+mod trajectory;
 
 pub use app::App;
-pub use launch::{run, AppLaunch};
+pub use launch::AppLaunch;
+#[cfg(not(target_arch = "wasm32"))]
+pub use launch::run;
 
 // Re-export eframe so downstream crates (the bin, a future web crate) can name
 // its types without pinning the version themselves.

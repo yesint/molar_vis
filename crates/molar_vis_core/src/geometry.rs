@@ -117,57 +117,61 @@ pub struct MeshData {
     pub indices: Vec<u32>,
 }
 
-/// Build GPU geometry for one representation. `sel` is bound to its `System` to
-/// read positions/atoms straight from the live `State`/`Topology` (nothing is
-/// cached). Spheres come from the selected atoms; bonds are emitted only where
-/// both endpoints are selected.
+/// Whether a representation needs secondary structure (for the Cartoon shape or
+/// the SecStruct color scheme). The caller computes/caches the [`SsMap`] and
+/// passes it to [`build`].
+pub fn needs_ss(params: &RepParams, color: ColorMethod) -> bool {
+    matches!(params, RepParams::Cartoon { .. }) || color.needs_ss()
+}
+
+/// Build GPU geometry for one representation from a `bound` selection (which may
+/// be a [`molar::SelBoundParts`] reading coordinates from a trajectory frame held
+/// apart from the topology — nothing is copied). `n_atoms` is the molecule's atom
+/// count (for the per-atom bond lookup); `ss` is the precomputed secondary
+/// structure (required for Cartoon / SecStruct color, else `None`). Spheres come
+/// from the selected atoms; bonds are emitted only where both endpoints are selected.
 pub fn build(
-    system: &System,
-    sel: &Sel,
+    bound: &(impl ParticleIterProvider + PosProvider + AtomProvider),
+    n_atoms: usize,
     bonds: &[[usize; 2]],
     params: &RepParams,
     color: ColorMethod,
-    ss_algo: SsAlgorithm,
+    ss: Option<&SsMap>,
 ) -> GeometryData {
-    let bound = system.bind(sel);
-    // Secondary structure is needed for the Cartoon shape and the SecStruct
-    // color scheme; the algorithm is chosen per-rep (`ss_algo`).
-    let ss = (matches!(params, RepParams::Cartoon { .. }) || color.needs_ss())
-        .then(|| SsMap::compute(&bound, ss_algo));
-    let colorizer = Colorizer::new(color, &bound, system.len(), ss.as_ref());
+    let colorizer = Colorizer::new(color, bound, n_atoms, ss);
     match *params {
         RepParams::Vdw => GeometryData {
-            spheres: spheres(&bound, &colorizer, |a| a.vdw()),
+            spheres: spheres(bound, &colorizer, |a| a.vdw()),
             ..Default::default()
         },
         RepParams::Licorice { bond_radius } => {
-            let lut = selected_lut(&bound, &colorizer, system.len());
+            let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
-                spheres: spheres(&bound, &colorizer, |_| bond_radius),
+                spheres: spheres(bound, &colorizer, |_| bond_radius),
                 cylinders: cylinders(&lut, bonds, bond_radius),
                 ..Default::default()
             }
         }
         RepParams::BallAndStick { sphere_scale, bond_radius } => {
-            let lut = selected_lut(&bound, &colorizer, system.len());
+            let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
-                spheres: spheres(&bound, &colorizer, |a| a.vdw() * sphere_scale),
+                spheres: spheres(bound, &colorizer, |a| a.vdw() * sphere_scale),
                 cylinders: cylinders(&lut, bonds, bond_radius),
                 ..Default::default()
             }
         }
         RepParams::Lines => {
-            let lut = selected_lut(&bound, &colorizer, system.len());
+            let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
                 lines: lines(&lut, bonds),
                 ..Default::default()
             }
         }
         RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness } => {
-            let ss = ss.as_ref().expect("ss computed for cartoon");
+            let ss = ss.expect("ss computed for cartoon");
             GeometryData {
                 mesh: cartoon::build(
-                    &bound,
+                    bound,
                     &colorizer,
                     ss,
                     coil_radius,

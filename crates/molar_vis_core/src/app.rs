@@ -3,8 +3,12 @@
 //! control panel (Scene → Molecules → Representations → Rep controls) plus the
 //! central 3D viewport, and only re-renders the scene when something changed.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+
 use eframe::egui;
-use molar::prelude::SsAlgorithm;
+use molar::prelude::{SsAlgorithm, State};
 
 use crate::camera::{Camera, Projection};
 use crate::color::ColorMethod;
@@ -13,7 +17,9 @@ use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::render::SceneRenderer;
-use crate::scene::{self, Representation, Scene};
+use crate::scene::{self, MolId, Representation, Scene};
+use crate::secstruct::SsMap;
+use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
 
 use egui_phosphor::regular as icon;
 
@@ -392,6 +398,15 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                         .changed();
                 });
         });
+        // During trajectory playback, secondary structure is computed once and
+        // reused for speed; enable this to recompute it on every frame (DSSP is
+        // the main per-frame cost, so it's off by default).
+        ui.checkbox(&mut rep.ss_per_frame, "Recompute SS every frame")
+            .on_hover_text(
+                "Off: compute secondary structure once and reuse it across frames \
+                 (fast). On: recompute DSSP each trajectory frame (slower, but \
+                 follows conformational changes).",
+            );
     }
 
     // Restore this style's default parameters.
@@ -410,6 +425,94 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
     if changed {
         rep.geom_dirty = true;
     }
+}
+
+/// Draw the VMD-style trajectory control bar (buttons + frame field + loop/speed)
+/// and the frame slider on its own row. Returns true if the displayed frame
+/// changed (so the caller re-applies the state and re-renders). Caller ensures
+/// the trajectory has playback (>1 frame).
+fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
+    let n = traj.n_frames();
+    if n < 2 {
+        return false;
+    }
+    let last = n - 1;
+    let before = traj.current;
+
+    ui.horizontal(|ui| {
+        compact_actions(ui);
+        if icon_button(ui, icon::SKIP_BACK, "First frame").clicked() {
+            traj.set_playing(false);
+            traj.set_current(0);
+        }
+        if icon_button(ui, icon::CARET_LEFT, "Step back").clicked() {
+            traj.set_playing(false);
+            traj.step(-1);
+        }
+        let play_glyph = if traj.playing { icon::PAUSE } else { icon::PLAY };
+        if ui
+            .selectable_label(traj.playing, play_glyph)
+            .on_hover_text(if traj.playing { "Pause" } else { "Play" })
+            .clicked()
+        {
+            traj.set_playing(!traj.playing);
+        }
+        if icon_button(ui, icon::CARET_RIGHT, "Step forward").clicked() {
+            traj.set_playing(false);
+            traj.step(1);
+        }
+        if icon_button(ui, icon::SKIP_FORWARD, "Last frame").clicked() {
+            traj.set_playing(false);
+            traj.set_current(last);
+        }
+
+        // Editable current-frame field + total.
+        let mut cur = traj.current;
+        if ui
+            .add(egui::DragValue::new(&mut cur).range(0..=last))
+            .on_hover_text("Current frame")
+            .changed()
+        {
+            traj.set_current(cur);
+        }
+        ui.weak(format!("/ {last}"));
+
+        // Loop / once toggle.
+        let looping = traj.loop_mode == LoopMode::Loop;
+        if ui
+            .selectable_label(looping, icon::REPEAT)
+            .on_hover_text(if looping {
+                "Looping (click for play-once)"
+            } else {
+                "Play once (click to loop)"
+            })
+            .clicked()
+        {
+            traj.loop_mode = if looping { LoopMode::Once } else { LoopMode::Loop };
+        }
+
+        // Playback speed (frames per second).
+        ui.add(
+            egui::DragValue::new(&mut traj.speed_fps)
+                .range(1.0..=120.0)
+                .suffix(" fps")
+                .fixed_decimals(0),
+        )
+        .on_hover_text("Playback speed");
+    });
+
+    // Slider on its own row, filling the width.
+    let mut cur = traj.current;
+    let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
+    if resp.changed() {
+        traj.set_playing(false);
+        traj.set_current(cur);
+    }
+    if let Some(t) = traj.current_time() {
+        resp.on_hover_text(format!("frame {} — t = {:.3}", traj.current, t));
+    }
+
+    traj.current != before
 }
 
 pub struct App {
@@ -432,6 +535,46 @@ pub struct App {
     pending_redo_n: Option<usize>,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
+    /// Open trajectory-load dialog, if any (one at a time).
+    load_dialog: Option<LoadDialog>,
+    /// In-flight background trajectory loaders, keyed by molecule (so they
+    /// survive reorder/delete/undo). Drained each frame via `try_recv`.
+    loaders: HashMap<MolId, Receiver<LoadMsg>>,
+}
+
+/// State of the "Load trajectory" modal.
+struct LoadDialog {
+    mol_id: MolId,
+    path: Option<PathBuf>,
+    from: usize,
+    /// Whether `to` bounds the read (else read to end of file).
+    to_enabled: bool,
+    to: usize,
+    stride: usize,
+    mode: LoadMode,
+    error: Option<String>,
+}
+
+impl LoadDialog {
+    fn new(mol_id: MolId) -> Self {
+        Self {
+            mol_id,
+            path: None,
+            from: 0,
+            to_enabled: false,
+            to: 0,
+            stride: 1,
+            mode: LoadMode::Sync,
+            error: None,
+        }
+    }
+}
+
+/// Outcome of drawing the load dialog this frame.
+enum DialogAction {
+    Keep,
+    Cancel,
+    Load,
 }
 
 impl App {
@@ -518,6 +661,46 @@ impl App {
             }
         }
 
+        // Verification hook: MOLAR_VIS_DEBUG_TRAJ=<path> loads a trajectory into
+        // the first molecule (sync), bypassing the dialog; MOLAR_VIS_DEBUG_FRAME=<n>
+        // selects the displayed frame so headless screenshots can confirm motion.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(traj_path) = std::env::var("MOLAR_VIS_DEBUG_TRAJ") {
+            if let Some(mol) = scene.molecules.first_mut() {
+                mol.seed_frame0();
+                let envn = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<usize>().ok());
+                let opts = crate::trajectory::LoadOptions {
+                    from: envn("MOLAR_VIS_DEBUG_TRAJ_FROM").unwrap_or(0),
+                    to: envn("MOLAR_VIS_DEBUG_TRAJ_TO"),
+                    stride: envn("MOLAR_VIS_DEBUG_TRAJ_STRIDE").unwrap_or(1),
+                };
+                match data::traj_loader::read_frames_sync(
+                    std::path::Path::new(&traj_path),
+                    &opts,
+                    mol.n_atoms,
+                ) {
+                    Ok(frames) => {
+                        mol.append_frames(frames);
+                        let frame = std::env::var("MOLAR_VIS_DEBUG_FRAME")
+                            .ok()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        mol.trajectory.set_current(frame);
+                        if std::env::var("MOLAR_VIS_DEBUG_TRAJ_PLAY").is_ok() {
+                            mol.trajectory.set_playing(true);
+                        }
+                        mol.apply_current_frame();
+                        log::info!(
+                            "debug trajectory: {} frames, showing {}",
+                            mol.trajectory.n_frames(),
+                            mol.trajectory.current
+                        );
+                    }
+                    Err(e) => log::error!("debug trajectory load failed: {e}"),
+                }
+            }
+        }
+
         let mut camera = match scene.bbox() {
             Some((min, max)) => Camera::frame_bbox(min, max),
             None => Camera::default(),
@@ -553,6 +736,8 @@ impl App {
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,
+            load_dialog: None,
+            loaders: HashMap::new(),
         })
     }
 
@@ -561,13 +746,21 @@ impl App {
     fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
         let mut changed = false;
         for mol in &mut self.scene.molecules {
-            if !mol.reps.iter().any(|r| r.sel_dirty || r.geom_dirty) {
+            if !mol.reps.iter().any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty) {
                 continue;
             }
+            // The coordinates to render: the current trajectory frame, read by
+            // reference (no copy into the System), or the static structure state.
+            let render_state: &State = match mol.trajectory.frames.get(mol.trajectory.current) {
+                Some(frame) => frame,
+                None => mol.system.state(),
+            };
+            let n_atoms = mol.n_atoms;
             for rep in &mut mol.reps {
                 if rep.sel_dirty {
-                    // Parse + evaluate the selection. On error keep the previous
-                    // selection/geometry and just surface the message.
+                    // Parse + evaluate the selection (against the System's own
+                    // state). On error keep the previous selection/geometry and
+                    // just surface the message.
                     match scene::evaluate(&mol.system, rep.sel_text.as_str()) {
                         Ok((expr, sel)) => {
                             rep.expr = Some(expr);
@@ -579,19 +772,42 @@ impl App {
                     }
                     rep.sel_dirty = false;
                 }
-                if rep.geom_dirty {
-                    if let Some(sel) = &rep.sel {
-                        let geom = geometry::build(
-                            &mol.system,
-                            sel,
-                            &mol.bonds,
-                            &rep.params,
-                            rep.color,
-                            rep.ss_algo,
-                        );
-                        rep.gpu = self.renderer.upload(rs, &geom);
-                    }
+                let Some(sel) = &rep.sel else {
                     rep.geom_dirty = false;
+                    rep.coords_dirty = false;
+                    continue;
+                };
+
+                if rep.geom_dirty {
+                    // Full structural rebuild: (re)compute secondary structure
+                    // into the cache, build geometry, recreate GPU buffers.
+                    let (geom, fresh_ss) = {
+                        let bound = mol.system.bind_with_state(sel, render_state);
+                        let ss = geometry::needs_ss(&rep.params, rep.color)
+                            .then(|| SsMap::compute(&bound, rep.ss_algo));
+                        let geom = geometry::build(
+                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color, ss.as_ref(),
+                        );
+                        (geom, ss)
+                    };
+                    rep.ss_cache = fresh_ss;
+                    rep.gpu = self.renderer.upload(rs, &geom);
+                    rep.geom_dirty = false;
+                    rep.coords_dirty = false;
+                    changed = true;
+                } else if rep.coords_dirty {
+                    // Coordinates-only frame change: rebuild geometry reusing the
+                    // cached secondary structure (no DSSP), then update the
+                    // existing GPU buffers in place (no reallocation).
+                    let geom = {
+                        let bound = mol.system.bind_with_state(sel, render_state);
+                        geometry::build(
+                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color,
+                            rep.ss_cache.as_ref(),
+                        )
+                    };
+                    self.renderer.update(rs, &mut rep.gpu, &geom);
+                    rep.coords_dirty = false;
                     changed = true;
                 }
             }
@@ -620,8 +836,14 @@ impl eframe::App for App {
             }
         });
 
+        // Drain background trajectory loaders so the slider reflects arrived frames.
+        self.poll_loaders();
+
         let panel_dirty = self.draw_left_panel(ui);
         self.view_dirty |= panel_dirty;
+
+        // The "Load trajectory" modal floats above everything (driven from ctx).
+        self.draw_load_dialog(&ctx);
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
         let applied = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {
@@ -632,6 +854,27 @@ impl eframe::App for App {
         if let Some(state) = applied {
             state.apply(&mut self.scene);
             self.view_dirty = true;
+        }
+
+        // Advance playback for any playing molecule (time-based, so the fps knob
+        // is honored regardless of the render rate). `tick` is a no-op unless
+        // playing, and stops itself at the ends in play-once mode.
+        let dt = ctx.input(|i| i.stable_dt).min(0.1) as f64;
+        let mut animating = false;
+        let mut frame_advanced = false;
+        for mol in &mut self.scene.molecules {
+            if mol.trajectory.tick(dt) {
+                mol.apply_current_frame();
+                frame_advanced = true;
+            }
+            animating |= mol.trajectory.playing;
+        }
+        if frame_advanced {
+            self.view_dirty = true;
+        }
+        // Keep repainting while animating or loading; otherwise idle = 0 GPU.
+        if animating || !self.loaders.is_empty() {
+            ctx.request_repaint();
         }
 
         self.draw_viewport(ui, frame);
@@ -725,6 +968,16 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
 
+            // Open a structure file as a new molecule (topology+coords formats only).
+            if ui
+                .button(format!("{}  Open", icon::FOLDER_OPEN))
+                .on_hover_text("Open a structure file as a new molecule")
+                .clicked()
+            {
+                self.open_structure();
+            }
+            ui.separator();
+
             let can_undo = self.history.can_undo();
             if ui
                 .add_enabled(can_undo, egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE))
@@ -784,6 +1037,7 @@ impl App {
         let default_rep = self.default_rep;
         let mut view_dirty = false;
         let mut delete: Option<usize> = None;
+        let mut open_load: Option<MolId> = None;
 
         for i in 0..self.scene.molecules.len() {
             let open;
@@ -825,8 +1079,24 @@ impl App {
                             mol.reps_open = true;
                             view_dirty = true;
                         }
+                        if icon_button(ui, icon::FILM_STRIP, "Load trajectory").clicked() {
+                            open_load = Some(mol.id);
+                        }
                     });
                 });
+                // Trajectory playback controls, shown once >1 frame is loaded.
+                if mol.trajectory.has_playback() {
+                    ui.indent(egui::Id::new(("traj", i)), |ui| {
+                        if draw_traj_bar(ui, &mut mol.trajectory) {
+                            mol.apply_current_frame();
+                            view_dirty = true;
+                        }
+                    });
+                } else if self.loaders.contains_key(&mol.id) {
+                    ui.indent(egui::Id::new(("traj", i)), |ui| {
+                        ui.weak(format!("loading… {} frames", mol.trajectory.n_frames()));
+                    });
+                }
                 open = mol.reps_open;
             }
             if open {
@@ -840,11 +1110,295 @@ impl App {
         if let Some(i) = delete {
             // Park the molecule in the trash so the delete can be undone.
             let m = self.scene.molecules.remove(i);
+            // Drop any in-flight loader (its background thread exits when the
+            // receiver is dropped).
+            self.loaders.remove(&m.id);
             self.scene.trash.insert(m.id, m);
             self.scene.clamp_selection();
             view_dirty = true;
         }
+        if let Some(id) = open_load {
+            self.load_dialog = Some(LoadDialog::new(id));
+        }
         view_dirty
+    }
+
+    /// Open a structure file as a new molecule via a native file picker. Only
+    /// topology+coordinate formats (pdb/ent, gro, xyz, tpr) can seed a molecule.
+    /// Frames the camera when this is the first molecule; the add is undoable
+    /// (captured by the end-of-frame history checkpoint).
+    fn open_structure(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Structures", &["pdb", "ent", "gro", "xyz", "tpr"])
+                .pick_file()
+            else {
+                return;
+            };
+            let was_empty = self.scene.molecules.is_empty();
+            match data::load(&path) {
+                Ok(raw) => {
+                    self.scene.add(raw, self.default_rep);
+                    self.scene.selected_mol = Some(self.scene.molecules.len() - 1);
+                    if was_empty {
+                        if let Some((min, max)) = self.scene.bbox() {
+                            let proj = self.camera.projection;
+                            self.camera = Camera::frame_bbox(min, max);
+                            self.camera.projection = proj;
+                        }
+                    }
+                    self.status = format!("{} molecule(s) loaded", self.scene.molecules.len());
+                    self.view_dirty = true;
+                }
+                Err(e) => {
+                    log::error!("{e}");
+                    self.status = e;
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.status = "Opening files is not yet supported on the web".to_string();
+        }
+    }
+
+    /// Render the "Load trajectory" modal (a-la VMD): file chooser + frame range
+    /// / stride + sync/async, with Load/Cancel. Driven from `ctx` (egui modals
+    /// take a `Context`, not a `Ui`), so it floats above the whole window.
+    fn draw_load_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.load_dialog.take() else {
+            return;
+        };
+        let mut action = DialogAction::Keep;
+
+        let modal = egui::Modal::new(egui::Id::new("load_traj_modal")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.heading("Load trajectory");
+            match self.scene.molecules.iter().find(|m| m.id == dialog.mol_id) {
+                Some(mol) => {
+                    ui.label(format!("Into “{}”  ({} atoms)", mol.name, mol.n_atoms));
+                }
+                None => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 120, 120),
+                        "molecule no longer exists",
+                    );
+                }
+            }
+            ui.separator();
+
+            // File chooser.
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!("{}  Choose file…", icon::FOLDER_OPEN))
+                    .clicked()
+                {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(p) = rfd::FileDialog::new()
+                        .add_filter(
+                            "Trajectories",
+                            &["xtc", "trr", "dcd", "pdb", "gro", "xyz", "nc", "ncdf"],
+                        )
+                        .pick_file()
+                    {
+                        dialog.path = Some(p);
+                        dialog.error = None;
+                    }
+                }
+                match &dialog.path {
+                    Some(p) => {
+                        ui.monospace(
+                            p.file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        );
+                    }
+                    None => {
+                        ui.weak("no file selected");
+                    }
+                }
+            });
+
+            // Frame range + stride.
+            egui::Grid::new("traj_load_opts")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.label("First frame");
+                    ui.add(egui::DragValue::new(&mut dialog.from));
+                    ui.end_row();
+
+                    ui.label("Last frame");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut dialog.to_enabled, "");
+                        ui.add_enabled(dialog.to_enabled, egui::DragValue::new(&mut dialog.to));
+                        if !dialog.to_enabled {
+                            ui.weak("(to end of file)");
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Stride");
+                    ui.add(egui::DragValue::new(&mut dialog.stride).range(1..=usize::MAX))
+                        .on_hover_text("Keep every Nth frame");
+                    ui.end_row();
+                });
+
+            ui.horizontal(|ui| {
+                ui.label("Reading:");
+                ui.radio_value(&mut dialog.mode, LoadMode::Sync, "Sync")
+                    .on_hover_text("Read all frames now (UI blocks until done)");
+                ui.radio_value(&mut dialog.mode, LoadMode::Async, "Async")
+                    .on_hover_text("Read in the background; frames appear as they load");
+            });
+
+            if let Some(err) = &dialog.error {
+                ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(dialog.path.is_some(), egui::Button::new("Load"))
+                    .clicked()
+                {
+                    action = DialogAction::Load;
+                }
+                if ui.button("Cancel").clicked() {
+                    action = DialogAction::Cancel;
+                }
+            });
+        });
+
+        if modal.should_close() {
+            action = DialogAction::Cancel;
+        }
+
+        match action {
+            DialogAction::Keep => self.load_dialog = Some(dialog),
+            DialogAction::Cancel => {}
+            DialogAction::Load => {
+                if let Err(e) = self.start_load(&dialog) {
+                    dialog.error = Some(e);
+                    self.load_dialog = Some(dialog); // reopen, showing the error
+                }
+            }
+        }
+    }
+
+    /// Begin loading the dialog's file into its molecule (sync or async).
+    fn start_load(&mut self, dialog: &LoadDialog) -> Result<(), String> {
+        let path = dialog.path.clone().ok_or("no file selected")?;
+        let opts = LoadOptions {
+            from: dialog.from,
+            to: dialog.to_enabled.then_some(dialog.to),
+            stride: dialog.stride.max(1),
+        };
+        if let Some(to) = opts.to {
+            if to < opts.from {
+                return Err("last frame is before first frame".to_string());
+            }
+        }
+
+        // Seed frame 0 with the structure coords (idempotent) and learn the count.
+        let expected = {
+            let mol = self
+                .scene
+                .molecules
+                .iter_mut()
+                .find(|m| m.id == dialog.mol_id)
+                .ok_or("molecule no longer exists")?;
+            mol.seed_frame0();
+            mol.n_atoms
+        };
+
+        match dialog.mode {
+            LoadMode::Sync => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let frames = data::traj_loader::read_frames_sync(&path, &opts, expected)?;
+                    let added = frames.len();
+                    let mol = self
+                        .scene
+                        .molecules
+                        .iter_mut()
+                        .find(|m| m.id == dialog.mol_id)
+                        .ok_or("molecule no longer exists")?;
+                    let first_new = mol.trajectory.frames.len();
+                    mol.append_frames(frames);
+                    mol.trajectory.current = first_new; // jump to first loaded frame
+                    mol.apply_current_frame();
+                    self.status = format!("Loaded {added} frame(s)");
+                    self.view_dirty = true;
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (&path, &opts, expected);
+                    return Err("trajectory loading is not yet supported on the web".to_string());
+                }
+            }
+            LoadMode::Async => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let rx = data::traj_loader::spawn_async(path, opts, expected);
+                    self.loaders.insert(dialog.mol_id, rx);
+                    self.status = "Loading trajectory…".to_string();
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (&path, &opts, expected);
+                    return Err("trajectory loading is not yet supported on the web".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drain background loaders, appending streamed frames to their molecules.
+    /// Non-blocking (`try_recv`); finished/errored/disconnected loaders are removed.
+    fn poll_loaders(&mut self) {
+        if self.loaders.is_empty() {
+            return;
+        }
+        use std::sync::mpsc::TryRecvError;
+        let ids: Vec<MolId> = self.loaders.keys().copied().collect();
+        let mut finished: Vec<MolId> = Vec::new();
+        for id in ids {
+            loop {
+                let msg = match self.loaders.get(&id) {
+                    Some(rx) => rx.try_recv(),
+                    None => break,
+                };
+                match msg {
+                    Ok(LoadMsg::Frame(state)) => {
+                        // Append to the molecule if it still exists; else discard.
+                        if let Some(mol) =
+                            self.scene.molecules.iter_mut().find(|m| m.id == id)
+                        {
+                            mol.push_frame(state);
+                        }
+                    }
+                    Ok(LoadMsg::Done) => {
+                        finished.push(id);
+                        break;
+                    }
+                    Ok(LoadMsg::Error(e)) => {
+                        self.status = e;
+                        finished.push(id);
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        finished.push(id);
+                        break;
+                    }
+                }
+            }
+        }
+        for id in finished {
+            self.loaders.remove(&id);
+        }
     }
 
     /// Representations of the selected molecule as rich rows: a drag handle

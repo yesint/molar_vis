@@ -11,6 +11,25 @@
   gmx genconf -f ../../molar/molar/tests/cpt.gro -o tests/large_375k.gro -nbox 2 2 1
   ```
 
+- `2lao_traj.pdb` — a 20-frame multi-MODEL trajectory of `2lao` (rigid drift + breathing
+  wobble) for verifying trajectory loading/playback. **Not tracked in git** (generated).
+  Regenerate:
+
+  ```python
+  import math
+  atoms = [l.rstrip("\n") for l in open("tests/2lao.pdb") if l.startswith(("ATOM","HETATM"))]
+  with open("tests/2lao_traj.pdb","w") as g:
+      for fr in range(20):
+          g.write(f"MODEL     {fr+1:>4}\n")
+          amp = 1.5*math.sin(fr/19*math.pi)
+          for idx,l in enumerate(atoms):
+              x,y,z = float(l[30:38]),float(l[38:46]),float(l[46:54])
+              ph = (idx%50)/50*2*math.pi
+              x += 0.6*fr + amp*math.sin(ph); y += amp*math.cos(ph)
+              g.write(f"{l[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{l[54:]}\n")
+          g.write("ENDMDL\n")
+  ```
+
 ## Quick run
 
 ```sh

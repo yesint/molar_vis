@@ -90,6 +90,7 @@ struct DrawBuffer {
 struct MeshBuffers {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
+    vertex_count: u32,
     index_count: u32,
 }
 
@@ -113,12 +114,31 @@ fn upload_buf<T: bytemuck::Pod>(
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
         contents: bytemuck::cast_slice(data),
-        usage: wgpu::BufferUsages::VERTEX,
+        // COPY_DST so an unchanged-size frame update can write in place (see `update`).
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
     });
     Some(DrawBuffer {
         buffer,
         count: data.len() as u32,
     })
+}
+
+/// Incrementally update an instance/vertex buffer for a coordinates-only change.
+/// If the element count is unchanged, write into the existing buffer (no
+/// reallocation); otherwise recreate it.
+fn update_buf<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    slot: &mut Option<DrawBuffer>,
+    data: &[T],
+    label: &str,
+) {
+    match slot {
+        Some(b) if b.count as usize == data.len() && !data.is_empty() => {
+            queue.write_buffer(&b.buffer, 0, bytemuck::cast_slice(data));
+        }
+        _ => *slot = upload_buf(device, data, label),
+    }
 }
 
 fn upload_mesh(device: &wgpu::Device, mesh: &crate::geometry::MeshData) -> Option<MeshBuffers> {
@@ -128,18 +148,40 @@ fn upload_mesh(device: &wgpu::Device, mesh: &crate::geometry::MeshData) -> Optio
     let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("mesh-verts"),
         contents: bytemuck::cast_slice(&mesh.vertices),
-        usage: wgpu::BufferUsages::VERTEX,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
     });
     let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("mesh-indices"),
         contents: bytemuck::cast_slice(&mesh.indices),
-        usage: wgpu::BufferUsages::INDEX,
+        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
     });
     Some(MeshBuffers {
         vertices,
         indices,
+        vertex_count: mesh.vertices.len() as u32,
         index_count: mesh.indices.len() as u32,
     })
+}
+
+/// Incrementally update a cartoon mesh for a coordinates-only change. When the
+/// vertex and index counts are unchanged (same SS → same topology, only the
+/// spline positions moved), write the vertices in place; otherwise recreate.
+fn update_mesh(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    slot: &mut Option<MeshBuffers>,
+    mesh: &crate::geometry::MeshData,
+) {
+    match slot {
+        Some(m)
+            if m.vertex_count as usize == mesh.vertices.len()
+                && m.index_count as usize == mesh.indices.len()
+                && !mesh.indices.is_empty() =>
+        {
+            queue.write_buffer(&m.vertices, 0, bytemuck::cast_slice(&mesh.vertices));
+        }
+        _ => *slot = upload_mesh(device, mesh),
+    }
 }
 
 pub struct SceneRenderer {
@@ -230,6 +272,18 @@ impl SceneRenderer {
             lines: upload_buf(device, &geom.lines, "lines"),
             mesh: upload_mesh(device, &geom.mesh),
         }
+    }
+
+    /// Incrementally update a representation's existing GPU buffers from new
+    /// geometry (used for coordinate-only trajectory frame changes). Buffers whose
+    /// element counts are unchanged are written in place via `queue.write_buffer`
+    /// (no reallocation); any whose size changed are recreated.
+    pub fn update(&self, rs: &RenderState, gpu: &mut RepGpu, geom: &GeometryData) {
+        let (device, queue) = (&rs.device, &rs.queue);
+        update_buf(device, queue, &mut gpu.spheres, &geom.spheres, "spheres");
+        update_buf(device, queue, &mut gpu.cylinders, &geom.cylinders, "cylinders");
+        update_buf(device, queue, &mut gpu.lines, &geom.lines, "lines");
+        update_mesh(device, queue, &mut gpu.mesh, &geom.mesh);
     }
 
     /// Render every visible representation of every visible molecule into the

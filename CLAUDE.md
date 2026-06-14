@@ -15,18 +15,23 @@ The user, Semen Yesylevsky, is the author of molar. The full approved plan lives
 cargo build
 cargo run -p molar_vis -- tests/2lao.pdb [more files...]   # each file = one molecule
 cargo test -p molar_vis_core
-cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check
+cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
 ```
 
 - Test assets in `tests/`: `2lao.pdb` (1911 atoms), `large_375k.gro` (375,548 atoms,
   generated — **not in git**; regenerate per `tests/README.md` with `gmx genconf`).
-- Dev machine is **Wayland**; screenshot a running window with
-  `spectacle -b -n -f -o out.png` (`-a` = active window).
+- Dev machine is **Wayland**; screenshot a running window with `spectacle -b -n -a -o out.png`
+  (**`-a` = active window — use this**; `-f` full-screen captures blank on this compositor).
 - Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon`,
   `MOLAR_VIS_DEBUG_SEL="<selection>"`,
   `MOLAR_VIS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
   `MOLAR_VIS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
-  `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`.
+  `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`,
+  `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
+  `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
+  (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
+  update path). Generate a quick test trajectory with the Python snippet that wrote
+  `tests/2lao_traj.pdb` (multi-MODEL, **not in git**).
 
 ## Tech stack (working versions)
 
@@ -74,12 +79,19 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
   (compiled) / `sel: Sel` (evaluated) / visible / dirty flags / `RepGpu`), `evaluate()`
-  (text → `SelectionExpr` → `Sel`).
+  (text → `SelectionExpr` → `Sel`). `Molecule` also owns a `trajectory: Trajectory` and the
+  `seed_frame0`/`append_frames`/`push_frame`/`apply_current_frame` methods (see *molar integration*).
+- `trajectory.rs` — `Trajectory { frames: Vec<State>, current, playing, loop_mode, speed_fps, … }`
+  (`n_frames`/`has_playback`/`set_current`/`step`/`tick`), `LoadOptions {from,to,stride}`,
+  `LoadMode {Sync,Async}`, `LoadMsg {Frame,Done,Error}`. Pure data + playback math, **WASM-safe**.
 - `data.rs` + `data/loader.rs` (`RawMolecule`: System + guessed bonds + bbox; positions/
-  radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter).
+  radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter)
+  + `data/traj_loader.rs` (**native-only**, `#[cfg(not(wasm))]`: `read_frames_sync`/`spawn_async`).
 - `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A),
   camera UBO (bind group 0), sphere/cylinder/line/**mesh** pipelines, `RepGpu` (per-rep
-  buffers; mesh = vertex + u32 index buffer), `upload()`, `render_scene()`, `texture_id()`.
+  buffers; mesh = vertex + u32 index buffer; buffers carry `COPY_DST`), `upload()` (recreate
+  buffers), **`update()`** (in-place `write_buffer` when element counts match, for coords-only
+  frame changes), `render_scene()`, `texture_id()`.
   Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl`.
   The cartoon mesh writes real depth and interleaves correctly with the impostors.
 
@@ -121,14 +133,38 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   (`system.select(&expr)`). Read coords by binding: `system.bind(&sel)` → `SelBound` →
   `iter_particle()` (`Particle { id, atom, pos }`). Empty/invalid selection → `Err`
   (shown in red), keeps prior geometry.
+- **Disjoint bind (molar `SelBoundParts`):** `system.bind_with_state(&sel, &state)` binds a
+  selection using the system's **topology** but coordinates from an **external** `State` (e.g.
+  a trajectory frame) — no copy into the System. `geometry::build` takes the bound (generic
+  over the providers) so frames render by reference. `System::state()`/`topology()` borrow the
+  parts. (molar addition; `SelBound` is System-coupled and unchanged.)
 - Selection grammar incl.: `all`, `protein`, `backbone`, `water`, `name`, `resid`,
   `resindex`, `resname`, `index`, `chain`, `within …`.
-- **Trajectory plan (future):** `System::set_state(&mut self, State) -> Result<State>` —
-  plain `&mut`, **no interior mutability needed** (the App owns the `Scene` mutably). Per
-  frame: read a `State` (`FileHandler::read_state`), `mol.system.set_state(frame)`, then
-  re-evaluate each rep's stored `SelectionExpr` → fresh `Sel` (required for coordinate-
-  dependent selections like `within …`) and rebuild geometry. `Sel`s stay valid across
-  `set_state` as long as topology is unchanged.
+- **Trajectory (M7, implemented):** per-molecule `Trajectory { frames: Vec<State>, current,
+  playing, … }` (`trajectory.rs`). Frame 0 = the structure coords (`Molecule::seed_frame0`,
+  via the `set_state(State::new_fake(n))` swap trick); loaded frames append; multiple loads
+  concatenate. **Frame changes are zero-copy**: `Molecule::apply_current_frame` does NOT copy
+  the frame into the System — it just sets dirty flags; `rebuild_dirty` reads the frame by
+  reference via `bind_with_state(sel, &frames[current])`. Routing per rep: `dynamic` →
+  `sel_dirty` (re-eval selection — those molecules *do* get the frame `set_state`'d in, since
+  selection eval reads the System's own state); Cartoon/SecStruct with `ss_per_frame` →
+  `geom_dirty` (SS may restructure); otherwise → **`coords_dirty`** (incremental). `Sel`s stay
+  valid (topology unchanged). Loading: `data/traj_loader.rs` (native, threads)
+  walks wanted frames `from, from+stride, …≤to` via `FileHandler::skip_to_frame(target)` +
+  `read_state` — skipped frames are **seeked over, not decompressed** (random-access for
+  xtc/trr/dcd via the in-molar generic seek, serial fallback for pdb/gro/xyz) — validating
+  atom count per frame; sync (blocking) or async
+  (`spawn_async` → `mpsc` channel drained each `ui()`). VMD-style control bar + slider in
+  `app.rs` (`draw_traj_bar`), Load dialog is an `egui::Modal` (rfd file picker). Trajectory is
+  **not** in `EditState` (view state, like the camera).
+- **Per-frame rebuild paths (`rebuild_dirty`):** `geom_dirty` = full structural rebuild
+  (selection/style/color/params, or SS restructure) → recompute SS into `rep.ss_cache`, build,
+  `renderer.upload` (recreate buffers). `coords_dirty` = coordinates-only frame change → build
+  reusing the cached SS (**no DSSP**), then `renderer.update` writes the new data into the
+  **existing** GPU buffers in place (`queue.write_buffer`, no realloc) when element counts match
+  (else recreates). Buffers carry `COPY_DST`. So scrubbing/playing avoids both per-frame DSSP
+  and per-frame buffer reallocation. Per-rep **`ss_per_frame`** toggle (gear panel, Cartoon /
+  SecStruct only; in `EditState`) forces DSSP recompute every frame when motion changes SS.
 - Bonds aren't in GRO (partial in PDB); guessed at load (`distance_search_single` +
   `dist < 0.6*(vdw_i+vdw_j)`).
 - Secondary structure for M6 cartoon: `molar::Dssp` (10-variant `SS` enum).
@@ -153,12 +189,16 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 
 ## UI layout (left panel)
 
-History toolbar (undo/redo buttons, each with a `▼` dropdown listing named actions for
-**cumulative** undo/redo; also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
+Toolbar: **`Open`** button (`App::open_structure` — native `rfd` picker filtered to
+topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
+molecule, frames the camera on the first one, undoable via the normal checkpoint) · then
+undo/redo buttons, each with a `▼` dropdown listing named actions for **cumulative**
+undo/redo (also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
 toggles, **orthographic is the default**; **depth-cue** on/off + Strength/Start sliders) →
-`Molecules` (one row each: name + atom count,
-right-justified eye/trash) → `Representations` ("Add" button, then rich rows). No
-standalone controls section — params live in a per-rep gear popup.
+`Molecules` (one row each: name + atom count, right-justified **Load-trajectory** (`FILM_STRIP`)
+· eye · trash; a trajectory control bar + slider appears below when >1 frame) →
+`Representations` ("Add" button, then rich rows). No standalone controls section — params
+live in a per-rep gear popup.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):
@@ -203,3 +243,39 @@ History labels via `describe_change` ("edit selection", "change coloring",
   ribbon_thickness}`. **`RepParams` is now a per-style enum** (each variant carries only its
   own knobs); `geometry::build` dispatches on it (no more `kind` arg).
 - ✅ MVP complete (M0–M6, all five representations).
+- ✅ M7 **Trajectories** (native) — `trajectory.rs` (`Trajectory`/`LoadOptions`/`LoadMode`/
+  `LoadMsg`) + `data/traj_loader.rs` (native, cfg-gated) + per-molecule Load dialog (`egui::Modal`
+  + `rfd`) + VMD-style playback bar/slider + sync/async loading. See the trajectory note under
+  *molar integration*. Verified on a multi-MODEL 2lao trajectory (atoms move per frame, slider/
+  frame-field/play work).
+- ✅ **molar made wasm-friendly + a pluggable byte source** (changes in the molar repo, not just
+  molar_vis):
+  - `FileFormatError` is now **`pub`** (+ `FileIoError::kind()`/`path()`), so callers match
+    `FileFormatError::Eof` directly. **EOF unified**: pdb/gro/xyz now return the top-level
+    `FileFormatError::Eof` (was each handler's own `Eof`), matching xtc/trr/dcd — also fixed a
+    latent spurious-corruption warning on multi-MODEL PDB via `IoStateIterator`.
+  - `molar_gromacs` (tpr/cpt, libloading) is **target-gated** to non-wasm; tpr/cpt handlers +
+    dispatch arms + error variants `#[cfg(not(wasm))]`. `cargo build … --target
+    wasm32-unknown-unknown` now **compiles** for both molar and molar_vis_core (xtc/trr/dcd/gro/
+    pdb/xyz survive; tpr/cpt dropped). Remaining wasm *runtime* items (Instant→web-time shim,
+    threads→worker, rayon pool) belong to the browser milestone.
+  - **`DynSource`** (boxed `Read + Seek + Send`) + **`FileHandler::from_reader(ext, src)`**: every
+    pure-Rust handler gained `from_source(DynSource)` (stores `BufReader<DynSource>` /
+    `XTCReader<DynSource>`); `open(path)` now wraps a `File` into a `DynSource`. Lets molar read
+    any format from a non-file source (in-memory buffer, browser Blob) with the unchanged sync API.
+  - **XTC generic seek**: molly's seek path is `File`-bound only because of its internal `Buffer`
+    optimization; the seek logic itself needs just `Read + Seek`. Ported faithfully **into molar's
+    xtc handler** (`io/xtc_handler.rs`, `skip_positions`/`seek_next`/`skip_frames`/`seek_prev`/
+    `skip_to_time`) using molly's **public** API (`XTCReader { pub file, pub step }`, `read_header`,
+    `molly::reader::read_nbytes`, `molly::padding`, `Header`) — **no molly change**. Round-trip
+    test `io::tests::from_reader_matches_open` asserts `from_reader(Cursor)` == `open(path)` for
+    xtc & trr incl. forward/backward seek.
+  - **`SelBoundParts` + `System::bind_with_state` / `state()` / `topology()`**: bind a `Sel` to a
+    **disjoint** `(&Topology, &State)` (read-only) — used so trajectory frames render by reference
+    (zero-copy). `SelBoundParts` impls the element providers directly (no `SystemProvider`), so it
+    gets `iter_particle`/`Measure`/`Analysis` via the blankets but can't derive sub-selections (the
+    viewer doesn't need that). Test `system::tests::bind_with_state_reads_external_coords`.
+- ⏳ M8 **Browser streaming** (not yet) — `WasmBlobReader` (Read+Seek via worker-only
+  `FileReaderSync` over a `Blob`), a wasm Web Worker loader (wasm-threads), `web_sys::File` picker,
+  `eframe::WebRunner` entry + `index.html` served with COOP/COEP. The `from_reader` core above is
+  the foundation; only the wasm runtime assembly remains.

@@ -14,6 +14,8 @@ pub struct AppLaunch {
 }
 
 /// Launch the native viewer window. Returns once the window is closed.
+/// Native-only: the web build uses `eframe::WebRunner` from a wasm entry point.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(launch: AppLaunch) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,

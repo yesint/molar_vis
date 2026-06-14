@@ -19,3 +19,8 @@ bytemuck.workspace = true
 log.workspace = true
 molar = { workspace = true }
 egui-phosphor = "0.12.0"
+
+# Native file-open dialog for loading trajectories. Target-gated so cargo never
+# tries to resolve/build it for wasm32 (the browser will use its own file picker).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.15"
