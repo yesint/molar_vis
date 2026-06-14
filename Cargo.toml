@@ -22,13 +22,9 @@ wgpu = "29"
 glam = "0.32"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
-# Local molar checkout (default features => Float = f32). Added to molar_vis_core at M1.
-molar = { path = "../molar/molar", default-features = false }
-
-# Develop powersasa (ours) from the local clone so molar's new surface-mesh API
-# is available through the path-dep on molar. Drop/bump once pushed & released.
-[patch."https://github.com/yesint/powersasa-llm.git"]
-powersasa = { path = "../powersasa-llm" }
+# molar (default features => Float = f32), from GitHub so the crate is installable
+# without a local sibling checkout. molar pulls its own powersasa git dependency.
+molar = { git = "https://github.com/yesint/molar.git", default-features = false }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]
