@@ -51,9 +51,11 @@ pub struct Representation {
     /// Cached secondary structure from the last full (structural) build, reused
     /// for coordinate-only frame updates when `ss_per_frame` is off. Transient.
     pub ss_cache: Option<SsMap>,
-    /// Transient UI state: whether this rep's inline params panel is expanded.
+    /// Transient UI state: whether this rep's inline settings panel is expanded.
     /// Not part of `EditState` (view state, not undoable).
     pub params_open: bool,
+    /// Transient UI state: which tab of the settings panel is shown.
+    pub settings_tab: SettingsTab,
     /// `sel_text` changed → recompile the selection.
     pub sel_dirty: bool,
     /// Selection/style/color/params changed → full geometry rebuild + buffer
@@ -126,12 +128,25 @@ impl Representation {
             ss_per_frame,
             ss_cache: None,
             params_open: false,
+            settings_tab: SettingsTab::default(),
             sel_dirty: true,
             geom_dirty: false,
             coords_dirty: false,
             gpu: RepGpu::default(),
         }
     }
+}
+
+/// Which tab of a representation's settings panel is shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SettingsTab {
+    /// Style-specific geometry parameters.
+    #[default]
+    Style,
+    /// Trajectory / per-frame behavior.
+    Traj,
+    /// Periodic-image rendering.
+    Periodic,
 }
 
 /// A loaded molecule. The live molar `System` is the single source of per-atom

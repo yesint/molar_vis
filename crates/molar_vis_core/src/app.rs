@@ -18,7 +18,7 @@ use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::material::Material;
 use crate::render::SceneRenderer;
-use crate::scene::{self, MolId, Representation, Scene};
+use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
 use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
 
@@ -400,9 +400,33 @@ fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 /// Parameter controls for a representation, shown inline under its row as a tidy
 /// two-column table (parameter name on the left, control on the right).
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
-    if let Some(err) = &rep.sel_error {
-        ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
+    // Tab bar: [Style] [Traj] [Periodic].
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (tab, label) in [
+            (SettingsTab::Style, "Style"),
+            (SettingsTab::Traj, "Traj"),
+            (SettingsTab::Periodic, "Periodic"),
+        ] {
+            if ui.selectable_label(rep.settings_tab == tab, label).clicked() {
+                rep.settings_tab = tab;
+            }
+        }
+    });
+    ui.separator();
+    match rep.settings_tab {
+        SettingsTab::Traj => {
+            draw_traj_tab(ui, rep);
+            return;
+        }
+        SettingsTab::Periodic => {
+            ui.weak("Rendering of periodic images — coming soon.");
+            return;
+        }
+        SettingsTab::Style => {}
     }
+
+    // --- [Style] tab: per-style geometry parameters. ---
     let mut changed = false;
     egui::Grid::new("rep_params")
         .num_columns(2)
@@ -474,15 +498,6 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                         .changed();
                 });
         });
-        // During trajectory playback, secondary structure is computed once and
-        // reused for speed; enable this to recompute it on every frame (DSSP is
-        // the main per-frame cost, so it's off by default).
-        ui.checkbox(&mut rep.ss_per_frame, "Recompute SS every frame")
-            .on_hover_text(
-                "Off: compute secondary structure once and reuse it across frames \
-                 (fast). On: recompute DSSP each trajectory frame (slower, but \
-                 follows conformational changes).",
-            );
     }
 
     // Restore this style's default parameters.
@@ -501,6 +516,25 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
     if changed {
         rep.geom_dirty = true;
     }
+}
+
+/// [Traj] tab of the representation settings: per-frame behavior.
+fn draw_traj_tab(ui: &mut egui::Ui, rep: &mut Representation) {
+    ui.checkbox(&mut rep.dynamic, "Update every frame").on_hover_text(
+        "Re-evaluate the selection on every trajectory frame — needed for \
+         coordinate-dependent selections like `within …`.",
+    );
+    // Per-frame secondary structure (Cartoon shape / SecStruct coloring only).
+    if matches!(rep.kind, RepKind::Cartoon) || rep.color == ColorMethod::SecStruct {
+        ui.checkbox(&mut rep.ss_per_frame, "Recompute SS every frame")
+            .on_hover_text(
+                "Off: compute secondary structure once and reuse it across frames \
+                 (fast). On: recompute DSSP each trajectory frame (slower, but \
+                 follows conformational changes).",
+            );
+    }
+    ui.add_space(2.0);
+    ui.weak("More per-frame options (coordinate smoothing, …) coming later.");
 }
 
 /// Draw the VMD-style trajectory control bar (buttons + frame field + loop/speed)
@@ -616,6 +650,8 @@ pub struct App {
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
+    /// Whether the depth-cue panel in the viewport overlay is expanded.
+    cue_panel_open: bool,
 }
 
 /// State of the "Load trajectory" modal.
@@ -844,6 +880,7 @@ impl App {
             editing_rep: None,
             load_dialog: None,
             loaders: HashMap::new(),
+            cue_panel_open: false,
         })
     }
 
@@ -1020,16 +1057,11 @@ impl App {
                 ui.add_space(8.0);
 
                 self.draw_history_toolbar(ui);
-                ui.add_space(4.0);
+                ui.add_space(6.0);
 
-                egui::CollapsingHeader::new("Scene")
-                    .default_open(true)
-                    .show(ui, |ui| self.draw_scene_controls(ui));
-
-                ui.separator();
-                egui::CollapsingHeader::new("Molecules")
-                    .default_open(true)
-                    .show(ui, |ui| view_dirty |= self.draw_molecule_list(ui));
+                // Molecules are listed directly (no "Molecules"/"Scene" headers);
+                // global scene controls live in the viewport overlay instead.
+                view_dirty |= self.draw_molecule_list(ui);
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(4.0);
@@ -1041,50 +1073,68 @@ impl App {
         view_dirty
     }
 
-    /// Global scene options. Projection now; lighting/background/etc. later.
-    fn draw_scene_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Projection");
-            let persp = self.camera.is_perspective();
-            // Mutually exclusive icon toggle buttons (tooltips on hover).
-            if ui
-                .selectable_label(persp, icon::PERSPECTIVE)
-                .on_hover_text("Perspective")
-                .clicked()
-            {
-                self.camera.projection = Projection::Perspective;
-            }
-            if ui
-                .selectable_label(!persp, icon::CUBE)
-                .on_hover_text("Orthographic")
-                .clicked()
-            {
-                self.camera.projection = Projection::Orthographic;
-            }
-        });
-
-        let cue = &mut self.camera.depth_cue;
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut cue.enabled, "Depth cue")
-                .on_hover_text("Fade distant geometry toward the background for depth perception");
-        });
-        ui.add_enabled_ui(cue.enabled, |ui| {
-            egui::Grid::new("depth_cue")
-                .num_columns(2)
-                .spacing(egui::vec2(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.label("Strength");
-                    ui.add(egui::Slider::new(&mut cue.strength, 0.0..=1.0).fixed_decimals(2))
-                        .on_hover_text("How strongly the far side fades to the background");
-                    ui.end_row();
-                    ui.label("Start");
-                    ui.add(egui::Slider::new(&mut cue.start, 0.0..=1.0).fixed_decimals(2))
-                        .on_hover_text(
-                            "Where the fog begins, from the front (0) to the back (1) of the scene",
+    /// Small floating scene-controls overlay anchored to the viewport's top-left:
+    /// a projection-cycle button and a depth-cue toggle that expands a cue panel.
+    /// (More controls — lighting/background/etc. — will join it later.)
+    fn draw_scene_overlay(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        egui::Area::new(ui.id().with("scene_overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                    ui.horizontal(|ui| {
+                        // Single button cycling perspective ↔ orthographic.
+                        let persp = self.camera.is_perspective();
+                        let (glyph, tip) = if persp {
+                            (icon::PERSPECTIVE, "Perspective — click for orthographic")
+                        } else {
+                            (icon::CUBE, "Orthographic — click for perspective")
+                        };
+                        if ui.button(glyph).on_hover_text(tip).clicked() {
+                            self.camera.projection = if persp {
+                                Projection::Orthographic
+                            } else {
+                                Projection::Perspective
+                            };
+                        }
+                        // Toggle the depth-cue panel.
+                        if ui
+                            .selectable_label(self.cue_panel_open, icon::CLOUD_FOG)
+                            .on_hover_text("Depth cue")
+                            .clicked()
+                        {
+                            self.cue_panel_open = !self.cue_panel_open;
+                        }
+                    });
+                    if self.cue_panel_open {
+                        ui.separator();
+                        let cue = &mut self.camera.depth_cue;
+                        ui.checkbox(&mut cue.enabled, "Depth cue").on_hover_text(
+                            "Fade distant geometry toward the background for depth perception",
                         );
-                    ui.end_row();
+                        ui.add_enabled_ui(cue.enabled, |ui| {
+                            egui::Grid::new("depth_cue")
+                                .num_columns(2)
+                                .spacing(egui::vec2(8.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.label("Strength");
+                                    ui.add(
+                                        egui::Slider::new(&mut cue.strength, 0.0..=1.0)
+                                            .fixed_decimals(2),
+                                    );
+                                    ui.end_row();
+                                    ui.label("Start");
+                                    ui.add(
+                                        egui::Slider::new(&mut cue.start, 0.0..=1.0)
+                                            .fixed_decimals(2),
+                                    );
+                                    ui.end_row();
+                                });
+                        });
+                    }
                 });
-        });
+            });
     }
 
     /// Undo/redo buttons, each with a dropdown listing the named actions on the
@@ -1183,7 +1233,7 @@ impl App {
                     ui.label(mol.name.as_str());
                     ui.weak(format!("({})", mol.n_atoms));
                     // Load a trajectory into this molecule (left-aligned, by the name).
-                    if icon_button(ui, icon::FILM_STRIP, "Load trajectory").clicked() {
+                    if icon_button(ui, icon::FOLDER_OPEN, "Load trajectory").clicked() {
                         open_load = Some(mol.id);
                     }
                     // Right-justified action group: add-rep · eye · trash.
@@ -1617,13 +1667,7 @@ impl App {
                                 if icon_button(ui, icon::COPY, "Duplicate").clicked() {
                                     duplicate = Some(j);
                                 }
-                                if ui
-                                    .selectable_label(rep.dynamic, icon::ARROWS_CLOCKWISE)
-                                    .on_hover_text("Update every frame")
-                                    .clicked()
-                                {
-                                    rep.dynamic = !rep.dynamic;
-                                }
+                                // (Update-every-frame moved to the Settings ▸ Traj tab.)
                                 // Eye: open when shown, crossed when hidden.
                                 let eye = if rep.visible { icon::EYE } else { icon::EYE_SLASH };
                                 if ui
@@ -1662,29 +1706,34 @@ impl App {
                         }
                     });
 
-                    // Row 2: style | color (icon+text dropdowns) | gear (params toggle).
-                    ui.horizontal(|ui| {
-                        // Gear is right-justified: reserve its space on the right
-                        // first (so the pickers can't overlap it), then lay the
-                        // pickers out left-to-right in the remaining width.
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .selectable_label(rep.params_open, icon::GEAR_SIX)
-                                .on_hover_text("Settings")
-                                .clicked()
-                            {
-                                rep.params_open = !rep.params_open;
-                            }
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.add_space(row2_indent);
-                                    style_picker(ui, rep);
-                                    color_picker(ui, rep);
-                                    material_picker(ui, rep);
-                                },
-                            );
+                    // Selection errors appear immediately below the selection field,
+                    // aligned under it (indented past the drag handle).
+                    if let Some(err) = &rep.sel_error {
+                        ui.horizontal(|ui| {
+                            ui.add_space(row2_indent);
+                            ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
                         });
+                    }
+
+                    // Row 2: [settings expander] style | color | material. The caret
+                    // sits where the drag handle is in row 1 (so the style dropdown
+                    // lines up under the selection field) and toggles the settings.
+                    ui.horizontal(|ui| {
+                        let caret = if rep.params_open {
+                            icon::CARET_DOWN
+                        } else {
+                            icon::CARET_RIGHT
+                        };
+                        if ui
+                            .selectable_label(rep.params_open, caret)
+                            .on_hover_text("Representation settings")
+                            .clicked()
+                        {
+                            rep.params_open = !rep.params_open;
+                        }
+                        style_picker(ui, rep);
+                        color_picker(ui, rep);
+                        material_picker(ui, rep);
                     });
                 })
                 .response;
@@ -1815,6 +1864,9 @@ impl App {
             let texture_id = self.renderer.texture_id();
             egui::Image::new(egui::load::SizedTexture::new(texture_id, rect.size()))
                 .paint_at(ui, rect);
+
+            // Floating scene controls (projection / depth cue) over the viewport.
+            self.draw_scene_overlay(ui, rect);
         });
     }
 }

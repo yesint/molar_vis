@@ -191,20 +191,25 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - Icons: `egui_phosphor::regular::{EYE, EYE_SLASH, TRASH, COPY, PLUS, PERSPECTIVE, CUBE}`;
   the font is installed in `theme::apply` via `egui_phosphor::add_to_fonts`.
 
-## UI layout (left panel)
+## UI layout
 
+**Left panel** = toolbar + the molecule list directly (no `Scene`/`Molecules`
+collapsing headers; global scene controls moved to the viewport overlay below).
 Toolbar: **`Open`** button (`App::open_structure` — native `rfd` picker filtered to
 topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
 molecule, frames the camera on the first one, undoable via the normal checkpoint) · then
-undo/redo buttons, each with a `▼` dropdown listing named actions for **cumulative**
-undo/redo (also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
-toggles, **orthographic is the default**; **depth-cue** on/off + Strength/Start sliders) →
-`Molecules` (one row each: name + atom count, right-justified **Load-trajectory** (`FILM_STRIP`)
-· add-rep · **periodic-box toggle** (`BOUNDING_BOX`, `Camera`-independent wireframe overlay) ·
-**zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` → `Camera::focus_bbox` on the whole-molecule bbox
-at the current frame) · eye · trash; a trajectory control bar + slider appears below when >1
-frame) → `Representations` ("Add" button, then rich rows). No standalone controls section —
-params live in a per-rep gear popup.
+undo/redo buttons, each with a `▼` dropdown for **cumulative** undo/redo (also Ctrl+Z /
+Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + atom count +
+**Load-trajectory** (`FOLDER_OPEN`, left of the name), right-justified **add-rep** ·
+**periodic-box toggle** (`BOUNDING_BOX`) · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
+`Camera::focus_bbox`) · eye · trash; a trajectory control bar + slider appears below when
+>1 frame; reps listed (indented) when the molecule caret is open.
+
+**Viewport overlay** (`draw_scene_overlay`, top-left `egui::Area` over the 3D image):
+a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
+**orthographic is the default**) and a **depth-cue** button (`CLOUD_FOG`) that toggles
+(`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders). More scene
+controls will join it later.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):
@@ -212,12 +217,16 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   **selection field** (fills width; focusing sets `editing_rep` and expands it to a
   full-width editor, collapsing on Enter/blur) · right-justified compact actions
   (`Layout::right_to_left` + `compact_actions`): **zoom-to-selection** (`MAGNIFYING_GLASS_PLUS`
-  → `Camera::focus_bbox` on the rep's `sel` bbox at the current frame) · eye ·
-  update-every-frame (`rep.dynamic`, ↻) · duplicate · trash.
-- **Row 2** (indented by the drag-handle width, so it aligns under the selection field):
-  **style** dropdown · **color** dropdown · **material** dropdown (`material_picker`,
-  shaded-sphere icon faded by opacity) · **gear** (`GEAR_SIX`, toggles the inline
-  `draw_rep_params` expander). Style and color are **icon+text** buttons built by the shared
+  → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · duplicate · trash. The rep's
+  **selection error** (if any) is shown in red on the next line, aligned under the field.
+- **Row 2** (a **settings caret** — `CARET_RIGHT`/`CARET_DOWN`, where the drag handle is in
+  row 1 — toggles `params_open`; then) **style** dropdown · **color** dropdown · **material**
+  dropdown (`material_picker`, shaded-sphere icon faded by opacity). The expanded settings
+  panel (`draw_rep_params`) is **tabbed** — **[Style]** (per-style geometry params +
+  SS-algorithm + Defaults; `draw_style_tab`), **[Traj]** (`draw_traj_tab`: *Update every
+  frame* = `rep.dynamic`; *Recompute SS every frame* = `ss_per_frame` for Cartoon/SecStruct;
+  more per-frame options later), **[Periodic]** (periodic-image rendering — TBD); tab in
+  `rep.settings_tab: SettingsTab`. Style and color are **icon+text** buttons built by the shared
   `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
   `ColorMethod` (Element = CPK dots, Chain = interlocking colored links, ResID =
