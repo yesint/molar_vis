@@ -13,9 +13,12 @@
 //! 3. Extract the isosurface `dist − probe = 0` with **Surface Nets** (a dual
 //!    marching-cubes that yields one vertex per straddling cell → watertight,
 //!    smooth, no lookup tables).
-//! Per-vertex normals come from the field gradient; colors are a distance-weighted
-//! blend of nearby atoms (a single nearest-atom assignment looks patchy/Voronoi-like,
-//! so boundaries between differently-colored atoms are smoothed into gradients).
+//! Per-vertex normals come from the field gradient. Colors start as the nearest
+//! atom's color, then are **Laplacian-smoothed along the mesh** (1-ring averaging)
+//! so the hard nearest-atom Voronoi patches become smooth gradients — smoothing
+//! along the surface rather than through 3-D space, so colors don't bleed across a
+//! crevice. The normals get a light Laplacian pass too, to remove the per-cell
+//! faceting left by sampling the field gradient at the nearest grid node.
 
 use glam::Vec3;
 use molar::prelude::*;
@@ -103,11 +106,12 @@ where
     let n = nx * ny * nz;
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
 
-    // --- Pass 1: SAS occupancy (a voxel is inside if within vdW+probe of an atom).
-    // Coloring is done per surface vertex afterwards (see `color_vertices`), so we
-    // don't track a per-voxel nearest atom here.
+    // --- Pass 1: SAS occupancy + nearest atom per voxel (seeds the initial vertex
+    // color, which is then Laplacian-smoothed along the mesh). ---
     let mut inside = vec![false; n];
-    for (&c, &r) in centers.iter().zip(&radii) {
+    let mut nearest = vec![u32::MAX; n];
+    let mut best_d2 = vec![f32::INFINITY; n];
+    for (a, (&c, &r)) in centers.iter().zip(&radii).enumerate() {
         // Voxel range covering this atom's SAS sphere.
         let vlo = ((c - Vec3::splat(r) - lo) / h).floor();
         let vhi = ((c + Vec3::splat(r) - lo) / h).ceil();
@@ -122,8 +126,15 @@ where
             for y in y0..=y1 {
                 for x in x0..=x1 {
                     let p = lo + Vec3::new(x as f32, y as f32, z as f32) * h;
-                    if (p - c).length_squared() <= r2 {
-                        inside[idx(x, y, z)] = true;
+                    let d2 = (p - c).length_squared();
+                    let i = idx(x, y, z);
+                    if d2 <= r2 {
+                        inside[i] = true;
+                    }
+                    // Nearest atom (by center) for the initial coloring.
+                    if d2 < best_d2[i] {
+                        best_d2[i] = d2;
+                        nearest[i] = a as u32;
                     }
                 }
             }
@@ -146,104 +157,92 @@ where
     // smooth, at O(voxels) cost. Driven by the rep's `smoothing` slider.
     smooth_field(&mut field, dims, smoothing as usize);
 
-    // --- Pass 3: Surface Nets isosurface at field = 0. ---
-    let mut mesh = surface_nets(&field, dims, lo, h);
+    // --- Pass 3: Surface Nets isosurface at field = 0 (vertices seeded with the
+    // nearest-atom color). ---
+    let mut mesh = surface_nets(&field, &nearest, &colors, dims, lo, h);
 
-    // Smoothly color each vertex by a distance-weighted blend of nearby atoms.
-    // Assigning the single nearest atom's color makes hard Voronoi-cell patches;
-    // blending neighbors turns the boundaries into smooth gradients.
-    color_vertices(&mut mesh, &centers, &colors, rmax);
+    // Laplacian-smooth the mesh: the nearest-atom coloring is patchy (Voronoi
+    // cells), so spread it along the surface into smooth gradients; also lightly
+    // de-facet the gradient-sampled normals. Iteration counts scale with grid
+    // resolution so the *physical* smoothing distance stays roughly constant.
+    let uniform_color = colors.iter().all(|&c| c == colors[0]);
+    let color_iters = if uniform_color {
+        0
+    } else {
+        ((0.2 / h * (0.2 / h)).round() as usize).clamp(4, 64)
+    };
+    let normal_iters = ((0.1 / h * (0.1 / h)).round() as usize).clamp(1, 16);
+    laplacian_smooth(&mut mesh, color_iters, normal_iters);
     mesh
 }
 
-/// Color each mesh vertex by a distance-weighted blend of the atoms near it.
-/// Weight is a windowed inverse-distance kernel: the owning atom dominates in the
-/// interior of its patch, but near a boundary two (or more) atoms contribute
-/// comparably, so the color transitions smoothly instead of snapping. `rmax` is the
-/// largest atom SAS radius; the blend radius is a small multiple of it so a handful
-/// of neighbors participate. Uniform coloring (e.g. `Solid`) short-circuits.
-fn color_vertices(mesh: &mut MeshData, centers: &[Vec3], colors: &[u32], rmax: f32) {
-    let verts = &mut mesh.vertices;
-    if verts.is_empty() || centers.is_empty() {
+/// Laplacian (umbrella) smoothing of per-vertex attributes *along the mesh surface*:
+/// each vertex is repeatedly replaced by the average of its 1-ring neighbors (found
+/// from the triangle list). Topology-aware — blends along the surface, so colors
+/// don't bleed across a crevice the way a 3-D distance blend would. Color is smoothed
+/// `color_iters` times (hard nearest-atom Voronoi patches → smooth gradients); the
+/// gradient-sampled normals get `normal_iters` lighter passes to remove per-cell
+/// faceting, then are renormalized.
+fn laplacian_smooth(mesh: &mut MeshData, color_iters: usize, normal_iters: usize) {
+    if mesh.vertices.is_empty() || mesh.indices.len() < 3 {
         return;
     }
-    // Uniform color (Solid, or a single-element selection): nothing to blend.
-    let c0 = colors[0];
-    if colors.iter().all(|&c| c == c0) {
-        for v in verts.iter_mut() {
-            v.color = c0;
+    if color_iters > 0 {
+        let mut rgb: Vec<[f32; 3]> = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                [
+                    (v.color & 0xff) as f32,
+                    ((v.color >> 8) & 0xff) as f32,
+                    ((v.color >> 16) & 0xff) as f32,
+                ]
+            })
+            .collect();
+        smooth_attr(&mut rgb, &mesh.indices, color_iters);
+        for (v, c) in mesh.vertices.iter_mut().zip(&rgb) {
+            let q = |x: f32| x.round().clamp(0.0, 255.0) as u32;
+            v.color = q(c[0]) | (q(c[1]) << 8) | (q(c[2]) << 16) | (0xff << 24);
         }
-        return;
     }
-
-    // Per-atom RGB as floats (alpha is set later from the material).
-    let rgb: Vec<[f32; 3]> = colors
-        .iter()
-        .map(|&c| {
-            [
-                (c & 0xff) as f32,
-                ((c >> 8) & 0xff) as f32,
-                ((c >> 16) & 0xff) as f32,
-            ]
-        })
-        .collect();
-
-    // Blend radius: a couple of atom radii so several neighbors contribute.
-    let qr = (rmax * 1.5).max(1e-3);
-    let qr2 = qr * qr;
-    let soft2 = (0.3 * rmax).powi(2).max(1e-6);
-
-    // Uniform spatial grid of atom indices (cell = qr, so every atom within `qr` of
-    // a point lies in the 3×3×3 block of cells around the point's own cell).
-    let mut lo = centers[0];
-    let mut hi = centers[0];
-    for c in centers {
-        lo = lo.min(*c);
-        hi = hi.max(*c);
-    }
-    let inv = 1.0 / qr;
-    let span = |e: f32| ((e * inv).floor() as usize) + 1;
-    let (gx, gy, gz) = (span(hi.x - lo.x), span(hi.y - lo.y), span(hi.z - lo.z));
-    let gidx = |x: usize, y: usize, z: usize| x + gx * (y + gy * z);
-    let cell_of = |p: Vec3| {
-        (
-            (((p.x - lo.x) * inv) as usize).min(gx - 1),
-            (((p.y - lo.y) * inv) as usize).min(gy - 1),
-            (((p.z - lo.z) * inv) as usize).min(gz - 1),
-        )
-    };
-    let mut grid: Vec<Vec<u32>> = vec![Vec::new(); gx * gy * gz];
-    for (a, c) in centers.iter().enumerate() {
-        let (x, y, z) = cell_of(*c);
-        grid[gidx(x, y, z)].push(a as u32);
-    }
-
-    for v in verts.iter_mut() {
-        let p = Vec3::from_array(v.pos);
-        let (cx, cy, cz) = cell_of(p);
-        let mut acc = [0.0f32; 3];
-        let mut wsum = 0.0f32;
-        for z in cz.saturating_sub(1)..=(cz + 1).min(gz - 1) {
-            for y in cy.saturating_sub(1)..=(cy + 1).min(gy - 1) {
-                for x in cx.saturating_sub(1)..=(cx + 1).min(gx - 1) {
-                    for &a in &grid[gidx(x, y, z)] {
-                        let d2 = (p - centers[a as usize]).length_squared();
-                        if d2 < qr2 {
-                            let win = 1.0 - d2 / qr2;
-                            let w = win * win / (d2 + soft2);
-                            let cc = rgb[a as usize];
-                            acc[0] += w * cc[0];
-                            acc[1] += w * cc[1];
-                            acc[2] += w * cc[2];
-                            wsum += w;
-                        }
-                    }
-                }
+    if normal_iters > 0 {
+        let mut nrm: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
+        smooth_attr(&mut nrm, &mesh.indices, normal_iters);
+        for (v, nn) in mesh.vertices.iter_mut().zip(&nrm) {
+            let g = Vec3::from_array(*nn).normalize_or_zero();
+            if g != Vec3::ZERO {
+                v.normal = [g.x, g.y, g.z];
             }
         }
-        if wsum > 0.0 {
-            let q = |k: usize| (acc[k] / wsum).round().clamp(0.0, 255.0) as u32;
-            v.color = q(0) | (q(1) << 8) | (q(2) << 16) | (0xff << 24);
+    }
+}
+
+/// One-ring averaging of a per-vertex `vec3` attribute, `iters` passes; neighbors are
+/// gathered from triangle edges. The surface is closed (every edge shared by two
+/// triangles), so each neighbor is counted exactly twice — a uniform weighting.
+/// Scratch buffers are reused across passes.
+fn smooth_attr(attr: &mut [[f32; 3]], indices: &[u32], iters: usize) {
+    let n = attr.len();
+    let mut sum = vec![[0.0f32; 3]; n];
+    let mut cnt = vec![0u32; n];
+    for _ in 0..iters {
+        sum.iter_mut().for_each(|s| *s = [0.0; 3]);
+        cnt.iter_mut().for_each(|c| *c = 0);
+        for tri in indices.chunks_exact(3) {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            // Each vertex accumulates its two triangle-mates.
+            for &(i, j) in &[(a, b), (a, c), (b, a), (b, c), (c, a), (c, b)] {
+                sum[i][0] += attr[j][0];
+                sum[i][1] += attr[j][1];
+                sum[i][2] += attr[j][2];
+                cnt[i] += 1;
+            }
+        }
+        for v in 0..n {
+            if cnt[v] > 0 {
+                let inv = 1.0 / cnt[v] as f32;
+                attr[v] = [sum[v][0] * inv, sum[v][1] * inv, sum[v][2] * inv];
+            }
         }
     }
 }
@@ -385,9 +384,16 @@ fn dt_1d(f: &[f32]) -> Vec<f32> {
 
 /// Naive Surface Nets: one vertex per cell straddling `field = 0`, placed at the
 /// average of the cell's edge crossings; quads connect cells across each straddling
-/// grid edge. Watertight by construction. Normals = −∇field; per-vertex color is
-/// filled in afterwards by [`color_vertices`].
-fn surface_nets(field: &[f32], dims: [usize; 3], origin: Vec3, h: f32) -> MeshData {
+/// grid edge. Watertight by construction. Normals = −∇field; each vertex is seeded
+/// with its nearest atom's color (later Laplacian-smoothed by [`laplacian_smooth`]).
+fn surface_nets(
+    field: &[f32],
+    nearest: &[u32],
+    colors: &[u32],
+    dims: [usize; 3],
+    origin: Vec3,
+    h: f32,
+) -> MeshData {
     let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
     // Cell (x,y,z) spans corners x..x+1 etc.; (nx-1)×(ny-1)×(nz-1) cells.
@@ -459,11 +465,18 @@ fn surface_nets(field: &[f32], dims: [usize; 3], origin: Vec3, h: f32) -> MeshDa
                 let gy = vgrid.y.round() as usize;
                 let gz = vgrid.z.round() as usize;
                 let normal = -field_gradient(field, dims, gx, gy, gz);
+                let ni = idx(gx.min(nx - 1), gy.min(ny - 1), gz.min(nz - 1));
+                let aid = nearest[ni];
+                let color = if aid != u32::MAX {
+                    colors.get(aid as usize).copied().unwrap_or(0xffff_ffff)
+                } else {
+                    0xffff_ffff
+                };
                 cell_vert[cidx(x, y, z)] = vertices.len() as u32;
                 vertices.push(MeshVertex {
                     pos: [pos_world.x, pos_world.y, pos_world.z],
                     normal: [normal.x, normal.y, normal.z],
-                    color: 0, // filled in by color_vertices()
+                    color,
                     mat: 0,
                 });
             }

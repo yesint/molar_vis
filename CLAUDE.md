@@ -361,10 +361,13 @@ History labels via `describe_change` ("edit selection", "change coloring",
   outside voxel = `dist(x, solvent)` → isosurface at `dist = probe` (= morphological closing of
   the vdW balls by the probe) via **Surface Nets** (dual marching-cubes: one vertex per
   straddling cell → watertight by construction, smooth, no 256-entry tables). Per-vertex normal
-  = −∇field; **color = distance-weighted blend of nearby atoms** (`color_vertices`: a uniform
-  spatial grid of atom centers + a windowed inverse-distance kernel over the ~few nearest atoms —
-  single nearest-atom assignment made hard Voronoi-cell patches, blending makes the boundaries
-  smooth gradients; uniform color e.g. `Solid` short-circuits). `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
+  = −∇field; color seeded from the nearest atom, then **Laplacian-smoothed along the mesh**
+  (`laplacian_smooth`/`smooth_attr`: 1-ring averaging over triangle edges — topology-aware, so it
+  blends *along* the surface and doesn't bleed across a crevice like a 3-D distance blend would).
+  Hard nearest-atom Voronoi patches → smooth gradients; the gradient-sampled **normals get a light
+  Laplacian pass too** (de-facets the per-cell nearest-node gradient, then renormalized). Iteration
+  counts scale with grid resolution (∝(1/h)²) so the physical smoothing distance stays ~constant;
+  uniform color (`Solid`) skips the color pass. `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
   32M (auto-coarsen + `log::warn`). A **light separable [1,2,1] blur of the distance field**
   before Surface Nets (`smoothing` passes, default 2) removes the binary-occupancy voxel
   staircase so both the surface and its gradient-derived normals come out smooth. Per-rep
