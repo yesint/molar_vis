@@ -304,6 +304,17 @@ fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMeth
                 Stroke::NONE,
             ));
         }
+        ColorMethod::Solid(c) => {
+            // A filled swatch of the chosen color, with a subtle border.
+            let sw = rect.shrink(2.0);
+            painter.rect_filled(sw, 2.0, rgb4(c));
+            painter.rect_stroke(
+                sw,
+                2.0,
+                Stroke::new(1.0, Color32::from_gray(90)),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
 }
 
@@ -328,17 +339,37 @@ fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool) -> bool 
 }
 
 /// A drawn color-scheme icon + label button that opens a dropdown of options.
+/// The `Solid` scheme additionally shows an egui color picker so the user can
+/// choose any RGB color (changes are undoable like any other coloring change).
 fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     let method = rep.color;
     let resp = picker_button(ui, method.label(), |p, r| paint_color_icon(p, r, method));
 
     egui::Popup::menu(&resp).show(|ui| {
         for method in ColorMethod::ALL {
-            if color_option(ui, method, method == rep.color) {
-                rep.color = method;
-                rep.geom_dirty = true;
-                ui.close();
+            if color_option(ui, method, method.same_kind(rep.color)) {
+                // Switching *to* Solid keeps any existing solid color; other
+                // schemes are selected as-is. (Don't close — let the user tweak
+                // the Solid color in the picker below without reopening.)
+                if !(matches!(method, ColorMethod::Solid(_))
+                    && matches!(rep.color, ColorMethod::Solid(_)))
+                {
+                    rep.color = method;
+                    rep.geom_dirty = true;
+                }
             }
+        }
+        // When the Solid scheme is active, edit its exact color in place.
+        if let ColorMethod::Solid(rgba) = &mut rep.color {
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Color");
+                let mut c = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
+                if ui.color_edit_button_srgba(&mut c).changed() {
+                    *rgba = [c.r(), c.g(), c.b(), 255];
+                    rep.geom_dirty = true;
+                }
+            });
         }
     });
 }
@@ -773,6 +804,7 @@ impl App {
                 "index" => Some(ColorMethod::Index),
                 "beta" => Some(ColorMethod::Beta),
                 "secstruct" | "structure" | "ss" => Some(ColorMethod::SecStruct),
+                "solid" => Some(ColorMethod::Solid(crate::color::DEFAULT_SOLID)),
                 _ => None,
             }
         }) {
@@ -1897,6 +1929,7 @@ impl App {
                     proj,
                     self.camera.is_perspective(),
                     self.camera.cue_uniform(),
+                    self.camera.eye_depth_range(),
                     &self.scene,
                 );
                 self.last_render_camera = Some(self.camera);

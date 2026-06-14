@@ -21,6 +21,10 @@ pub struct CameraUniform {
     /// Background color geometry fades toward under depth cueing (matches the
     /// scene clear color so distant geometry dissolves into the background).
     pub fog_color: [f32; 4],
+    /// Eye-space depth range `[front, back, _, _]` (positive distances) bracketing
+    /// the molecule. The weighted-blended OIT shaders normalize each fragment's
+    /// eye-space depth across this range so nearer transparent layers dominate.
+    pub depth_range: [f32; 4],
 }
 
 impl CameraUniform {
@@ -31,6 +35,7 @@ impl CameraUniform {
         viewport: [f32; 2],
         cue: [f32; 4],
         fog_color: [f32; 4],
+        depth_range: [f32; 2],
     ) -> Self {
         Self {
             view: view.to_cols_array_2d(),
@@ -38,6 +43,7 @@ impl CameraUniform {
             params: [if perspective { 1.0 } else { 0.0 }, viewport[0], viewport[1], 0.0],
             cue,
             fog_color,
+            depth_range: [depth_range[0], depth_range[1], 0.0, 0.0],
         }
     }
 }

@@ -9,6 +9,7 @@ struct Camera {
     params: vec4<f32>, // x: 1.0 = perspective; yz: viewport size in pixels
     cue: vec4<f32>,    // depth cue: near, far, strength, _
     fog_color: vec4<f32>,
+    depth_range: vec4<f32>, // OIT: eye-space [front, back, _, _]
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -83,7 +84,32 @@ fn vs_main(@builtin(vertex_index) vidx: u32, seg: VsIn) -> VsOut {
     return out;
 }
 
+// Weighted-blended OIT weight, biased strongly toward the camera using linear
+// eye-space depth across the molecule's extent (see sphere.wgsl for rationale).
+fn oit_weight(eye_z: f32, a: f32) -> f32 {
+    let d = -eye_z;
+    let t = clamp((d - camera.depth_range.x) / max(camera.depth_range.y - camera.depth_range.x, 1e-6), 0.0, 1.0);
+    let bias = pow(1.0 - t, 3.0);
+    return clamp(a * (1.0e-2 + bias * 1.0e3), 1.0e-3, 1.0e3);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(apply_fog(in.color.rgb, in.eye_z), in.color.a);
+}
+
+struct OitOut {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: f32,
+};
+
+@fragment
+fn fs_oit(in: VsOut) -> OitOut {
+    let rgb = apply_fog(in.color.rgb, in.eye_z);
+    let a = in.color.a;
+    let w = oit_weight(in.eye_z, a);
+    var out: OitOut;
+    out.accum = vec4<f32>(rgb * a, a) * w;
+    out.reveal = a;
+    return out;
 }

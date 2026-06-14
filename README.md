@@ -68,15 +68,17 @@ atoms. (molar's PowerSASA backend also exposes exact SASA areas + analytic SAS/S
 
 **Materials** — eight VMD-style presets (Opaque, Transparent, Glass, Translucent, Ghost,
 Glossy, Diffuse, Metal): per-rep ambient/diffuse/specular/shininess (Blinn-Phong) plus
-**opacity**, with a two-phase transparent render pass.
+**opacity**, with **order-independent transparency** (weighted-blended OIT) so overlapping
+translucent surfaces blend correctly without sorting.
 
 **Trajectories** (native) — load multi-frame trajectories (xtc/trr/dcd/gro/multi-MODEL pdb)
 into a molecule with a VMD-style playback bar (first / step / play-pause / step / last,
 editable frame field, loop, fps) and a frame slider; sync or background-async loading.
 Frame changes are zero-copy (rendered by reference) with incremental GPU updates.
 
-**Coloring schemes** — Element (CPK), Chain, ResID, ResName, Index, B-factor, and
-Secondary structure, each with a drawn descriptive icon in the picker.
+**Coloring schemes** — Element (CPK), Chain, ResID, ResName, Index, B-factor,
+Secondary structure, and **Solid** (a custom color you pick), each with a drawn descriptive
+icon in the picker.
 
 **Selections** — molar's VMD/Pteros-style selection language: `protein`, `backbone`,
 `water`, `name CA`, `resid 1:50`, `chain A`, `within 5.0 of ...`, and much more.
@@ -196,7 +198,7 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 - Load one or more molecules; multi-molecule / multi-representation scenes.
 - All six representations (Lines, Licorice, Ball-and-Stick, VDW, Cartoon, Surface).
 - Every coloring scheme; the full molar selection language.
-- Eight materials incl. transparency; perspective/orthographic; depth cueing.
+- Eight materials incl. order-independent transparency; perspective/orthographic; depth cueing.
 - **Trajectory** loading + VMD-style playback (native).
 - Undo/redo; drag-reorder reps; zoom-to-selection/molecule; periodic-box wireframe.
 
@@ -204,8 +206,7 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 - **WebAssembly / browser app — incomplete.** The core compiles to wasm and `molar` was
   made wasm-friendly, but there is no runnable in-browser build yet (no web entry point,
   file picker, or streaming worker — see [WebAssembly](#webassembly--partial--in-progress)).
-- Smooth-surface tuning, atom picking / lasso selection, and custom solid colors are
-  planned.
+- Smooth-surface tuning and atom picking / lasso selection are planned.
 
 This is a young project under active development; expect rough edges.
 

@@ -108,6 +108,18 @@ impl Camera {
         [near, far, strength, 0.0]
     }
 
+    /// Eye-space distance range `[front, back]` (positive, away from the camera)
+    /// bracketing the molecule's bounding sphere. Used by the weighted-blended OIT
+    /// shaders to normalize per-fragment depth across the molecule's own extent —
+    /// the molecule occupies a razor-thin, non-linear slice of NDC depth, so the
+    /// raw window depth can't discriminate transparent layers; linear eye-space
+    /// depth across `[front, back]` can, letting near layers dominate the blend.
+    pub fn eye_depth_range(&self) -> [f32; 2] {
+        let front = (self.distance - self.scene_radius).max(1e-3);
+        let back = (self.distance + self.scene_radius).max(front + 1e-3);
+        [front, back]
+    }
+
     fn right(&self) -> Vec3 {
         self.orientation * Vec3::X
     }

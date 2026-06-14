@@ -52,13 +52,17 @@ impl SphereInstance {
 
 /// Build the sphere impostor pipeline. `camera_bgl` is bind group 0 (the camera
 /// uniform); the billboard quad vertices are generated from `vertex_index`, so
-/// the only vertex buffer is the per-instance buffer.
+/// the only vertex buffer is the per-instance buffer. `targets`/`depth_write`/
+/// `fs_entry` are supplied by the caller so the same geometry serves both the
+/// opaque pass (single color target, depth-write on, `fs_main`) and the
+/// weighted-blended OIT pass (accum+reveal targets, depth-write off, `fs_oit`).
 pub fn build_pipeline(
     device: &wgpu::Device,
-    color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
-    transparent: bool,
+    targets: &[Option<wgpu::ColorTargetState>],
+    depth_write: bool,
+    fs_entry: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sphere-shader"),
@@ -87,7 +91,7 @@ pub fn build_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: depth_format,
-            depth_write_enabled: Some(!transparent),
+            depth_write_enabled: Some(depth_write),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -95,12 +99,8 @@ pub fn build_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            entry_point: Some(fs_entry),
+            targets,
             compilation_options: Default::default(),
         }),
         multiview_mask: None,

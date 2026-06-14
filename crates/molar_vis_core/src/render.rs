@@ -30,50 +30,123 @@ use crate::scene::Scene;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Weighted-blended OIT targets: `accum` holds the running sum of weighted
+/// premultiplied color (RGB) + weight (A); `reveal` holds the running product of
+/// `1 - alpha`. Both are float so the accumulation doesn't clamp/quantize.
+const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+
 /// Scene background. Used both as the render-pass clear color and as the depth-cue
 /// fog color, so distant geometry dissolves seamlessly into the background.
 const BG: [f32; 4] = [0.02, 0.02, 0.05, 1.0];
 
-/// Offscreen render targets, recreated when the viewport size changes.
+/// Color-target descriptors for the opaque pass: a single alpha-blended target.
+fn opaque_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
+    vec![Some(wgpu::ColorTargetState {
+        format: color_format,
+        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        write_mask: wgpu::ColorWrites::ALL,
+    })]
+}
+
+/// Color-target descriptors for the weighted-blended OIT pass: `accum` is purely
+/// additive, `reveal` multiplies the destination by `1 - src` (revealage).
+fn oit_targets() -> Vec<Option<wgpu::ColorTargetState>> {
+    let add = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    };
+    let mul = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+        operation: wgpu::BlendOperation::Add,
+    };
+    vec![
+        Some(wgpu::ColorTargetState {
+            format: ACCUM_FORMAT,
+            blend: Some(wgpu::BlendState { color: add, alpha: add }),
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        Some(wgpu::ColorTargetState {
+            format: REVEAL_FORMAT,
+            blend: Some(wgpu::BlendState { color: mul, alpha: mul }),
+            write_mask: wgpu::ColorWrites::RED,
+        }),
+    ]
+}
+
+/// Offscreen render targets, recreated when the viewport size changes. Besides
+/// the composited color + depth, this holds the weighted-blended OIT `accum` and
+/// `reveal` targets and a bind group exposing them to the composite pass.
 struct Targets {
     size: [u32; 2],
     color_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    accum_view: wgpu::TextureView,
+    reveal_view: wgpu::TextureView,
+    oit_bind_group: wgpu::BindGroup,
     _color_tex: wgpu::Texture,
     _depth_tex: wgpu::Texture,
 }
 
 impl Targets {
-    fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, size: [u32; 2]) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        oit_bgl: &wgpu::BindGroupLayout,
+        size: [u32; 2],
+    ) -> Self {
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
             depth_or_array_layers: 1,
         };
-        let color_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scene-color"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: color_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        let make = |label: &str, format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let attach_sample =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let color_tex = make("scene-color", color_format, attach_sample);
+        let depth_tex = make("scene-depth", DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let accum_tex = make("oit-accum", ACCUM_FORMAT, attach_sample);
+        let reveal_tex = make("oit-reveal", REVEAL_FORMAT, attach_sample);
+
+        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+        let accum_view = view(&accum_tex);
+        let reveal_view = view(&reveal_tex);
+
+        let oit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("oit-composite-bg"),
+            layout: oit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&accum_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&reveal_view),
+                },
+            ],
         });
-        let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scene-depth"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+
         Self {
             size,
-            color_view: color_tex.create_view(&wgpu::TextureViewDescriptor::default()),
-            depth_view: depth_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+            color_view: view(&color_tex),
+            depth_view: view(&depth_tex),
+            accum_view,
+            reveal_view,
+            oit_bind_group,
             _color_tex: color_tex,
             _depth_tex: depth_tex,
         }
@@ -184,6 +257,50 @@ fn update_mesh(
     }
 }
 
+/// Build the OIT resolve pipeline: a vertex-buffer-less fullscreen triangle that
+/// samples the accum + reveal targets (bind group 0) and blends the resolved
+/// transparent color over the opaque scene color with `(SrcAlpha, 1-SrcAlpha)`.
+fn build_composite_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    oit_bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("oit-composite-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("render/shaders/oit_composite.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("oit-composite-layout"),
+        bind_group_layouts: &[Some(oit_bgl)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("oit-composite-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 pub struct SceneRenderer {
     color_format: wgpu::TextureFormat,
     targets: Targets,
@@ -192,13 +309,16 @@ pub struct SceneRenderer {
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
-    // Each geometry has an opaque pipeline (depth-write on) and a transparent
-    // one (depth-write off, so blended fragments don't cull each other — which
-    // otherwise stripes the cartoon mesh). All pipelines alpha-blend.
+    // Each geometry has an opaque pipeline `[0]` (single alpha-blended target,
+    // depth-write on) and a weighted-blended OIT pipeline `[1]` (accum+reveal
+    // targets, depth-write off, depth-test on). The OIT pipelines are resolved
+    // into the color target by `composite_pipeline` after the transparent pass.
     sphere_pipeline: [wgpu::RenderPipeline; 2],
     cylinder_pipeline: [wgpu::RenderPipeline; 2],
     line_pipeline: [wgpu::RenderPipeline; 2],
     mesh_pipeline: [wgpu::RenderPipeline; 2],
+    oit_bgl: wgpu::BindGroupLayout,
+    composite_pipeline: wgpu::RenderPipeline,
 }
 
 impl SceneRenderer {
@@ -235,26 +355,60 @@ impl SceneRenderer {
             }],
         });
 
-        // [opaque (depth-write on), transparent (depth-write off)].
+        // Opaque pass: single alpha-blended target, depth-write on, `fs_main`.
+        // OIT pass: accum+reveal targets, depth-write off (test on), `fs_oit`.
         let f = color_format;
-        let sphere_pipeline = [
-            sphere::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
-            sphere::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
-        ];
-        let cylinder_pipeline = [
-            cylinder::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
-            cylinder::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
-        ];
-        let line_pipeline = [
-            line::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
-            line::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
-        ];
-        let mesh_pipeline = [
-            mesh::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
-            mesh::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
-        ];
+        let opaque_t = opaque_targets(f);
+        let oit_t = oit_targets();
+        let pair = |opaque: wgpu::RenderPipeline, oit: wgpu::RenderPipeline| [opaque, oit];
+        let sphere_pipeline = pair(
+            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
+            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
+        );
+        let cylinder_pipeline = pair(
+            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
+            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
+        );
+        let line_pipeline = pair(
+            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
+            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
+        );
+        let mesh_pipeline = pair(
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
+        );
 
-        let targets = Targets::new(device, color_format, [1, 1]);
+        // OIT resolve: a fullscreen pass that reads the accum + reveal targets
+        // (bind group 0 here, *not* the camera) and blends the order-independent
+        // transparent color over the opaque scene color.
+        let oit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("oit-composite-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let composite_pipeline = build_composite_pipeline(device, f, &oit_bgl);
+
+        let targets = Targets::new(device, color_format, &oit_bgl, [1, 1]);
         let egui_texture = rs.renderer.write().register_native_texture(
             device,
             &targets.color_view,
@@ -271,6 +425,8 @@ impl SceneRenderer {
             cylinder_pipeline,
             line_pipeline,
             mesh_pipeline,
+            oit_bgl,
+            composite_pipeline,
         }
     }
 
@@ -312,10 +468,11 @@ impl SceneRenderer {
         proj: Mat4,
         perspective: bool,
         cue: [f32; 4],
+        depth_range: [f32; 2],
         scene: &Scene,
     ) -> TextureId {
         if size_px != self.targets.size {
-            self.targets = Targets::new(&rs.device, self.color_format, size_px);
+            self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, size_px);
             rs.renderer.write().update_egui_texture_from_wgpu_texture(
                 &rs.device,
                 &self.targets.color_view,
@@ -331,18 +488,30 @@ impl SceneRenderer {
             [size_px[0] as f32, size_px[1] as f32],
             cue,
             BG,
+            depth_range,
         );
         rs.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
+
+        // Skip the OIT + composite passes entirely when nothing transparent is
+        // visible (idle scenes pay nothing for the transparency machinery).
+        let has_transparent = scene.molecules.iter().any(|m| {
+            m.visible
+                && m.reps
+                    .iter()
+                    .any(|r| r.visible && r.material.is_transparent())
+        });
 
         let mut encoder = rs
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("scene-encoder"),
             });
+
+        // Pass 1 — opaque geometry into the color + depth targets.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene-pass"),
+                label: Some("opaque-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.targets.color_view,
                     resolve_target: None,
@@ -369,58 +538,126 @@ impl SceneRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            self.draw_reps(&mut pass, scene, false);
+        }
 
-            // Two phases for transparency: opaque representations (which write
-            // depth) first, then transparent ones blended over them. All pipelines
-            // alpha-blend; opaque geometry has alpha 1 so blending is a no-op.
-            for transparent_phase in [false, true] {
-                for mol in &scene.molecules {
-                    if !mol.visible {
-                        continue;
-                    }
-                    for rep in &mol.reps {
-                        if !rep.visible || rep.material.is_transparent() != transparent_phase {
-                            continue;
-                        }
-                        let i = transparent_phase as usize;
-                        if let Some(s) = &rep.gpu.spheres {
-                            pass.set_pipeline(&self.sphere_pipeline[i]);
-                            pass.set_vertex_buffer(0, s.buffer.slice(..));
-                            pass.draw(0..4, 0..s.count);
-                        }
-                        if let Some(c) = &rep.gpu.cylinders {
-                            pass.set_pipeline(&self.cylinder_pipeline[i]);
-                            pass.set_vertex_buffer(0, c.buffer.slice(..));
-                            pass.draw(0..4, 0..c.count);
-                        }
-                        if let Some(l) = &rep.gpu.lines {
-                            // Instanced fat-line quads: one segment (2 verts) per instance.
-                            pass.set_pipeline(&self.line_pipeline[i]);
-                            pass.set_vertex_buffer(0, l.buffer.slice(..));
-                            pass.draw(0..4, 0..l.count / 2);
-                        }
-                        if let Some(m) = &rep.gpu.mesh {
-                            pass.set_pipeline(&self.mesh_pipeline[i]);
-                            pass.set_vertex_buffer(0, m.vertices.slice(..));
-                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                            pass.draw_indexed(0..m.index_count, 0, 0..1);
-                        }
-                    }
-                    // Periodic-box wireframe (opaque grey) — draw in the opaque phase.
-                    if !transparent_phase && mol.show_box {
-                        if let Some(l) = &mol.box_gpu.lines {
-                            pass.set_pipeline(&self.line_pipeline[0]);
-                            pass.set_vertex_buffer(0, l.buffer.slice(..));
-                            pass.draw(0..4, 0..l.count / 2);
-                        }
-                    }
-                }
+        // Pass 2 — transparent geometry into the weighted-blended OIT targets
+        // (accum cleared to 0, reveal to 1). Depth-tests against the opaque depth,
+        // but writes no depth, so transparent fragments don't cull each other.
+        if has_transparent {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("oit-pass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.targets.accum_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.targets.reveal_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.targets.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                self.draw_reps(&mut pass, scene, true);
+            }
+
+            // Pass 3 — resolve the OIT targets over the opaque color.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("oit-composite-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.composite_pipeline);
+                pass.set_bind_group(0, &self.targets.oit_bind_group, &[]);
+                pass.draw(0..3, 0..1);
             }
         }
+
         rs.queue.submit(std::iter::once(encoder.finish()));
 
         self.egui_texture
+    }
+
+    /// Draw every visible representation matching the requested transparency into
+    /// the active pass, using each geometry's opaque (`transparent == false`) or
+    /// OIT (`true`) pipeline. The periodic-box wireframe is opaque-only.
+    fn draw_reps(&self, pass: &mut wgpu::RenderPass, scene: &Scene, transparent: bool) {
+        let i = transparent as usize;
+        for mol in &scene.molecules {
+            if !mol.visible {
+                continue;
+            }
+            for rep in &mol.reps {
+                if !rep.visible || rep.material.is_transparent() != transparent {
+                    continue;
+                }
+                if let Some(s) = &rep.gpu.spheres {
+                    pass.set_pipeline(&self.sphere_pipeline[i]);
+                    pass.set_vertex_buffer(0, s.buffer.slice(..));
+                    pass.draw(0..4, 0..s.count);
+                }
+                if let Some(c) = &rep.gpu.cylinders {
+                    pass.set_pipeline(&self.cylinder_pipeline[i]);
+                    pass.set_vertex_buffer(0, c.buffer.slice(..));
+                    pass.draw(0..4, 0..c.count);
+                }
+                if let Some(l) = &rep.gpu.lines {
+                    // Instanced fat-line quads: one segment (2 verts) per instance.
+                    pass.set_pipeline(&self.line_pipeline[i]);
+                    pass.set_vertex_buffer(0, l.buffer.slice(..));
+                    pass.draw(0..4, 0..l.count / 2);
+                }
+                if let Some(m) = &rep.gpu.mesh {
+                    pass.set_pipeline(&self.mesh_pipeline[i]);
+                    pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                }
+            }
+            // Periodic-box wireframe (opaque grey).
+            if !transparent && mol.show_box {
+                if let Some(l) = &mol.box_gpu.lines {
+                    pass.set_pipeline(&self.line_pipeline[0]);
+                    pass.set_vertex_buffer(0, l.buffer.slice(..));
+                    pass.draw(0..4, 0..l.count / 2);
+                }
+            }
+        }
     }
 }

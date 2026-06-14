@@ -62,10 +62,11 @@ impl LineVertex {
 
 pub fn build_pipeline(
     device: &wgpu::Device,
-    color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
-    transparent: bool,
+    targets: &[Option<wgpu::ColorTargetState>],
+    depth_write: bool,
+    fs_entry: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("line-shader"),
@@ -94,7 +95,7 @@ pub fn build_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: depth_format,
-            depth_write_enabled: Some(!transparent),
+            depth_write_enabled: Some(depth_write),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -102,12 +103,8 @@ pub fn build_pipeline(
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            entry_point: Some(fs_entry),
+            targets,
             compilation_options: Default::default(),
         }),
         multiview_mask: None,

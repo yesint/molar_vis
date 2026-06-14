@@ -101,13 +101,16 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `data.rs` + `data/loader.rs` (`RawMolecule`: System + guessed bonds + bbox; positions/
   radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter)
   + `data/traj_loader.rs` (**native-only**, `#[cfg(not(wasm))]`: `read_frames_sync`/`spawn_async`).
-- `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A),
-  camera UBO (bind group 0), sphere/cylinder/line/**mesh** pipelines, `RepGpu` (per-rep
-  buffers; mesh = vertex + u32 index buffer; buffers carry `COPY_DST`), `upload()` (recreate
+- `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A) **plus
+  Weighted-Blended OIT `accum` (RGBA16F) + `reveal` (R16F) targets** (in `Targets`, with an
+  `oit_bind_group` for the resolve), camera UBO (bind group 0), sphere/cylinder/line/**mesh**
+  pipelines (each `[opaque, oit]`) + a fullscreen **`composite_pipeline`** (`oit_bgl`), `RepGpu`
+  (per-rep buffers; mesh = vertex + u32 index buffer; buffers carry `COPY_DST`), `upload()` (recreate
   buffers), **`update()`** (in-place `write_buffer` when element counts match, for coords-only
-  frame changes), `render_scene()`, `texture_id()`.
-  Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl`.
-  The cartoon mesh writes real depth and interleaves correctly with the impostors.
+  frame changes), `render_scene()` (3-pass: opaque → OIT → composite; `draw_reps` shared), `texture_id()`.
+  Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl` (incl.
+  `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit`). The cartoon mesh writes real depth
+  and interleaves correctly with the impostors.
 
 ## Key architecture
 
@@ -248,7 +251,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
   `ColorMethod` (Element = CPK dots, Chain = interlocking colored links, ResID =
   backbone-with-residues diagram, ResName = "ALA" on rainbow, Index = "123" colored digits,
-  Beta = "B" on rainbow).
+  Beta = "B" on rainbow, **Solid = a filled swatch of the chosen color**). The `Solid` row, when
+  active, shows a `color_edit_button_srgba` "Color" row below the list to pick the exact RGB.
 
 History labels via `describe_change` ("edit selection", "change coloring",
 "reorder representations", …). FPS in the footer.
@@ -320,12 +324,23 @@ History labels via `describe_change` ("edit selection", "change coloring",
   Translucent/Ghost/Glossy/Diffuse/Metal; each `params()` → ambient/diffuse/specular/shininess/
   opacity) + per-rep `material` (in `EditState`) + a **material dropdown** in row 2 (next to color,
   `material_picker`/`paint_material_icon`).
-  - **Transparency**: `geometry::build` folds the material opacity into each element's color alpha;
-    all shaders output it; **each geometry has two pipelines** (`[opaque, transparent]`) — both
-    alpha-blend, but the transparent one has **depth-write off** (so blended fragments don't cull
-    each other, which otherwise *stripes* the cartoon mesh). `render_scene` runs two phases: opaque
-    reps (write depth), then transparent reps (test depth, no write). Order-dependent within the
-    transparent set (no sort/OIT yet).
+  - **Transparency (Weighted-Blended OIT)**: `geometry::build` folds the material opacity into each
+    element's color alpha; all shaders output it. **Each geometry has two pipelines** `[opaque, oit]`:
+    `[0]` writes a single alpha-blended color target + depth (`fs_main`); `[1]` is the OIT pipeline —
+    depth-test on, **depth-write off**, output to two targets via `fs_oit`. `render_scene` is **three
+    passes** (skipped past pass 1 when nothing transparent is visible): (1) opaque → color+depth; (2)
+    transparent → the **WBOIT** `accum` (RGBA16F, additive: Σ premultiplied color·weight) + `reveal`
+    (R16F, multiplicative `dst*(1-α)`) targets, depth-tested against the opaque depth; (3) a fullscreen
+    `oit_composite.wgsl` resolve blends `accum.rgb/accum.a` over the opaque color with `(SrcAlpha,
+    1-SrcAlpha)` and `1-reveal` (McGuire & Bavoil). **Order-independent — no sort.** The OIT weight
+    (`oit_weight` in each shader) biases strongly toward the camera using **linear eye-space depth
+    normalized across the molecule's own front→back extent** (`camera.depth_range`, from
+    `Camera::eye_depth_range`): the molecule occupies a razor-thin, non-linear slice of *window* depth,
+    so naive NDC-depth weighting saturates and the resolve degenerates to a washed-out flat average of
+    all layers — linear eye-space depth lets near layers dominate. Dense transparent VDW is still an
+    inherently busy translucent blob (~30 overlapping crisp layers); single/few-layer cases (surface,
+    cartoon) are clean. Impostor `fs_oit` still writes analytic `frag_depth` so OIT depth-tests against
+    opaque geometry.
   - **Lighting**: `Material::pack_lighting()` packs the four coeffs into a `u32`
     (`ambient | diffuse<<8 | specular<<16 | shininess<<24`); `geometry::build` stamps it onto every
     sphere/cylinder/mesh-vertex's new `mat: u32` field (lines carry opacity only — unlit). The lit
@@ -334,7 +349,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
     white highlight, headlight `L=(0.3,0.4,1)`, view dir to eye (origin perspective / +z ortho).
     The cartoon mesh flips its normal to face the eye first (two-sided open ribbons). Glossy=tight
     highlight, Diffuse=matte (specular 0), Metal=dark+broad highlight — all verified distinct.
-  - **TODO**: consider OIT for multi-layer transparency.
+  - ✅ **OIT** (was TODO): replaced the order-dependent two-phase blend with Weighted-Blended OIT
+    (see *Transparency* above) — multi-layer transparency is now order-independent.
 - ✅ M12 **Molecular surface (SES)** — `RepKind::Surface` + `RepParams::Surface { probe, quality }`,
   built in `geometry/surface.rs` as the **solvent-excluded (rolling-probe) surface via a grid
   distance-field + Surface Nets** (the robust PyMOL/Chimera/EDTSurf "distance maps + carving"
@@ -360,8 +376,11 @@ History labels via `describe_change` ("edit selection", "change coloring",
   a **tabbed** panel **[Style] / [Traj] / [Periodic]** (`SettingsTab`); selection errors shown
   under the field; VMD mouse nav extended (roll on Shift+LMB, dolly on Shift+RMB) and
   zoom-to-fit fills ~90%. Crate is **installable** from GitHub git-deps (no local paths/patch).
-- ⏳ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` + an egui color-picker
-  submenu in the color dropdown (undoable via `RepState`).
+- ✅ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` (`color.rs`; `DEFAULT_SOLID`
+  orange, `same_kind` for picker highlight, `Colorizer` returns it verbatim) + an egui color-picker
+  submenu in the color dropdown (`color_picker`: a `Solid` row with a swatch icon; when active, a
+  `color_edit_button_srgba` "Color" row below edits the exact RGB). Undoable for free — `RepState`
+  already snapshots `rep.color` and history compares `ColorMethod` generically.
 - ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs
   impostors) and lasso-select (polygon over projected positions) → feed a selection; hooks into
   `draw_viewport` input.

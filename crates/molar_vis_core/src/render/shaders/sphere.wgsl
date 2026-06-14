@@ -9,6 +9,7 @@ struct Camera {
     params: vec4<f32>, // params.x: 1.0 = perspective, 0.0 = orthographic
     cue: vec4<f32>,    // depth cue: near, far, strength, _
     fog_color: vec4<f32>,
+    depth_range: vec4<f32>, // OIT: eye-space [front, back, _, _]
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -67,6 +68,19 @@ fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: 
     return base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
 }
 
+// Weighted-blended OIT weight: bias the per-fragment contribution strongly toward
+// the camera so the nearest transparent layers dominate the blend (otherwise a
+// deep stack of equal-weight layers averages to a washed-out mush). Uses *linear*
+// eye-space depth normalized across the molecule's own front→back extent, because
+// the molecule occupies a razor-thin, non-linear slice of window depth. `eye_z` is
+// the (negative) eye-space z; `a` the fragment opacity.
+fn oit_weight(eye_z: f32, a: f32) -> f32 {
+    let d = -eye_z; // eye-space distance, positive
+    let t = clamp((d - camera.depth_range.x) / max(camera.depth_range.y - camera.depth_range.x, 1e-6), 0.0, 1.0);
+    let bias = pow(1.0 - t, 3.0); // 1 at the front, 0 at the back
+    return clamp(a * (1.0e-2 + bias * 1.0e3), 1.0e-3, 1.0e3);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
     // Triangle-strip quad corners in [-1,1]^2.
@@ -99,8 +113,16 @@ struct FsOut {
     @builtin(frag_depth) depth: f32,
 };
 
-@fragment
-fn fs_main(in: VsOut) -> FsOut {
+// Result of ray-casting the impostor sphere: shaded (fogged) color, opacity and
+// the analytic [0,1] window depth. Misses `discard`.
+struct Hit {
+    color: vec3<f32>,
+    alpha: f32,
+    depth: f32,
+    eye_z: f32,
+};
+
+fn compute_hit(in: VsOut) -> Hit {
     // Perspective: ray from the eye (origin) through this fragment.
     // Orthographic: parallel rays along view -Z through this fragment's xy.
     var ro: vec3<f32>;
@@ -138,8 +160,33 @@ fn fs_main(in: VsOut) -> FsOut {
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-hit), camera.params.x > 0.5);
     let lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat));
 
+    return Hit(apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> FsOut {
+    let h = compute_hit(in);
     var out: FsOut;
-    out.depth = clip.z / clip.w;
-    out.color = vec4<f32>(apply_fog(lit, hit.z), in.color.a);
+    out.depth = h.depth;
+    out.color = vec4<f32>(h.color, h.alpha);
+    return out;
+}
+
+// Weighted-blended OIT: accumulate weighted premultiplied color and revealage.
+// Still writes analytic depth so the OIT pass depth-tests against opaque geometry.
+struct OitOut {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: f32,
+    @builtin(frag_depth) depth: f32,
+};
+
+@fragment
+fn fs_oit(in: VsOut) -> OitOut {
+    let h = compute_hit(in);
+    let w = oit_weight(h.eye_z, h.alpha);
+    var out: OitOut;
+    out.depth = h.depth;
+    out.accum = vec4<f32>(h.color * h.alpha, h.alpha) * w;
+    out.reveal = h.alpha;
     return out;
 }

@@ -113,10 +113,17 @@ pub enum ColorMethod {
     Index,
     Beta,
     SecStruct,
+    /// A single user-chosen RGBA color for the whole selection.
+    Solid([u8; 4]),
 }
 
+/// Default color for the `Solid` scheme when first selected (VMD-ish orange).
+pub const DEFAULT_SOLID: [u8; 4] = [255, 165, 0, 255];
+
 impl ColorMethod {
-    pub const ALL: [ColorMethod; 7] = [
+    /// The picker entries, in order. `Solid` carries [`DEFAULT_SOLID`] here; the
+    /// actual per-rep color is edited via the color-picker submenu.
+    pub const ALL: [ColorMethod; 8] = [
         ColorMethod::Element,
         ColorMethod::Chain,
         ColorMethod::ResId,
@@ -124,6 +131,7 @@ impl ColorMethod {
         ColorMethod::Index,
         ColorMethod::Beta,
         ColorMethod::SecStruct,
+        ColorMethod::Solid(DEFAULT_SOLID),
     ];
 
     pub fn label(self) -> &'static str {
@@ -135,12 +143,22 @@ impl ColorMethod {
             ColorMethod::Index => "Index",
             ColorMethod::Beta => "B-factor",
             ColorMethod::SecStruct => "Structure",
+            ColorMethod::Solid(_) => "Solid",
         }
     }
 
     /// Whether this scheme needs a DSSP pass (per-residue SS assignment).
     pub fn needs_ss(self) -> bool {
         matches!(self, ColorMethod::SecStruct)
+    }
+
+    /// Whether two methods are the *same kind* (ignoring a `Solid` color value),
+    /// used to highlight the active picker row even after the color is edited.
+    pub fn same_kind(self, other: ColorMethod) -> bool {
+        matches!(
+            (self, other),
+            (ColorMethod::Solid(_), ColorMethod::Solid(_))
+        ) || self == other
     }
 }
 
@@ -209,6 +227,7 @@ impl Colorizer {
                 .as_ref()
                 .and_then(|m| m.get(&atom.resindex).copied())
                 .unwrap_or([230, 230, 230, 255]),
+            ColorMethod::Solid(rgba) => rgba,
         };
         pack_rgba8(rgba)
     }
