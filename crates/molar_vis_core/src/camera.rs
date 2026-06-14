@@ -71,6 +71,19 @@ impl Camera {
         }
     }
 
+    /// Reframe to bring the bounding box `[min, max]` optimally into view —
+    /// recenter on it and set the zoom to fit its bounding sphere — while
+    /// **keeping** the current orientation, projection, and depth cue (a "zoom to
+    /// selection / focus" action, unlike [`frame_bbox`](Self::frame_bbox) which
+    /// resets the orientation).
+    pub fn focus_bbox(&mut self, min: Vec3, max: Vec3) {
+        let center = (min + max) * 0.5;
+        let radius = ((max - min).length() * 0.5).max(1e-3);
+        self.target = center;
+        self.scene_radius = radius;
+        self.distance = radius / (self.fov_y * 0.5).sin() * 1.3;
+    }
+
     pub fn is_perspective(&self) -> bool {
         matches!(self.projection, Projection::Perspective)
     }

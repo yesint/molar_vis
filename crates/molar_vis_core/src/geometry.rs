@@ -184,6 +184,46 @@ pub fn build(
     }
 }
 
+/// The 12 edges of the periodic box as a line list (24 vertices). The box is the
+/// parallelepiped spanned by its three lattice vectors from the origin (GROMACS
+/// convention). Drawn in a neutral grey.
+pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
+    let m = pbox.get_matrix();
+    // Columns of the box matrix are the three lattice vectors a, b, c.
+    let a = [m[(0, 0)], m[(1, 0)], m[(2, 0)]];
+    let b = [m[(0, 1)], m[(1, 1)], m[(2, 1)]];
+    let c = [m[(0, 2)], m[(1, 2)], m[(2, 2)]];
+    let corner = |i: f32, j: f32, k: f32| {
+        [
+            i * a[0] + j * b[0] + k * c[0],
+            i * a[1] + j * b[1] + k * c[1],
+            i * a[2] + j * b[2] + k * c[2],
+        ]
+    };
+    let color = crate::color::pack_rgba8([170, 170, 170, 255]);
+    // 12 edges as corner (i,j,k) pairs: bottom face, top face, then verticals.
+    const EDGES: [((f32, f32, f32), (f32, f32, f32)); 12] = [
+        ((0., 0., 0.), (1., 0., 0.)),
+        ((1., 0., 0.), (1., 1., 0.)),
+        ((1., 1., 0.), (0., 1., 0.)),
+        ((0., 1., 0.), (0., 0., 0.)),
+        ((0., 0., 1.), (1., 0., 1.)),
+        ((1., 0., 1.), (1., 1., 1.)),
+        ((1., 1., 1.), (0., 1., 1.)),
+        ((0., 1., 1.), (0., 0., 1.)),
+        ((0., 0., 0.), (0., 0., 1.)),
+        ((1., 0., 0.), (1., 0., 1.)),
+        ((1., 1., 0.), (1., 1., 1.)),
+        ((0., 1., 0.), (0., 1., 1.)),
+    ];
+    let mut v = Vec::with_capacity(24);
+    for ((i0, j0, k0), (i1, j1, k1)) in EDGES {
+        v.push(LineVertex { pos: corner(i0, j0, k0), color });
+        v.push(LineVertex { pos: corner(i1, j1, k1), color });
+    }
+    v
+}
+
 fn spheres(
     bound: &impl ParticleIterProvider,
     colorizer: &Colorizer,

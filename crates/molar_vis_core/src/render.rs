@@ -379,6 +379,14 @@ impl SceneRenderer {
                         pass.draw_indexed(0..m.index_count, 0, 0..1);
                     }
                 }
+                // Periodic-box wireframe (per molecule, drawn as plain lines).
+                if mol.show_box {
+                    if let Some(l) = &mol.box_gpu.lines {
+                        pass.set_pipeline(&self.line_pipeline);
+                        pass.set_vertex_buffer(0, l.buffer.slice(..));
+                        pass.draw(0..l.count, 0..1);
+                    }
+                }
             }
         }
         rs.queue.submit(std::iter::once(encoder.finish()));

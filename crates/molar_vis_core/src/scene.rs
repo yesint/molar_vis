@@ -147,6 +147,12 @@ pub struct Molecule {
     /// (then frame 0 is the structure coords; see [`Molecule::seed_frame0`]).
     /// Not part of `EditState` — frame/playback is view state, like the camera.
     pub trajectory: Trajectory,
+    /// Show the periodic box as a wireframe overlay (transient view toggle).
+    pub show_box: bool,
+    /// GPU buffer for the box wireframe (lines only); rebuilt when `box_dirty`.
+    pub box_gpu: RepGpu,
+    /// Box geometry needs (re)building — toggled on, or coordinates changed.
+    pub box_dirty: bool,
 }
 
 impl Molecule {
@@ -164,6 +170,9 @@ impl Molecule {
             selected_rep: Some(0),
             reps_open: true,
             trajectory: Trajectory::default(),
+            show_box: false,
+            box_gpu: RepGpu::default(),
+            box_dirty: false,
         }
     }
 
@@ -207,6 +216,7 @@ impl Molecule {
         if self.trajectory.frames.get(self.trajectory.current).is_none() {
             return;
         }
+        self.box_dirty = true; // the box can change per frame (e.g. NPT)
         let needs_eval = self.reps.iter().any(|r| r.dynamic);
         if needs_eval {
             if let Some(frame) = self.trajectory.frames.get(self.trajectory.current) {
@@ -222,6 +232,26 @@ impl Molecule {
                 rep.coords_dirty = true;
             }
         }
+    }
+
+    /// The state currently displayed: the active trajectory frame, or the static
+    /// structure state when no trajectory is loaded.
+    pub fn render_state(&self) -> &State {
+        self.trajectory
+            .frames
+            .get(self.trajectory.current)
+            .unwrap_or_else(|| self.system.state())
+    }
+
+    /// Bounding box (nm) of selection `sel` at the currently displayed frame.
+    pub fn sel_bbox(&self, sel: &Sel) -> (Vec3, Vec3) {
+        let (min, max) = self.system.bind_with_state(sel, self.render_state()).min_max();
+        (Vec3::new(min.x, min.y, min.z), Vec3::new(max.x, max.y, max.z))
+    }
+
+    /// Bounding box (nm) of the whole molecule at the currently displayed frame.
+    pub fn current_bbox(&self) -> (Vec3, Vec3) {
+        self.sel_bbox(&self.system.select_all())
     }
 }
 

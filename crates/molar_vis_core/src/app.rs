@@ -701,6 +701,14 @@ impl App {
             }
         }
 
+        // Verification hook: MOLAR_VIS_DEBUG_BOX=1 shows the periodic box on mol 0.
+        if std::env::var("MOLAR_VIS_DEBUG_BOX").is_ok() {
+            if let Some(mol) = scene.molecules.first_mut() {
+                mol.show_box = true;
+                mol.box_dirty = true;
+            }
+        }
+
         let mut camera = match scene.bbox() {
             Some((min, max)) => Camera::frame_bbox(min, max),
             None => Camera::default(),
@@ -712,6 +720,16 @@ impl App {
         }
         if std::env::var("MOLAR_VIS_DEBUG_ORTHO").is_ok() {
             camera.projection = Projection::Orthographic;
+        }
+        // Verification hook: MOLAR_VIS_DEBUG_FOCUS=<selection> zooms the camera to
+        // fit that selection of mol 0 (exercises the zoom-to-selection path).
+        if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
+            if let Some(mol) = scene.molecules.first() {
+                if let Ok((_, sel)) = scene::evaluate(&mol.system, &sel_text) {
+                    let (min, max) = mol.sel_bbox(&sel);
+                    camera.focus_bbox(min, max);
+                }
+            }
         }
 
         let history = History::new(EditState::capture(&scene));
@@ -746,7 +764,11 @@ impl App {
     fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
         let mut changed = false;
         for mol in &mut self.scene.molecules {
-            if !mol.reps.iter().any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty) {
+            let any_rep_dirty = mol
+                .reps
+                .iter()
+                .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty);
+            if !any_rep_dirty && !(mol.show_box && mol.box_dirty) {
                 continue;
             }
             // The coordinates to render: the current trajectory frame, read by
@@ -810,6 +832,17 @@ impl App {
                     rep.coords_dirty = false;
                     changed = true;
                 }
+            }
+            // Periodic-box wireframe: (re)build when shown and dirty.
+            if mol.show_box && mol.box_dirty {
+                let lines = match render_state.pbox.as_ref() {
+                    Some(pb) => geometry::box_wireframe(pb),
+                    None => Vec::new(),
+                };
+                let geom = geometry::GeometryData { lines, ..Default::default() };
+                mol.box_gpu = self.renderer.upload(rs, &geom);
+                mol.box_dirty = false;
+                changed = true;
             }
         }
         changed
@@ -1038,6 +1071,9 @@ impl App {
         let mut view_dirty = false;
         let mut delete: Option<usize> = None;
         let mut open_load: Option<MolId> = None;
+        // A camera "zoom to fit" request (whole-molecule bbox), applied after the
+        // loop so it doesn't conflict with the `&mut` molecule borrow.
+        let mut focus: Option<(glam::Vec3, glam::Vec3)> = None;
 
         for i in 0..self.scene.molecules.len() {
             let open;
@@ -1067,6 +1103,20 @@ impl App {
                             .clicked()
                         {
                             mol.visible = !mol.visible;
+                            view_dirty = true;
+                        }
+                        if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to molecule")
+                            .clicked()
+                        {
+                            focus = Some(mol.current_bbox());
+                        }
+                        if ui
+                            .selectable_label(mol.show_box, icon::BOUNDING_BOX)
+                            .on_hover_text("Show periodic box")
+                            .clicked()
+                        {
+                            mol.show_box = !mol.show_box;
+                            mol.box_dirty = true;
                             view_dirty = true;
                         }
                         if ui
@@ -1119,6 +1169,10 @@ impl App {
         }
         if let Some(id) = open_load {
             self.load_dialog = Some(LoadDialog::new(id));
+        }
+        if let Some((min, max)) = focus {
+            self.camera.focus_bbox(min, max);
+            view_dirty = true;
         }
         view_dirty
     }
@@ -1424,6 +1478,7 @@ impl App {
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;
         let mut reorder: Option<(usize, usize)> = None;
+        let mut zoom_rep: Option<usize> = None;
 
         for j in 0..mol.reps.len() {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
@@ -1485,6 +1540,12 @@ impl App {
                                 {
                                     rep.visible = !rep.visible;
                                     view_dirty = true;
+                                }
+                                // Zoom the camera to fit this selection.
+                                if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to selection")
+                                    .clicked()
+                                {
+                                    zoom_rep = Some(j);
                                 }
                                 // Selection field fills the remaining width.
                                 ui.with_layout(
@@ -1574,6 +1635,16 @@ impl App {
                 Some(j.min(mol.reps.len() - 1))
             };
             view_dirty = true;
+        }
+
+        // Zoom the camera to fit a rep's selection (camera is a disjoint field
+        // from the scene, so this is fine while `mol` is borrowed).
+        if let Some(j) = zoom_rep {
+            if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
+                let (min, max) = mol.sel_bbox(sel);
+                self.camera.focus_bbox(min, max);
+                view_dirty = true;
+            }
         }
 
         self.editing_rep = new_editing;

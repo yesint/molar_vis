@@ -30,7 +30,9 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
-  update path). Generate a quick test trajectory with the Python snippet that wrote
+  update path) + `MOLAR_VIS_DEBUG_BOX=1` (show mol 0's periodic box) +
+  `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
+  zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
   `tests/2lao_traj.pdb` (multi-MODEL, **not in git**).
 
 ## Tech stack (working versions)
@@ -196,17 +198,20 @@ undo/redo buttons, each with a `▼` dropdown listing named actions for **cumula
 undo/redo (also Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y) → `Scene` (projection icon
 toggles, **orthographic is the default**; **depth-cue** on/off + Strength/Start sliders) →
 `Molecules` (one row each: name + atom count, right-justified **Load-trajectory** (`FILM_STRIP`)
-· eye · trash; a trajectory control bar + slider appears below when >1 frame) →
-`Representations` ("Add" button, then rich rows). No standalone controls section — params
-live in a per-rep gear popup.
+· add-rep · **periodic-box toggle** (`BOUNDING_BOX`, `Camera`-independent wireframe overlay) ·
+**zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` → `Camera::focus_bbox` on the whole-molecule bbox
+at the current frame) · eye · trash; a trajectory control bar + slider appears below when >1
+frame) → `Representations` ("Add" button, then rich rows). No standalone controls section —
+params live in a per-rep gear popup.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):
 - **Row 1**: **drag handle** (`DOTS_SIX_VERTICAL` in `dnd_drag_source(payload=index)`) ·
   **selection field** (fills width; focusing sets `editing_rep` and expands it to a
   full-width editor, collapsing on Enter/blur) · right-justified compact actions
-  (`Layout::right_to_left` + `compact_actions`): eye · update-every-frame (`rep.dynamic`, ↻) ·
-  duplicate · trash.
+  (`Layout::right_to_left` + `compact_actions`): **zoom-to-selection** (`MAGNIFYING_GLASS_PLUS`
+  → `Camera::focus_bbox` on the rep's `sel` bbox at the current frame) · eye ·
+  update-every-frame (`rep.dynamic`, ↻) · duplicate · trash.
 - **Row 2** (indented by the drag-handle width, so it aligns under the selection field):
   **style** dropdown · **color** dropdown · **gear** (`GEAR_SIX`, toggles the inline
   `draw_rep_params` expander). Style and color are **icon+text** buttons built by the shared
