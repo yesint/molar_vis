@@ -13,7 +13,9 @@
 //! 3. Extract the isosurface `dist − probe = 0` with **Surface Nets** (a dual
 //!    marching-cubes that yields one vertex per straddling cell → watertight,
 //!    smooth, no lookup tables).
-//! Per-vertex normals come from the field gradient; colors from the nearest atom.
+//! Per-vertex normals come from the field gradient; colors are a distance-weighted
+//! blend of nearby atoms (a single nearest-atom assignment looks patchy/Voronoi-like,
+//! so boundaries between differently-colored atoms are smoothed into gradients).
 
 use glam::Vec3;
 use molar::prelude::*;
@@ -101,11 +103,11 @@ where
     let n = nx * ny * nz;
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
 
-    // --- Pass 1: SAS occupancy + nearest atom per voxel (for coloring). ---
+    // --- Pass 1: SAS occupancy (a voxel is inside if within vdW+probe of an atom).
+    // Coloring is done per surface vertex afterwards (see `color_vertices`), so we
+    // don't track a per-voxel nearest atom here.
     let mut inside = vec![false; n];
-    let mut nearest = vec![u32::MAX; n];
-    let mut best_d2 = vec![f32::INFINITY; n];
-    for (a, (&c, &r)) in centers.iter().zip(&radii).enumerate() {
+    for (&c, &r) in centers.iter().zip(&radii) {
         // Voxel range covering this atom's SAS sphere.
         let vlo = ((c - Vec3::splat(r) - lo) / h).floor();
         let vhi = ((c + Vec3::splat(r) - lo) / h).ceil();
@@ -120,15 +122,8 @@ where
             for y in y0..=y1 {
                 for x in x0..=x1 {
                     let p = lo + Vec3::new(x as f32, y as f32, z as f32) * h;
-                    let d2 = (p - c).length_squared();
-                    let i = idx(x, y, z);
-                    if d2 <= r2 {
-                        inside[i] = true;
-                    }
-                    // Nearest atom (by center) for coloring, tracked everywhere in range.
-                    if d2 < best_d2[i] {
-                        best_d2[i] = d2;
-                        nearest[i] = a as u32;
+                    if (p - c).length_squared() <= r2 {
+                        inside[idx(x, y, z)] = true;
                     }
                 }
             }
@@ -152,7 +147,105 @@ where
     smooth_field(&mut field, dims, smoothing as usize);
 
     // --- Pass 3: Surface Nets isosurface at field = 0. ---
-    surface_nets(&field, &nearest, &colors, dims, lo, h)
+    let mut mesh = surface_nets(&field, dims, lo, h);
+
+    // Smoothly color each vertex by a distance-weighted blend of nearby atoms.
+    // Assigning the single nearest atom's color makes hard Voronoi-cell patches;
+    // blending neighbors turns the boundaries into smooth gradients.
+    color_vertices(&mut mesh, &centers, &colors, rmax);
+    mesh
+}
+
+/// Color each mesh vertex by a distance-weighted blend of the atoms near it.
+/// Weight is a windowed inverse-distance kernel: the owning atom dominates in the
+/// interior of its patch, but near a boundary two (or more) atoms contribute
+/// comparably, so the color transitions smoothly instead of snapping. `rmax` is the
+/// largest atom SAS radius; the blend radius is a small multiple of it so a handful
+/// of neighbors participate. Uniform coloring (e.g. `Solid`) short-circuits.
+fn color_vertices(mesh: &mut MeshData, centers: &[Vec3], colors: &[u32], rmax: f32) {
+    let verts = &mut mesh.vertices;
+    if verts.is_empty() || centers.is_empty() {
+        return;
+    }
+    // Uniform color (Solid, or a single-element selection): nothing to blend.
+    let c0 = colors[0];
+    if colors.iter().all(|&c| c == c0) {
+        for v in verts.iter_mut() {
+            v.color = c0;
+        }
+        return;
+    }
+
+    // Per-atom RGB as floats (alpha is set later from the material).
+    let rgb: Vec<[f32; 3]> = colors
+        .iter()
+        .map(|&c| {
+            [
+                (c & 0xff) as f32,
+                ((c >> 8) & 0xff) as f32,
+                ((c >> 16) & 0xff) as f32,
+            ]
+        })
+        .collect();
+
+    // Blend radius: a couple of atom radii so several neighbors contribute.
+    let qr = (rmax * 1.5).max(1e-3);
+    let qr2 = qr * qr;
+    let soft2 = (0.3 * rmax).powi(2).max(1e-6);
+
+    // Uniform spatial grid of atom indices (cell = qr, so every atom within `qr` of
+    // a point lies in the 3×3×3 block of cells around the point's own cell).
+    let mut lo = centers[0];
+    let mut hi = centers[0];
+    for c in centers {
+        lo = lo.min(*c);
+        hi = hi.max(*c);
+    }
+    let inv = 1.0 / qr;
+    let span = |e: f32| ((e * inv).floor() as usize) + 1;
+    let (gx, gy, gz) = (span(hi.x - lo.x), span(hi.y - lo.y), span(hi.z - lo.z));
+    let gidx = |x: usize, y: usize, z: usize| x + gx * (y + gy * z);
+    let cell_of = |p: Vec3| {
+        (
+            (((p.x - lo.x) * inv) as usize).min(gx - 1),
+            (((p.y - lo.y) * inv) as usize).min(gy - 1),
+            (((p.z - lo.z) * inv) as usize).min(gz - 1),
+        )
+    };
+    let mut grid: Vec<Vec<u32>> = vec![Vec::new(); gx * gy * gz];
+    for (a, c) in centers.iter().enumerate() {
+        let (x, y, z) = cell_of(*c);
+        grid[gidx(x, y, z)].push(a as u32);
+    }
+
+    for v in verts.iter_mut() {
+        let p = Vec3::from_array(v.pos);
+        let (cx, cy, cz) = cell_of(p);
+        let mut acc = [0.0f32; 3];
+        let mut wsum = 0.0f32;
+        for z in cz.saturating_sub(1)..=(cz + 1).min(gz - 1) {
+            for y in cy.saturating_sub(1)..=(cy + 1).min(gy - 1) {
+                for x in cx.saturating_sub(1)..=(cx + 1).min(gx - 1) {
+                    for &a in &grid[gidx(x, y, z)] {
+                        let d2 = (p - centers[a as usize]).length_squared();
+                        if d2 < qr2 {
+                            let win = 1.0 - d2 / qr2;
+                            let w = win * win / (d2 + soft2);
+                            let cc = rgb[a as usize];
+                            acc[0] += w * cc[0];
+                            acc[1] += w * cc[1];
+                            acc[2] += w * cc[2];
+                            wsum += w;
+                        }
+                    }
+                }
+            }
+        }
+        if wsum > 0.0 {
+            let q = |k: usize| (acc[k] / wsum).round().clamp(0.0, 255.0) as u32;
+            v.color = q(0) | (q(1) << 8) | (q(2) << 16) | (0xff << 24);
+        }
+    }
 }
 
 /// Separable [1,2,1]/4 blur of a scalar grid, applied `passes` times along each
@@ -292,15 +385,9 @@ fn dt_1d(f: &[f32]) -> Vec<f32> {
 
 /// Naive Surface Nets: one vertex per cell straddling `field = 0`, placed at the
 /// average of the cell's edge crossings; quads connect cells across each straddling
-/// grid edge. Watertight by construction. Normals = −∇field; colors = nearest atom.
-fn surface_nets(
-    field: &[f32],
-    nearest: &[u32],
-    colors: &[u32],
-    dims: [usize; 3],
-    origin: Vec3,
-    h: f32,
-) -> MeshData {
+/// grid edge. Watertight by construction. Normals = −∇field; per-vertex color is
+/// filled in afterwards by [`color_vertices`].
+fn surface_nets(field: &[f32], dims: [usize; 3], origin: Vec3, h: f32) -> MeshData {
     let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
     // Cell (x,y,z) spans corners x..x+1 etc.; (nx-1)×(ny-1)×(nz-1) cells.
@@ -372,18 +459,11 @@ fn surface_nets(
                 let gy = vgrid.y.round() as usize;
                 let gz = vgrid.z.round() as usize;
                 let normal = -field_gradient(field, dims, gx, gy, gz);
-                let ni = idx(gx.min(nx - 1), gy.min(ny - 1), gz.min(nz - 1));
-                let aid = nearest[ni];
-                let color = if aid != u32::MAX {
-                    colors.get(aid as usize).copied().unwrap_or(0xffff_ffff)
-                } else {
-                    0xffff_ffff
-                };
                 cell_vert[cidx(x, y, z)] = vertices.len() as u32;
                 vertices.push(MeshVertex {
                     pos: [pos_world.x, pos_world.y, pos_world.z],
                     normal: [normal.x, normal.y, normal.z],
-                    color,
+                    color: 0, // filled in by color_vertices()
                     mat: 0,
                 });
             }

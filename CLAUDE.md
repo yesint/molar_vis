@@ -361,7 +361,10 @@ History labels via `describe_change` ("edit selection", "change coloring",
   outside voxel = `dist(x, solvent)` → isosurface at `dist = probe` (= morphological closing of
   the vdW balls by the probe) via **Surface Nets** (dual marching-cubes: one vertex per
   straddling cell → watertight by construction, smooth, no 256-entry tables). Per-vertex normal
-  = −∇field, color = nearest atom; `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
+  = −∇field; **color = distance-weighted blend of nearby atoms** (`color_vertices`: a uniform
+  spatial grid of atom centers + a windowed inverse-distance kernel over the ~few nearest atoms —
+  single nearest-atom assignment made hard Voronoi-cell patches, blending makes the boundaries
+  smooth gradients; uniform color e.g. `Solid` short-circuits). `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
   32M (auto-coarsen + `log::warn`). A **light separable [1,2,1] blur of the distance field**
   before Surface Nets (`smoothing` passes, default 2) removes the binary-occupancy voxel
   staircase so both the surface and its gradient-derived normals come out smooth. Per-rep
