@@ -90,8 +90,10 @@ pub enum RepParams {
     Surface {
         /// Probe radius added to each vdW radius (nm). 0 → vdW surface, 0.14 → SAS.
         probe: f32,
-        /// Per-atom icosphere subdivision level (0..=4): higher = smoother/heavier.
+        /// Grid resolution level (0 = coarse/fast … 4 = fine/smooth).
         quality: u32,
+        /// Distance-field blur passes before isosurfacing (0 = none, more = smoother).
+        smoothing: u32,
     },
 }
 
@@ -113,6 +115,7 @@ impl RepParams {
             RepKind::Surface => RepParams::Surface {
                 probe: 0.14,
                 quality: 2,
+                smoothing: 2,
             },
         }
     }
@@ -198,8 +201,8 @@ pub fn build(
                 ..Default::default()
             }
         }
-        RepParams::Surface { probe, quality } => GeometryData {
-            mesh: surface::build(bound, &colorizer, probe, quality),
+        RepParams::Surface { probe, quality, smoothing } => GeometryData {
+            mesh: surface::build(bound, &colorizer, probe, quality, smoothing),
             ..Default::default()
         },
     };

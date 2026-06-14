@@ -317,7 +317,11 @@ History labels via `describe_change` ("edit selection", "change coloring",
   the vdW balls by the probe) via **Surface Nets** (dual marching-cubes: one vertex per
   straddling cell → watertight by construction, smooth, no 256-entry tables). Per-vertex normal
   = −∇field, color = nearest atom; `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
-  32M (auto-coarsen + `log::warn`). Verified watertight/smooth on 2lao (~1 s), the symmetric
+  32M (auto-coarsen + `log::warn`). A **light separable [1,2,1] blur of the distance field**
+  before Surface Nets (`smoothing` passes, default 2) removes the binary-occupancy voxel
+  staircase so both the surface and its gradient-derived normals come out smooth. Per-rep gear
+  sliders: **Probe radius / Quality / Smoothing** (all in `RepParams::Surface`).
+  Verified watertight/smooth on 2lao (~1 s), the symmetric
   cube, and 375k atoms (~10 s, 1.4M tris). `MOLAR_VIS_DEBUG_REP=surface`,
   `MOLAR_VIS_DEBUG_SURF=1` logs grid stats. **Dead-ends (documented in memory):** analytic
   convex+toroidal+concave patches (powersasa `surface_mesh`/`ses_mesh`, kept as an exact

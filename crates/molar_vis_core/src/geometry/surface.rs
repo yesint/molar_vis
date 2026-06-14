@@ -39,7 +39,13 @@ fn spacing_for(quality: u32) -> f32 {
 
 /// Build the SES mesh for the bound selection. `probe` is the rolling-probe radius
 /// (nm); `quality` selects the grid resolution.
-pub fn build<S>(bound: &S, colorizer: &Colorizer, probe: f32, quality: u32) -> MeshData
+pub fn build<S>(
+    bound: &S,
+    colorizer: &Colorizer,
+    probe: f32,
+    quality: u32,
+    smoothing: u32,
+) -> MeshData
 where
     S: ParticleIterProvider + PosProvider + AtomProvider,
 {
@@ -136,10 +142,67 @@ where
     let big = (nx * nx + ny * ny + nz * nz) as f32 + 1.0;
     let mut g: Vec<f32> = (0..n).map(|i| if inside[i] { big } else { 0.0 }).collect();
     edt_3d(&mut g, nx, ny, nz);
-    let field: Vec<f32> = g.iter().map(|&d2| d2.sqrt() * h - probe).collect();
+    let mut field: Vec<f32> = g.iter().map(|&d2| d2.sqrt() * h - probe).collect();
+
+    // Light separable [1,2,1] blur of the distance field: the binary occupancy makes
+    // the EDT (and its gradient = our normals) stair-step at voxel resolution, which
+    // reads as a rugged/faceted surface. Blurring the field removes that
+    // high-frequency noise so both the extracted isosurface and the shading come out
+    // smooth, at O(voxels) cost. Driven by the rep's `smoothing` slider.
+    smooth_field(&mut field, dims, smoothing as usize);
 
     // --- Pass 3: Surface Nets isosurface at field = 0. ---
     surface_nets(&field, &nearest, &colors, dims, lo, h)
+}
+
+/// Separable [1,2,1]/4 blur of a scalar grid, applied `passes` times along each
+/// axis (edges clamped). Cheap (O(voxels·passes)); smooths the distance field so the
+/// extracted surface and its gradient normals lose the voxel-staircase ruggedness.
+fn smooth_field(field: &mut [f32], dims: [usize; 3], passes: usize) {
+    if passes == 0 {
+        return;
+    }
+    let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
+    let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
+    let mut line = vec![0.0f32; nx.max(ny).max(nz)];
+    let blur = |line: &[f32], i: usize, len: usize| {
+        let a = line[i.saturating_sub(1)];
+        let b = line[i];
+        let c = line[(i + 1).min(len - 1)];
+        (a + 2.0 * b + c) * 0.25
+    };
+    for _ in 0..passes {
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    line[x] = field[idx(x, y, z)];
+                }
+                for x in 0..nx {
+                    field[idx(x, y, z)] = blur(&line, x, nx);
+                }
+            }
+        }
+        for z in 0..nz {
+            for x in 0..nx {
+                for y in 0..ny {
+                    line[y] = field[idx(x, y, z)];
+                }
+                for y in 0..ny {
+                    field[idx(x, y, z)] = blur(&line, y, ny);
+                }
+            }
+        }
+        for y in 0..ny {
+            for x in 0..nx {
+                for z in 0..nz {
+                    line[z] = field[idx(x, y, z)];
+                }
+                for z in 0..nz {
+                    field[idx(x, y, z)] = blur(&line, z, nz);
+                }
+            }
+        }
+    }
 }
 
 /// In-place exact Euclidean distance transform (squared) by Felzenszwalb &

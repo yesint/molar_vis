@@ -436,13 +436,18 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                 changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
                 ui.end_row();
             }
-            RepParams::Surface { probe, quality } => {
+            RepParams::Surface { probe, quality, smoothing } => {
                 ui.label("Probe radius (nm)");
                 changed |= ui.add(egui::Slider::new(probe, 0.0..=0.3)).changed();
                 ui.end_row();
                 ui.label("Quality");
                 changed |= ui
-                    .add(egui::Slider::new(quality, 0..=4).text("higher = smoother/heavier"))
+                    .add(egui::Slider::new(quality, 0..=4).text("grid resolution"))
+                    .changed();
+                ui.end_row();
+                ui.label("Smoothing");
+                changed |= ui
+                    .add(egui::Slider::new(smoothing, 0..=5).text("blur passes"))
                     .changed();
                 ui.end_row();
             }
