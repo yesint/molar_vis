@@ -386,10 +386,12 @@ History labels via `describe_change` ("edit selection", "change coloring",
   under the field; VMD mouse nav extended (roll on Shift+LMB, dolly on Shift+RMB) and
   zoom-to-fit fills ~90%. Crate is **installable** from GitHub git-deps (no local paths/patch).
 - ✅ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` (`color.rs`; `DEFAULT_SOLID`
-  orange, `same_kind` for picker highlight, `Colorizer` returns it verbatim) + an egui color-picker
-  submenu in the color dropdown (`color_picker`: a `Solid` row that opens an `egui` `SubMenu` with a
-  preset swatch grid + a full `color_picker_color32`). Undoable for free — `RepState` already
-  snapshots `rep.color` and history compares `ColorMethod` generically.
+  orange, `Colorizer` returns it verbatim) + an egui color-picker submenu in the color dropdown
+  (`color_picker`: a `Solid` row — drawn via `color_option`, which returns a `Response` + optional
+  ⏵ — that opens an `egui::containers::menu::SubMenu` with a preset swatch grid (`SOLID_SWATCHES`/
+  `swatch_button`) + a full `color_picker_color32`; the submenu is `CloseOnClickOutside` so dragging
+  the picker doesn't dismiss it). Undoable for free — `RepState` already snapshots `rep.color` and
+  history compares `ColorMethod` generically.
 - ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs
   impostors) and lasso-select (polygon over projected positions) → feed a selection; hooks into
   `draw_viewport` input.
