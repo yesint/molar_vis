@@ -318,9 +318,11 @@ fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMeth
     }
 }
 
-/// A clickable icon+label row inside the color dropdown. Returns true if clicked.
-fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(160.0, 22.0), egui::Sense::click());
+/// A clickable icon+label row inside the color dropdown. Returns its `Response`.
+/// When `arrow` is set it draws a right-pointing submenu indicator (used for the
+/// `Solid` row, which opens the color submenu).
+fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool, arrow: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(172.0, 22.0), egui::Sense::click());
     if selected || resp.hovered() {
         ui.painter()
             .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
@@ -335,42 +337,127 @@ fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool) -> bool 
         egui::FontId::proportional(15.0),
         ui.visuals().text_color(),
     );
-    resp.clicked()
+    if arrow {
+        ui.painter().text(
+            egui::pos2(rect.right() - 8.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "⏵",
+            egui::FontId::proportional(13.0),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    resp
+}
+
+/// Predefined color swatches for the `Solid` color submenu (6 per row).
+const SOLID_SWATCHES: [[u8; 4]; 18] = [
+    [230, 50, 50, 255],   // red
+    [255, 140, 0, 255],   // orange
+    [240, 220, 40, 255],  // yellow
+    [60, 200, 80, 255],   // green
+    [60, 200, 210, 255],  // cyan
+    [60, 110, 240, 255],  // blue
+    [150, 80, 220, 255],  // purple
+    [220, 60, 200, 255],  // magenta
+    [240, 130, 180, 255], // pink
+    [30, 150, 150, 255],  // teal
+    [170, 220, 40, 255],  // lime
+    [40, 60, 150, 255],   // navy
+    [245, 245, 245, 255], // white
+    [200, 200, 200, 255], // light grey
+    [140, 140, 140, 255], // grey
+    [80, 80, 80, 255],    // dark grey
+    [25, 25, 25, 255],    // near-black
+    [150, 90, 50, 255],   // brown
+];
+
+/// A small clickable color swatch in the `Solid` submenu grid. Highlights on
+/// hover and rings the currently-selected color.
+fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+    ui.painter()
+        .rect_filled(rect, 2.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+    let stroke = if selected {
+        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill)
+    } else if resp.hovered() {
+        egui::Stroke::new(1.5, ui.visuals().widgets.hovered.fg_stroke.color)
+    } else {
+        egui::Stroke::new(1.0, egui::Color32::from_gray(80))
+    };
+    ui.painter()
+        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+    resp.on_hover_text(format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))
+        .clicked()
+}
+
+/// The current solid color, or the default if the rep isn't colored by Solid.
+fn current_solid(method: ColorMethod) -> [u8; 4] {
+    match method {
+        ColorMethod::Solid(c) => c,
+        _ => crate::color::DEFAULT_SOLID,
+    }
 }
 
 /// A drawn color-scheme icon + label button that opens a dropdown of options.
-/// The `Solid` scheme additionally shows an egui color picker so the user can
-/// choose any RGB color (changes are undoable like any other coloring change).
+/// The built-in schemes pick-and-close; **`Solid` opens a submenu** with a grid of
+/// preset swatches and a full color picker (changes are undoable like any other
+/// coloring change).
 fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
+    use egui::containers::menu::{MenuConfig, SubMenu};
     let method = rep.color;
     let resp = picker_button(ui, method.label(), |p, r| paint_color_icon(p, r, method));
 
     egui::Popup::menu(&resp).show(|ui| {
-        for method in ColorMethod::ALL {
-            if color_option(ui, method, method.same_kind(rep.color)) {
-                // Switching *to* Solid keeps any existing solid color; other
-                // schemes are selected as-is. (Don't close — let the user tweak
-                // the Solid color in the picker below without reopening.)
-                if !(matches!(method, ColorMethod::Solid(_))
-                    && matches!(rep.color, ColorMethod::Solid(_)))
-                {
-                    rep.color = method;
-                    rep.geom_dirty = true;
-                }
+        // The built-in per-atom schemes: pick one and close.
+        for m in ColorMethod::ALL {
+            if matches!(m, ColorMethod::Solid(_)) {
+                continue;
+            }
+            if color_option(ui, m, m == rep.color, false).clicked() {
+                rep.color = m;
+                rep.geom_dirty = true;
+                ui.close();
             }
         }
-        // When the Solid scheme is active, edit its exact color in place.
-        if let ColorMethod::Solid(rgba) = &mut rep.color {
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Color");
-                let mut c = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
-                if ui.color_edit_button_srgba(&mut c).changed() {
-                    *rgba = [c.r(), c.g(), c.b(), 255];
+        // Solid: a submenu with a preset-swatch grid + a full color picker.
+        let active = matches!(rep.color, ColorMethod::Solid(_));
+        let header = color_option(ui, ColorMethod::Solid(current_solid(rep.color)), active, true);
+        SubMenu::new()
+            // Keep the picker usable: clicking inside (e.g. the SV square) must
+            // not close the menu — only clicking outside dismisses it.
+            .config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+            .show(ui, &header, |ui| {
+                let mut cur = current_solid(rep.color);
+                let mut changed = false;
+                ui.label(egui::RichText::new("Presets").weak().small());
+                egui::Grid::new("solid_presets")
+                    .spacing(egui::vec2(3.0, 3.0))
+                    .show(ui, |ui| {
+                        for (i, &c) in SOLID_SWATCHES.iter().enumerate() {
+                            if swatch_button(ui, c, c == cur) {
+                                cur = c;
+                                changed = true;
+                            }
+                            if (i + 1) % 6 == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                ui.separator();
+                let mut col = egui::Color32::from_rgb(cur[0], cur[1], cur[2]);
+                if egui::color_picker::color_picker_color32(
+                    ui,
+                    &mut col,
+                    egui::color_picker::Alpha::Opaque,
+                ) {
+                    cur = [col.r(), col.g(), col.b(), 255];
+                    changed = true;
+                }
+                if changed {
+                    rep.color = ColorMethod::Solid(cur);
                     rep.geom_dirty = true;
                 }
             });
-        }
     });
 }
 

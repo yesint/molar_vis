@@ -251,8 +251,10 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
   `ColorMethod` (Element = CPK dots, Chain = interlocking colored links, ResID =
   backbone-with-residues diagram, ResName = "ALA" on rainbow, Index = "123" colored digits,
-  Beta = "B" on rainbow, **Solid = a filled swatch of the chosen color**). The `Solid` row, when
-  active, shows a `color_edit_button_srgba` "Color" row below the list to pick the exact RGB.
+  Beta = "B" on rainbow, **Solid = a filled swatch of the chosen color**). The `Solid` row is a
+  **submenu** (`egui::containers::menu::SubMenu`, ⏵): hovering opens a panel with a preset
+  swatch grid (`SOLID_SWATCHES`, `swatch_button`) + a full `color_picker_color32` (the submenu uses
+  `CloseOnClickOutside` so dragging the picker doesn't dismiss it).
 
 History labels via `describe_change` ("edit selection", "change coloring",
 "reorder representations", …). FPS in the footer.
@@ -378,9 +380,9 @@ History labels via `describe_change` ("edit selection", "change coloring",
   zoom-to-fit fills ~90%. Crate is **installable** from GitHub git-deps (no local paths/patch).
 - ✅ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` (`color.rs`; `DEFAULT_SOLID`
   orange, `same_kind` for picker highlight, `Colorizer` returns it verbatim) + an egui color-picker
-  submenu in the color dropdown (`color_picker`: a `Solid` row with a swatch icon; when active, a
-  `color_edit_button_srgba` "Color" row below edits the exact RGB). Undoable for free — `RepState`
-  already snapshots `rep.color` and history compares `ColorMethod` generically.
+  submenu in the color dropdown (`color_picker`: a `Solid` row that opens an `egui` `SubMenu` with a
+  preset swatch grid + a full `color_picker_color32`). Undoable for free — `RepState` already
+  snapshots `rep.color` and history compares `ColorMethod` generically.
 - ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs
   impostors) and lasso-select (polygon over projected positions) → feed a selection; hooks into
   `draw_viewport` input.

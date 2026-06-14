@@ -151,15 +151,6 @@ impl ColorMethod {
     pub fn needs_ss(self) -> bool {
         matches!(self, ColorMethod::SecStruct)
     }
-
-    /// Whether two methods are the *same kind* (ignoring a `Solid` color value),
-    /// used to highlight the active picker row even after the color is edited.
-    pub fn same_kind(self, other: ColorMethod) -> bool {
-        matches!(
-            (self, other),
-            (ColorMethod::Solid(_), ColorMethod::Solid(_))
-        ) || self == other
-    }
 }
 
 /// A per-method atom colorizer. Holds any context needed (e.g. the B-factor range
