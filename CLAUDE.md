@@ -41,8 +41,14 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **1.4** (local path dep `../molar/molar`, `default-features=false` → `Float=f32`).
+molar **1.4** (**git dep** `git = "https://github.com/yesint/molar.git"`,
+`default-features=false` → `Float=f32`; pulls `powersasa` transitively from git).
 GROMACS 2026.1 available as `gmx`.
+
+**Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
+`[patch]`). `Cargo.lock` pins the resolved git revisions. To develop molar/powersasa
+locally, temporarily add a `[patch."…powersasa-llm.git"] powersasa = { path = "…" }`
+and/or point `molar` at a local path — but don't commit those.
 
 ## Workspace & modules
 
@@ -55,8 +61,12 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   (Scene/Molecules/Representations/Controls) + central viewport; `rebuild_dirty()`
   and the render-skip logic. Holds the `MOLAR_VIS_DEBUG_*` hooks.
 - `theme.rs` — installs the Phosphor icon font + a high-contrast dark style, larger fonts.
-- `camera.rs` — quaternion arcball `Camera` (orbit/pan/zoom), perspective **and**
-  orthographic projection, `frame_bbox`. `#[derive(PartialEq)]` drives render-skip.
+- `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
+  LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
+  `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll`. Perspective
+  **and** orthographic projection. `frame_bbox`/`focus_bbox` use `fit_distance` (fit the
+  bbox's **longest dimension to ~90%** of the viewport; bounding-sphere radius still drives
+  near/far). `#[derive(PartialEq)]` drives render-skip.
 - `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `Colorizer`.
 - `secstruct.rs` — `SsMap` (molar `Dssp` keyed by `resindex`), `SsClass` (helix/sheet/coil),
   VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme.
@@ -167,8 +177,9 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   reusing the cached SS (**no DSSP**), then `renderer.update` writes the new data into the
   **existing** GPU buffers in place (`queue.write_buffer`, no realloc) when element counts match
   (else recreates). Buffers carry `COPY_DST`. So scrubbing/playing avoids both per-frame DSSP
-  and per-frame buffer reallocation. Per-rep **`ss_per_frame`** toggle (gear panel, Cartoon /
-  SecStruct only; in `EditState`) forces DSSP recompute every frame when motion changes SS.
+  and per-frame buffer reallocation. Per-rep **`ss_per_frame`** toggle (settings **Traj**
+  tab, Cartoon / SecStruct only; in `EditState`) forces DSSP recompute every frame when
+  motion changes SS.
 - Bonds aren't in GRO (partial in PDB); guessed at load (`distance_search_single` +
   `dist < 0.6*(vdw_i+vdw_j)`).
 - Secondary structure for M6 cartoon: `molar::Dssp` (10-variant `SS` enum).
@@ -207,7 +218,7 @@ Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + at
 
 **Viewport overlay** (`draw_scene_overlay`, top-left `egui::Area` over the 3D image):
 a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
-**orthographic is the default**) and a **depth-cue** button (`CLOUD_FOG`) that toggles
+**orthographic is the default**) and a **depth-cue** button (`GRADIENT` glyph) that toggles
 (`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders). More scene
 controls will join it later.
 
@@ -328,14 +339,20 @@ History labels via `describe_change` ("edit selection", "change coloring",
   = −∇field, color = nearest atom; `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
   32M (auto-coarsen + `log::warn`). A **light separable [1,2,1] blur of the distance field**
   before Surface Nets (`smoothing` passes, default 2) removes the binary-occupancy voxel
-  staircase so both the surface and its gradient-derived normals come out smooth. Per-rep gear
-  sliders: **Probe radius / Quality / Smoothing** (all in `RepParams::Surface`).
+  staircase so both the surface and its gradient-derived normals come out smooth. Per-rep
+  settings (**Style** tab) sliders: **Probe radius / Quality / Smoothing** (`RepParams::Surface`).
   Verified watertight/smooth on 2lao (~1 s), the symmetric
   cube, and 375k atoms (~10 s, 1.4M tris). `MOLAR_VIS_DEBUG_REP=surface`,
   `MOLAR_VIS_DEBUG_SURF=1` logs grid stats. **Dead-ends (documented in memory):** analytic
   convex+toroidal+concave patches (powersasa `surface_mesh`/`ses_mesh`, kept as an exact
   SAS-area API) are MSMS-style crack-prone and were abandoned; Ball-Pivoting re-meshing worked
   visually but was too slow. The grid is the only reliably watertight, scalable approach.
+- ✅ **UI revamp + installable** — no `Scene`/`Molecules` headers (molecules listed directly);
+  global scene controls (projection cycle + depth-cue) moved to a floating top-left
+  **viewport overlay** (`draw_scene_overlay`); per-rep **settings caret** (not a gear) opening
+  a **tabbed** panel **[Style] / [Traj] / [Periodic]** (`SettingsTab`); selection errors shown
+  under the field; VMD mouse nav extended (roll on Shift+LMB, dolly on Shift+RMB) and
+  zoom-to-fit fills ~90%. Crate is **installable** from GitHub git-deps (no local paths/patch).
 - ⏳ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` + an egui color-picker
   submenu in the color dropdown (undoable via `RepState`).
 - ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs
