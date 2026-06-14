@@ -122,7 +122,9 @@ impl RepParams {
             RepKind::Surface => RepParams::Surface {
                 probe: 0.14,
                 quality: 2,
-                smoothing: 2,
+                // Off by default: the Laplacian mesh pass smooths the normals, so
+                // the distance-field blur is now opt-in (extra geometric smoothing).
+                smoothing: 0,
             },
         }
     }

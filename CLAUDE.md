@@ -369,8 +369,9 @@ History labels via `describe_change` ("edit selection", "change coloring",
   counts scale with grid resolution (∝(1/h)²) so the physical smoothing distance stays ~constant;
   uniform color (`Solid`) skips the color pass. `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
   32M (auto-coarsen + `log::warn`). A **light separable [1,2,1] blur of the distance field**
-  before Surface Nets (`smoothing` passes, default 2) removes the binary-occupancy voxel
-  staircase so both the surface and its gradient-derived normals come out smooth. Per-rep
+  before Surface Nets (`smoothing` passes, **default 0** — opt-in now that the Laplacian mesh
+  pass smooths the normals) removes the binary-occupancy voxel staircase from the surface
+  *shape* (geometric smoothing the mesh-Laplacian can't do). Per-rep
   settings (**Style** tab) sliders: **Probe radius / Quality / Smoothing** (`RepParams::Surface`).
   Verified watertight/smooth on 2lao (~1 s), the symmetric
   cube, and 375k atoms (~10 s, 1.4M tris). `MOLAR_VIS_DEBUG_REP=surface`,

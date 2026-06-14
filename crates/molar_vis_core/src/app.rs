@@ -609,14 +609,10 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                 changed |= ui.add(egui::Slider::new(probe, 0.0..=0.3)).changed();
                 ui.end_row();
                 ui.label("Quality");
-                changed |= ui
-                    .add(egui::Slider::new(quality, 0..=4).text("grid resolution"))
-                    .changed();
+                changed |= ui.add(egui::Slider::new(quality, 0..=4)).changed();
                 ui.end_row();
                 ui.label("Smoothing");
-                changed |= ui
-                    .add(egui::Slider::new(smoothing, 0..=5).text("blur passes"))
-                    .changed();
+                changed |= ui.add(egui::Slider::new(smoothing, 0..=5)).changed();
                 ui.end_row();
             }
         });
