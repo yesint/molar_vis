@@ -400,19 +400,34 @@ fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 /// Parameter controls for a representation, shown inline under its row as a tidy
 /// two-column table (parameter name on the left, control on the right).
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
-    // Tab bar: [Style] [Traj] [Periodic] — compact (small font, tight padding,
-    // like a dropdown list rather than full-size buttons).
+    // Tab bar: [Style] [Traj] [Periodic] — underline-style tabs (selected = bold
+    // text with an accent underline) rather than disconnected toggle buttons.
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        ui.spacing_mut().button_padding = egui::vec2(5.0, 1.0);
+        ui.spacing_mut().item_spacing.x = 14.0;
         for (tab, label) in [
             (SettingsTab::Style, "Style"),
             (SettingsTab::Traj, "Traj"),
             (SettingsTab::Periodic, "Periodic"),
         ] {
-            let text = egui::RichText::new(label).size(13.0);
-            if ui.selectable_label(rep.settings_tab == tab, text).clicked() {
+            let selected = rep.settings_tab == tab;
+            let txt = if selected {
+                egui::RichText::new(label).strong()
+            } else {
+                egui::RichText::new(label).color(ui.visuals().weak_text_color())
+            };
+            let resp = ui
+                .add(egui::Label::new(txt).sense(egui::Sense::click()))
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if resp.clicked() {
                 rep.settings_tab = tab;
+            }
+            if selected {
+                let r = resp.rect;
+                ui.painter().hline(
+                    r.x_range(),
+                    r.bottom() + 2.0,
+                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                );
             }
         }
     });
@@ -962,12 +977,16 @@ impl App {
                     changed = true;
                 }
             }
-            // Periodic-box wireframe: (re)build when shown and dirty.
+            // Periodic-box wireframe: (re)build when shown and dirty. Use the
+            // current frame's box (so it tracks NPT box changes); fall back to the
+            // structure's own box when a trajectory frame carries none, so the box
+            // doesn't vanish on formats without per-frame box records.
             if mol.show_box && mol.box_dirty {
-                let lines = match render_state.pbox.as_ref() {
-                    Some(pb) => geometry::box_wireframe(pb),
-                    None => Vec::new(),
-                };
+                let pb = render_state
+                    .pbox
+                    .as_ref()
+                    .or_else(|| mol.system.state().pbox.as_ref());
+                let lines = pb.map(geometry::box_wireframe).unwrap_or_default();
                 let geom = geometry::GeometryData { lines, ..Default::default() };
                 mol.box_gpu = self.renderer.upload(rs, &geom);
                 mol.box_dirty = false;
@@ -1825,14 +1844,26 @@ impl App {
             let (rect, response) =
                 ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
-            // VMD-style navigation: left = rotate, middle = pan, right = zoom.
+            // VMD-style navigation:
+            //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
+            //   RMB = pan           · Shift+RMB = move along view Z (dolly)
+            //   middle = pan        · wheel = scale (zoom)
             let delta = response.drag_delta();
+            let shift = ui.input(|i| i.modifiers.shift);
             if response.dragged_by(egui::PointerButton::Primary) {
-                self.camera.orbit(delta.x, delta.y);
+                if shift {
+                    self.camera.roll(delta.x);
+                } else {
+                    self.camera.orbit(delta.x, delta.y);
+                }
+            } else if response.dragged_by(egui::PointerButton::Secondary) {
+                if shift {
+                    self.camera.zoom_drag(delta.y);
+                } else {
+                    self.camera.pan(delta.x, delta.y, rect.height());
+                }
             } else if response.dragged_by(egui::PointerButton::Middle) {
                 self.camera.pan(delta.x, delta.y, rect.height());
-            } else if response.dragged_by(egui::PointerButton::Secondary) {
-                self.camera.zoom_drag(delta.y);
             }
             if response.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);

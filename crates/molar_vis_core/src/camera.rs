@@ -153,6 +153,16 @@ impl Camera {
         self.orientation = (q * self.orientation).normalize();
     }
 
+    /// Roll (shift+left-drag): rotate within the screen plane, about the view
+    /// axis. Horizontal drag drives the angle.
+    pub fn roll(&mut self, dx: f32) {
+        const K: f32 = 0.01;
+        // View axis (screen normal, toward the eye) = orientation·Z.
+        let axis = self.orientation * Vec3::Z;
+        let q = Quat::from_axis_angle(axis, dx * K);
+        self.orientation = (q * self.orientation).normalize();
+    }
+
     /// Pan (middle-drag): slide `target` in the camera plane so the molecule
     /// tracks the cursor. `viewport_h` is the viewport height in points.
     pub fn pan(&mut self, dx: f32, dy: f32, viewport_h: f32) {
