@@ -119,8 +119,12 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   cartoon mesh). The camera uniform carries a perspective flag: perspective uses an
   eye-ray from the origin; **orthographic uses a parallel ray with origin on the camera
   plane (z=0)** so the near hit has t>0 (a past bug black-screened ortho). Lines are
-  plain 1px GL lines. Half-bond coloring = two half-segments per bond, colored by each
-  endpoint atom.
+  **screen-space fat-line quads** — WebGPU only rasterizes 1px `LineList`, so each segment
+  (a pair of `LineVertex`, which now carries a per-vertex `width` px) is reinterpreted as
+  **instanced** data (stride = 2 verts) and drawn as a `TriangleStrip` quad expanded
+  perpendicular to the segment by `width` px in `line.wgsl` (uses the viewport size carried
+  in the camera uniform's `params.yz`); width stays constant in pixels at any zoom, like VMD.
+  Half-bond coloring = two half-segments per bond, colored by each endpoint atom.
 - **Depth cueing (fog)** — linear fog fades all geometry toward the background (`BG` in
   `render.rs`, also the clear color) by eye-space distance. The camera uniform carries
   `cue = [near, far, strength, _]` (eye-space, derived per frame by `Camera::cue_uniform`
@@ -233,8 +237,10 @@ via `dnd_hover_payload`/`dnd_release_payload`):
 - **Row 2** (a **settings caret** — `CARET_RIGHT`/`CARET_DOWN`, where the drag handle is in
   row 1 — toggles `params_open`; then) **style** dropdown · **color** dropdown · **material**
   dropdown (`material_picker`, shaded-sphere icon faded by opacity). The expanded settings
-  panel (`draw_rep_params`) is **tabbed** — **[Style]** (per-style geometry params +
-  SS-algorithm + Defaults; `draw_style_tab`), **[Traj]** (`draw_traj_tab`: *Update every
+  panel (`draw_rep_params`) is **tabbed** — **[Style]** (per-style geometry params: VDW
+  *Sphere scale*, Lines *Line width (px)*, Licorice/Ball-and-Stick radii, Cartoon ribbon
+  dims, Surface probe/quality/smoothing + SS-algorithm + Defaults; every style now has at
+  least one tunable so Defaults is always shown), **[Traj]** (`draw_traj_tab`: *Update every
   frame* = `rep.dynamic`; *Recompute SS every frame* = `ss_per_frame` for Cartoon/SecStruct;
   more per-frame options later), **[Periodic]** (periodic-image rendering — TBD); tab in
   `rep.settings_tab: SettingsTab`. Style and color are **icon+text** buttons built by the shared
@@ -269,7 +275,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
   (Lambert-shaded `MeshVertex` pipeline, writes real depth, shares the offscreen buffer with
   the impostors). `RepKind::Cartoon` + `RepParams::Cartoon{coil_radius,ribbon_width,
   ribbon_thickness}`. **`RepParams` is now a per-style enum** (each variant carries only its
-  own knobs); `geometry::build` dispatches on it (no more `kind` arg).
+  own knobs — incl. `Vdw { scale }` (× VDW radius) and `Lines { width }` (px), both formerly
+  unit variants); `geometry::build` dispatches on it (no more `kind` arg).
 - ✅ MVP complete (M0–M6, all five representations).
 - ✅ M7 **Trajectories** (native) — `trajectory.rs` (`Trajectory`/`LoadOptions`/`LoadMode`/
   `LoadMsg`) + `data/traj_loader.rs` (native, cfg-gated) + per-molecule Load dialog (`egui::Modal`

@@ -450,8 +450,16 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
         .num_columns(2)
         .spacing(egui::vec2(8.0, 4.0))
         .show(ui, |ui| match &mut rep.params {
-            RepParams::Vdw | RepParams::Lines => {
-                ui.weak("No tunable parameters.");
+            RepParams::Vdw { scale } => {
+                ui.label("Sphere scale");
+                changed |= ui
+                    .add(egui::Slider::new(scale, 0.1..=2.0).text("× VDW radius"))
+                    .changed();
+                ui.end_row();
+            }
+            RepParams::Lines { width } => {
+                ui.label("Line width (px)");
+                changed |= ui.add(egui::Slider::new(width, 1.0..=10.0)).changed();
                 ui.end_row();
             }
             RepParams::Licorice { bond_radius } => {
@@ -519,16 +527,14 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
     }
 
     // Restore this style's default parameters.
-    if !matches!(rep.params, RepParams::Vdw | RepParams::Lines) {
-        ui.add_space(2.0);
-        if ui
-            .button(format!("{}  Defaults", icon::ARROW_COUNTER_CLOCKWISE))
-            .on_hover_text("Restore default parameters for this style")
-            .clicked()
-        {
-            rep.params = RepParams::for_kind(rep.kind);
-            changed = true;
-        }
+    ui.add_space(2.0);
+    if ui
+        .button(format!("{}  Defaults", icon::ARROW_COUNTER_CLOCKWISE))
+        .on_hover_text("Restore default parameters for this style")
+        .clicked()
+    {
+        rep.params = RepParams::for_kind(rep.kind);
+        changed = true;
     }
 
     if changed {

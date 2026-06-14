@@ -67,7 +67,10 @@ impl RepKind {
 /// `RepKind` — switching style replaces it wholesale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RepParams {
-    Vdw,
+    Vdw {
+        /// VDW radius multiplier (1.0 = true van der Waals radii).
+        scale: f32,
+    },
     Licorice {
         /// Cylinder + cap radius.
         bond_radius: f32,
@@ -78,7 +81,11 @@ pub enum RepParams {
         /// Stick radius.
         bond_radius: f32,
     },
-    Lines,
+    Lines {
+        /// Line width in pixels (screen-space, constant at any zoom — like VMD's
+        /// line thickness).
+        width: f32,
+    },
     Cartoon {
         /// Coil/turn tube radius.
         coil_radius: f32,
@@ -100,13 +107,13 @@ pub enum RepParams {
 impl RepParams {
     pub fn for_kind(kind: RepKind) -> Self {
         match kind {
-            RepKind::Vdw => RepParams::Vdw,
+            RepKind::Vdw => RepParams::Vdw { scale: 1.0 },
             RepKind::Licorice => RepParams::Licorice { bond_radius: 0.03 },
             RepKind::BallAndStick => RepParams::BallAndStick {
                 sphere_scale: 0.25,
                 bond_radius: 0.015,
             },
-            RepKind::Lines => RepParams::Lines,
+            RepKind::Lines => RepParams::Lines { width: 1.0 },
             RepKind::Cartoon => RepParams::Cartoon {
                 coil_radius: 0.03,
                 ribbon_width: 0.15,
@@ -160,8 +167,8 @@ pub fn build(
 ) -> GeometryData {
     let colorizer = Colorizer::new(color, bound, n_atoms, ss);
     let mut data = match *params {
-        RepParams::Vdw => GeometryData {
-            spheres: spheres(bound, &colorizer, |a| a.vdw()),
+        RepParams::Vdw { scale } => GeometryData {
+            spheres: spheres(bound, &colorizer, |a| a.vdw() * scale),
             ..Default::default()
         },
         RepParams::Licorice { bond_radius } => {
@@ -180,10 +187,10 @@ pub fn build(
                 ..Default::default()
             }
         }
-        RepParams::Lines => {
+        RepParams::Lines { width } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
-                lines: lines(&lut, bonds),
+                lines: lines(&lut, bonds, width),
                 ..Default::default()
             }
         }
@@ -267,8 +274,8 @@ pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
     ];
     let mut v = Vec::with_capacity(24);
     for ((i0, j0, k0), (i1, j1, k1)) in EDGES {
-        v.push(LineVertex { pos: corner(i0, j0, k0), color });
-        v.push(LineVertex { pos: corner(i1, j1, k1), color });
+        v.push(LineVertex { pos: corner(i0, j0, k0), color, width: 1.0 });
+        v.push(LineVertex { pos: corner(i1, j1, k1), color, width: 1.0 });
     }
     v
 }
@@ -323,15 +330,15 @@ fn cylinders(
     v
 }
 
-fn lines(lut: &[Option<([f32; 3], u32)>], bonds: &[[usize; 2]]) -> Vec<LineVertex> {
+fn lines(lut: &[Option<([f32; 3], u32)>], bonds: &[[usize; 2]], width: f32) -> Vec<LineVertex> {
     let mut v = Vec::new();
     for &[a, b] in bonds {
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let m = midpoint(pa, pb);
-            v.push(LineVertex { pos: pa, color: ca });
-            v.push(LineVertex { pos: m, color: ca });
-            v.push(LineVertex { pos: m, color: cb });
-            v.push(LineVertex { pos: pb, color: cb });
+            v.push(LineVertex { pos: pa, color: ca, width });
+            v.push(LineVertex { pos: m, color: ca, width });
+            v.push(LineVertex { pos: m, color: cb, width });
+            v.push(LineVertex { pos: pb, color: cb, width });
         }
     }
     v

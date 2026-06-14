@@ -11,7 +11,8 @@ pub struct CameraUniform {
     /// View → clip space (right-handed, [0,1] depth).
     pub proj: [[f32; 4]; 4],
     /// x = 1.0 for perspective (eye-ray impostors), 0.0 for orthographic
-    /// (parallel-ray impostors). y,z,w reserved.
+    /// (parallel-ray impostors). y,z = viewport size in pixels (used by the
+    /// fat-line shader to expand segments to a constant pixel width). w reserved.
     pub params: [f32; 4],
     /// Depth cueing: `[near, far, strength, _]` in eye-space distance. Geometry
     /// fades to `fog_color` from `near` (none) to `far` (full `strength`).
@@ -27,13 +28,14 @@ impl CameraUniform {
         view: Mat4,
         proj: Mat4,
         perspective: bool,
+        viewport: [f32; 2],
         cue: [f32; 4],
         fog_color: [f32; 4],
     ) -> Self {
         Self {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
-            params: [if perspective { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            params: [if perspective { 1.0 } else { 0.0 }, viewport[0], viewport[1], 0.0],
             cue,
             fog_color,
         }

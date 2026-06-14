@@ -324,7 +324,14 @@ impl SceneRenderer {
             );
         }
 
-        let cam = CameraUniform::new(view, proj, perspective, cue, BG);
+        let cam = CameraUniform::new(
+            view,
+            proj,
+            perspective,
+            [size_px[0] as f32, size_px[1] as f32],
+            cue,
+            BG,
+        );
         rs.queue
             .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
 
@@ -389,9 +396,10 @@ impl SceneRenderer {
                             pass.draw(0..4, 0..c.count);
                         }
                         if let Some(l) = &rep.gpu.lines {
+                            // Instanced fat-line quads: one segment (2 verts) per instance.
                             pass.set_pipeline(&self.line_pipeline[i]);
                             pass.set_vertex_buffer(0, l.buffer.slice(..));
-                            pass.draw(0..l.count, 0..1);
+                            pass.draw(0..4, 0..l.count / 2);
                         }
                         if let Some(m) = &rep.gpu.mesh {
                             pass.set_pipeline(&self.mesh_pipeline[i]);
@@ -405,7 +413,7 @@ impl SceneRenderer {
                         if let Some(l) = &mol.box_gpu.lines {
                             pass.set_pipeline(&self.line_pipeline[0]);
                             pass.set_vertex_buffer(0, l.buffer.slice(..));
-                            pass.draw(0..l.count, 0..1);
+                            pass.draw(0..4, 0..l.count / 2);
                         }
                     }
                 }
