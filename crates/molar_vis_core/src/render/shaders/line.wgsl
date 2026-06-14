@@ -24,15 +24,16 @@ struct VsIn {
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>, // rgb + opacity
     @location(1) eye_z: f32,
 };
 
-fn unpack_color(c: u32) -> vec3<f32> {
+fn unpack_color(c: u32) -> vec4<f32> {
     let r = f32((c >> 0u) & 0xffu) / 255.0;
     let g = f32((c >> 8u) & 0xffu) / 255.0;
     let b = f32((c >> 16u) & 0xffu) / 255.0;
-    return vec3<f32>(r, g, b);
+    let a = f32((c >> 24u) & 0xffu) / 255.0;
+    return vec4<f32>(r, g, b, a);
 }
 
 @vertex
@@ -47,5 +48,5 @@ fn vs_main(v: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(apply_fog(in.color, in.eye_z), 1.0);
+    return vec4<f32>(apply_fog(in.color.rgb, in.eye_z), in.color.a);
 }

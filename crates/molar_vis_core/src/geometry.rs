@@ -7,6 +7,7 @@
 use molar::prelude::*;
 
 use crate::color::{ColorMethod, Colorizer};
+use crate::material::Material;
 use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
 use crate::secstruct::SsMap;
 
@@ -136,10 +137,11 @@ pub fn build(
     bonds: &[[usize; 2]],
     params: &RepParams,
     color: ColorMethod,
+    material: Material,
     ss: Option<&SsMap>,
 ) -> GeometryData {
     let colorizer = Colorizer::new(color, bound, n_atoms, ss);
-    match *params {
+    let mut data = match *params {
         RepParams::Vdw => GeometryData {
             spheres: spheres(bound, &colorizer, |a| a.vdw()),
             ..Default::default()
@@ -181,7 +183,32 @@ pub fn build(
                 ..Default::default()
             }
         }
+    };
+
+    // Stamp the material onto every element: the packed lighting coefficients
+    // (`mat`) drive the lit shaders (spheres/cylinders/mesh), and the opacity rides
+    // in the color's alpha channel (read by all shaders; the renderer draws
+    // transparent reps in a second, depth-write-off, blended pass). Lines are
+    // unlit, so they carry opacity only.
+    let lighting = material.pack_lighting();
+    let a = material.opacity_u8();
+    let with_opacity = |c: u32| (c & 0x00ff_ffff) | ((a as u32) << 24);
+    for s in &mut data.spheres {
+        s.color = with_opacity(s.color);
+        s.mat = lighting;
     }
+    for c in &mut data.cylinders {
+        c.color = with_opacity(c.color);
+        c.mat = lighting;
+    }
+    for l in &mut data.lines {
+        l.color = with_opacity(l.color);
+    }
+    for v in &mut data.mesh.vertices {
+        v.color = with_opacity(v.color);
+        v.mat = lighting;
+    }
+    data
 }
 
 /// The 12 edges of the periodic box as a line list (24 vertices). The box is the
@@ -235,6 +262,7 @@ fn spheres(
             center: [p.pos.x, p.pos.y, p.pos.z],
             radius: radius(p.atom),
             color: colorizer.color(p.atom, p.id),
+            mat: 0,
         })
         .collect()
 }
@@ -266,8 +294,8 @@ fn cylinders(
     for &[a, b] in bonds {
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let m = midpoint(pa, pb);
-            v.push(CylinderInstance { p0: pa, radius, p1: m, color: ca });
-            v.push(CylinderInstance { p0: m, radius, p1: pb, color: cb });
+            v.push(CylinderInstance { p0: pa, radius, p1: m, color: ca, mat: 0 });
+            v.push(CylinderInstance { p0: m, radius, p1: pb, color: cb, mat: 0 });
         }
     }
     v

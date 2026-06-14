@@ -11,6 +11,7 @@ mod data;
 mod geometry;
 mod history;
 mod launch;
+mod material;
 mod render;
 mod scene;
 mod secstruct;

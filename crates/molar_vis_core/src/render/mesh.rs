@@ -12,8 +12,10 @@ pub struct MeshVertex {
     pub pos: [f32; 3],
     /// World-space normal (unit).
     pub normal: [f32; 3],
-    /// RGBA8 packed.
+    /// RGBA8 packed; alpha carries the material opacity.
     pub color: u32,
+    /// Packed material lighting (ambient|diffuse<<8|specular<<16|shininess<<24).
+    pub mat: u32,
 }
 
 impl MeshVertex {
@@ -36,6 +38,12 @@ impl MeshVertex {
                 shader_location: 2,
                 format: wgpu::VertexFormat::Uint32,
             },
+            // mat: u32 @location(3)
+            wgpu::VertexAttribute {
+                offset: 28,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Uint32,
+            },
         ],
     };
 }
@@ -45,6 +53,7 @@ pub fn build_pipeline(
     color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
+    transparent: bool,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("mesh-shader"),
@@ -74,7 +83,7 @@ pub fn build_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: depth_format,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(!transparent),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -85,7 +94,7 @@ pub fn build_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
-                blend: None,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),

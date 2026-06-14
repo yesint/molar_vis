@@ -192,10 +192,13 @@ pub struct SceneRenderer {
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
 
-    sphere_pipeline: wgpu::RenderPipeline,
-    cylinder_pipeline: wgpu::RenderPipeline,
-    line_pipeline: wgpu::RenderPipeline,
-    mesh_pipeline: wgpu::RenderPipeline,
+    // Each geometry has an opaque pipeline (depth-write on) and a transparent
+    // one (depth-write off, so blended fragments don't cull each other — which
+    // otherwise stripes the cartoon mesh). All pipelines alpha-blend.
+    sphere_pipeline: [wgpu::RenderPipeline; 2],
+    cylinder_pipeline: [wgpu::RenderPipeline; 2],
+    line_pipeline: [wgpu::RenderPipeline; 2],
+    mesh_pipeline: [wgpu::RenderPipeline; 2],
 }
 
 impl SceneRenderer {
@@ -232,11 +235,24 @@ impl SceneRenderer {
             }],
         });
 
-        let sphere_pipeline = sphere::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
-        let cylinder_pipeline =
-            cylinder::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
-        let line_pipeline = line::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
-        let mesh_pipeline = mesh::build_pipeline(device, color_format, DEPTH_FORMAT, &camera_bgl);
+        // [opaque (depth-write on), transparent (depth-write off)].
+        let f = color_format;
+        let sphere_pipeline = [
+            sphere::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
+            sphere::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
+        ];
+        let cylinder_pipeline = [
+            cylinder::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
+            cylinder::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
+        ];
+        let line_pipeline = [
+            line::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
+            line::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
+        ];
+        let mesh_pipeline = [
+            mesh::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, false),
+            mesh::build_pipeline(device, f, DEPTH_FORMAT, &camera_bgl, true),
+        ];
 
         let targets = Targets::new(device, color_format, [1, 1]);
         let egui_texture = rs.renderer.write().register_native_texture(
@@ -349,42 +365,48 @@ impl SceneRenderer {
 
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
-            for mol in &scene.molecules {
-                if !mol.visible {
-                    continue;
-                }
-                for rep in &mol.reps {
-                    if !rep.visible {
+            // Two phases for transparency: opaque representations (which write
+            // depth) first, then transparent ones blended over them. All pipelines
+            // alpha-blend; opaque geometry has alpha 1 so blending is a no-op.
+            for transparent_phase in [false, true] {
+                for mol in &scene.molecules {
+                    if !mol.visible {
                         continue;
                     }
-                    if let Some(s) = &rep.gpu.spheres {
-                        pass.set_pipeline(&self.sphere_pipeline);
-                        pass.set_vertex_buffer(0, s.buffer.slice(..));
-                        pass.draw(0..4, 0..s.count);
+                    for rep in &mol.reps {
+                        if !rep.visible || rep.material.is_transparent() != transparent_phase {
+                            continue;
+                        }
+                        let i = transparent_phase as usize;
+                        if let Some(s) = &rep.gpu.spheres {
+                            pass.set_pipeline(&self.sphere_pipeline[i]);
+                            pass.set_vertex_buffer(0, s.buffer.slice(..));
+                            pass.draw(0..4, 0..s.count);
+                        }
+                        if let Some(c) = &rep.gpu.cylinders {
+                            pass.set_pipeline(&self.cylinder_pipeline[i]);
+                            pass.set_vertex_buffer(0, c.buffer.slice(..));
+                            pass.draw(0..4, 0..c.count);
+                        }
+                        if let Some(l) = &rep.gpu.lines {
+                            pass.set_pipeline(&self.line_pipeline[i]);
+                            pass.set_vertex_buffer(0, l.buffer.slice(..));
+                            pass.draw(0..l.count, 0..1);
+                        }
+                        if let Some(m) = &rep.gpu.mesh {
+                            pass.set_pipeline(&self.mesh_pipeline[i]);
+                            pass.set_vertex_buffer(0, m.vertices.slice(..));
+                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..m.index_count, 0, 0..1);
+                        }
                     }
-                    if let Some(c) = &rep.gpu.cylinders {
-                        pass.set_pipeline(&self.cylinder_pipeline);
-                        pass.set_vertex_buffer(0, c.buffer.slice(..));
-                        pass.draw(0..4, 0..c.count);
-                    }
-                    if let Some(l) = &rep.gpu.lines {
-                        pass.set_pipeline(&self.line_pipeline);
-                        pass.set_vertex_buffer(0, l.buffer.slice(..));
-                        pass.draw(0..l.count, 0..1);
-                    }
-                    if let Some(m) = &rep.gpu.mesh {
-                        pass.set_pipeline(&self.mesh_pipeline);
-                        pass.set_vertex_buffer(0, m.vertices.slice(..));
-                        pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..m.index_count, 0, 0..1);
-                    }
-                }
-                // Periodic-box wireframe (per molecule, drawn as plain lines).
-                if mol.show_box {
-                    if let Some(l) = &mol.box_gpu.lines {
-                        pass.set_pipeline(&self.line_pipeline);
-                        pass.set_vertex_buffer(0, l.buffer.slice(..));
-                        pass.draw(0..l.count, 0..1);
+                    // Periodic-box wireframe (opaque grey) — draw in the opaque phase.
+                    if !transparent_phase && mol.show_box {
+                        if let Some(l) = &mol.box_gpu.lines {
+                            pass.set_pipeline(&self.line_pipeline[0]);
+                            pass.set_vertex_buffer(0, l.buffer.slice(..));
+                            pass.draw(0..l.count, 0..1);
+                        }
                     }
                 }
             }

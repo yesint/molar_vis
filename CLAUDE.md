@@ -31,6 +31,7 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
   update path) + `MOLAR_VIS_DEBUG_BOX=1` (show mol 0's periodic box) +
+  `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
   zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
   `tests/2lao_traj.pdb` (multi-MODEL, **not in git**).
@@ -213,7 +214,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   → `Camera::focus_bbox` on the rep's `sel` bbox at the current frame) · eye ·
   update-every-frame (`rep.dynamic`, ↻) · duplicate · trash.
 - **Row 2** (indented by the drag-handle width, so it aligns under the selection field):
-  **style** dropdown · **color** dropdown · **gear** (`GEAR_SIX`, toggles the inline
+  **style** dropdown · **color** dropdown · **material** dropdown (`material_picker`,
+  shaded-sphere icon faded by opacity) · **gear** (`GEAR_SIX`, toggles the inline
   `draw_rep_params` expander). Style and color are **icon+text** buttons built by the shared
   `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
@@ -286,9 +288,25 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `FileReaderSync` over a `Blob`), a wasm Web Worker loader (wasm-threads), `web_sys::File` picker,
   `eframe::WebRunner` entry + `index.html` served with COOP/COEP. The `from_reader` core above is
   the foundation; only the wasm runtime assembly remains.
-- ⏳ M9 **Materials** — VMD-style per-rep materials incl. **transparent** (opacity); needs
-  ambient/specular in the shaders + an alpha-blended (or OIT) pass in `render.rs` + a material
-  dropdown in the rep row.
+- ✅ M9 **Materials** — `material.rs` `Material` (8 VMD presets: Opaque/Transparent/Glass/
+  Translucent/Ghost/Glossy/Diffuse/Metal; each `params()` → ambient/diffuse/specular/shininess/
+  opacity) + per-rep `material` (in `EditState`) + a **material dropdown** in row 2 (next to color,
+  `material_picker`/`paint_material_icon`).
+  - **Transparency**: `geometry::build` folds the material opacity into each element's color alpha;
+    all shaders output it; **each geometry has two pipelines** (`[opaque, transparent]`) — both
+    alpha-blend, but the transparent one has **depth-write off** (so blended fragments don't cull
+    each other, which otherwise *stripes* the cartoon mesh). `render_scene` runs two phases: opaque
+    reps (write depth), then transparent reps (test depth, no write). Order-dependent within the
+    transparent set (no sort/OIT yet).
+  - **Lighting**: `Material::pack_lighting()` packs the four coeffs into a `u32`
+    (`ambient | diffuse<<8 | specular<<16 | shininess<<24`); `geometry::build` stamps it onto every
+    sphere/cylinder/mesh-vertex's new `mat: u32` field (lines carry opacity only — unlit). The lit
+    shaders (`sphere/cylinder/mesh.wgsl`) take `mat` (flat-interpolated), `unpack_mat` it, and run a
+    shared **Blinn-Phong** `shade_material`: `base*(amb + dif*N·L) + spec*pow(N·H, 2+shin*128)`,
+    white highlight, headlight `L=(0.3,0.4,1)`, view dir to eye (origin perspective / +z ortho).
+    The cartoon mesh flips its normal to face the eye first (two-sided open ribbons). Glossy=tight
+    highlight, Diffuse=matte (specular 0), Metal=dark+broad highlight — all verified distinct.
+  - **TODO**: consider OIT for multi-layer transparency.
 - ⏳ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` + an egui color-picker
   submenu in the color dropdown (undoable via `RepState`).
 - ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs

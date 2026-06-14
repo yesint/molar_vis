@@ -24,6 +24,7 @@ struct Instance {
     @location(1) radius: f32,
     @location(2) p1: vec3<f32>,
     @location(3) color: u32,
+    @location(4) mat: u32,
 };
 
 struct VsOut {
@@ -33,14 +34,37 @@ struct VsOut {
     @location(2) @interpolate(flat) axis: vec3<f32>,   // unit axis, view space
     @location(3) @interpolate(flat) radius: f32,
     @location(4) @interpolate(flat) seg_len: f32,
-    @location(5) @interpolate(flat) color: vec3<f32>,
+    @location(5) @interpolate(flat) color: vec4<f32>, // rgb + opacity
+    @location(6) @interpolate(flat) mat: u32,          // packed material lighting
 };
 
-fn unpack_color(c: u32) -> vec3<f32> {
+fn unpack_color(c: u32) -> vec4<f32> {
     let r = f32((c >> 0u) & 0xffu) / 255.0;
     let g = f32((c >> 8u) & 0xffu) / 255.0;
     let b = f32((c >> 16u) & 0xffu) / 255.0;
-    return vec3<f32>(r, g, b);
+    let a = f32((c >> 24u) & 0xffu) / 255.0;
+    return vec4<f32>(r, g, b, a);
+}
+
+// Unpack the per-element material lighting coefficients (ambient, diffuse,
+// specular, shininess).
+fn unpack_mat(m: u32) -> vec4<f32> {
+    let amb = f32((m >> 0u) & 0xffu) / 255.0;
+    let dif = f32((m >> 8u) & 0xffu) / 255.0;
+    let spc = f32((m >> 16u) & 0xffu) / 255.0;
+    let shn = f32((m >> 24u) & 0xffu) / 255.0;
+    return vec4<f32>(amb, dif, spc, shn);
+}
+
+// Blinn-Phong shade in view space (white specular highlight; `view_dir` to eye).
+fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: vec4<f32>) -> vec3<f32> {
+    let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
+    let ndotl = max(dot(normal, light_dir), 0.0);
+    let half = normalize(light_dir + view_dir);
+    let ndoth = max(dot(normal, half), 0.0);
+    let exponent = 2.0 + mat.w * 128.0;
+    let spec = mat.z * pow(ndoth, exponent);
+    return base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
 }
 
 @vertex
@@ -74,6 +98,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
     out.radius = inst.radius;
     out.seg_len = seg_len;
     out.color = unpack_color(inst.color);
+    out.mat = inst.mat;
     return out;
 }
 
@@ -122,12 +147,12 @@ fn fs_main(in: VsOut) -> FsOut {
     let normal = normalize(hit - axis_point);
     let clip = camera.proj * vec4<f32>(hit, 1.0);
 
-    let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
-    let diffuse = max(dot(normal, light_dir), 0.0);
-    let shade = 0.25 + 0.75 * diffuse;
+    // Per-material Blinn-Phong (view dir to eye: origin for perspective, +z ortho).
+    let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-hit), camera.params.x > 0.5);
+    let lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat));
 
     var out: FsOut;
     out.depth = clip.z / clip.w;
-    out.color = vec4<f32>(apply_fog(in.color * shade, hit.z), 1.0);
+    out.color = vec4<f32>(apply_fog(lit, hit.z), in.color.a);
     return out;
 }

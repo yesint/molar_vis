@@ -16,6 +16,7 @@ use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
+use crate::material::Material;
 use crate::render::SceneRenderer;
 use crate::scene::{self, MolId, Representation, Scene};
 use crate::secstruct::SsMap;
@@ -336,6 +337,60 @@ fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     });
 }
 
+/// Draw a small icon depicting a material: a shaded sphere whose opacity mirrors
+/// the material's, with a specular highlight whose size tracks shininess.
+fn paint_material_icon(painter: &egui::Painter, rect: egui::Rect, material: Material) {
+    use egui::Color32;
+    let p = material.params();
+    let c = rect.center();
+    let r = rect.height() * 0.42;
+    let a = ((p.opacity * 0.85 + 0.15) * 255.0) as u8; // keep faint materials visible
+    painter.circle_filled(c, r, Color32::from_rgba_unmultiplied(150, 152, 165, a));
+    if p.specular > 0.35 {
+        let hl = c + egui::vec2(-r * 0.32, -r * 0.34);
+        let hr = r * (0.18 + p.shininess * 0.18);
+        painter.circle_filled(hl, hr, Color32::from_white_alpha(235));
+    }
+}
+
+/// A clickable icon+label row inside the material dropdown. Returns true if clicked.
+fn material_option(ui: &mut egui::Ui, material: Material, selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 22.0), egui::Sense::click());
+    if selected || resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let icon_rect =
+        egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
+    paint_material_icon(ui.painter(), icon_rect, material);
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 8.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        material.label(),
+        egui::FontId::proportional(15.0),
+        ui.visuals().text_color(),
+    );
+    resp.clicked()
+}
+
+/// A drawn material icon + label button that opens a dropdown of materials.
+/// A material change forces a geometry rebuild (the opacity/lighting are baked
+/// per geometry element).
+fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
+    let material = rep.material;
+    let resp = picker_button(ui, material.label(), |p, r| paint_material_icon(p, r, material));
+
+    egui::Popup::menu(&resp).show(|ui| {
+        for material in Material::ALL {
+            if material_option(ui, material, material == rep.material) {
+                rep.material = material;
+                rep.geom_dirty = true;
+                ui.close();
+            }
+        }
+    });
+}
+
 /// Parameter controls for a representation, shown inline under its row as a tidy
 /// two-column table (parameter name on the left, control on the right).
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
@@ -646,6 +701,18 @@ impl App {
                 }
             }
         }
+        // Verification hook: MOLAR_VIS_DEBUG_MATERIAL sets the first rep's material.
+        if let Some(mat) = std::env::var("MOLAR_VIS_DEBUG_MATERIAL").ok().and_then(|m| {
+            Material::ALL
+                .into_iter()
+                .find(|x| x.label().eq_ignore_ascii_case(&m))
+        }) {
+            for mol in &mut scene.molecules {
+                if let Some(rep) = mol.reps.first_mut() {
+                    rep.material = mat;
+                }
+            }
+        }
         // Verification hook: MOLAR_VIS_DEBUG_ALLCOLORS lays out one rep per color
         // scheme (cycling styles) so every style/color icon is visible at once.
         if std::env::var("MOLAR_VIS_DEBUG_ALLCOLORS").is_ok() {
@@ -808,7 +875,8 @@ impl App {
                         let ss = geometry::needs_ss(&rep.params, rep.color)
                             .then(|| SsMap::compute(&bound, rep.ss_algo));
                         let geom = geometry::build(
-                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color, ss.as_ref(),
+                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
+                            ss.as_ref(),
                         );
                         (geom, ss)
                     };
@@ -824,7 +892,7 @@ impl App {
                     let geom = {
                         let bound = mol.system.bind_with_state(sel, render_state);
                         geometry::build(
-                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color,
+                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
                             rep.ss_cache.as_ref(),
                         )
                     };
@@ -980,18 +1048,21 @@ impl App {
                 .on_hover_text("Fade distant geometry toward the background for depth perception");
         });
         ui.add_enabled_ui(cue.enabled, |ui| {
-            ui.add(
-                egui::Slider::new(&mut cue.strength, 0.0..=1.0)
-                    .text("Strength")
-                    .fixed_decimals(2),
-            )
-            .on_hover_text("How strongly the far side fades to the background");
-            ui.add(
-                egui::Slider::new(&mut cue.start, 0.0..=1.0)
-                    .text("Start")
-                    .fixed_decimals(2),
-            )
-            .on_hover_text("Where the fog begins, from the front (0) to the back (1) of the scene");
+            egui::Grid::new("depth_cue")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.label("Strength");
+                    ui.add(egui::Slider::new(&mut cue.strength, 0.0..=1.0).fixed_decimals(2))
+                        .on_hover_text("How strongly the far side fades to the background");
+                    ui.end_row();
+                    ui.label("Start");
+                    ui.add(egui::Slider::new(&mut cue.start, 0.0..=1.0).fixed_decimals(2))
+                        .on_hover_text(
+                            "Where the fog begins, from the front (0) to the back (1) of the scene",
+                        );
+                    ui.end_row();
+                });
         });
     }
 
@@ -1090,6 +1161,10 @@ impl App {
                     }
                     ui.label(mol.name.as_str());
                     ui.weak(format!("({})", mol.n_atoms));
+                    // Load a trajectory into this molecule (left-aligned, by the name).
+                    if icon_button(ui, icon::FILM_STRIP, "Load trajectory").clicked() {
+                        open_load = Some(mol.id);
+                    }
                     // Right-justified action group: add-rep · eye · trash.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         compact_actions(ui);
@@ -1128,9 +1203,6 @@ impl App {
                             mol.selected_rep = Some(mol.reps.len() - 1);
                             mol.reps_open = true;
                             view_dirty = true;
-                        }
-                        if icon_button(ui, icon::FILM_STRIP, "Load trajectory").clicked() {
-                            open_load = Some(mol.id);
                         }
                     });
                 });
@@ -1571,16 +1643,27 @@ impl App {
 
                     // Row 2: style | color (icon+text dropdowns) | gear (params toggle).
                     ui.horizontal(|ui| {
-                        ui.add_space(row2_indent);
-                        style_picker(ui, rep);
-                        color_picker(ui, rep);
-                        if ui
-                            .selectable_label(rep.params_open, icon::GEAR_SIX)
-                            .on_hover_text("Settings")
-                            .clicked()
-                        {
-                            rep.params_open = !rep.params_open;
-                        }
+                        // Gear is right-justified: reserve its space on the right
+                        // first (so the pickers can't overlap it), then lay the
+                        // pickers out left-to-right in the remaining width.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .selectable_label(rep.params_open, icon::GEAR_SIX)
+                                .on_hover_text("Settings")
+                                .clicked()
+                            {
+                                rep.params_open = !rep.params_open;
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.add_space(row2_indent);
+                                    style_picker(ui, rep);
+                                    color_picker(ui, rep);
+                                    material_picker(ui, rep);
+                                },
+                            );
+                        });
                     });
                 })
                 .response;

@@ -11,8 +11,10 @@ pub struct SphereInstance {
     pub center: [f32; 3],
     /// Sphere radius (nm) — VDW radius pre-multiplied by any per-rep scale.
     pub radius: f32,
-    /// RGBA8 packed little-endian.
+    /// RGBA8 packed little-endian; alpha carries the material opacity.
     pub color: u32,
+    /// Packed material lighting (ambient|diffuse<<8|specular<<16|shininess<<24).
+    pub mat: u32,
 }
 
 impl SphereInstance {
@@ -38,6 +40,12 @@ impl SphereInstance {
                 shader_location: 2,
                 format: wgpu::VertexFormat::Uint32,
             },
+            // mat: u32 @location(3)
+            wgpu::VertexAttribute {
+                offset: 20,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Uint32,
+            },
         ],
     };
 }
@@ -50,6 +58,7 @@ pub fn build_pipeline(
     color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
+    transparent: bool,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sphere-shader"),
@@ -78,7 +87,7 @@ pub fn build_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: depth_format,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(!transparent),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -89,7 +98,7 @@ pub fn build_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
-                blend: None,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),

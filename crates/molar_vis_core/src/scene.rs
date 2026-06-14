@@ -8,6 +8,7 @@ use molar::prelude::*;
 use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
+use crate::material::Material;
 use crate::render::RepGpu;
 use crate::secstruct::SsMap;
 use crate::trajectory::Trajectory;
@@ -22,6 +23,8 @@ pub struct Representation {
     pub kind: RepKind,
     pub params: RepParams,
     pub color: ColorMethod,
+    /// Appearance preset (lighting + opacity); see [`crate::material::Material`].
+    pub material: Material,
     /// Secondary-structure algorithm driving the Cartoon shape and the
     /// "Structure" color scheme (DSSP vanilla / PyMOL dss).
     pub ss_algo: SsAlgorithm,
@@ -74,6 +77,7 @@ impl Representation {
             true,
             false,
             false,
+            Material::default(),
         )
     }
 
@@ -89,11 +93,13 @@ impl Representation {
             self.visible,
             self.dynamic,
             self.ss_per_frame,
+            self.material,
         )
     }
 
     /// Reconstruct a representation from saved editable fields (used by undo/redo).
     /// Starts dirty so its selection recompiles and geometry rebuilds next frame.
+    #[allow(clippy::too_many_arguments)]
     pub fn restore(
         kind: RepKind,
         params: RepParams,
@@ -103,11 +109,13 @@ impl Representation {
         visible: bool,
         dynamic: bool,
         ss_per_frame: bool,
+        material: Material,
     ) -> Self {
         Self {
             kind,
             params,
             color,
+            material,
             ss_algo,
             sel_text,
             expr: None,

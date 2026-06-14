@@ -22,20 +22,44 @@ struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: u32,
+    @location(3) mat: u32,
 };
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal_eye: vec3<f32>,
-    @location(1) color: vec3<f32>,
-    @location(2) eye_z: f32,
+    @location(1) color: vec4<f32>, // rgb + opacity
+    @location(2) view_pos: vec3<f32>,
+    @location(3) @interpolate(flat) mat: u32, // packed material lighting
 };
 
-fn unpack_color(c: u32) -> vec3<f32> {
+fn unpack_color(c: u32) -> vec4<f32> {
     let r = f32((c >> 0u) & 0xffu) / 255.0;
     let g = f32((c >> 8u) & 0xffu) / 255.0;
     let b = f32((c >> 16u) & 0xffu) / 255.0;
-    return vec3<f32>(r, g, b);
+    let a = f32((c >> 24u) & 0xffu) / 255.0;
+    return vec4<f32>(r, g, b, a);
+}
+
+// Unpack the per-element material lighting coefficients (ambient, diffuse,
+// specular, shininess).
+fn unpack_mat(m: u32) -> vec4<f32> {
+    let amb = f32((m >> 0u) & 0xffu) / 255.0;
+    let dif = f32((m >> 8u) & 0xffu) / 255.0;
+    let spc = f32((m >> 16u) & 0xffu) / 255.0;
+    let shn = f32((m >> 24u) & 0xffu) / 255.0;
+    return vec4<f32>(amb, dif, spc, shn);
+}
+
+// Blinn-Phong shade in view space (white specular highlight; `view_dir` to eye).
+fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: vec4<f32>) -> vec3<f32> {
+    let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
+    let ndotl = max(dot(normal, light_dir), 0.0);
+    let half = normalize(light_dir + view_dir);
+    let ndoth = max(dot(normal, half), 0.0);
+    let exponent = 2.0 + mat.w * 128.0;
+    let spec = mat.z * pow(ndoth, exponent);
+    return base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
 }
 
 @vertex
@@ -46,17 +70,21 @@ fn vs_main(v: VsIn) -> VsOut {
     // view is rigid (rotation + translation); w=0 applies only the rotation.
     out.normal_eye = (camera.view * vec4<f32>(v.normal, 0.0)).xyz;
     out.color = unpack_color(v.color);
-    out.eye_z = view_pos.z;
+    out.view_pos = view_pos.xyz;
+    out.mat = v.mat;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal_eye);
-    // Headlight: camera looks down -z, so the view direction toward the eye is
-    // +z. Two-sided (abs) so back faces of open ribbons are still lit.
-    let diff = abs(n.z);
-    let ambient = 0.35;
-    let shade = ambient + (1.0 - ambient) * diff;
-    return vec4<f32>(apply_fog(in.color * shade, in.eye_z), 1.0);
+    var n = normalize(in.normal_eye);
+    // View direction toward the eye (origin for perspective, +z for ortho).
+    let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-in.view_pos), camera.params.x > 0.5);
+    // Two-sided: flip the normal to face the eye so back faces of open ribbons
+    // are lit rather than dark.
+    if (dot(n, view_dir) < 0.0) {
+        n = -n;
+    }
+    let lit = shade_material(in.color.rgb, n, view_dir, unpack_mat(in.mat));
+    return vec4<f32>(apply_fog(lit, in.view_pos.z), in.color.a);
 }

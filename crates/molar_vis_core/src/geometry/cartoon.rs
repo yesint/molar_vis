@@ -307,6 +307,7 @@ fn emit(rings: &[Ring], mesh: &mut MeshData) {
                 pos: (r.center + offset).to_array(),
                 normal: nrm.to_array(),
                 color: r.color,
+                mat: 0,
             });
         }
     }
@@ -338,6 +339,7 @@ fn add_cap(mesh: &mut MeshData, ring: &Ring, ring_base: u32, front: bool) {
         pos: ring.center.to_array(),
         normal: normal.to_array(),
         color: ring.color,
+        mat: 0,
     });
     for k in 0..RING {
         let k2 = (k + 1) % RING;

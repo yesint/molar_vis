@@ -16,6 +16,7 @@ use molar::prelude::SsAlgorithm;
 
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
+use crate::material::Material;
 use crate::scene::{MolId, Molecule, Representation, Scene};
 
 #[derive(Clone, PartialEq)]
@@ -28,6 +29,7 @@ struct RepState {
     visible: bool,
     dynamic: bool,
     ss_per_frame: bool,
+    material: Material,
 }
 
 #[derive(Clone, PartialEq)]
@@ -65,6 +67,7 @@ impl EditState {
                             visible: r.visible,
                             dynamic: r.dynamic,
                             ss_per_frame: r.ss_per_frame,
+                            material: r.material,
                         })
                         .collect(),
                 })
@@ -108,6 +111,7 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
                 || cur.color != s.color
                 || cur.ss_algo != s.ss_algo
                 || cur.sel_text != s.sel_text
+                || cur.material != s.material
         };
         if needs_rebuild {
             mol.reps[i] = rep_from_state(s);
@@ -130,6 +134,7 @@ fn rep_from_state(s: &RepState) -> Representation {
         s.visible,
         s.dynamic,
         s.ss_per_frame,
+        s.material,
     )
 }
 
