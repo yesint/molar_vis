@@ -12,6 +12,7 @@ use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
 use crate::secstruct::SsMap;
 
 mod cartoon;
+mod surface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepKind {
@@ -20,15 +21,17 @@ pub enum RepKind {
     BallAndStick,
     Lines,
     Cartoon,
+    Surface,
 }
 
 impl RepKind {
-    pub const ALL: [RepKind; 5] = [
+    pub const ALL: [RepKind; 6] = [
         RepKind::Vdw,
         RepKind::Licorice,
         RepKind::BallAndStick,
         RepKind::Lines,
         RepKind::Cartoon,
+        RepKind::Surface,
     ];
 
     pub fn label(self) -> &'static str {
@@ -38,6 +41,7 @@ impl RepKind {
             RepKind::BallAndStick => "Ball and Stick",
             RepKind::Lines => "Lines",
             RepKind::Cartoon => "Cartoon",
+            RepKind::Surface => "Surface",
         }
     }
 
@@ -49,6 +53,7 @@ impl RepKind {
             "ballstick" | "ball_and_stick" | "ball-and-stick" => Some(RepKind::BallAndStick),
             "lines" => Some(RepKind::Lines),
             "cartoon" => Some(RepKind::Cartoon),
+            "surface" | "surf" | "sas" => Some(RepKind::Surface),
             _ => None,
         }
     }
@@ -82,6 +87,12 @@ pub enum RepParams {
         /// Helix/sheet ribbon half-thickness.
         ribbon_thickness: f32,
     },
+    Surface {
+        /// Probe radius added to each vdW radius (nm). 0 → vdW surface, 0.14 → SAS.
+        probe: f32,
+        /// Per-atom icosphere subdivision level (0..=4): higher = smoother/heavier.
+        quality: u32,
+    },
 }
 
 impl RepParams {
@@ -98,6 +109,10 @@ impl RepParams {
                 coil_radius: 0.03,
                 ribbon_width: 0.15,
                 ribbon_thickness: 0.03,
+            },
+            RepKind::Surface => RepParams::Surface {
+                probe: 0.14,
+                quality: 2,
             },
         }
     }
@@ -183,6 +198,10 @@ pub fn build(
                 ..Default::default()
             }
         }
+        RepParams::Surface { probe, quality } => GeometryData {
+            mesh: surface::build(bound, &colorizer, probe, quality),
+            ..Default::default()
+        },
     };
 
     // Stamp the material onto every element: the packed lighting coefficients

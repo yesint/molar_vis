@@ -2653,7 +2653,6 @@ dependencies = [
 [[package]]
 name = "powersasa"
 version = "0.2.0"
-source = "git+https://github.com/yesint/powersasa-llm.git#87536beadf93a7cfd443ee80aed1f9f684913068"
 dependencies = [
  "nalgebra",
  "thiserror 2.0.18",

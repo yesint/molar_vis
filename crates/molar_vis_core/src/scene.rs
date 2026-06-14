@@ -234,7 +234,12 @@ impl Molecule {
         for rep in &mut self.reps {
             if rep.dynamic {
                 rep.sel_dirty = true;
-            } else if rep.ss_per_frame && crate::geometry::needs_ss(&rep.params, rep.color) {
+            } else if matches!(rep.kind, RepKind::Surface)
+                || (rep.ss_per_frame && crate::geometry::needs_ss(&rep.params, rep.color))
+            {
+                // The surface mesh is rebuilt from scratch each frame (its topology
+                // changes with the coordinates), so it can't use the in-place
+                // coords-only GPU update.
                 rep.geom_dirty = true;
             } else {
                 rep.coords_dirty = true;

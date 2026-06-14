@@ -98,6 +98,12 @@ fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: RepKind, co
             ];
             painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
         }
+        RepKind::Surface => {
+            // A blob: three overlapping circles that fuse into one smooth outline.
+            painter.circle_filled(c - Vec2::new(hw * 0.42, -r * 0.10), r * 0.62, color);
+            painter.circle_filled(c + Vec2::new(hw * 0.40, r * 0.18), r * 0.58, color);
+            painter.circle_filled(c + Vec2::new(hw * 0.02, -r * 0.30), r * 0.50, color);
+        }
     }
 }
 
@@ -428,6 +434,16 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
                 ui.end_row();
                 ui.label("Ribbon thickness (nm)");
                 changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
+                ui.end_row();
+            }
+            RepParams::Surface { probe, quality } => {
+                ui.label("Probe radius (nm)");
+                changed |= ui.add(egui::Slider::new(probe, 0.0..=0.3)).changed();
+                ui.end_row();
+                ui.label("Quality");
+                changed |= ui
+                    .add(egui::Slider::new(quality, 0..=4).text("higher = smoother/heavier"))
+                    .changed();
                 ui.end_row();
             }
         });

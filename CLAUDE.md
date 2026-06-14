@@ -22,7 +22,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   generated — **not in git**; regenerate per `tests/README.md` with `gmx genconf`).
 - Dev machine is **Wayland**; screenshot a running window with `spectacle -b -n -a -o out.png`
   (**`-a` = active window — use this**; `-f` full-screen captures blank on this compositor).
-- Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon`,
+- Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon|surface`
+  (+ `MOLAR_VIS_DEBUG_SURF=1` logs surface grid stats),
   `MOLAR_VIS_DEBUG_SEL="<selection>"`,
   `MOLAR_VIS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
   `MOLAR_VIS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
@@ -307,6 +308,21 @@ History labels via `describe_change` ("edit selection", "change coloring",
     The cartoon mesh flips its normal to face the eye first (two-sided open ribbons). Glossy=tight
     highlight, Diffuse=matte (specular 0), Metal=dark+broad highlight — all verified distinct.
   - **TODO**: consider OIT for multi-layer transparency.
+- ✅ M12 **Molecular surface (SES)** — `RepKind::Surface` + `RepParams::Surface { probe, quality }`,
+  built in `geometry/surface.rs` as the **solvent-excluded (rolling-probe) surface via a grid
+  distance-field + Surface Nets** (the robust PyMOL/Chimera/EDTSurf "distance maps + carving"
+  method; renders through the existing lit-mesh pipeline). Pipeline: rasterize the SAS solid
+  (voxel within `vdW+probe` of an atom) → exact Felzenszwalb–Huttenlocher EDT to the nearest
+  outside voxel = `dist(x, solvent)` → isosurface at `dist = probe` (= morphological closing of
+  the vdW balls by the probe) via **Surface Nets** (dual marching-cubes: one vertex per
+  straddling cell → watertight by construction, smooth, no 256-entry tables). Per-vertex normal
+  = −∇field, color = nearest atom; `quality` 0–4 → spacing 0.14–0.035 nm, voxel count capped at
+  32M (auto-coarsen + `log::warn`). Verified watertight/smooth on 2lao (~1 s), the symmetric
+  cube, and 375k atoms (~10 s, 1.4M tris). `MOLAR_VIS_DEBUG_REP=surface`,
+  `MOLAR_VIS_DEBUG_SURF=1` logs grid stats. **Dead-ends (documented in memory):** analytic
+  convex+toroidal+concave patches (powersasa `surface_mesh`/`ses_mesh`, kept as an exact
+  SAS-area API) are MSMS-style crack-prone and were abandoned; Ball-Pivoting re-meshing worked
+  visually but was too slow. The grid is the only reliably watertight, scalable approach.
 - ⏳ M10 **Custom solid selection colors** — `ColorMethod::Solid([u8;4])` + an egui color-picker
   submenu in the color dropdown (undoable via `RepState`).
 - ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs

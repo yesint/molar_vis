@@ -25,6 +25,11 @@ log = "0.4"
 # Local molar checkout (default features => Float = f32). Added to molar_vis_core at M1.
 molar = { path = "../molar/molar", default-features = false }
 
+# Develop powersasa (ours) from the local clone so molar's new surface-mesh API
+# is available through the path-dep on molar. Drop/bump once pushed & released.
+[patch."https://github.com/yesint/powersasa-llm.git"]
+powersasa = { path = "../powersasa-llm" }
+
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]
 opt-level = 1
