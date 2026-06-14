@@ -400,15 +400,18 @@ fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 /// Parameter controls for a representation, shown inline under its row as a tidy
 /// two-column table (parameter name on the left, control on the right).
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
-    // Tab bar: [Style] [Traj] [Periodic].
+    // Tab bar: [Style] [Traj] [Periodic] — compact (small font, tight padding,
+    // like a dropdown list rather than full-size buttons).
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
+        ui.spacing_mut().button_padding = egui::vec2(5.0, 1.0);
         for (tab, label) in [
             (SettingsTab::Style, "Style"),
             (SettingsTab::Traj, "Traj"),
             (SettingsTab::Periodic, "Periodic"),
         ] {
-            if ui.selectable_label(rep.settings_tab == tab, label).clicked() {
+            let text = egui::RichText::new(label).size(13.0);
+            if ui.selectable_label(rep.settings_tab == tab, text).clicked() {
                 rep.settings_tab = tab;
             }
         }
@@ -1100,7 +1103,7 @@ impl App {
                         }
                         // Toggle the depth-cue panel.
                         if ui
-                            .selectable_label(self.cue_panel_open, icon::CLOUD_FOG)
+                            .selectable_label(self.cue_panel_open, icon::GRADIENT)
                             .on_hover_text("Depth cue")
                             .clicked()
                         {
@@ -1724,8 +1727,11 @@ impl App {
                         } else {
                             icon::CARET_RIGHT
                         };
+                        // Never shows the persistent "selected" (blue) highlight —
+                        // the ▸/▾ glyph already signals expanded/collapsed; passing
+                        // `false` keeps just the hover feedback.
                         if ui
-                            .selectable_label(rep.params_open, caret)
+                            .selectable_label(false, caret)
                             .on_hover_text("Representation settings")
                             .clicked()
                         {

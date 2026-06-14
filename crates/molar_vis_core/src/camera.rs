@@ -54,17 +54,27 @@ impl Default for Camera {
     }
 }
 
+/// Eye distance that makes a box of half-extents `half` fill ~`FILL` of the vertical
+/// field of view along its **longest** dimension (so the object is large in frame,
+/// not lost inside its bounding-sphere diagonal). Works for both perspective and
+/// orthographic (same small-angle relation). `scene_radius` (the bounding-sphere
+/// radius) handles near/far separately, so this can be tight without clipping.
+fn fit_distance(half: Vec3, fov_y: f32) -> f32 {
+    const FILL: f32 = 0.9;
+    let fit_r = half.max_element().max(1e-3);
+    fit_r / (FILL * (fov_y * 0.5).tan())
+}
+
 impl Camera {
     /// Position the camera to frame a bounding box.
     pub fn frame_bbox(min: Vec3, max: Vec3) -> Self {
-        let center = (min + max) * 0.5;
-        let radius = ((max - min).length() * 0.5).max(1e-3);
         let fov_y = 45_f32.to_radians();
+        let half = (max - min) * 0.5;
         Self {
-            target: center,
+            target: (min + max) * 0.5,
             orientation: Quat::IDENTITY,
-            distance: radius / (fov_y * 0.5).sin() * 1.3,
-            scene_radius: radius,
+            distance: fit_distance(half, fov_y),
+            scene_radius: half.length().max(1e-3),
             fov_y,
             projection: Projection::Orthographic,
             depth_cue: DepthCue::default(),
@@ -77,11 +87,10 @@ impl Camera {
     /// selection / focus" action, unlike [`frame_bbox`](Self::frame_bbox) which
     /// resets the orientation).
     pub fn focus_bbox(&mut self, min: Vec3, max: Vec3) {
-        let center = (min + max) * 0.5;
-        let radius = ((max - min).length() * 0.5).max(1e-3);
-        self.target = center;
-        self.scene_radius = radius;
-        self.distance = radius / (self.fov_y * 0.5).sin() * 1.3;
+        let half = (max - min) * 0.5;
+        self.target = (min + max) * 0.5;
+        self.scene_radius = half.length().max(1e-3);
+        self.distance = fit_distance(half, self.fov_y);
     }
 
     pub fn is_perspective(&self) -> bool {
