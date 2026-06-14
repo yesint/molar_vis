@@ -40,7 +40,7 @@ impl RepKind {
         }
     }
 
-    /// Parse a rep name (used by the `VMD_RS_DEBUG_REP` verification hook).
+    /// Parse a rep name (used by the `MOLAR_VIS_DEBUG_REP` verification hook).
     pub fn from_name(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "vdw" => Some(RepKind::Vdw),

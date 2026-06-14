@@ -1615,6 +1615,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "molar_vis"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "molar_vis_core",
+]
+
+[[package]]
+name = "molar_vis_core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "eframe",
+ "egui",
+ "egui-phosphor",
+ "egui-wgpu",
+ "glam 0.32.1",
+ "log",
+ "molar",
+ "wgpu",
+]
+
+[[package]]
 name = "molly"
 version = "0.6.1"
 source = "git+https://github.com/ma3ke/molly.git#9f2fd6bcff4cdad8c4ab509a519192f89d843774"
@@ -3047,29 +3070,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vmd_rs"
-version = "0.1.0"
-dependencies = [
- "env_logger",
- "vmd_rs_core",
-]
-
-[[package]]
-name = "vmd_rs_core"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "eframe",
- "egui",
- "egui-phosphor",
- "egui-wgpu",
- "glam 0.32.1",
- "log",
- "molar",
- "wgpu",
-]
 
 [[package]]
 name = "walkdir"

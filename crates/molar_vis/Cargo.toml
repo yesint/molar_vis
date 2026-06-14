@@ -1,14 +1,14 @@
 [package]
-name = "vmd_rs"
+name = "molar_vis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "vmd_rs"
+name = "molar_vis"
 path = "src/main.rs"
 
 [dependencies]
-vmd_rs_core = { path = "../vmd_rs_core" }
+molar_vis_core = { path = "../molar_vis_core" }
 env_logger = "0.11"

@@ -3,7 +3,7 @@
 use eframe::egui;
 use egui::{Color32, FontFamily, FontId, TextStyle};
 
-/// Apply the vmd_rs look. Call once at startup with the egui context.
+/// Apply the molar_vis look. Call once at startup with the egui context.
 pub fn apply(ctx: &egui::Context) {
     // Merge in the Phosphor icon font (eye / trash / copy / plus / projection
     // glyphs used by the panel) alongside the default fonts.

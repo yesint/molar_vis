@@ -1,4 +1,4 @@
-# CLAUDE.md — vmd_rs
+# CLAUDE.md — molar_vis
 
 A modern, legacy-free molecular viewer modeled after VMD, in **pure Rust**,
 targeting Linux/Windows/macOS/WebAssembly. It builds on **molar** (the user's Rust
@@ -7,26 +7,26 @@ wgpu** with hand-written WGSL GPU ray-cast impostors.
 
 The user, Semen Yesylevsky, is the author of molar. The full approved plan lives at
 `~/.claude/plans/we-are-going-to-rippling-wreath.md`; per-session memory at
-`~/.claude/projects/-home-semen-work-Projects-vmd-rs/memory/`.
+`~/.claude/projects/-home-semen-work-Projects-molar-vis/memory/`.
 
 ## Build / run / test
 
 ```sh
 cargo build
-cargo run -p vmd_rs -- tests/2lao.pdb [more files...]   # each file = one molecule
-cargo test -p vmd_rs_core
-cargo build -p vmd_rs_core --target wasm32-unknown-unknown   # WASM-readiness check
+cargo run -p molar_vis -- tests/2lao.pdb [more files...]   # each file = one molecule
+cargo test -p molar_vis_core
+cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check
 ```
 
 - Test assets in `tests/`: `2lao.pdb` (1911 atoms), `large_375k.gro` (375,548 atoms,
   generated — **not in git**; regenerate per `tests/README.md` with `gmx genconf`).
 - Dev machine is **Wayland**; screenshot a running window with
   `spectacle -b -n -f -o out.png` (`-a` = active window).
-- Headless verification env hooks (native only): `VMD_RS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon`,
-  `VMD_RS_DEBUG_SEL="<selection>"`,
-  `VMD_RS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
-  `VMD_RS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
-  `VMD_RS_DEBUG_ORBIT=<deg>`, `VMD_RS_DEBUG_ORTHO=1`.
+- Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon`,
+  `MOLAR_VIS_DEBUG_SEL="<selection>"`,
+  `MOLAR_VIS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
+  `MOLAR_VIS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
+  `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`.
 
 ## Tech stack (working versions)
 
@@ -37,14 +37,14 @@ GROMACS 2026.1 available as `gmx`.
 
 ## Workspace & modules
 
-`crates/vmd_rs_core` (library, WASM-safe, all logic) + `crates/vmd_rs` (native bin:
+`crates/molar_vis_core` (library, WASM-safe, all logic) + `crates/molar_vis` (native bin:
 argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 
 - `lib.rs` — module decls, `run`/`App` re-exports.
 - `launch.rs` — `AppLaunch`, eframe bootstrap (`Renderer::Wgpu`).
 - `app.rs` — `eframe::App`; owns `SceneRenderer`, `Camera`, `Scene`; left panel
   (Scene/Molecules/Representations/Controls) + central viewport; `rebuild_dirty()`
-  and the render-skip logic. Holds the `VMD_RS_DEBUG_*` hooks.
+  and the render-skip logic. Holds the `MOLAR_VIS_DEBUG_*` hooks.
 - `theme.rs` — installs the Phosphor icon font + a high-contrast dark style, larger fonts.
 - `camera.rs` — quaternion arcball `Camera` (orbit/pan/zoom), perspective **and**
   orthographic projection, `frame_bbox`. `#[derive(PartialEq)]` drives render-skip.

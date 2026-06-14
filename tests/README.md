@@ -14,9 +14,9 @@
 ## Quick run
 
 ```sh
-cargo run -p vmd_rs -- tests/2lao.pdb
-cargo run -p vmd_rs -- tests/large_375k.gro
+cargo run -p molar_vis -- tests/2lao.pdb
+cargo run -p molar_vis -- tests/large_375k.gro
 ```
 
-Headless verification env hooks (native): `VMD_RS_DEBUG_REP=vdw|licorice|ballstick|lines`,
-`VMD_RS_DEBUG_ORBIT=<deg>`, `VMD_RS_DEBUG_ORTHO=1`.
+Headless verification env hooks (native): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines`,
+`MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`.

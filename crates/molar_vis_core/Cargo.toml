@@ -1,12 +1,12 @@
 [package]
-name = "vmd_rs_core"
+name = "molar_vis_core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [lib]
-name = "vmd_rs_core"
+name = "molar_vis_core"
 path = "src/lib.rs"
 
 [dependencies]

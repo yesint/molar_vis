@@ -1,8 +1,8 @@
-//! vmd_rs_core — all viewer logic, kept WASM-safe (no native-only deps live here).
+//! molar_vis_core — all viewer logic, kept WASM-safe (no native-only deps live here).
 //!
 //! The crate exposes [`run`] (the eframe entry point) and [`AppLaunch`] (launch
 //! parameters). Native-only concerns (argv parsing, file dialogs, logging setup)
-//! live in the `vmd_rs` binary so this crate can compile to `wasm32-unknown-unknown`.
+//! live in the `molar_vis` binary so this crate can compile to `wasm32-unknown-unknown`.
 
 mod app;
 mod camera;

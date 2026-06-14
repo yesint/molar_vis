@@ -448,8 +448,8 @@ impl App {
         let renderer = SceneRenderer::new(render_state);
 
         // VMD's default style for a new molecule is Lines; override for headless
-        // checks with VMD_RS_DEBUG_REP=vdw|licorice|ballstick|lines.
-        let default_rep = std::env::var("VMD_RS_DEBUG_REP")
+        // checks with MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines.
+        let default_rep = std::env::var("MOLAR_VIS_DEBUG_REP")
             .ok()
             .and_then(|s| RepKind::from_name(&s))
             .unwrap_or(RepKind::Lines);
@@ -474,9 +474,9 @@ impl App {
             status = "No molecules loaded.".to_string();
         }
 
-        // Verification hook: VMD_RS_DEBUG_SEL=<selection> overrides the initial
+        // Verification hook: MOLAR_VIS_DEBUG_SEL=<selection> overrides the initial
         // selection of every molecule's first rep (e.g. "name CA", "protein").
-        if let Ok(sel) = std::env::var("VMD_RS_DEBUG_SEL") {
+        if let Ok(sel) = std::env::var("MOLAR_VIS_DEBUG_SEL") {
             for mol in &mut scene.molecules {
                 if let Some(rep) = mol.reps.first_mut() {
                     rep.sel_text = sel.clone();
@@ -484,8 +484,8 @@ impl App {
                 }
             }
         }
-        // Verification hook: VMD_RS_DEBUG_COLOR sets the first rep's color scheme.
-        if let Some(cm) = std::env::var("VMD_RS_DEBUG_COLOR").ok().and_then(|c| {
+        // Verification hook: MOLAR_VIS_DEBUG_COLOR sets the first rep's color scheme.
+        if let Some(cm) = std::env::var("MOLAR_VIS_DEBUG_COLOR").ok().and_then(|c| {
             match c.to_ascii_lowercase().as_str() {
                 "element" => Some(ColorMethod::Element),
                 "chain" => Some(ColorMethod::Chain),
@@ -503,9 +503,9 @@ impl App {
                 }
             }
         }
-        // Verification hook: VMD_RS_DEBUG_ALLCOLORS lays out one rep per color
+        // Verification hook: MOLAR_VIS_DEBUG_ALLCOLORS lays out one rep per color
         // scheme (cycling styles) so every style/color icon is visible at once.
-        if std::env::var("VMD_RS_DEBUG_ALLCOLORS").is_ok() {
+        if std::env::var("MOLAR_VIS_DEBUG_ALLCOLORS").is_ok() {
             for mol in &mut scene.molecules {
                 mol.reps.clear();
                 for (i, &cm) in ColorMethod::ALL.iter().enumerate() {
@@ -522,19 +522,19 @@ impl App {
             Some((min, max)) => Camera::frame_bbox(min, max),
             None => Camera::default(),
         };
-        if let Ok(deg) = std::env::var("VMD_RS_DEBUG_ORBIT") {
+        if let Ok(deg) = std::env::var("MOLAR_VIS_DEBUG_ORBIT") {
             if let Ok(d) = deg.parse::<f32>() {
                 camera.orbit(d, d * 0.4);
             }
         }
-        if std::env::var("VMD_RS_DEBUG_ORTHO").is_ok() {
+        if std::env::var("MOLAR_VIS_DEBUG_ORTHO").is_ok() {
             camera.projection = Projection::Orthographic;
         }
 
         let history = History::new(EditState::capture(&scene));
 
-        // Verification hook: VMD_RS_DEBUG_PARAMS=1 opens the first rep's gear panel.
-        if std::env::var("VMD_RS_DEBUG_PARAMS").is_ok() {
+        // Verification hook: MOLAR_VIS_DEBUG_PARAMS=1 opens the first rep's gear panel.
+        if std::env::var("MOLAR_VIS_DEBUG_PARAMS").is_ok() {
             if let Some(rep) = scene.molecules.first_mut().and_then(|m| m.reps.first_mut()) {
                 rep.params_open = true;
             }

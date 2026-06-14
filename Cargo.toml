@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vmd_rs_core", "crates/vmd_rs"]
+members = ["crates/molar_vis_core", "crates/molar_vis"]
 resolver = "2"
 
 [workspace.package]
@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Artistic-2.0"
 authors = ["Semen Yesylevskyy"]
-repository = "https://github.com/yesint/vmd_rs"
+repository = "https://github.com/yesint/molar_vis"
 
 [workspace.dependencies]
 egui = "0.34"
@@ -22,7 +22,7 @@ wgpu = "29"
 glam = "0.32"
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
-# Local molar checkout (default features => Float = f32). Added to vmd_rs_core at M1.
+# Local molar checkout (default features => Float = f32). Added to molar_vis_core at M1.
 molar = { path = "../molar/molar", default-features = false }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
