@@ -130,10 +130,16 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl` (incl.
   `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit`). The cartoon mesh writes real depth
   and interleaves correctly with the impostors.
-- `pick.rs` — CPU ray-cast atom picking (`PickMode`, `PickHit`, `cursor_ray`, `ray_sphere`,
-  `effective_radius`, `pick`). Hit-tests the cursor against atoms **as displayed** (smoothed +
-  periodic images, sharing `PeriodicParams::offsets` with the renderer) and reports the atom's
-  **real** stored coordinate. Drives the hover-info overlay (`draw_pick_overlay` in `app.rs`). M11.
+- `pick.rs` — CPU ray-cast atom picking (`PickMode {Off, HoverInfo, Lasso}`, `PickHit`,
+  `cursor_ray`, `ray_sphere`, `effective_radius`, `pick`) **and lasso selection** (`lasso_select`,
+  `point_in_polygon`, `index_selection_string`, `LassoSelection`). Hit-tests the cursor/lasso
+  against atoms **as displayed** (smoothed + periodic images, sharing `PeriodicParams::offsets`
+  with the renderer) and reports the atom's **real** stored coordinate. Both hover-pick and lasso
+  share `atom_in_rep(kind, name)` — the **style-specific contribution filter**: a Cartoon rep is
+  hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal OT1/OT2/OXT — what the
+  ribbon is built from, never side chains); every other style hits all selected atoms (Lines
+  included, via its isolated-atom dots). Drives the hover-info overlay (`draw_pick_overlay` in
+  `app.rs`). M11.
 
 ## Key architecture
 
@@ -268,7 +274,11 @@ Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + at
 a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
 **orthographic is the default**) and a **depth-cue** button (`GRADIENT` glyph) that toggles
 (`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), a **pick-mode
-dropdown** (`Off` default / `Hover info` — see `pick.rs` / M11), and an **axes-gizmo dropdown**
+dropdown** (`Off` default / `Hover info` / `Lasso select` — see `pick.rs` / M11; in `Lasso` a
+plain-LMB drag accumulates `App::lasso_path` (Shift+LMB still rolls), the polygon is drawn as a
+cyan polyline, and on release `finish_lasso` turns the enclosed atoms into a new **VDW** rep per
+molecule via `pick::index_selection_string` — undoable by the normal checkpoint), and an
+**axes-gizmo dropdown**
 (`ARROWS_OUT_CARDINAL`: an *On* checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,
 BottomLeft,BottomRight}`, default BottomRight — VMD-style orientation axes;
 `MOLAR_VIS_DEBUG_AXES=1` enables it headlessly). All four are the **same `overlay_button`
@@ -449,19 +459,33 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `swatch_button`) + a full `color_picker_color32`; the submenu is `CloseOnClickOutside` so dragging
   the picker doesn't dismiss it). Undoable for free — `RepState` already snapshots `rep.color` and
   history compares `ColorMethod` generically.
-- 🟡 M11 **Atom picking** — `pick.rs` (`PickMode {Off, HoverInfo}`, `PickHit`, `cursor_ray`,
-  `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) -> Option<PickHit>`): a **CPU
-  ray-cast** of the cursor against every visible atom **at its displayed position** (smoothed +
-  periodic-replicated, via `bind_with_state(sel, smoothed_or_frame)` × `PeriodicParams::offsets`),
-  returning the nearest hit — but reporting the atom's **real** stored coord (`frame.coords[id]`,
-  central image, un-smoothed), per the user's hard requirement. Pick/glow radius = the rep's drawn
-  sphere (VDW `vdw·scale`, BallAndStick `vdw·sphere_scale`) else the **small Ball-and-Stick
-  sphere size** (`vdw·0.25` = `BALLSTICK_SPHERE_SCALE` — Licorice/Lines/Cartoon/Surface). Pick-mode
-  **dropdown** in the viewport overlay (next to depth-cue; Off default → no per-hover cost). In
-  `HoverInfo`, `draw_viewport` ray-casts the hover, and `draw_pick_overlay` paints a **cyan glowing
-  outline ring** at the hit's projected displayed position + a **framed** lower-left info box
-  `name resname resid` / `x, y, z` (real coords, **nm**). `MOLAR_VIS_DEBUG_PICK=1` forces a
-  viewport-center pick (headless verification — hover can't be simulated on this Wayland box).
-  **TODO:** mouse-lasso selection (polygon over projected positions → feed a selection); more pick
-  modes in the dropdown. Picking is O(visible atoms × images) per hover — fine for small/medium
-  systems, a spatial grid / GPU id-buffer is the optimization for huge ones.
+- 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
+  `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
+  Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed
+  position** (smoothed + periodic-replicated, via `bind_with_state(sel, smoothed_or_frame)` ×
+  `PeriodicParams::offsets`), returning the nearest hit — but reporting the atom's **real** stored
+  coord (`frame.coords[id]`, central image, un-smoothed), per the user's hard requirement.
+  Pick/glow radius = the rep's drawn sphere (VDW `vdw·scale`, BallAndStick `vdw·sphere_scale`) else
+  the **small Ball-and-Stick sphere size** (`vdw·0.25` = `BALLSTICK_SPHERE_SCALE` —
+  Licorice/Lines/Cartoon/Surface). Pick-mode **dropdown** in the viewport overlay (next to
+  depth-cue; Off default → no per-hover cost). In `HoverInfo`, `draw_viewport` ray-casts the hover,
+  and `draw_pick_overlay` paints a **cyan glowing outline ring** at the hit's projected displayed
+  position + a **framed** lower-left info box `name resname resid` / `x, y, z` (real coords, **nm**).
+  `MOLAR_VIS_DEBUG_PICK=1` forces a viewport-center pick (headless verification — hover can't be
+  simulated on this Wayland box).
+  - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, a plain-LMB drag in `draw_viewport`
+    accumulates `App::lasso_path` (pixel coords; Shift+LMB still rolls, RMB/MMB/wheel still
+    navigate), drawn as a cyan polyline; on release `finish_lasso` maps the path → clip-space NDC
+    polygon and calls `lasso_select`, which projects every **style-eligible, displayed** atom (any
+    periodic image inside the polygon counts, **even-odd** `point_in_polygon`) and groups hits per
+    molecule (`LassoSelection`, deduped/sorted). Each molecule with hits gets a new **VDW** rep
+    whose selection text is `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …`
+    string (consecutive runs → inclusive ranges; molar `index` is the 0-based global atom index).
+    Undoable via the normal end-of-frame checkpoint.
+  - **Style-specific eligibility** (shared by hover + lasso via `atom_in_rep(kind, name)`): a
+    Cartoon rep is hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal
+    OT1/OT2/OXT — what the ribbon is built from), never side chains; every other style is hit on
+    all selected atoms (Lines included, via its isolated-atom dots). Tested:
+    `lasso_full_screen_selects_all_for_vdw`, `lasso_cartoon_selects_only_backbone`.
+  - **TODO:** more pick modes in the dropdown. Picking/lasso is O(visible atoms × images) — fine
+    for small/medium systems; a spatial grid / GPU id-buffer is the optimization for huge ones.

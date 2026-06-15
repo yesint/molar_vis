@@ -1038,8 +1038,12 @@ pub struct App {
     /// Whether the depth-cue panel in the viewport overlay is expanded.
     cue_panel_open: bool,
     /// Picking mode (viewport-overlay dropdown). `HoverInfo` shows the hovered
-    /// atom's identity + real coords and glows its outline.
+    /// atom's identity + real coords and glows its outline; `Lasso` drags a
+    /// freehand selection polygon.
     pick_mode: PickMode,
+    /// In-progress lasso polygon (viewport pixel coords), accumulated while
+    /// dragging in `PickMode::Lasso`. Empty when not lassoing. Transient view state.
+    lasso_path: Vec<egui::Pos2>,
     /// Whether the VMD-style orientation axes gizmo is shown in the viewport.
     axes_on: bool,
     /// Which viewport corner the axes gizmo is anchored to.
@@ -1315,6 +1319,7 @@ impl App {
             } else {
                 PickMode::default()
             },
+            lasso_path: Vec::new(),
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
             axes_corner: Corner::BottomRight,
         })
@@ -1586,6 +1591,11 @@ impl App {
                                 &mut self.pick_mode,
                                 PickMode::HoverInfo,
                                 PickMode::HoverInfo.label(),
+                            );
+                            ui.selectable_value(
+                                &mut self.pick_mode,
+                                PickMode::Lasso,
+                                PickMode::Lasso.label(),
                             );
                         });
                         // Orientation-axes dropdown: on/off + which corner.
@@ -2340,10 +2350,23 @@ impl App {
             //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
             //   RMB = pan           · Shift+RMB = move along view Z (dolly)
             //   middle = pan        · wheel = scale (zoom)
+            // In Lasso pick mode, a plain LMB drag draws the selection polygon
+            // instead of orbiting (Shift+LMB still rolls, so roll stays reachable).
+            let lasso_mode = self.pick_mode == PickMode::Lasso;
+            if !lasso_mode {
+                self.lasso_path.clear();
+            }
             let delta = response.drag_delta();
             let shift = ui.input(|i| i.modifiers.shift);
             if response.dragged_by(egui::PointerButton::Primary) {
-                if shift {
+                if lasso_mode && !shift {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        // Drop near-duplicate points (drag jitter) for a clean polygon.
+                        if self.lasso_path.last().is_none_or(|&p| (p - pos).length() > 1.5) {
+                            self.lasso_path.push(pos);
+                        }
+                    }
+                } else if shift {
                     self.camera.roll(delta.x);
                 } else {
                     self.camera.orbit(delta.x, delta.y);
@@ -2421,6 +2444,32 @@ impl App {
                 }
             }
 
+            // Lasso selection: draw the in-progress polygon, and on release turn
+            // the enclosed (style-eligible) atoms into a new selection rep.
+            if lasso_mode && self.lasso_path.len() >= 2 {
+                let painter = ui.painter_at(rect);
+                let col = egui::Color32::from_rgb(130, 215, 255);
+                painter.add(egui::Shape::line(
+                    self.lasso_path.clone(),
+                    egui::Stroke::new(1.5, col),
+                ));
+                // Faint segment closing the loop back to the start.
+                if let (Some(&first), Some(&last)) =
+                    (self.lasso_path.first(), self.lasso_path.last())
+                {
+                    painter.line_segment(
+                        [last, first],
+                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(130, 215, 255, 110)),
+                    );
+                }
+            }
+            if lasso_mode
+                && !self.lasso_path.is_empty()
+                && response.drag_stopped_by(egui::PointerButton::Primary)
+            {
+                self.finish_lasso(rect, size_px);
+            }
+
             // VMD-style orientation axes gizmo in the chosen corner.
             if self.axes_on {
                 draw_axes_overlay(ui, rect, &self.camera, self.axes_corner);
@@ -2429,5 +2478,44 @@ impl App {
             // Floating scene controls (projection / depth cue) over the viewport.
             self.draw_scene_overlay(ui, rect);
         });
+    }
+
+    /// Finish a lasso gesture: convert the screen-space path to a clip-space
+    /// polygon, collect the enclosed atoms (per `pick::lasso_select`, honoring the
+    /// per-rep style logic), and add a VDW representation of the result to each
+    /// molecule that had hits. Undoable via the normal end-of-frame checkpoint.
+    fn finish_lasso(&mut self, rect: egui::Rect, size_px: [u32; 2]) {
+        let path = std::mem::take(&mut self.lasso_path);
+        if path.len() < 3 {
+            return;
+        }
+        // Screen px → clip-space NDC (y up), matching `pick`'s convention.
+        let polygon: Vec<glam::Vec2> = path
+            .iter()
+            .map(|p| {
+                glam::Vec2::new(
+                    ((p.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+                    1.0 - ((p.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+                )
+            })
+            .collect();
+        let aspect = size_px[0] as f32 / size_px[1] as f32;
+        let view = self.camera.view();
+        let proj = self.camera.proj(aspect);
+        let results = pick::lasso_select(&self.scene, view, proj, &polygon);
+        for res in results {
+            let Some(sel_text) = pick::index_selection_string(&res.atoms) else {
+                continue;
+            };
+            let mol = &mut self.scene.molecules[res.mol];
+            // VDW so the lassoed set is clearly visible; sel_dirty (set by `new`)
+            // makes it evaluate + build next frame.
+            let mut rep = Representation::new(RepKind::Vdw);
+            rep.sel_text = sel_text;
+            mol.reps.push(rep);
+            mol.selected_rep = Some(mol.reps.len() - 1);
+            mol.reps_open = true;
+        }
+        self.view_dirty = true;
     }
 }
