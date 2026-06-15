@@ -8,8 +8,8 @@
 A modern, **legacy-free** molecular visualizer modeled after [VMD](https://www.ks.uiuc.edu/Research/vmd/),
 written in **pure Rust**. The molecule is drawn with hand-written **GPU ray-cast
 impostors** (WGSL) and real-time cartoon ribbons — no OpenGL fixed pipeline, no X11,
-no C/C++/Tcl. It runs natively on Linux, Windows and macOS and compiles to the web
-(WebAssembly).
+no C/C++/Tcl. It runs natively on Linux, Windows, macOS and compiles to WebAssembly
+([try it now online](https://yesint.github.io/molar_vis/)).
 
 The binary is called `molar_vis`. It is built on [molar](https://github.com/yesint/molar)
 — a Rust molecular-analysis library by the same author — for file I/O, atom selections,
@@ -122,23 +122,25 @@ cargo run --release -p molar_vis -- system.gro ligand.pdb  # two molecules
 Supported input formats are whatever molar reads — including **PDB**, **GRO**, and
 (with the appropriate molar features) trajectory and topology formats.
 
-### WebAssembly — partial / in progress
+### WebAssembly — run it in the browser
 
-The viewer is built to target the browser, but the WASM path is **not finished yet**.
-What works today: the core crate (all logic + rendering) **compiles** to
-`wasm32-unknown-unknown`, and `molar` was made wasm-friendly (the GROMACS/`libloading`
-dependency is dropped on wasm; xtc/trr/dcd/gro/pdb/xyz survive). A byte-source
-abstraction (`FileHandler::from_reader`) and a generic XTC seek are in place as the
-foundation for browser streaming.
+The viewer also runs in the browser (single-threaded WebAssembly, WebGPU with an
+automatic **WebGL2 fallback**). **Try the live demo: <https://yesint.github.io/molar_vis/>**
+— it opens to a sample structure; use **Open** to load your own `.pdb`/`.gro`/`.xyz`.
+
+Build and serve it locally with [Trunk](https://trunkrs.dev):
 
 ```sh
-cargo build -p molar_vis_core --target wasm32-unknown-unknown   # compiles (readiness check)
+cargo install --locked trunk     # once
+cd crates/molar_vis_web
+trunk serve                      # then open the printed http://127.0.0.1:8080
 ```
 
-What's **still missing** for an actual web build: the `eframe::WebRunner` entry point +
-`index.html`, a `web_sys::File` picker, and the Web-Worker trajectory streamer
-(`FileReaderSync` over a `Blob`, served cross-origin-isolated with COOP/COEP). Until
-those land there is no runnable browser app — use the native binary.
+The browser crate (`crates/molar_vis_web`) renders through `eframe`'s `WebRunner` and
+reads files in memory via molar's `FileHandler::from_reader` — no server needed, so it
+hosts on any static site. It's deployed to GitHub Pages from `.github/workflows/pages.yml`
+on every push to `main`. molar's parallelism (rayon) runs serially on wasm, and trajectory
+loading is native-only for now (the wasm build loads single structures).
 
 ## Selections
 
@@ -194,19 +196,20 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 
 ## Status
 
-**Works today (native, Linux/Windows/macOS):**
+**Works today (native on Linux/Windows/macOS, and in the browser):**
 - Load one or more molecules; multi-molecule / multi-representation scenes.
 - All six representations (Lines, Licorice, Ball-and-Stick, VDW, Cartoon, Surface).
 - Every coloring scheme; the full molar selection language.
 - Eight materials incl. order-independent transparency; perspective/orthographic; depth cueing.
 - **Trajectory** loading + VMD-style playback (native).
+- Atom **hover-info picking** and **lasso selection** (with a glowing active selection).
 - Undo/redo; drag-reorder reps; zoom-to-selection/molecule; periodic-box wireframe.
+- **Browser build** — runs in the browser ([live demo](https://yesint.github.io/molar_vis/));
+  WebGPU with a WebGL2 fallback, in-browser file open.
 
 **In progress / not done:**
-- **WebAssembly / browser app — incomplete.** The core compiles to wasm and `molar` was
-  made wasm-friendly, but there is no runnable in-browser build yet (no web entry point,
-  file picker, or streaming worker — see [WebAssembly](#webassembly--partial--in-progress)).
-- Smooth-surface tuning and atom picking / lasso selection are planned.
+- **Browser trajectory streaming** — trajectory playback is native-only today; the wasm
+  build loads single structures. A Web Worker frame streamer is the remaining browser piece.
 
 This is a young project under active development; expect rough edges.
 
