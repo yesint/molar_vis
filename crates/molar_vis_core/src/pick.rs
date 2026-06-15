@@ -45,14 +45,19 @@ pub struct PickHit {
     pub radius: f32,
 }
 
+/// The small Ball-and-Stick sphere fraction of the van der Waals radius (matches
+/// the Ball-and-Stick default `sphere_scale`) — the marker size used for reps that
+/// don't draw their own spheres.
+const BALLSTICK_SPHERE_SCALE: f32 = 0.25;
+
 /// The highlight/pick sphere radius for an atom in a given rep: the actual drawn
-/// sphere for VDW / Ball-and-Stick, else the default CPK (full van der Waals) radius.
+/// sphere for VDW / Ball-and-Stick, else the small Ball-and-Stick sphere size.
 fn effective_radius(params: &RepParams, atom: &Atom) -> f32 {
     match params {
         RepParams::Vdw { scale } => atom.vdw() * scale,
         RepParams::BallAndStick { sphere_scale, .. } => atom.vdw() * sphere_scale,
-        // Licorice / Lines / Cartoon / Surface → default CPK radius.
-        _ => atom.vdw(),
+        // Licorice / Lines / Cartoon / Surface → small Ball-and-Stick sphere size.
+        _ => atom.vdw() * BALLSTICK_SPHERE_SCALE,
     }
 }
 

@@ -100,10 +100,10 @@ fn draw_pick_overlay(
     painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0, glow(95)));
     painter.circle_stroke(center, rpx, egui::Stroke::new(1.8, glow(235)));
 
-    // Lower-left info box: "name: resname resid" / "x, y, z" (real coords, nm).
+    // Lower-left info box: "name resname resid" / "x, y, z" (real coords, nm).
     let font = egui::FontId::monospace(13.0);
     let tc = egui::Color32::from_gray(240);
-    let l1 = format!("{}: {}{}", hit.name, hit.resname, hit.resid);
+    let l1 = format!("{} {} {}", hit.name, hit.resname, hit.resid);
     let l2 = format!("{:.3}, {:.3}, {:.3}", hit.real.x, hit.real.y, hit.real.z);
     let g1 = painter.layout_no_wrap(l1, font.clone(), tc);
     let g2 = painter.layout_no_wrap(l2, font, tc);
@@ -113,13 +113,70 @@ fn draw_pick_overlay(
     let h = s1.y + s2.y + pad * 2.0;
     let x = rect.left() + 8.0;
     let y = rect.bottom() - 8.0 - h;
-    painter.rect_filled(
-        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+    let box_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+    painter.rect_filled(box_rect, 4.0, egui::Color32::from_black_alpha(180));
+    painter.rect_stroke(
+        box_rect,
         4.0,
-        egui::Color32::from_black_alpha(180),
+        egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+        egui::StrokeKind::Inside,
     );
     painter.galley(egui::pos2(x + pad, y + pad), g1, tc);
     painter.galley(egui::pos2(x + pad, y + pad + s1.y), g2, tc);
+}
+
+/// Draw a VMD-style orientation-axes gizmo into the chosen corner of `rect`.
+/// The three world axes (X red, Y green, Z blue) rotate with the camera; only the
+/// positive directions are drawn, labelled, and depth-sorted so nearer axes sit on top.
+fn draw_axes_overlay(ui: &egui::Ui, rect: egui::Rect, camera: &Camera, corner: Corner) {
+    let len = 26.0; // axis length, px
+    let label_gap = 12.0; // px between an axis tip and its label
+    let margin = len + label_gap + 10.0; // keep the gizmo + labels inside the rect
+    let center = match corner {
+        Corner::TopLeft => rect.left_top() + egui::vec2(margin, margin),
+        Corner::TopRight => rect.right_top() + egui::vec2(-margin, margin),
+        Corner::BottomLeft => rect.left_bottom() + egui::vec2(margin, -margin),
+        Corner::BottomRight => rect.right_bottom() + egui::vec2(-margin, -margin),
+    };
+    // World axis → view space: orientation rotates view→world, so its conjugate
+    // maps world→view. Screen y is down, hence the -y. View +z points at the eye.
+    let to_view = camera.orientation.conjugate();
+    let axes = [
+        (glam::Vec3::X, egui::Color32::from_rgb(235, 70, 70), "x"),
+        (glam::Vec3::Y, egui::Color32::from_rgb(70, 210, 70), "y"),
+        (glam::Vec3::Z, egui::Color32::from_rgb(90, 120, 255), "z"),
+    ];
+    let mut drawn: Vec<(f32, egui::Pos2, egui::Color32, &str)> = axes
+        .iter()
+        .map(|&(dir, col, lbl)| {
+            let v = to_view * dir;
+            let tip = center + egui::vec2(v.x, -v.y) * len;
+            (v.z, tip, col, lbl)
+        })
+        .collect();
+    // Draw far axes first so near ones overlap them.
+    drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let painter = ui.painter_at(rect);
+    for &(_, tip, col, lbl) in &drawn {
+        painter.line_segment([center, tip], egui::Stroke::new(2.0, col));
+        // Small head + label, set a constant gap beyond the tip (so foreshortened
+        // axes don't bunch their labels against the gizmo).
+        painter.circle_filled(tip, 2.0, col);
+        let dir = tip - center;
+        let label_pos = if dir.length() > 1e-3 {
+            tip + dir.normalized() * label_gap
+        } else {
+            tip + egui::vec2(0.0, -label_gap)
+        };
+        painter.text(
+            label_pos,
+            egui::Align2::CENTER_CENTER,
+            lbl,
+            egui::FontId::proportional(13.0),
+            col,
+        );
+    }
 }
 
 /// Draw a small vector icon depicting a representation style into `rect`.
@@ -247,6 +304,40 @@ fn picker_button(
         egui::FontId::proportional(10.0),
         txt,
     );
+    resp
+}
+
+/// One control in the viewport overlay toolbar: a fixed-height framed button
+/// whose content (an icon glyph, or `label + caret`) is centered by its **ink**
+/// bounds (`Galley::mesh_bounds`), not the font line-box. `ui.button` /
+/// `selectable_label` center the line-box, so Phosphor glyphs with different
+/// metrics (the depth-cue lines sat low, the cube high) looked vertically
+/// ragged; ink-centering lines them up. `active` paints the selection fill
+/// (toggle / open state). Returns the response — drive a `Popup::menu` off it.
+fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> egui::Response {
+    const H: f32 = 26.0;
+    const R: f32 = 4.0;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let txt = ui.visuals().text_color();
+    let galley = ui.painter().layout_no_wrap(content.to_owned(), font, txt);
+    let w = (galley.size().x + 14.0).max(H);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, H), egui::Sense::click());
+    let vis = ui.style().interact_selectable(&resp, active);
+    let fill = if active {
+        ui.visuals().selection.bg_fill
+    } else {
+        vis.weak_bg_fill
+    };
+    ui.painter().rect_filled(rect, R, fill);
+    if vis.bg_stroke.width > 0.0 {
+        ui.painter()
+            .rect_stroke(rect, R, vis.bg_stroke, egui::StrokeKind::Inside);
+    }
+    // Center the glyph/label by its ink, so it sits dead-centre regardless of the
+    // font's per-glyph vertical metrics.
+    let ink = galley.mesh_bounds;
+    ui.painter()
+        .galley(rect.center() - ink.center().to_vec2(), galley, txt);
     resp
 }
 
@@ -949,6 +1040,19 @@ pub struct App {
     /// Picking mode (viewport-overlay dropdown). `HoverInfo` shows the hovered
     /// atom's identity + real coords and glows its outline.
     pick_mode: PickMode,
+    /// Whether the VMD-style orientation axes gizmo is shown in the viewport.
+    axes_on: bool,
+    /// Which viewport corner the axes gizmo is anchored to.
+    axes_corner: Corner,
+}
+
+/// A viewport corner, for anchoring the axes gizmo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 /// State of the "Load trajectory" modal.
@@ -1211,6 +1315,8 @@ impl App {
             } else {
                 PickMode::default()
             },
+            axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
+            axes_corner: Corner::BottomRight,
         })
     }
 
@@ -1442,46 +1548,66 @@ impl App {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                    // All four controls are the same `overlay_button` (uniform
+                    // height, framed, ink-centered glyph); `left_to_right` centres
+                    // them on the row. Dropdowns hang off a `Popup::menu`.
                     ui.horizontal(|ui| {
-                        // Single button cycling perspective ↔ orthographic.
+                        // Projection toggle (perspective ↔ orthographic).
                         let persp = self.camera.is_perspective();
                         let (glyph, tip) = if persp {
                             (icon::PERSPECTIVE, "Perspective — click for orthographic")
                         } else {
                             (icon::CUBE, "Orthographic — click for perspective")
                         };
-                        if ui.button(glyph).on_hover_text(tip).clicked() {
+                        if overlay_button(ui, glyph, false).on_hover_text(tip).clicked() {
                             self.camera.projection = if persp {
                                 Projection::Orthographic
                             } else {
                                 Projection::Perspective
                             };
                         }
-                        // Toggle the depth-cue panel.
-                        if ui
-                            .selectable_label(self.cue_panel_open, icon::GRADIENT)
+                        // Depth-cue panel toggle (filled while open).
+                        if overlay_button(ui, icon::GRADIENT, self.cue_panel_open)
                             .on_hover_text("Depth cue")
                             .clicked()
                         {
                             self.cue_panel_open = !self.cue_panel_open;
                         }
-                        // Pick mode (hover info, …). Off by default — no per-hover cost.
-                        egui::ComboBox::from_id_salt("pick_mode")
-                            .selected_text(self.pick_mode.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.pick_mode,
-                                    PickMode::Off,
-                                    PickMode::Off.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut self.pick_mode,
-                                    PickMode::HoverInfo,
-                                    PickMode::HoverInfo.label(),
-                                );
-                            })
-                            .response
-                            .on_hover_text("Pick mode");
+                        // Pick mode dropdown (label + caret). Off by default.
+                        let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
+                        let resp = overlay_button(ui, &pick_label, false).on_hover_text("Pick mode");
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.selectable_value(
+                                &mut self.pick_mode,
+                                PickMode::Off,
+                                PickMode::Off.label(),
+                            );
+                            ui.selectable_value(
+                                &mut self.pick_mode,
+                                PickMode::HoverInfo,
+                                PickMode::HoverInfo.label(),
+                            );
+                        });
+                        // Orientation-axes dropdown: on/off + which corner.
+                        let resp = overlay_button(ui, icon::ARROWS_OUT_CARDINAL, self.axes_on)
+                            .on_hover_text("Orientation axes");
+                        egui::Popup::menu(&resp).show(|ui| {
+                            ui.checkbox(&mut self.axes_on, "On");
+                            ui.add_enabled_ui(self.axes_on, |ui| {
+                                ui.add_space(2.0);
+                                // 2×2 of corner radio buttons (top row, bottom row).
+                                egui::Grid::new("axes_corner")
+                                    .spacing(egui::vec2(18.0, 6.0))
+                                    .show(ui, |ui| {
+                                        ui.radio_value(&mut self.axes_corner, Corner::TopLeft, "");
+                                        ui.radio_value(&mut self.axes_corner, Corner::TopRight, "");
+                                        ui.end_row();
+                                        ui.radio_value(&mut self.axes_corner, Corner::BottomLeft, "");
+                                        ui.radio_value(&mut self.axes_corner, Corner::BottomRight, "");
+                                        ui.end_row();
+                                    });
+                            });
+                        });
                     });
                     if self.cue_panel_open {
                         ui.separator();
@@ -2293,6 +2419,11 @@ impl App {
                         draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
                     }
                 }
+            }
+
+            // VMD-style orientation axes gizmo in the chosen corner.
+            if self.axes_on {
+                draw_axes_overlay(ui, rect, &self.camera, self.axes_corner);
             }
 
             // Floating scene controls (projection / depth cue) over the viewport.

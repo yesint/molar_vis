@@ -56,11 +56,20 @@ fn unpack_mat(m: u32) -> vec4<f32> {
 fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: vec4<f32>) -> vec3<f32> {
     let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
     let ndotl = max(dot(normal, light_dir), 0.0);
+    // A dim fill from the opposite-front side keeps the thin lateral rims of the
+    // flat ribbon from going near-black (their normals point ⊥ to the key light).
+    // Gated by (1-ndotl)² so it only lifts shadow/terminator: surfaces the key
+    // already lights — and the specular highlight — are left exactly as before,
+    // preserving the slick look.
+    let fill_dir = normalize(vec3<f32>(-0.5, -0.3, 0.6));
+    let fill = max(dot(normal, fill_dir), 0.0);
+    let shadow = (1.0 - ndotl) * (1.0 - ndotl);
+    let diffuse = mat.y * (ndotl + 0.6 * fill * shadow);
     let half = normalize(light_dir + view_dir);
     let ndoth = max(dot(normal, half), 0.0);
     let exponent = 2.0 + mat.w * 128.0;
     let spec = mat.z * pow(ndoth, exponent);
-    return base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
+    return base * (mat.x + diffuse) + vec3<f32>(spec);
 }
 
 // Weighted-blended OIT weight, biased strongly toward the camera using linear
@@ -87,7 +96,12 @@ fn vs_main(v: VsIn) -> VsOut {
 
 // Shaded (fogged) color for this fragment; opacity rides in the returned alpha.
 fn shade(in: VsOut) -> vec4<f32> {
-    var n = normalize(in.normal_eye);
+    // Guard against degenerate (zero-length) interpolated normals — they occur at
+    // failed orientation frames and arrow tips. `normalize` of a zero vector is
+    // NaN, which NVIDIA writes to the UNORM target as white (AMD as 0), producing
+    // "white steps" along ribbon edges. Fall back to a toward-eye normal instead.
+    let nlen = length(in.normal_eye);
+    var n = select(vec3<f32>(0.0, 0.0, 1.0), in.normal_eye / nlen, nlen > 1e-6);
     // View direction toward the eye (origin for perspective, +z for ortho).
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-in.view_pos), camera.params.x > 0.5);
     // Two-sided: flip the normal to face the eye so back faces of open ribbons

@@ -38,6 +38,7 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_PICK=1` (force hover-info pick mode + pick at the viewport center each frame, so
   the glow/info overlay can be screenshot headlessly) +
+  `MOLAR_VIS_DEBUG_AXES=1` (show the VMD-style orientation-axes gizmo) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
   zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
@@ -94,7 +95,12 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   Only β-strand coords are smoothed
   (`(2·CAᵢ+CAᵢ₋₁+CAᵢ₊₁)/4`); helix/coil keep raw Cα. Elliptical cross-section (width axis =
   perp, thickness axis = tangent×perp) morphing by `SsClass` (helix=sheet flat ribbon, coil
-  tube) with β-arrowheads; emits indexed `MeshData`. Mirrors VMD `draw_cartoon_ribbons`.
+  tube); emits indexed `MeshData`. Mirrors VMD `draw_cartoon_ribbons`. **β-arrowheads**
+  (`arrow_regions`/`width_at`): per contiguous sheet run, a sharp barb (a width discontinuity at
+  the base) flaring to `arrow_base` then a linear taper to a point at the strand's last Cα (then
+  ramping back up into the following coil) — the only departure from the original ellipse path.
+  (A degenerate/zero normal — failed frame, arrow tip — is guarded in `mesh.wgsl` so it doesn't
+  `normalize`→NaN→white on NVIDIA.)
 - `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
   guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
@@ -134,6 +140,14 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - **Strategy A rendering** — the 3D scene is drawn into our *own* offscreen color +
   depth textures, then composited into egui as an `Image`. egui's render pass has no
   depth attachment; this gives full depth control for impostors.
+- **Anti-aliasing = SSAA** (`SSAA` in `render.rs`, default 2×) — the offscreen targets are
+  allocated at `SSAA×` the viewport (clamped to `max_texture_dimension_2d`); egui's existing
+  `FilterMode::Linear` downsamples into the 1× image rect (a 2×2 box average). This smooths
+  **everything**, crucially the **impostor silhouettes** (decided per-pixel by `discard`, so MSAA
+  can't touch them) as well as the cartoon mesh and lines — no MSAA targets / depth-resolve / OIT
+  rework. The camera viewport param (`params.yz`) stays at the **logical** size so fat-line pixel
+  widths come out correct after the downsample (a 2× target with logical viewport → line is `w`
+  final px). Cost: `SSAA²`× fragments per re-render; idle still 0 GPU (render-skip unchanged).
 - **Impostors** — spheres & cylinders are GPU ray-cast in fragment shaders that write
   analytic `frag_depth`, so they occlude correctly against each other (and, later, the
   cartoon mesh). The camera uniform carries a perspective flag: perspective uses an
@@ -253,9 +267,15 @@ Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + at
 **Viewport overlay** (`draw_scene_overlay`, top-left `egui::Area` over the 3D image):
 a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
 **orthographic is the default**) and a **depth-cue** button (`GRADIENT` glyph) that toggles
-(`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), and a **pick-mode
-dropdown** (`ComboBox`; `Off` default / `Hover info` — see `pick.rs` / M11). More scene
-controls will join it later.
+(`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), a **pick-mode
+dropdown** (`Off` default / `Hover info` — see `pick.rs` / M11), and an **axes-gizmo dropdown**
+(`ARROWS_OUT_CARDINAL`: an *On* checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,
+BottomLeft,BottomRight}`, default BottomRight — VMD-style orientation axes;
+`MOLAR_VIS_DEBUG_AXES=1` enables it headlessly). All four are the **same `overlay_button`
+helper** — a fixed-height framed button whose glyph/label is **centered by its ink bounds**
+(`Galley::mesh_bounds`), not the font line-box, so Phosphor glyphs with different metrics line
+up vertically (`ui.button`/`selectable_label` center the line-box → ragged row); the two
+dropdowns hang off `egui::Popup::menu(&resp)`. More scene controls will join it later.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):
@@ -309,7 +329,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `Dssp` keyed by `resindex`, `SsClass` helix/sheet/coil, VMD `ss_color`); `geometry/
   cartoon.rs` (per-chain Catmull-Rom spline through Cα, carbonyl-derived ribbon frame with
   flip-consistency, Laplacian smoothing of helix/sheet Cα, elliptical cross-section morphing
-  by SS class with β-arrowheads → indexed `MeshData`); `render/mesh.rs` + `shaders/mesh.wgsl`
+  by SS class + sharp barbed β-arrowheads → indexed `MeshData`; see the cartoon.rs bullet
+  above); `render/mesh.rs` + `shaders/mesh.wgsl`
   (Lambert-shaded `MeshVertex` pipeline, writes real depth, shares the offscreen buffer with
   the impostors). `RepKind::Cartoon` + `RepParams::Cartoon{coil_radius,ribbon_width,
   ribbon_thickness}`. **`RepParams` is now a per-style enum** (each variant carries only its
@@ -381,8 +402,12 @@ History labels via `describe_change` ("edit selection", "change coloring",
     shaders (`sphere/cylinder/mesh.wgsl`) take `mat` (flat-interpolated), `unpack_mat` it, and run a
     shared **Blinn-Phong** `shade_material`: `base*(amb + dif*N·L) + spec*pow(N·H, 2+shin*128)`,
     white highlight, headlight `L=(0.3,0.4,1)`, view dir to eye (origin perspective / +z ortho).
-    The cartoon mesh flips its normal to face the eye first (two-sided open ribbons). Glossy=tight
-    highlight, Diffuse=matte (specular 0), Metal=dark+broad highlight — all verified distinct.
+    The cartoon mesh flips its normal to face the eye first (two-sided open ribbons). **`mesh.wgsl`
+    additionally adds a dim opposite-front fill `(-0.5,-0.3,0.6)` gated by `(1−N·L)²`** so the flat
+    ribbon's thin **lateral rims** (normals ⊥ the key light → near-black) get lifted *only in
+    shadow/terminator* — key-lit areas and the specular highlight are untouched, so the slick look
+    is preserved (sphere/cylinder are unchanged, single headlight only). Glossy=tight highlight,
+    Diffuse=matte (specular 0), Metal=dark+broad highlight — all verified distinct.
   - ✅ **OIT** (was TODO): replaced the order-dependent two-phase blend with Weighted-Blended OIT
     (see *Transparency* above) — multi-layer transparency is now order-independent.
 - ✅ M12 **Molecular surface (SES)** — `RepKind::Surface` + `RepParams::Surface { probe, quality }`,
@@ -430,11 +455,12 @@ History labels via `describe_change` ("edit selection", "change coloring",
   periodic-replicated, via `bind_with_state(sel, smoothed_or_frame)` × `PeriodicParams::offsets`),
   returning the nearest hit — but reporting the atom's **real** stored coord (`frame.coords[id]`,
   central image, un-smoothed), per the user's hard requirement. Pick/glow radius = the rep's drawn
-  sphere (VDW `vdw·scale`, BallAndStick `vdw·sphere_scale`) else **default CPK = `vdw()`**. Pick-mode
+  sphere (VDW `vdw·scale`, BallAndStick `vdw·sphere_scale`) else the **small Ball-and-Stick
+  sphere size** (`vdw·0.25` = `BALLSTICK_SPHERE_SCALE` — Licorice/Lines/Cartoon/Surface). Pick-mode
   **dropdown** in the viewport overlay (next to depth-cue; Off default → no per-hover cost). In
   `HoverInfo`, `draw_viewport` ray-casts the hover, and `draw_pick_overlay` paints a **cyan glowing
-  outline ring** at the hit's projected displayed position + a lower-left info box
-  `name: resnameresid` / `x, y, z` (real coords, **nm**). `MOLAR_VIS_DEBUG_PICK=1` forces a
+  outline ring** at the hit's projected displayed position + a **framed** lower-left info box
+  `name resname resid` / `x, y, z` (real coords, **nm**). `MOLAR_VIS_DEBUG_PICK=1` forces a
   viewport-center pick (headless verification — hover can't be simulated on this Wayland box).
   **TODO:** mouse-lasso selection (polygon over projected positions → feed a selection); more pick
   modes in the dropdown. Picking is O(visible atoms × images) per hover — fine for small/medium

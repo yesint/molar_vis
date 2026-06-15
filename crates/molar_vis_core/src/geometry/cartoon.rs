@@ -5,9 +5,10 @@
 //! flip-consistency so the ribbon doesn't twist 180° between residues), and
 //! extrude an elliptical cross-section along the spline. The cross-section
 //! morphs by DSSP class: a thin tube for coil/turn, a wide flat ribbon for
-//! helices and sheets, with an arrowhead at each β-strand C-terminus. Helix and
-//! sheet Cα paths are Laplacian-smoothed first so ribbons run down the axis
-//! instead of corkscrewing along the raw Cα trace.
+//! helices and sheets. Each β-strand C-terminus gets an arrowhead: a sharp barb
+//! flaring to a wide base, then a linear taper to a point at the strand's last
+//! Cα. Helix and sheet Cα paths are Laplacian-smoothed first so ribbons run down
+//! the axis instead of corkscrewing along the raw Cα trace.
 
 use molar::prelude::*;
 
@@ -27,6 +28,10 @@ const RING: usize = 12;
 /// slope): tangent = (P₂−P₀)/slope. 1.25 (vs standard CR's 2.0) gives fuller,
 /// rounder loops through the helix turns, which is most of the "smoothness".
 const CR_SLOPE: f32 = 1.25;
+/// Arrowhead length, in residues, measured back from the strand's last Cα.
+const ARROW_LEN: f32 = 1.6;
+/// Arrowhead base half-width, as a multiple of the ribbon half-width.
+const ARROW_BASE_SCALE: f32 = 1.7;
 
 struct Residue {
     ca: Vector3f,
@@ -184,20 +189,19 @@ fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
     }
     perps[0] = perps[1]; // first residue had no previous data to work with
 
-    // β-strand C-termini get an arrowhead: a Sheet residue whose successor isn't.
-    let is_arrow: Vec<bool> = (0..n)
-        .map(|i| classes[i] == SsClass::Sheet && (i + 1 >= n || classes[i + 1] != SsClass::Sheet))
-        .collect();
-    let arrow_base = shape.ribbon_width * 1.75;
+    // β-strand C-termini get an arrowhead. One (base, tip) span per contiguous
+    // sheet run, in continuous residue coordinates (see `width_at`).
+    let strands = arrow_regions(&classes);
+    let arrow_base = shape.ribbon_width * ARROW_BASE_SCALE;
 
     let ctx = RunCtx {
         run,
         coords: &coords,
         perps: &perps,
         classes: &classes,
-        is_arrow: &is_arrow,
         shape,
         arrow_base,
+        strands: &strands,
     };
 
     // Sample the spline into cross-section rings.
@@ -229,15 +233,73 @@ fn demote_singletons(classes: &mut [SsClass]) {
     }
 }
 
+/// Contiguous β-strand runs → `(base, tip)` in continuous residue coordinates.
+/// `tip` is the strand's last Cα (the arrow point); `base` is `ARROW_LEN`
+/// residues before it (clamped to the strand start) where the barb flares out.
+fn arrow_regions(classes: &[SsClass]) -> Vec<(f32, f32)> {
+    let n = classes.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if classes[i] == SsClass::Sheet {
+            let s = i;
+            let mut e = i + 1;
+            while e < n && classes[e] == SsClass::Sheet {
+                e += 1;
+            }
+            let tip = (e - 1) as f32;
+            let base = (tip - ARROW_LEN).max(s as f32);
+            out.push((base, tip));
+            i = e;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Ribbon half-width at a class boundary (no arrow logic).
+fn residue_width(c: &RunCtx, idx: usize) -> f32 {
+    let idx = idx.min(c.classes.len() - 1);
+    c.shape.dims(c.classes[idx]).0
+}
+
+/// Ribbon half-width at continuous residue coordinate `r`, arrowhead-aware.
+/// Outside any arrow: linear blend of the class half-widths. Inside an arrow
+/// span `[base, tip]`: a sharp barb (a width discontinuity at `base`, since
+/// samples just below `base` keep the ribbon width) flaring to `arrow_base`,
+/// then a linear taper to a point at `tip`; for the residue past `tip` the width
+/// ramps from the point back up into the following coil tube.
+fn width_at(c: &RunCtx, r: f32) -> f32 {
+    let n = c.classes.len();
+    for &(base, tip) in c.strands {
+        if r >= base && r <= tip {
+            let denom = (tip - base).max(1e-3);
+            return (c.arrow_base * (tip - r) / denom).max(1e-3);
+        }
+        if r > tip && r < tip + 1.0 {
+            // Arrow point (0) → following coil tube, over one residue.
+            let next = residue_width(c, tip as usize + 1);
+            return (next * (r - tip)).max(1e-3);
+        }
+    }
+    let i = r.floor() as usize;
+    let u = r - i as f32;
+    let wa = residue_width(c, i);
+    let wb = residue_width(c, (i + 1).min(n - 1));
+    wa * (1.0 - u) + wb * u
+}
+
 /// Everything the per-sample cross-section builder needs for one run.
 struct RunCtx<'a> {
     run: &'a [Residue],
     coords: &'a [Vector3f],
     perps: &'a [Vector3f],
     classes: &'a [SsClass],
-    is_arrow: &'a [bool],
     shape: &'a Shape,
     arrow_base: f32,
+    /// β-strand arrow spans `(base, tip)`, in continuous residue coordinates.
+    strands: &'a [(f32, f32)],
 }
 
 /// One cross-section: a center frame + ellipse dimensions + color.
@@ -267,18 +329,12 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
     let perp = (c.perps[i] * (1.0 - u) + c.perps[i + 1] * u).normalize_or_zero();
     let normal = tangent.cross(&perp).normalize_or_zero();
 
-    let (hw_a, ht_a) = c.shape.dims(c.classes[i]);
-    let (hw_b, ht_b) = c.shape.dims(c.classes[i + 1]);
+    let (_, ht_a) = c.shape.dims(c.classes[i]);
+    let (_, ht_b) = c.shape.dims(c.classes[i + 1]);
     let ht = ht_a * (1.0 - u) + ht_b * u;
-    let hw = if c.is_arrow[i] {
-        // Arrowhead: widest at the base, tapering to a point at the tip.
-        c.arrow_base * (1.0 - u) + 0.01 * u
-    } else if c.is_arrow[i + 1] {
-        // Lead-in segment that widens up to the arrow base.
-        hw_a * (1.0 - u) + c.arrow_base * u
-    } else {
-        hw_a * (1.0 - u) + hw_b * u
-    };
+    // Arrowhead-aware ribbon half-width (β-strand barbs + taper to a point); see
+    // `width_at`. Everything else is the original elliptical cross-section.
+    let hw = width_at(c, i as f32 + u);
 
     Ring {
         center,
@@ -333,6 +389,11 @@ fn emit(rings: &[Ring], mesh: &mut MeshData) {
 }
 
 fn add_cap(mesh: &mut MeshData, ring: &Ring, ring_base: u32, front: bool) {
+    // Skip near-degenerate rings (e.g. an arrow point that lands on a run end):
+    // their fan would be slivers with unstable normals and ~zero area anyway.
+    if ring.hw < 1e-3 || ring.ht < 1e-3 {
+        return;
+    }
     let normal = if front { -ring.tangent } else { ring.tangent };
     let center_idx = mesh.vertices.len() as u32;
     mesh.vertices.push(MeshVertex {

@@ -46,6 +46,14 @@ const BG: [f32; 4] = [0.02, 0.02, 0.05, 1.0];
 /// satisfies `min_uniform_buffer_offset_alignment` on every target.
 const CAMERA_STRIDE: u64 = 256;
 
+/// Supersampling factor: the offscreen targets are rendered at `SSAA×` the
+/// viewport resolution, then egui's linear filter downsamples them into the
+/// (1×) image rect — a 2×2 box average that anti-aliases **everything**, including
+/// the ray-cast impostor silhouettes (which are decided per-pixel by `discard`,
+/// so MSAA can't touch them). The camera's viewport param stays at the *logical*
+/// size so fat-line pixel widths come out correct after the downsample.
+const SSAA: u32 = 2;
+
 /// Bind-group binding size for one camera entry (the actual `CameraUniform`).
 fn camera_binding_size() -> Option<std::num::NonZeroU64> {
     std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
@@ -503,8 +511,15 @@ impl SceneRenderer {
         depth_range: [f32; 2],
         scene: &Scene,
     ) -> TextureId {
-        if size_px != self.targets.size {
-            self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, size_px);
+        // Render into SSAA× targets (clamped to the device's max texture size),
+        // then let egui's linear filter downsample to the (1×) image rect.
+        let max_dim = rs.device.limits().max_texture_dimension_2d;
+        let render_size = [
+            (size_px[0] * SSAA).clamp(1, max_dim),
+            (size_px[1] * SSAA).clamp(1, max_dim),
+        ];
+        if render_size != self.targets.size {
+            self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
             rs.renderer.write().update_egui_texture_from_wgpu_texture(
                 &rs.device,
                 &self.targets.color_view,
