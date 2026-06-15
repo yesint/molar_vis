@@ -17,6 +17,7 @@ use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::material::Material;
+use crate::pick::{self, PickMode};
 use crate::render::SceneRenderer;
 use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
@@ -57,6 +58,68 @@ fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
         egui::FontId::proportional(13.0),
         red,
     );
+}
+
+/// Draw the hover-pick highlight over the viewport: a glowing outline ring at the
+/// hovered atom's **displayed** position (sized to the rep's sphere radius) plus a
+/// lower-left info box with the atom's identity and **real** coordinates (nm).
+fn draw_pick_overlay(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    camera: &Camera,
+    aspect: f32,
+    hit: &crate::pick::PickHit,
+) {
+    let vp = camera.proj(aspect) * camera.view();
+    let project = |w: glam::Vec3| -> Option<egui::Pos2> {
+        let c = vp * w.extend(1.0);
+        if c.w <= 0.0 {
+            return None;
+        }
+        let nx = c.x / c.w;
+        let ny = c.y / c.w;
+        Some(egui::pos2(
+            rect.left() + (nx * 0.5 + 0.5) * rect.width(),
+            rect.top() + (1.0 - (ny * 0.5 + 0.5)) * rect.height(),
+        ))
+    };
+    let Some(center) = project(hit.display) else {
+        return;
+    };
+    // Projected pixel radius: project a point one world-radius to the camera's right.
+    let right = camera.orientation * glam::Vec3::X;
+    let rpx = project(hit.display + right * hit.radius)
+        .map(|e| (e - center).length())
+        .unwrap_or(6.0)
+        .clamp(3.0, rect.width());
+
+    let painter = ui.painter_at(rect);
+    // Glowing outline: faint thick halo → bright thin core.
+    let glow = |a: u8| egui::Color32::from_rgba_unmultiplied(130, 215, 255, a);
+    painter.circle_stroke(center, rpx + 4.0, egui::Stroke::new(6.0, glow(35)));
+    painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0, glow(95)));
+    painter.circle_stroke(center, rpx, egui::Stroke::new(1.8, glow(235)));
+
+    // Lower-left info box: "name: resname resid" / "x, y, z" (real coords, nm).
+    let font = egui::FontId::monospace(13.0);
+    let tc = egui::Color32::from_gray(240);
+    let l1 = format!("{}: {}{}", hit.name, hit.resname, hit.resid);
+    let l2 = format!("{:.3}, {:.3}, {:.3}", hit.real.x, hit.real.y, hit.real.z);
+    let g1 = painter.layout_no_wrap(l1, font.clone(), tc);
+    let g2 = painter.layout_no_wrap(l2, font, tc);
+    let (s1, s2) = (g1.size(), g2.size());
+    let pad = 6.0;
+    let w = s1.x.max(s2.x) + pad * 2.0;
+    let h = s1.y + s2.y + pad * 2.0;
+    let x = rect.left() + 8.0;
+    let y = rect.bottom() - 8.0 - h;
+    painter.rect_filled(
+        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h)),
+        4.0,
+        egui::Color32::from_black_alpha(180),
+    );
+    painter.galley(egui::pos2(x + pad, y + pad), g1, tc);
+    painter.galley(egui::pos2(x + pad, y + pad + s1.y), g2, tc);
 }
 
 /// Draw a small vector icon depicting a representation style into `rect`.
@@ -883,6 +946,9 @@ pub struct App {
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
     /// Whether the depth-cue panel in the viewport overlay is expanded.
     cue_panel_open: bool,
+    /// Picking mode (viewport-overlay dropdown). `HoverInfo` shows the hovered
+    /// atom's identity + real coords and glows its outline.
+    pick_mode: PickMode,
 }
 
 /// State of the "Load trajectory" modal.
@@ -1138,6 +1204,13 @@ impl App {
             load_dialog: None,
             loaders: HashMap::new(),
             cue_panel_open: false,
+            // MOLAR_VIS_DEBUG_PICK forces hover-info on (and picks at the viewport
+            // center each frame; see draw_viewport) for headless verification.
+            pick_mode: if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
+                PickMode::HoverInfo
+            } else {
+                PickMode::default()
+            },
         })
     }
 
@@ -1392,6 +1465,23 @@ impl App {
                         {
                             self.cue_panel_open = !self.cue_panel_open;
                         }
+                        // Pick mode (hover info, …). Off by default — no per-hover cost.
+                        egui::ComboBox::from_id_salt("pick_mode")
+                            .selected_text(self.pick_mode.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.pick_mode,
+                                    PickMode::Off,
+                                    PickMode::Off.label(),
+                                );
+                                ui.selectable_value(
+                                    &mut self.pick_mode,
+                                    PickMode::HoverInfo,
+                                    PickMode::HoverInfo.label(),
+                                );
+                            })
+                            .response
+                            .on_hover_text("Pick mode");
                     });
                     if self.cue_panel_open {
                         ui.separator();
@@ -2178,6 +2268,32 @@ impl App {
             let texture_id = self.renderer.texture_id();
             egui::Image::new(egui::load::SizedTexture::new(texture_id, rect.size()))
                 .paint_at(ui, rect);
+
+            // Hover-info picking: ray-cast the cursor against the atoms *as drawn*
+            // (smoothed + periodic-replicated), glow the hit, and show its identity
+            // + **real** (stored) coordinates. Skipped while dragging the camera.
+            if self.pick_mode == PickMode::HoverInfo && !response.dragged() {
+                // Normally the cursor; the debug hook forces the viewport center so
+                // the overlay can be screenshot without simulating a mouse.
+                let ndc = if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
+                    Some((0.0, 0.0))
+                } else {
+                    response.hover_pos().map(|p| {
+                        (
+                            ((p.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+                            1.0 - ((p.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+                        )
+                    })
+                };
+                if let Some((ndc_x, ndc_y)) = ndc {
+                    let aspect = size_px[0] as f32 / size_px[1] as f32;
+                    let view = self.camera.view();
+                    let proj = self.camera.proj(aspect);
+                    if let Some(hit) = pick::pick(&self.scene, view, proj, ndc_x, ndc_y) {
+                        draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
+                    }
+                }
+            }
 
             // Floating scene controls (projection / depth cue) over the viewport.
             self.draw_scene_overlay(ui, rect);

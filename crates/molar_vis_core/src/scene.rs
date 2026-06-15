@@ -42,6 +42,27 @@ impl Default for PeriodicParams {
     }
 }
 
+impl PeriodicParams {
+    /// World-space translation offsets of every image this rep draws (the central
+    /// `(0,0,0)` image included iff `self_img`), as integer combinations of the box
+    /// lattice vectors `a,b,c` (nm). Shared by the renderer (one camera per offset)
+    /// and the picker (hit-test every drawn image) so they always agree.
+    pub fn offsets(&self, a: Vec3, b: Vec3, c: Vec3) -> Vec<Vec3> {
+        let mut out = Vec::new();
+        for i in -(self.neg[0] as i32)..=(self.pos[0] as i32) {
+            for j in -(self.neg[1] as i32)..=(self.pos[1] as i32) {
+                for k in -(self.neg[2] as i32)..=(self.pos[2] as i32) {
+                    if i == 0 && j == 0 && k == 0 && !self.self_img {
+                        continue;
+                    }
+                    out.push(a * i as f32 + b * j as f32 + c * k as f32);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
     pub kind: RepKind,

@@ -538,20 +538,14 @@ impl SceneRenderer {
                 let mut idxs: Vec<u32> = Vec::new();
                 match box_vecs {
                     Some([a, b, c]) => {
-                        let p = &rep.periodic;
-                        for i in -(p.neg[0] as i32)..=(p.pos[0] as i32) {
-                            for j in -(p.neg[1] as i32)..=(p.pos[1] as i32) {
-                                for k in -(p.neg[2] as i32)..=(p.pos[2] as i32) {
-                                    if i == 0 && j == 0 && k == 0 {
-                                        if p.self_img {
-                                            idxs.push(0);
-                                        }
-                                        continue;
-                                    }
-                                    let off = a * i as f32 + b * j as f32 + c * k as f32;
-                                    cameras.push(make_cam(view * Mat4::from_translation(off)));
-                                    idxs.push(cameras.len() as u32 - 1);
-                                }
+                        // One camera per drawn image; the central (zero) offset reuses
+                        // the base camera (entry 0). Shares `offsets` with the picker.
+                        for off in rep.periodic.offsets(a, b, c) {
+                            if off == Vec3::ZERO {
+                                idxs.push(0);
+                            } else {
+                                cameras.push(make_cam(view * Mat4::from_translation(off)));
+                                idxs.push(cameras.len() as u32 - 1);
                             }
                         }
                     }

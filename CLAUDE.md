@@ -36,6 +36,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   exercises periodic-image rendering — 2lao has a CRYST1 box) +
   `MOLAR_VIS_DEBUG_SMOOTH=<window>` (set mol 0 first rep's trajectory smoothing window; pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
+  `MOLAR_VIS_DEBUG_PICK=1` (force hover-info pick mode + pick at the viewport center each frame, so
+  the glow/info overlay can be screenshot headlessly) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
   zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
@@ -122,6 +124,10 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl` (incl.
   `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit`). The cartoon mesh writes real depth
   and interleaves correctly with the impostors.
+- `pick.rs` — CPU ray-cast atom picking (`PickMode`, `PickHit`, `cursor_ray`, `ray_sphere`,
+  `effective_radius`, `pick`). Hit-tests the cursor against atoms **as displayed** (smoothed +
+  periodic images, sharing `PeriodicParams::offsets` with the renderer) and reports the atom's
+  **real** stored coordinate. Drives the hover-info overlay (`draw_pick_overlay` in `app.rs`). M11.
 
 ## Key architecture
 
@@ -247,7 +253,8 @@ Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + at
 **Viewport overlay** (`draw_scene_overlay`, top-left `egui::Area` over the 3D image):
 a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
 **orthographic is the default**) and a **depth-cue** button (`GRADIENT` glyph) that toggles
-(`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders). More scene
+(`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), and a **pick-mode
+dropdown** (`ComboBox`; `Off` default / `Hover info` — see `pick.rs` / M11). More scene
 controls will join it later.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
@@ -417,6 +424,18 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `swatch_button`) + a full `color_picker_color32`; the submenu is `CloseOnClickOutside` so dragging
   the picker doesn't dismiss it). Undoable for free — `RepState` already snapshots `rep.color` and
   history compares `ColorMethod` generically.
-- ⏳ M11 **Atom picking + mouse lasso selection** — pick atoms (GPU id-buffer or CPU ray-cast vs
-  impostors) and lasso-select (polygon over projected positions) → feed a selection; hooks into
-  `draw_viewport` input.
+- 🟡 M11 **Atom picking** — `pick.rs` (`PickMode {Off, HoverInfo}`, `PickHit`, `cursor_ray`,
+  `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) -> Option<PickHit>`): a **CPU
+  ray-cast** of the cursor against every visible atom **at its displayed position** (smoothed +
+  periodic-replicated, via `bind_with_state(sel, smoothed_or_frame)` × `PeriodicParams::offsets`),
+  returning the nearest hit — but reporting the atom's **real** stored coord (`frame.coords[id]`,
+  central image, un-smoothed), per the user's hard requirement. Pick/glow radius = the rep's drawn
+  sphere (VDW `vdw·scale`, BallAndStick `vdw·sphere_scale`) else **default CPK = `vdw()`**. Pick-mode
+  **dropdown** in the viewport overlay (next to depth-cue; Off default → no per-hover cost). In
+  `HoverInfo`, `draw_viewport` ray-casts the hover, and `draw_pick_overlay` paints a **cyan glowing
+  outline ring** at the hit's projected displayed position + a lower-left info box
+  `name: resnameresid` / `x, y, z` (real coords, **nm**). `MOLAR_VIS_DEBUG_PICK=1` forces a
+  viewport-center pick (headless verification — hover can't be simulated on this Wayland box).
+  **TODO:** mouse-lasso selection (polygon over projected positions → feed a selection); more pick
+  modes in the dropdown. Picking is O(visible atoms × images) per hover — fine for small/medium
+  systems, a spatial grid / GPU id-buffer is the optimization for huge ones.
