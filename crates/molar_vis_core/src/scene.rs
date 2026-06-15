@@ -69,6 +69,10 @@ pub struct Representation {
     pub sel_empty: bool,
     /// Periodic-image display (see [`PeriodicParams`]). In `EditState`.
     pub periodic: PeriodicParams,
+    /// Trajectory smoothing window (odd; `1` = off). When `> 1`, the rendered
+    /// coordinates are a Savitzky–Golay blend of the nearby frames, computed
+    /// transiently at build time (`Trajectory::smoothed_state`). In `EditState`.
+    pub smooth_window: u32,
     pub visible: bool,
     /// Re-evaluate the (compiled) selection every time the System's State changes
     /// (i.e. each trajectory frame). For coordinate-dependent selections like
@@ -111,6 +115,7 @@ impl Representation {
             false,
             Material::default(),
             PeriodicParams::default(),
+            1, // smooth_window: off
         )
     }
 
@@ -128,6 +133,7 @@ impl Representation {
             self.ss_per_frame,
             self.material,
             self.periodic,
+            self.smooth_window,
         )
     }
 
@@ -145,6 +151,7 @@ impl Representation {
         ss_per_frame: bool,
         material: Material,
         periodic: PeriodicParams,
+        smooth_window: u32,
     ) -> Self {
         Self {
             kind,
@@ -158,6 +165,7 @@ impl Representation {
             sel_error: None,
             sel_empty: false,
             periodic,
+            smooth_window,
             visible,
             dynamic,
             ss_per_frame,

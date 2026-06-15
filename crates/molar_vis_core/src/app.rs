@@ -740,8 +740,32 @@ fn draw_traj_tab(ui: &mut egui::Ui, rep: &mut Representation) {
                  follows conformational changes).",
             );
     }
-    ui.add_space(2.0);
-    ui.weak("More per-frame options (coordinate smoothing, …) coming later.");
+    // Trajectory smoothing: render a Savitzky–Golay blend of nearby frames. The
+    // window is odd (1 = off, 3, 5, 7, …); stepped via the half-width but shown as
+    // the window count.
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Smooth window");
+        let mut half = rep.smooth_window.saturating_sub(1) / 2;
+        let resp = ui
+            .add(
+                egui::DragValue::new(&mut half)
+                    .range(0..=15)
+                    .speed(0.05)
+                    .custom_formatter(|n, _| format!("{}", (n as i64) * 2 + 1))
+                    .custom_parser(|s| s.parse::<f64>().ok().map(|w| ((w - 1.0) / 2.0).max(0.0))),
+            )
+            .on_hover_text(
+                "Render the trajectory smoothed over this many adjacent frames \
+                 (odd; 1 = off): a local-polynomial (Savitzky–Golay) blend of \
+                 neighbouring frames, shrunk gracefully at the trajectory ends.",
+            );
+        if resp.changed() {
+            rep.smooth_window = half * 2 + 1;
+            // Coords-only change → incremental rebuild (no DSSP / realloc).
+            rep.coords_dirty = true;
+        }
+    });
 }
 
 /// Draw the VMD-style trajectory control bar (buttons + frame field + loop/speed)
@@ -966,6 +990,15 @@ impl App {
                 }
             }
         }
+        // Verification hook: MOLAR_VIS_DEBUG_SMOOTH=<window> sets mol 0's first rep
+        // trajectory smoothing window (odd; needs MOLAR_VIS_DEBUG_TRAJ to do anything).
+        if let Ok(w) = std::env::var("MOLAR_VIS_DEBUG_SMOOTH") {
+            if let Ok(w) = w.trim().parse::<u32>() {
+                if let Some(rep) = scene.molecules.first_mut().and_then(|m| m.reps.first_mut()) {
+                    rep.smooth_window = w.max(1) | 1;
+                }
+            }
+        }
         // Verification hook: MOLAR_VIS_DEBUG_MATERIAL sets the first rep's material.
         if let Some(mat) = std::env::var("MOLAR_VIS_DEBUG_MATERIAL").ok().and_then(|m| {
             Material::ALL
@@ -1164,11 +1197,19 @@ impl App {
                     continue;
                 };
 
+                // Trajectory smoothing: a transient Savitzky–Golay blend of the
+                // frames around `current`, computed here and dropped after the
+                // build (nothing stored). Falls back to the raw current frame.
+                let smoothed = (rep.smooth_window > 1)
+                    .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
+                    .flatten();
+                let state: &State = smoothed.as_ref().unwrap_or(render_state);
+
                 if rep.geom_dirty {
                     // Full structural rebuild: (re)compute secondary structure
                     // into the cache, build geometry, recreate GPU buffers.
                     let (geom, fresh_ss) = {
-                        let bound = mol.system.bind_with_state(sel, render_state);
+                        let bound = mol.system.bind_with_state(sel, state);
                         let ss = geometry::needs_ss(&rep.params, rep.color)
                             .then(|| SsMap::compute(&bound, rep.ss_algo));
                         let geom = geometry::build(
@@ -1187,7 +1228,7 @@ impl App {
                     // cached secondary structure (no DSSP), then update the
                     // existing GPU buffers in place (no reallocation).
                     let geom = {
-                        let bound = mol.system.bind_with_state(sel, render_state);
+                        let bound = mol.system.bind_with_state(sel, state);
                         geometry::build(
                             &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
                             rep.ss_cache.as_ref(),

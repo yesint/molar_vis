@@ -31,6 +31,7 @@ struct RepState {
     ss_per_frame: bool,
     material: Material,
     periodic: PeriodicParams,
+    smooth_window: u32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -70,6 +71,7 @@ impl EditState {
                             ss_per_frame: r.ss_per_frame,
                             material: r.material,
                             periodic: r.periodic,
+                            smooth_window: r.smooth_window,
                         })
                         .collect(),
                 })
@@ -123,6 +125,11 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
             mol.reps[i].dynamic = s.dynamic;
             mol.reps[i].ss_per_frame = s.ss_per_frame;
             mol.reps[i].periodic = s.periodic;
+            // Smoothing changes the rendered coords → mark for an incremental rebuild.
+            if mol.reps[i].smooth_window != s.smooth_window {
+                mol.reps[i].smooth_window = s.smooth_window;
+                mol.reps[i].coords_dirty = true;
+            }
         }
     }
 }
@@ -139,6 +146,7 @@ fn rep_from_state(s: &RepState) -> Representation {
         s.ss_per_frame,
         s.material,
         s.periodic,
+        s.smooth_window,
     )
 }
 
@@ -190,6 +198,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             }
             if o.periodic != n.periodic {
                 return "change periodicity".into();
+            }
+            if o.smooth_window != n.smooth_window {
+                return "change smoothing".into();
             }
         }
     }

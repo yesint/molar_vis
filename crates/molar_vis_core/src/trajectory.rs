@@ -10,7 +10,7 @@
 //! native-only `data::traj_loader`; the wasm path feeds frames in via the same
 //! [`LoadMsg`] channel from a worker.
 
-use molar::prelude::State;
+use molar::prelude::{Pos, State};
 
 /// How playback behaves at the ends of the trajectory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -137,6 +137,61 @@ impl Trajectory {
         }
         moved
     }
+
+    /// Trajectory smoothing: a transient blend of the frames around `current`,
+    /// returned as an owned `State` (coords only — the box is taken as-is from the
+    /// current frame). **Computed at render time and dropped after the geometry
+    /// build; nothing is stored.** `window` is the odd smoothing window (`1` = off);
+    /// adjacent frames are weighted by **Savitzky–Golay** (local-polynomial)
+    /// coefficients, and the window is shrunk symmetrically toward the trajectory
+    /// ends so it degrades gracefully (no smoothing exactly at the first/last frame).
+    /// Returns `None` when there's nothing to smooth (`window ≤ 1`, `< 3` frames, or
+    /// a hard end) — callers then render the raw current frame.
+    pub fn smoothed_state(&self, window: u32) -> Option<State> {
+        let n = self.frames.len();
+        if window <= 1 || n < 3 {
+            return None;
+        }
+        let half = (window as usize - 1) / 2;
+        // Symmetric shrink at the ends: keep the window centred but smaller.
+        let m = half.min(self.current).min(n - 1 - self.current);
+        if m == 0 {
+            return None;
+        }
+        let coeffs = sg_center_coeffs(m);
+        let n_atoms = self.frames[self.current].coords.len();
+        let mut coords = vec![Pos::origin(); n_atoms];
+        for (k, &c) in coeffs.iter().enumerate() {
+            let frame = &self.frames[self.current - m + k];
+            for a in 0..n_atoms {
+                coords[a].coords += frame.coords[a].coords * c;
+            }
+        }
+        Some(State {
+            coords,
+            pbox: self.frames[self.current].pbox.clone(),
+            ..Default::default()
+        })
+    }
+}
+
+/// Savitzky–Golay center-point smoothing coefficients for a symmetric window of
+/// half-width `m` (window `2m+1`, offsets `−m..=m`), summing to 1. Degree-2
+/// (quadratic) for `m ≥ 2`; a plain boxcar average for `m == 1` (a quadratic
+/// through 3 points interpolates exactly = no smoothing, so drop to degree 0).
+fn sg_center_coeffs(m: usize) -> Vec<f32> {
+    let w = 2 * m + 1;
+    if m <= 1 {
+        return vec![1.0 / w as f32; w];
+    }
+    let mf = m as f32;
+    let denom = (2.0 * mf - 1.0) * (2.0 * mf + 1.0) * (2.0 * mf + 3.0);
+    (0..w)
+        .map(|k| {
+            let i = k as f32 - mf;
+            3.0 * (3.0 * mf * mf + 3.0 * mf - 1.0 - 5.0 * i * i) / denom
+        })
+        .collect()
 }
 
 /// Which frames to keep when reading a trajectory file.
@@ -184,6 +239,40 @@ mod tests {
         let mut t = Trajectory::default();
         t.frames = (0..n).map(|_| State::default()).collect();
         t
+    }
+
+    #[test]
+    fn sg_coeffs_sum_to_one_and_match_known() {
+        // Boxcar at window 3.
+        let c3 = sg_center_coeffs(1);
+        assert!((c3.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        assert!(c3.iter().all(|&w| (w - 1.0 / 3.0).abs() < 1e-5));
+        // Classic 5-point quadratic Savitzky–Golay: (-3, 12, 17, 12, -3) / 35.
+        let c5 = sg_center_coeffs(2);
+        assert!((c5.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        let want = [-3.0, 12.0, 17.0, 12.0, -3.0].map(|v: f32| v / 35.0);
+        for (a, b) in c5.iter().zip(want.iter()) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn smoothed_state_blends_frames() {
+        use molar::prelude::Pos;
+        // One atom whose x is 0, 10, 2 across three frames (frame 1 is "noisy").
+        let mut t = traj(3);
+        for (i, &x) in [0.0f32, 10.0, 2.0].iter().enumerate() {
+            t.frames[i].coords = vec![Pos::new(x, 0.0, 0.0)];
+        }
+        t.current = 1;
+        // Window 1 → no smoothing.
+        assert!(t.smoothed_state(1).is_none());
+        // Window 3 at the middle frame → boxcar average (0+10+2)/3 = 4.
+        let s = t.smoothed_state(3).expect("smoothed");
+        assert!((s.coords[0].x - 4.0).abs() < 1e-4, "{}", s.coords[0].x);
+        // At a hard end the window shrinks to nothing → no smoothing.
+        t.current = 0;
+        assert!(t.smoothed_state(3).is_none());
     }
 
     #[test]

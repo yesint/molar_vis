@@ -34,6 +34,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   update path) + `MOLAR_VIS_DEBUG_BOX=1` (show mol 0's periodic box) +
   `MOLAR_VIS_DEBUG_PBC="px,py,pz"` (set mol 0 first rep's +a/+b/+c periodic image counts + box;
   exercises periodic-image rendering — 2lao has a CRYST1 box) +
+  `MOLAR_VIS_DEBUG_SMOOTH=<window>` (set mol 0 first rep's trajectory smoothing window; pair with
+  `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
   zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
@@ -180,7 +182,12 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   via the `set_state(State::new_fake(n))` swap trick); loaded frames append; multiple loads
   concatenate. **Frame changes are zero-copy**: `Molecule::apply_current_frame` does NOT copy
   the frame into the System — it just sets dirty flags; `rebuild_dirty` reads the frame by
-  reference via `bind_with_state(sel, &frames[current])`. Routing per rep: `dynamic` →
+  reference via `bind_with_state(sel, &frames[current])`. **Trajectory smoothing** (per-rep
+  `smooth_window`, odd, 1=off; Traj tab): when >1, `rebuild_dirty` binds a **transient**
+  `Trajectory::smoothed_state(window)` instead of the raw frame — a Savitzky–Golay (local
+  polynomial) blend of the nearby frames' coords (window shrunk symmetrically at the ends; box
+  taken as-is), computed at build time and dropped after (a render-time coord transform, *nothing
+  stored* — same philosophy as periodic images). Routing per rep: `dynamic` →
   `sel_dirty` (re-eval selection — those molecules *do* get the frame `set_state`'d in, since
   selection eval reads the System's own state); Cartoon/SecStruct with `ss_per_frame` →
   `geom_dirty` (SS may restructure); otherwise → **`coords_dirty`** (incremental). `Sel`s stay
@@ -259,7 +266,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   dims, Surface probe/quality/smoothing + SS-algorithm + Defaults; every style now has at
   least one tunable so Defaults is always shown), **[Traj]** (`draw_traj_tab`: *Update every
   frame* = `rep.dynamic`; *Recompute SS every frame* = `ss_per_frame` for Cartoon/SecStruct;
-  more per-frame options later), **[Periodic]** (`draw_periodic_tab`, **only shown when the
+  *Smooth window* = `rep.smooth_window` — odd (1=off, 3,5,7…; a half-width `DragValue` shown as the
+  window via `custom_formatter`), trajectory smoothing; sets `coords_dirty`), **[Periodic]** (`draw_periodic_tab`, **only shown when the
   molecule has a box** — gated by `mol.system.state().pbox.is_some()`: *Self* / *Box* checkboxes
   + six `DragValue` spinboxes −x/+x/−y/+y/−z/+z giving the image counts along ±a,±b,±c; these
   are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`); tab in

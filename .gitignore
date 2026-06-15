@@ -7,3 +7,7 @@
 # Generated multi-MODEL trajectory of 2lao for verifying trajectory playback
 # (regenerate with the Python snippet in tests/README.md)
 /tests/2lao_traj.pdb
+
+# Generated noisy 3-MODEL trajectory of 2lao for verifying trajectory smoothing
+# (clean / noisy / clean frames; regenerate with the snippet in the smoothing commit)
+/tests/2lao_noisy.pdb
