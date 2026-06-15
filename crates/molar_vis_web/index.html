@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>molar_vis</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #050510;
+      }
+      /* eframe renders into this canvas; fill the window. */
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      /* Simple centred loading text shown until the wasm app boots. */
+      #loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #8ab4ff;
+        font: 16px system-ui, sans-serif;
+      }
+    </style>
+    <!-- Trunk builds the Rust crate in this directory and injects the JS/wasm. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+  </head>
+  <body>
+    <canvas id="molar_vis_canvas"></canvas>
+    <div id="loading">Loading molar_vis…</div>
+    <script>
+      // Hide the loading message once the canvas has been painted into.
+      const obs = new ResizeObserver(() => {
+        const el = document.getElementById("loading");
+        if (el) el.remove();
+        obs.disconnect();
+      });
+      obs.observe(document.getElementById("molar_vis_canvas"));
+    </script>
+  </body>
+</html>

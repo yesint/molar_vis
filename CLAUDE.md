@@ -389,10 +389,26 @@ History labels via `describe_change` ("edit selection", "change coloring",
     viewer doesn't need that). Test `system::tests::bind_with_state_reads_external_coords`.
 - ✅ **Zoom-to-selection / zoom-to-molecule** (`Camera::focus_bbox`) + **periodic-box wireframe**
   toggle (`geometry::box_wireframe`, per-molecule `box_gpu`).
-- ⏳ M8 **Browser streaming** (not yet) — `WasmBlobReader` (Read+Seek via worker-only
-  `FileReaderSync` over a `Blob`), a wasm Web Worker loader (wasm-threads), `web_sys::File` picker,
-  `eframe::WebRunner` entry + `index.html` served with COOP/COEP. The `from_reader` core above is
-  the foundation; only the wasm runtime assembly remains.
+- 🟡 M8 **Browser app (single-threaded wasm)** — the viewer compiles and **bundles to wasm via
+  `trunk`**, rendering through eframe's `WebRunner` (wgpu, WebGL2 fallback). **Decision: single-
+  threaded** (no SharedArrayBuffer/COOP-COEP/nightly — hostable on any static server). Pieces:
+  - **molar wasm runtime** (committed to molar, rev *ea33c5f*): `web_time::Instant` for the clock
+    (std panics on wasm) + a `src/par.rs` serial-iterator shim so molar's rayon calls run
+    single-threaded on wasm (rayon is now native-only); `IoStateIterator` reads serially on wasm.
+    **molar_vis pins it via a local `[patch]`** (dev only, in the root Cargo.toml) until molar is
+    pushed and the git rev bumped.
+  - **`crates/molar_vis_web`** (new) — a `bin` whose wasm `main` calls `molar_vis_core::run_web`
+    (`launch.rs`, `#[cfg(wasm)]`: `WebRunner::start` on the `<canvas id="molar_vis_canvas">`,
+    panic/log hooks). `index.html` + trunk; native `main` is a stub. Build: `cd crates/molar_vis_web
+    && trunk serve`. `.cargo/config.toml` sets `getrandom_backend="wasm_js"` (wasm only).
+  - **Browser file open** — `App::open_structure` forks: native rfd picker vs. `spawn_file_picker`
+    (a web-sys `<input type=file>` → `Blob::array_buffer` → bytes through an mpsc channel, drained
+    in `ui()`), loaded by `data::load_from_bytes` (molar `FileHandler::from_reader` over a `Cursor`).
+    `add_loaded` is the shared "add molecule + frame camera" tail.
+  - **Still TODO / unverified:** in-browser run not yet tested here (needs a real browser; WebGPU vs
+    WebGL2 + the file picker want live shakeout); trajectory streaming on wasm (a Web Worker feeding
+    the `LoadMsg` channel) is still future; push molar + drop the `[patch]`; release build + wasm-opt
+    (debug wasm is ~15 MB).
 - ✅ M9 **Materials** — `material.rs` `Material` (8 VMD presets: Opaque/Transparent/Glass/
   Translucent/Ghost/Glossy/Diffuse/Metal; each `params()` → ambient/diffuse/specular/shininess/
   opacity) + per-rep `material` (in `EditState`) + a **material dropdown** in row 2 (next to color,

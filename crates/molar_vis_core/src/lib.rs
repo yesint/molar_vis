@@ -23,6 +23,8 @@ pub use app::App;
 pub use launch::AppLaunch;
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::run;
+#[cfg(target_arch = "wasm32")]
+pub use launch::run_web;
 
 // Re-export eframe so downstream crates (the bin, a future web crate) can name
 // its types without pinning the version themselves.

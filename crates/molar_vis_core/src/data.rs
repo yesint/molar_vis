@@ -9,3 +9,5 @@ mod loader;
 pub mod traj_loader;
 
 pub use loader::{load, RawMolecule};
+#[cfg(target_arch = "wasm32")]
+pub use loader::load_from_bytes;

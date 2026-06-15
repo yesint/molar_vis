@@ -21,6 +21,34 @@ molar = { workspace = true }
 egui-phosphor = "0.12.0"
 
 # Native file-open dialog for loading trajectories. Target-gated so cargo never
-# tries to resolve/build it for wasm32 (the browser will use its own file picker).
+# tries to resolve/build it for wasm32 (the browser uses rfd's async web picker).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.15"
+
+# Browser runtime: the eframe `WebRunner` entry (`launch::run_web`) needs the
+# canvas + async glue; `wgpu`'s `webgl` feature gives a WebGL2 fallback for
+# browsers without WebGPU; `getrandom`'s `wasm_js` backend (+ the matching cfg in
+# `.cargo/config.toml`) keeps transitive RNG users from panicking. The file picker
+# is implemented directly on `web-sys` (`<input type=file>` + `Blob::array_buffer`)
+# since rfd's build script doesn't support wasm32-unknown-unknown.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "0.2"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wgpu = { workspace = true, features = ["webgl"] }
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "HtmlInputElement",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "Blob",
+] }

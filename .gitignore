@@ -1,6 +1,9 @@
 # Rust build artifacts
 /target
 
+# Trunk (wasm/browser) build output
+/crates/molar_vis_web/dist
+
 # Large generated test system (regenerate with gmx genconf; see tests/README.md)
 /tests/large_375k.gro
 

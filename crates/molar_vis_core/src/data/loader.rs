@@ -32,15 +32,38 @@ pub struct RawMolecule {
 
 /// Load `path` (PDB/GRO/… anything molar reads) and guess bonds.
 pub fn load(path: &Path) -> Result<RawMolecule, String> {
-    #[cfg(not(target_arch = "wasm32"))]
-    let t0 = std::time::Instant::now();
-
     let system = System::from_file(path)
         .map_err(|e| format!("failed to load {}: {e}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "molecule".to_string());
+    Ok(assemble(system, name))
+}
 
-    // Guess bonds and the bounding box while borrowing the system, using only
-    // transient arrays (positions/radii) that are dropped here — the System
-    // remains the single source of coordinates.
+/// Load a structure from in-memory bytes (the browser path: the file picker reads
+/// a `File`/`Blob` into a `Vec<u8>`). The format is taken from `name`'s extension.
+/// Uses molar's `FileHandler::from_reader`, so no filesystem access is needed.
+#[cfg(target_arch = "wasm32")]
+pub fn load_from_bytes(name: &str, bytes: Vec<u8>) -> Result<RawMolecule, String> {
+    let ext = name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mut fh = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes))
+        .map_err(|e| format!("can't read {name}: {e}"))?;
+    let (top, st) = fh
+        .read()
+        .map_err(|e| format!("failed to parse {name}: {e}"))?;
+    let system = System::new(top, st).map_err(|e| format!("invalid structure in {name}: {e}"))?;
+    Ok(assemble(system, name.to_string()))
+}
+
+/// Shared tail of [`load`]/[`load_from_bytes`]: guess bonds and the bounding box
+/// from the freshly loaded `system`, using only transient arrays (positions/radii)
+/// that are dropped here — the `System` stays the single source of coordinates.
+fn assemble(system: System, name: String) -> RawMolecule {
     let (bonds, bbox_min, bbox_max, n) = {
         let all = system.select_all_bound();
         let (min, max) = all.min_max();
@@ -61,26 +84,14 @@ pub fn load(path: &Path) -> Result<RawMolecule, String> {
         )
     };
 
-    #[cfg(not(target_arch = "wasm32"))]
-    log::info!(
-        "loaded {} atoms, {} bonds from {} in {:.2?}",
-        n,
-        bonds.len(),
-        path.display(),
-        t0.elapsed()
-    );
+    log::info!("loaded {} atoms, {} bonds from {}", n, bonds.len(), name);
 
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "molecule".to_string());
-
-    Ok(RawMolecule {
+    RawMolecule {
         name,
         system,
         n_atoms: n,
         bonds,
         bbox_min,
         bbox_max,
-    })
+    }
 }

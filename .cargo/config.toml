@@ -1,0 +1,7 @@
+# wasm-only build flag: select getrandom 0.3's browser backend. Required because a
+# transitive dependency (hashbrown/ahash RNG seeding) pulls getrandom, which
+# otherwise has no backend on wasm32-unknown-unknown and errors at runtime. Paired
+# with the `wasm_js` feature on getrandom in molar_vis_core. Scoped to the wasm
+# target, so native builds are unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

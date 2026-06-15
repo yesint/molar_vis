@@ -1054,6 +1054,13 @@ pub struct App {
     axes_on: bool,
     /// Which viewport corner the axes gizmo is anchored to.
     axes_corner: Corner,
+    /// Browser file-open channel: the async `<input type=file>` picker reads the
+    /// chosen file and sends `(filename, bytes)` here; `ui()` drains it and loads
+    /// the structure. Cloned per pick; the receiver is polled each frame. Wasm only.
+    #[cfg(target_arch = "wasm32")]
+    file_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
+    #[cfg(target_arch = "wasm32")]
+    file_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
@@ -1318,6 +1325,10 @@ impl App {
             }
         }
 
+        // Browser file-open channel (the async picker sends bytes back here).
+        #[cfg(target_arch = "wasm32")]
+        let (file_tx, file_rx) = std::sync::mpsc::channel::<(String, Vec<u8>)>();
+
         Ok(Self {
             renderer,
             camera,
@@ -1344,6 +1355,10 @@ impl App {
             lasso_path: Vec::new(),
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
             axes_corner: Corner::BottomRight,
+            #[cfg(target_arch = "wasm32")]
+            file_tx,
+            #[cfg(target_arch = "wasm32")]
+            file_rx,
         })
     }
 
@@ -1534,11 +1549,71 @@ fn build_glow(
     out
 }
 
+/// Browser file open: create a hidden `<input type=file>`, click it, and when the
+/// user picks a file read it (`Blob::array_buffer`) into a `Vec<u8>` and send
+/// `(name, bytes)` through `tx`. Requests a repaint so [`App::ui`] drains it. The
+/// whole flow is async (the picker dialog + the read), so this returns immediately.
+#[cfg(target_arch = "wasm32")]
+fn spawn_file_picker(tx: std::sync::mpsc::Sender<(String, Vec<u8>)>, ctx: egui::Context) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast as _;
+
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Ok(input) = document
+        .create_element("input")
+        .and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().map_err(|_| wasm_bindgen::JsValue::NULL.into()))
+    else {
+        return;
+    };
+    input.set_type("file");
+    input.set_accept(".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc");
+
+    let input_for_cb = input.clone();
+    let on_change = Closure::<dyn FnMut()>::new(move || {
+        let Some(file) = input_for_cb.files().and_then(|f| f.get(0)) else {
+            return;
+        };
+        let name = file.name();
+        let tx = tx.clone();
+        let ctx = ctx.clone();
+        // Read the Blob asynchronously, then hand the bytes to the app.
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
+                Ok(buf) => {
+                    let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                    let _ = tx.send((name, bytes));
+                    ctx.request_repaint();
+                }
+                Err(e) => log::error!("failed to read file: {e:?}"),
+            }
+        });
+    });
+    input.set_onchange(Some(on_change.as_ref().unchecked_ref()));
+    // The closure must outlive this call (it fires later); leak it deliberately.
+    on_change.forget();
+    input.click();
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).
         let ctx = ui.ctx().clone();
+
+        // Browser file picker results: load each (filename, bytes) the async picker
+        // delivered (see `spawn_file_picker`) as a new molecule.
+        #[cfg(target_arch = "wasm32")]
+        while let Ok((name, bytes)) = self.file_rx.try_recv() {
+            match data::load_from_bytes(&name, bytes) {
+                Ok(raw) => self.add_loaded(raw),
+                Err(e) => {
+                    log::error!("{e}");
+                    self.status = e;
+                }
+            }
+        }
 
         // Keyboard: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
         ctx.input(|i| {
@@ -1769,7 +1844,7 @@ impl App {
                 .on_hover_text("Open a structure file as a new molecule")
                 .clicked()
             {
-                self.open_structure();
+                self.open_structure(ui.ctx());
             }
             ui.separator();
 
@@ -1940,11 +2015,13 @@ impl App {
         view_dirty
     }
 
-    /// Open a structure file as a new molecule via a native file picker. Only
-    /// topology+coordinate formats (pdb/ent, gro, xyz, tpr) can seed a molecule.
-    /// Frames the camera when this is the first molecule; the add is undoable
-    /// (captured by the end-of-frame history checkpoint).
-    fn open_structure(&mut self) {
+    /// Open a structure file as a new molecule. Native: a synchronous `rfd` file
+    /// picker → [`data::load`]. Browser: an async `<input type=file>` whose bytes
+    /// come back through `file_rx` and are loaded in [`Self::ui`] via
+    /// [`data::load_from_bytes`]. Only topology+coordinate formats can seed a
+    /// molecule. The add is undoable (end-of-frame history checkpoint).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+    fn open_structure(&mut self, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(path) = rfd::FileDialog::new()
@@ -1953,21 +2030,8 @@ impl App {
             else {
                 return;
             };
-            let was_empty = self.scene.molecules.is_empty();
             match data::load(&path) {
-                Ok(raw) => {
-                    self.scene.add(raw, self.default_rep);
-                    self.scene.selected_mol = Some(self.scene.molecules.len() - 1);
-                    if was_empty {
-                        if let Some((min, max)) = self.scene.bbox() {
-                            let proj = self.camera.projection;
-                            self.camera = Camera::frame_bbox(min, max);
-                            self.camera.projection = proj;
-                        }
-                    }
-                    self.status = format!("{} molecule(s) loaded", self.scene.molecules.len());
-                    self.view_dirty = true;
-                }
+                Ok(raw) => self.add_loaded(raw),
                 Err(e) => {
                     log::error!("{e}");
                     self.status = e;
@@ -1975,9 +2039,25 @@ impl App {
             }
         }
         #[cfg(target_arch = "wasm32")]
-        {
-            self.status = "Opening files is not yet supported on the web".to_string();
+        spawn_file_picker(self.file_tx.clone(), ctx.clone());
+    }
+
+    /// Add a freshly loaded structure as a new molecule: select it, frame the
+    /// camera if it's the first one, and flag a re-render. Shared by the native
+    /// picker and the browser byte-loader.
+    fn add_loaded(&mut self, raw: data::RawMolecule) {
+        let was_empty = self.scene.molecules.is_empty();
+        self.scene.add(raw, self.default_rep);
+        self.scene.selected_mol = Some(self.scene.molecules.len() - 1);
+        if was_empty {
+            if let Some((min, max)) = self.scene.bbox() {
+                let proj = self.camera.projection;
+                self.camera = Camera::frame_bbox(min, max);
+                self.camera.projection = proj;
+            }
         }
+        self.status = format!("{} molecule(s) loaded", self.scene.molecules.len());
+        self.view_dirty = true;
     }
 
     /// Render the "Load trajectory" modal (a-la VMD): file chooser + frame range

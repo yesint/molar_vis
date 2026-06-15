@@ -1,0 +1,15 @@
+[package]
+name = "molar_vis_web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Browser/wasm entry point for the viewer, built by `trunk` (see index.html).
+# Native builds compile a stub `main` so the workspace still builds end-to-end.
+[[bin]]
+name = "molar_vis_web"
+path = "src/main.rs"
+
+[dependencies]
+molar_vis_core = { path = "../molar_vis_core" }

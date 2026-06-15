@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/molar_vis_core", "crates/molar_vis"]
+members = ["crates/molar_vis_core", "crates/molar_vis", "crates/molar_vis_web"]
 resolver = "2"
 
 [workspace.package]
@@ -24,7 +24,8 @@ bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 # molar (default features => Float = f32), from GitHub so the crate is installable
 # without a local sibling checkout. molar pulls its own powersasa git dependency.
-molar = { git = "https://github.com/yesint/molar.git", default-features = false }
+# Pinned to the rev with wasm runtime support (web-time clock + serial rayon shim).
+molar = { git = "https://github.com/yesint/molar.git", rev = "ea33c5f9a034f4fbce6ff1bdfbcd09cac5e29bfd", default-features = false }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]
