@@ -389,26 +389,35 @@ History labels via `describe_change` ("edit selection", "change coloring",
     viewer doesn't need that). Test `system::tests::bind_with_state_reads_external_coords`.
 - ✅ **Zoom-to-selection / zoom-to-molecule** (`Camera::focus_bbox`) + **periodic-box wireframe**
   toggle (`geometry::box_wireframe`, per-molecule `box_gpu`).
-- 🟡 M8 **Browser app (single-threaded wasm)** — the viewer compiles and **bundles to wasm via
-  `trunk`**, rendering through eframe's `WebRunner` (wgpu, WebGL2 fallback). **Decision: single-
-  threaded** (no SharedArrayBuffer/COOP-COEP/nightly — hostable on any static server). Pieces:
-  - **molar wasm runtime** (committed to molar, rev *ea33c5f*): `web_time::Instant` for the clock
-    (std panics on wasm) + a `src/par.rs` serial-iterator shim so molar's rayon calls run
-    single-threaded on wasm (rayon is now native-only); `IoStateIterator` reads serially on wasm.
-    **molar_vis pins it via a local `[patch]`** (dev only, in the root Cargo.toml) until molar is
-    pushed and the git rev bumped.
-  - **`crates/molar_vis_web`** (new) — a `bin` whose wasm `main` calls `molar_vis_core::run_web`
-    (`launch.rs`, `#[cfg(wasm)]`: `WebRunner::start` on the `<canvas id="molar_vis_canvas">`,
-    panic/log hooks). `index.html` + trunk; native `main` is a stub. Build: `cd crates/molar_vis_web
-    && trunk serve`. `.cargo/config.toml` sets `getrandom_backend="wasm_js"` (wasm only).
+- ✅ M8 **Browser app (single-threaded wasm)** — the viewer runs in the browser through eframe's
+  `WebRunner` (wgpu, with a **WebGL2 fallback**), built/bundled with `trunk` and **deployed to
+  GitHub Pages**. **Decision: single-threaded** (no SharedArrayBuffer/COOP-COEP/nightly — hostable on
+  any static server). Pieces:
+  - **molar wasm runtime** (committed + pushed to molar, rev *ea33c5f*; molar_vis pins that git rev):
+    `web_time::Instant` for the clock (std panics on wasm) + a `src/par.rs` serial-iterator shim so
+    molar's rayon calls run single-threaded on wasm (rayon is now native-only); `IoStateIterator`
+    reads serially on wasm.
+  - **`crates/molar_vis_web`** — a `bin` whose wasm `main` calls `molar_vis_core::run_web`
+    (`launch.rs`, `#[cfg(wasm)]`: `WebRunner::start` on the `<canvas id="molar_vis_canvas">`; panic +
+    Info-level `console_log` hooks; surfaces a startup failure into the page `#loading`). `index.html`
+    + trunk; native `main` is a stub. Build/serve: `cd crates/molar_vis_web && trunk serve`.
+    `.cargo/config.toml` sets `getrandom_backend="wasm_js"` (wasm only); wgpu gets the `webgl` feature
+    on wasm. The web build opens to a bundled molecule (`App::load_demo`, `include_bytes!` 2lao).
+  - **WebGL2 fallback** (`render.rs`): WebGL2 lacks `INDEPENDENT_BLEND`, so the OIT pipelines (accum
+    additive + reveal multiplicative) can't be created. `SceneRenderer::new` checks the adapter's
+    downlevel flags → `oit_enabled`; when false it skips the OIT/composite passes and draws
+    transparent reps with plain alpha blending in the opaque pass (`draw_reps` takes an explicit
+    pipeline index). The theme is **pinned to Dark** (`ctx.set_theme(ThemePreference::Dark)`), else
+    eframe follows the browser's light `prefers-color-scheme` and the UI comes up white.
   - **Browser file open** — `App::open_structure` forks: native rfd picker vs. `spawn_file_picker`
     (a web-sys `<input type=file>` → `Blob::array_buffer` → bytes through an mpsc channel, drained
     in `ui()`), loaded by `data::load_from_bytes` (molar `FileHandler::from_reader` over a `Cursor`).
     `add_loaded` is the shared "add molecule + frame camera" tail.
-  - **Still TODO / unverified:** in-browser run not yet tested here (needs a real browser; WebGPU vs
-    WebGL2 + the file picker want live shakeout); trajectory streaming on wasm (a Web Worker feeding
-    the `LoadMsg` channel) is still future; push molar + drop the `[patch]`; release build + wasm-opt
-    (debug wasm is ~15 MB).
+  - **Deploy**: `.github/workflows/pages.yml` builds `trunk build --release --public-url /<repo>/`
+    and publishes to Pages (auto-enables via `actions/configure-pages`). Demo:
+    **https://yesint.github.io/molar_vis/**.
+  - **Still TODO:** wasm **trajectory streaming** (a Web Worker feeding the `LoadMsg` channel) is
+    still future (native-only today); WebGPU path (vs the WebGL2 fallback) wants its own live check.
 - ✅ M9 **Materials** — `material.rs` `Material` (8 VMD presets: Opaque/Transparent/Glass/
   Translucent/Ghost/Glossy/Diffuse/Metal; each `params()` → ambient/diffuse/specular/shininess/
   opacity) + per-rep `material` (in `EditState`) + a **material dropdown** in row 2 (next to color,

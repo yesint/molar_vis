@@ -5,6 +5,9 @@ name: Deploy web demo to GitHub Pages
 on:
   push:
     branches: [main]
+    # Don't rebuild/redeploy for docs-only changes.
+    paths-ignore:
+      - "**.md"
   workflow_dispatch:
 
 permissions:
