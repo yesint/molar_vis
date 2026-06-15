@@ -61,7 +61,12 @@ pub fn run_web() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(App::new(cc, AppLaunch::default())?))),
+                Box::new(|cc| {
+                    let mut app = App::new(cc, AppLaunch::default())?;
+                    // Open to a bundled molecule so the demo isn't an empty viewport.
+                    app.load_demo();
+                    Ok(Box::new(app))
+                }),
             )
             .await;
 

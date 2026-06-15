@@ -2060,6 +2060,18 @@ impl App {
         self.view_dirty = true;
     }
 
+    /// Load the small bundled structure (2lao) so the web/GitHub-Pages demo opens
+    /// to a molecule instead of an empty viewport. Wasm only (embeds the file in
+    /// the binary); the native app starts empty and loads via the Open button.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_demo(&mut self) {
+        const DEMO_PDB: &[u8] = include_bytes!("../../../tests/2lao.pdb");
+        match data::load_from_bytes("2lao.pdb", DEMO_PDB.to_vec()) {
+            Ok(raw) => self.add_loaded(raw),
+            Err(e) => log::error!("demo load failed: {e}"),
+        }
+    }
+
     /// Render the "Load trajectory" modal (a-la VMD): file chooser + frame range
     /// / stride + sync/async, with Load/Cancel. Driven from `ctx` (egui modals
     /// take a `Context`, not a `Ui`), so it floats above the whole window.
