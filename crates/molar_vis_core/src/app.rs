@@ -1708,6 +1708,25 @@ impl App {
                             });
                         });
                     });
+                    // In Lasso mode, a held modifier changes the set operation — show
+                    // it below the pick selector (matches `finish_lasso`'s `LassoOp`).
+                    if self.pick_mode == PickMode::Lasso {
+                        let m = ui.input(|i| i.modifiers);
+                        let hint = if m.shift {
+                            Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
+                        } else if m.command {
+                            Some((icon::MINUS_CIRCLE, "subtract from selection", egui::Color32::from_rgb(230, 140, 140)))
+                        } else {
+                            None
+                        };
+                        if let Some((glyph, text, color)) = hint {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.colored_label(color, egui::RichText::new(glyph).size(16.0));
+                                ui.colored_label(color, text);
+                            });
+                        }
+                    }
                     if self.cue_panel_open {
                         ui.separator();
                         let cue = &mut self.camera.depth_cue;
