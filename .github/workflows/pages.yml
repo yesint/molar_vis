@@ -34,6 +34,13 @@ jobs:
       # Cache the cargo registry + target dir (wgpu/eframe/molar are slow to build).
       - uses: Swatinem/rust-cache@v2
 
+      # Enable Pages (source = GitHub Actions) via the API if it isn't already, so
+      # no manual repo-settings step is needed for the first deploy.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       - name: Install trunk
         run: |
           curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
