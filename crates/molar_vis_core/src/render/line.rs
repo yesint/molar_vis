@@ -66,6 +66,7 @@ pub fn build_pipeline(
     camera_bgl: &wgpu::BindGroupLayout,
     targets: &[Option<wgpu::ColorTargetState>],
     depth_write: bool,
+    depth_compare: wgpu::CompareFunction,
     fs_entry: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -96,7 +97,7 @@ pub fn build_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: depth_format,
             depth_write_enabled: Some(depth_write),
-            depth_compare: Some(wgpu::CompareFunction::Less),
+            depth_compare: Some(depth_compare),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

@@ -12,7 +12,8 @@ pub struct CameraUniform {
     pub proj: [[f32; 4]; 4],
     /// x = 1.0 for perspective (eye-ray impostors), 0.0 for orthographic
     /// (parallel-ray impostors). y,z = viewport size in pixels (used by the
-    /// fat-line shader to expand segments to a constant pixel width). w reserved.
+    /// fat-line shader to expand segments to a constant pixel width). w = the
+    /// active-selection glow pulse multiplier (animated 0..1; used only by `fs_glow`).
     pub params: [f32; 4],
     /// Depth cueing: `[near, far, strength, _]` in eye-space distance. Geometry
     /// fades to `fog_color` from `near` (none) to `far` (full `strength`).
@@ -28,6 +29,7 @@ pub struct CameraUniform {
 }
 
 impl CameraUniform {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         view: Mat4,
         proj: Mat4,
@@ -36,11 +38,12 @@ impl CameraUniform {
         cue: [f32; 4],
         fog_color: [f32; 4],
         depth_range: [f32; 2],
+        glow_pulse: f32,
     ) -> Self {
         Self {
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
-            params: [if perspective { 1.0 } else { 0.0 }, viewport[0], viewport[1], 0.0],
+            params: [if perspective { 1.0 } else { 0.0 }, viewport[0], viewport[1], glow_pulse],
             cue,
             fog_color,
             depth_range: [depth_range[0], depth_range[1], 0.0, 0.0],

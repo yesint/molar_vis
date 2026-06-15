@@ -38,6 +38,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_PICK=1` (force hover-info pick mode + pick at the viewport center each frame, so
   the glow/info overlay can be screenshot headlessly) +
+  `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection of mol 0 as an active/pending
+  selection — exercises the lasso glow highlight + accept/discard UI without a mouse drag) +
   `MOLAR_VIS_DEBUG_AXES=1` (show the VMD-style orientation-axes gizmo) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
@@ -119,17 +121,20 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `oit_bind_group` for the resolve), **dynamic-offset** camera UBO (bind group 0; an array of
   `CameraUniform` at `CAMERA_STRIDE`=256 — entry 0 is the base camera, one extra per **periodic
   image** = base view × `Mat4::from_translation(i·a+j·b+k·c)`, grown/`make_camera_bind_group`'d as
-  needed), sphere/cylinder/line/**mesh** pipelines (each `[opaque, oit]`) + a fullscreen
-  **`composite_pipeline`** (`oit_bgl`), `RepGpu` (per-rep buffers; mesh = vertex + u32 index buffer;
-  buffers carry `COPY_DST`), `upload()` (recreate buffers), **`update()`** (in-place `write_buffer`
-  when element counts match, for coords-only frame changes), `render_scene()` (builds the per-image
-  camera list + `images[mol][rep]` = camera indices, then 3-pass: opaque → OIT → composite;
-  `draw_reps` loops a rep's images, selecting each image's camera by **dynamic offset** — same
-  geometry buffers re-drawn shifted, **no data duplication**; the box wireframe is replicated at each
-  image cell of any rep with periodic `Box` on, + the molecule-level box at entry 0), `texture_id()`.
-  Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl` (incl.
-  `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit`). The cartoon mesh writes real depth
-  and interleaves correctly with the impostors.
+  needed), sphere/cylinder/line/**mesh** pipelines (each `[opaque, oit, glow]` — index `GLOW=2`
+  is additive cyan, depth-test `≤`, no depth-write) + a fullscreen **`composite_pipeline`**
+  (`oit_bgl`), `RepGpu` (per-rep buffers; mesh = vertex + u32 index buffer; buffers carry
+  `COPY_DST`; `has_geometry()`), `upload()` (recreate buffers), **`update()`** (in-place
+  `write_buffer` when element counts match, for coords-only frame changes), `render_scene()` (builds
+  the per-image camera list + `images[mol][rep]` = camera indices, then up to **4 passes**: opaque →
+  OIT → composite → **glow** (`draw_glow` draws each molecule's `glow_gpu` for the active-selection
+  highlight; skipped when none); `draw_reps` loops a rep's images, selecting each image's camera by
+  **dynamic offset** — same geometry buffers re-drawn shifted, **no data duplication**; the box
+  wireframe is replicated at each image cell of any rep with periodic `Box` on, + the molecule-level
+  box at entry 0), `texture_id()`. Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and
+  `render/shaders/*.wgsl` (incl. `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit` +
+  `fs_glow`; the `build_pipeline`s take `depth_compare`). The cartoon mesh writes real depth and
+  interleaves correctly with the impostors.
 - `pick.rs` — CPU ray-cast atom picking (`PickMode {Off, HoverInfo, Lasso}`, `PickHit`,
   `cursor_ray`, `ray_sphere`, `effective_radius`, `pick`) **and lasso selection** (`lasso_select`,
   `point_in_polygon`, `index_selection_string`, `LassoSelection`). Hit-tests the cursor/lasso
@@ -138,8 +143,10 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   share `atom_in_rep(kind, name)` — the **style-specific contribution filter**: a Cartoon rep is
   hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal OT1/OT2/OXT — what the
   ribbon is built from, never side chains); every other style hits all selected atoms (Lines
-  included, via its isolated-atom dots). Drives the hover-info overlay (`draw_pick_overlay` in
-  `app.rs`). M11.
+  included, via its isolated-atom crosses). `lasso_select` also captures each atom's effective
+  glow radius. Drives the hover-info overlay (`draw_pick_overlay`/`draw_glow_ring` in `app.rs`).
+  The lasso result is staged as a molecule's active (pending) selection, highlighted by a GPU
+  glow pass (not an egui overlay) — see *active selection* under M11. M11.
 
 ## Key architecture
 
@@ -276,8 +283,9 @@ a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip c
 (`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), a **pick-mode
 dropdown** (`Off` default / `Hover info` / `Lasso select` — see `pick.rs` / M11; in `Lasso` a
 plain-LMB drag accumulates `App::lasso_path` (Shift+LMB still rolls), the polygon is drawn as a
-cyan polyline, and on release `finish_lasso` turns the enclosed atoms into a new **VDW** rep per
-molecule via `pick::index_selection_string` — undoable by the normal checkpoint), and an
+cyan polyline, and on release `finish_lasso` stages the enclosed atoms as each molecule's
+**active (pending) selection** (`Molecule::pending`, *not* a rep yet) — a glowing highlight +
+minimal accept/discard UI; **two-step**, so accepting is the only undoable part), and an
 **axes-gizmo dropdown**
 (`ARROWS_OUT_CARDINAL`: an *On* checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,
 BottomLeft,BottomRight}`, default BottomRight — VMD-style orientation axes;
@@ -478,14 +486,37 @@ History labels via `describe_change` ("edit selection", "change coloring",
     navigate), drawn as a cyan polyline; on release `finish_lasso` maps the path → clip-space NDC
     polygon and calls `lasso_select`, which projects every **style-eligible, displayed** atom (any
     periodic image inside the polygon counts, **even-odd** `point_in_polygon`) and groups hits per
-    molecule (`LassoSelection`, deduped/sorted). Each molecule with hits gets a new **VDW** rep
-    whose selection text is `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …`
-    string (consecutive runs → inclusive ranges; molar `index` is the 0-based global atom index).
-    Undoable via the normal end-of-frame checkpoint.
+    molecule (`LassoSelection { atoms, radii }`, deduped/sorted; `radii` = each atom's effective
+    glow size from the style it was captured in). The hits become each molecule's selection text
+    via `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …` string (consecutive
+    runs → inclusive ranges; 0-based global atom index).
+  - **Lasso set ops** (release modifier; `LassoOp` in `app.rs`): plain drag **replaces** the active
+    selection, **Shift**+drag **adds** (unions), **Ctrl/⌘**+drag **subtracts** — merged per molecule
+    in `finish_lasso` via a `BTreeSet` over the existing pending atoms (empty result → clears it). In
+    Lasso mode *any* LMB drag draws the polygon (orbit/roll live in the other pick modes).
+  - **Active (pending) selection — two-step commit** (`scene::PendingSelection`,
+    `Molecule::pending`): a lasso does **not** make a rep directly. It stages a *pending* selection
+    that's **view state, not undoable, excluded from `EditState`**, shown two ways: (1) a **GPU glow
+    highlight in the current style** — `rebuild_dirty`'s `build_glow` rebuilds, per visible rep,
+    `(rep.sel ∩ pending)` in *that rep's own style/params* (Cartoon → ribbon, VDW → spheres, …),
+    merged into the molecule's `glow_gpu` (`GeometryData::append`); a final additive **glow pass**
+    (`render_scene` pass 4, pipeline index `GLOW=2`) draws it with the shaders' `fs_glow` — an
+    intense cyan **Fresnel rim** (bright at grazing angles + a strong body tint), **pulsing**: the
+    camera uniform's `params.w` carries an animated multiplier (`0.70 + 0.30·sin(t·3.2)`, computed in
+    `draw_viewport`) and while any selection is pending the viewport `request_repaint()`s + force-
+    re-renders each frame so it breathes (idle = 0 GPU otherwise). Depth-tested `≤` against the scene
+    depth (so occluded atoms don't glow), no depth-write. So the *selected geometry itself glows in
+    its current style* — **not** a 2-D overlay. `glow_dirty` rebuilds it when the pending set or
+    coords change, **or when any rep's geometry is rebuilt** (so the glow follows a live style/
+    selection change); central image only. (2) a **minimal panel block** under the reps
+    (`draw_reps_for`): a non-editable italic "selection" label + **green ✓ accept** + **🗑 discard**,
+    no style/color/material row. **Accept** commits it as a normal, fully-editable **Ball-and-Stick**
+    rep over the same `index …` text (this push *is* the undoable step — "add representation");
+    **discard** drops it. `MOLAR_VIS_DEBUG_PENDING=<sel>` stages one headlessly.
   - **Style-specific eligibility** (shared by hover + lasso via `atom_in_rep(kind, name)`): a
     Cartoon rep is hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal
     OT1/OT2/OXT — what the ribbon is built from), never side chains; every other style is hit on
-    all selected atoms (Lines included, via its isolated-atom dots). Tested:
+    all selected atoms (Lines included, via its isolated-atom **crosses**). Tested:
     `lasso_full_screen_selects_all_for_vdw`, `lasso_cartoon_selects_only_backbone`.
-  - **TODO:** more pick modes in the dropdown. Picking/lasso is O(visible atoms × images) — fine
-    for small/medium systems; a spatial grid / GPU id-buffer is the optimization for huge ones.
+  - **TODO:** more pick modes in the dropdown. Picking/lasso is O(visible atoms × images) — fine for
+    small/medium systems; a spatial grid / GPU id-buffer is the optimization for huge ones.

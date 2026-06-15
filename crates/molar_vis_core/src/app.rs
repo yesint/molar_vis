@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use molar::prelude::{SsAlgorithm, State};
+use molar::prelude::{ParticleIterProvider, SsAlgorithm, State};
 
 use crate::camera::{Camera, Projection};
 use crate::color::ColorMethod;
@@ -60,6 +60,16 @@ fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
     );
 }
 
+/// The blue glow ring shared by hover-picking and the active-selection highlight:
+/// a faint thick halo fading inward to a bright thin core, centered at `center`
+/// with core pixel radius `rpx`.
+fn draw_glow_ring(painter: &egui::Painter, center: egui::Pos2, rpx: f32) {
+    let glow = |a: u8| egui::Color32::from_rgba_unmultiplied(130, 215, 255, a);
+    painter.circle_stroke(center, rpx + 4.0, egui::Stroke::new(6.0, glow(35)));
+    painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0, glow(95)));
+    painter.circle_stroke(center, rpx, egui::Stroke::new(1.8, glow(235)));
+}
+
 /// Draw the hover-pick highlight over the viewport: a glowing outline ring at the
 /// hovered atom's **displayed** position (sized to the rep's sphere radius) plus a
 /// lower-left info box with the atom's identity and **real** coordinates (nm).
@@ -94,11 +104,7 @@ fn draw_pick_overlay(
         .clamp(3.0, rect.width());
 
     let painter = ui.painter_at(rect);
-    // Glowing outline: faint thick halo → bright thin core.
-    let glow = |a: u8| egui::Color32::from_rgba_unmultiplied(130, 215, 255, a);
-    painter.circle_stroke(center, rpx + 4.0, egui::Stroke::new(6.0, glow(35)));
-    painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0, glow(95)));
-    painter.circle_stroke(center, rpx, egui::Stroke::new(1.8, glow(235)));
+    draw_glow_ring(&painter, center, rpx);
 
     // Lower-left info box: "name resname resid" / "x, y, z" (real coords, nm).
     let font = egui::FontId::monospace(13.0);
@@ -1287,6 +1293,22 @@ impl App {
             }
         }
 
+        // Verification hook: MOLAR_VIS_DEBUG_PENDING=<selection> stages that selection
+        // of mol 0 as an active (pending) selection — exercises the lasso glow +
+        // accept/discard UI without simulating a mouse drag.
+        if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_PENDING") {
+            if let Some(mol) = scene.molecules.first_mut() {
+                if let Ok((_, sel)) = scene::evaluate(&mol.system, &sel_text) {
+                    let atoms: Vec<usize> = {
+                        let bound = mol.system.bind(&sel);
+                        bound.iter_particle().map(|p| p.id).collect()
+                    };
+                    mol.pending = Some(scene::PendingSelection { sel_text, atoms });
+                    mol.glow_dirty = true;
+                }
+            }
+        }
+
         let history = History::new(EditState::capture(&scene));
 
         // Verification hook: MOLAR_VIS_DEBUG_PARAMS=1 opens the first rep's gear panel.
@@ -1334,7 +1356,7 @@ impl App {
                 .reps
                 .iter()
                 .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty);
-            if !any_rep_dirty && !(mol.show_box && mol.box_dirty) {
+            if !any_rep_dirty && !(mol.show_box && mol.box_dirty) && !mol.glow_dirty {
                 continue;
             }
             // The coordinates to render: the current trajectory frame, read by
@@ -1344,6 +1366,9 @@ impl App {
                 None => mol.system.state(),
             };
             let n_atoms = mol.n_atoms;
+            // Whether any rep's geometry was (re)built this pass — if so and there's
+            // an active selection, its glow must follow the new style/coords.
+            let mut rep_geom_changed = false;
             for rep in &mut mol.reps {
                 if rep.sel_dirty {
                     // Parse + evaluate the selection (against the System's own
@@ -1407,6 +1432,7 @@ impl App {
                     rep.geom_dirty = false;
                     rep.coords_dirty = false;
                     changed = true;
+                    rep_geom_changed = true;
                 } else if rep.coords_dirty {
                     // Coordinates-only frame change: rebuild geometry reusing the
                     // cached secondary structure (no DSSP), then update the
@@ -1421,6 +1447,7 @@ impl App {
                     self.renderer.update(rs, &mut rep.gpu, &geom);
                     rep.coords_dirty = false;
                     changed = true;
+                    rep_geom_changed = true;
                 }
             }
             // Periodic-box wireframe: (re)build when dirty, regardless of whether
@@ -1440,9 +1467,71 @@ impl App {
                 mol.box_dirty = false;
                 changed = true;
             }
+
+            // If any rep's geometry was rebuilt (style/selection/coords changed) and
+            // there's an active selection, rebuild its glow so it follows the change.
+            if rep_geom_changed && mol.pending.is_some() {
+                mol.glow_dirty = true;
+            }
+
+            // Active-selection glow: rebuild the pending atoms in each rep's own
+            // style (so the highlight glows in the current style), or clear it. Runs
+            // after the rep loop so Cartoon reps' `ss_cache` is already populated.
+            if mol.glow_dirty {
+                let geom = match &mol.pending {
+                    Some(pending) => build_glow(
+                        &mol.system, &mol.bonds, &mol.reps, pending, render_state, n_atoms,
+                    ),
+                    None => geometry::GeometryData::default(),
+                };
+                mol.glow_gpu = self.renderer.upload(rs, &geom);
+                mol.glow_dirty = false;
+                changed = true;
+            }
         }
         changed
     }
+}
+
+/// Build the active-selection glow geometry for one molecule: for each visible
+/// rep, the rep's selection intersected with the `pending` atoms, built in that
+/// rep's own style/params, merged into one geometry. The element colors/materials
+/// are irrelevant (the glow shaders emit a fixed cyan Fresnel rim), so the rep's
+/// own values are reused. Cartoon/SecStruct reps are skipped until their SS cache
+/// exists (it's filled by the same `rebuild_dirty` pass, just before this).
+fn build_glow(
+    system: &molar::prelude::System,
+    bonds: &[[usize; 2]],
+    reps: &[Representation],
+    pending: &scene::PendingSelection,
+    state: &State,
+    n_atoms: usize,
+) -> geometry::GeometryData {
+    let Some(index_str) = pick::index_selection_string(&pending.atoms) else {
+        return geometry::GeometryData::default();
+    };
+    let mut out = geometry::GeometryData::default();
+    for rep in reps {
+        if !rep.visible {
+            continue;
+        }
+        if geometry::needs_ss(&rep.params, rep.color) && rep.ss_cache.is_none() {
+            continue;
+        }
+        // (rep selection) ∩ (pending atoms): glow only this rep's own atoms, in its
+        // own style. Skip on an empty/invalid intersection.
+        let combined = format!("({}) and ({})", rep.sel_text, index_str);
+        let Ok((_, sel)) = scene::evaluate(system, &combined) else {
+            continue;
+        };
+        let bound = system.bind_with_state(&sel, state);
+        let geom = geometry::build(
+            &bound, n_atoms, bonds, &rep.params, rep.color, rep.material,
+            rep.ss_cache.as_ref(),
+        );
+        out.append(geom);
+    }
+    out
 }
 
 impl eframe::App for App {
@@ -2292,6 +2381,38 @@ impl App {
             ui.add_space(6.0);
         }
 
+        // The active (pending) selection — e.g. just captured by a lasso — appears
+        // below the reps with a minimal interface: a non-editable "selection" label
+        // plus accept (commit as a Ball-and-Stick rep) / discard buttons. No style,
+        // color, or editable selection (those come once it's accepted).
+        let mut accept_pending = false;
+        let mut discard_pending = false;
+        if mol.pending.is_some() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new("selection").italics())
+                        .selectable(false),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    compact_actions(ui);
+                    if icon_button(ui, icon::TRASH, "Discard selection").clicked() {
+                        discard_pending = true;
+                    }
+                    let accept = ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(icon::CHECK)
+                                .color(egui::Color32::from_rgb(120, 220, 120)),
+                        )
+                        .on_hover_text("Accept as a representation");
+                    if accept.clicked() {
+                        accept_pending = true;
+                    }
+                });
+            });
+            ui.add_space(6.0);
+        }
+
         if let Some((from, to)) = reorder {
             if to != from && to != from + 1 {
                 let item = mol.reps.remove(from);
@@ -2314,6 +2435,23 @@ impl App {
             } else {
                 Some(j.min(mol.reps.len() - 1))
             };
+            view_dirty = true;
+        }
+        if accept_pending {
+            if let Some(p) = mol.pending.take() {
+                // Commit as a normal, fully editable Ball-and-Stick representation.
+                let mut rep = Representation::new(RepKind::BallAndStick);
+                rep.sel_text = p.sel_text;
+                mol.reps.push(rep);
+                mol.selected_rep = Some(mol.reps.len() - 1);
+                mol.reps_open = true;
+            }
+            mol.glow_dirty = true; // clear the glow geometry
+            view_dirty = true;
+        }
+        if discard_pending {
+            mol.pending = None;
+            mol.glow_dirty = true; // clear the glow geometry
             view_dirty = true;
         }
 
@@ -2350,8 +2488,9 @@ impl App {
             //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
             //   RMB = pan           · Shift+RMB = move along view Z (dolly)
             //   middle = pan        · wheel = scale (zoom)
-            // In Lasso pick mode, a plain LMB drag draws the selection polygon
-            // instead of orbiting (Shift+LMB still rolls, so roll stays reachable).
+            // In Lasso pick mode any LMB drag draws the selection polygon (the held
+            // modifier picks the set op on release: plain = replace, Shift = add,
+            // Ctrl = subtract); orbit/roll move to the other modes.
             let lasso_mode = self.pick_mode == PickMode::Lasso;
             if !lasso_mode {
                 self.lasso_path.clear();
@@ -2359,7 +2498,7 @@ impl App {
             let delta = response.drag_delta();
             let shift = ui.input(|i| i.modifiers.shift);
             if response.dragged_by(egui::PointerButton::Primary) {
-                if lasso_mode && !shift {
+                if lasso_mode {
                     if let Some(pos) = response.interact_pointer_pos() {
                         // Drop near-duplicate points (drag jitter) for a clean polygon.
                         if self.lasso_path.last().is_none_or(|&p| (p - pos).length() > 1.5) {
@@ -2393,9 +2532,27 @@ impl App {
                 ((rect.height() * ppp).round() as u32).max(1),
             ];
 
+            // An active (pending) selection glows with a gentle pulse: while one is
+            // present, animate the glow's intensity multiplier and keep repainting
+            // (and re-rendering each frame) so it breathes. Otherwise idle = 0 GPU.
+            let pulsing = self
+                .scene
+                .molecules
+                .iter()
+                .any(|m| m.visible && m.pending.is_some());
+            let glow_pulse = if pulsing {
+                let t = ui.input(|i| i.time) as f32;
+                0.70 + 0.30 * (t * 3.2).sin()
+            } else {
+                1.0
+            };
+            if pulsing {
+                ui.ctx().request_repaint();
+            }
+
             let cam_changed = self.last_render_camera != Some(self.camera);
             let size_changed = size_px != self.last_size;
-            if geom_changed || cam_changed || size_changed || self.view_dirty {
+            if geom_changed || cam_changed || size_changed || self.view_dirty || pulsing {
                 let aspect = size_px[0] as f32 / size_px[1] as f32;
                 let view = self.camera.view();
                 let proj = self.camera.proj(aspect);
@@ -2407,6 +2564,7 @@ impl App {
                     self.camera.is_perspective(),
                     self.camera.cue_uniform(),
                     self.camera.eye_depth_range(),
+                    glow_pulse,
                     &self.scene,
                 );
                 self.last_render_camera = Some(self.camera);
@@ -2444,8 +2602,11 @@ impl App {
                 }
             }
 
-            // Lasso selection: draw the in-progress polygon, and on release turn
-            // the enclosed (style-eligible) atoms into a new selection rep.
+            // The active (pending) selection is highlighted by a GPU glow pass
+            // (`render_scene` pass 4), so there's nothing to draw here.
+
+            // Lasso selection: draw the in-progress polygon, and on release stage
+            // the enclosed (style-eligible) atoms as the active selection.
             if lasso_mode && self.lasso_path.len() >= 2 {
                 let painter = ui.painter_at(rect);
                 let col = egui::Color32::from_rgb(130, 215, 255);
@@ -2467,7 +2628,17 @@ impl App {
                 && !self.lasso_path.is_empty()
                 && response.drag_stopped_by(egui::PointerButton::Primary)
             {
-                self.finish_lasso(rect, size_px);
+                // The modifier held at release picks the set operation: Shift adds to
+                // the active selection, Ctrl (⌘ on mac) subtracts, plain replaces.
+                let m = ui.input(|i| i.modifiers);
+                let op = if m.shift {
+                    LassoOp::Add
+                } else if m.command {
+                    LassoOp::Subtract
+                } else {
+                    LassoOp::Replace
+                };
+                self.finish_lasso(rect, size_px, op);
             }
 
             // VMD-style orientation axes gizmo in the chosen corner.
@@ -2482,9 +2653,11 @@ impl App {
 
     /// Finish a lasso gesture: convert the screen-space path to a clip-space
     /// polygon, collect the enclosed atoms (per `pick::lasso_select`, honoring the
-    /// per-rep style logic), and add a VDW representation of the result to each
-    /// molecule that had hits. Undoable via the normal end-of-frame checkpoint.
-    fn finish_lasso(&mut self, rect: egui::Rect, size_px: [u32; 2]) {
+    /// per-rep style logic), and combine them with each molecule's **active (pending)
+    /// selection** per `op` — a glowing highlight with a minimal accept/discard UI,
+    /// not yet a real representation. Staging is not undoable; accepting it (→ a
+    /// Ball-and-Stick rep) is.
+    fn finish_lasso(&mut self, rect: egui::Rect, size_px: [u32; 2], op: LassoOp) {
         let path = std::mem::take(&mut self.lasso_path);
         if path.len() < 3 {
             return;
@@ -2503,19 +2676,58 @@ impl App {
         let view = self.camera.view();
         let proj = self.camera.proj(aspect);
         let results = pick::lasso_select(&self.scene, view, proj, &polygon);
+
+        // Replace clears the previous active selection everywhere first; Add/Subtract
+        // merge into the existing per-molecule pending set.
+        if op == LassoOp::Replace {
+            for mol in &mut self.scene.molecules {
+                if mol.pending.take().is_some() {
+                    mol.glow_dirty = true;
+                }
+            }
+        }
         for res in results {
-            let Some(sel_text) = pick::index_selection_string(&res.atoms) else {
-                continue;
-            };
             let mol = &mut self.scene.molecules[res.mol];
-            // VDW so the lassoed set is clearly visible; sel_dirty (set by `new`)
-            // makes it evaluate + build next frame.
-            let mut rep = Representation::new(RepKind::Vdw);
-            rep.sel_text = sel_text;
-            mol.reps.push(rep);
-            mol.selected_rep = Some(mol.reps.len() - 1);
-            mol.reps_open = true;
+            // Start from the current pending atoms (sorted, unique), then apply the op.
+            let mut set: std::collections::BTreeSet<usize> = mol
+                .pending
+                .as_ref()
+                .map(|p| p.atoms.iter().copied().collect())
+                .unwrap_or_default();
+            match op {
+                // For Replace the set was just cleared above, so this is just the new
+                // atoms; Add unions them in.
+                LassoOp::Replace | LassoOp::Add => set.extend(res.atoms),
+                LassoOp::Subtract => {
+                    for a in &res.atoms {
+                        set.remove(a);
+                    }
+                }
+            }
+            let atoms: Vec<usize> = set.into_iter().collect();
+            match pick::index_selection_string(&atoms) {
+                Some(sel_text) => {
+                    mol.pending = Some(scene::PendingSelection { sel_text, atoms });
+                    mol.reps_open = true;
+                }
+                // Empty result (e.g. subtracted everything) → no active selection.
+                None => {
+                    mol.pending = None;
+                }
+            }
+            mol.glow_dirty = true;
         }
         self.view_dirty = true;
     }
+}
+
+/// How a lasso gesture combines with the molecule's existing active selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LassoOp {
+    /// Plain drag: the lasso becomes the new active selection.
+    Replace,
+    /// Shift+drag: union the lassoed atoms into the active selection.
+    Add,
+    /// Ctrl/⌘+drag: remove the lassoed atoms from the active selection.
+    Subtract,
 }

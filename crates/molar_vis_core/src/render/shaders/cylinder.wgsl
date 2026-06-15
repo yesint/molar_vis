@@ -118,12 +118,15 @@ struct FsOut {
 };
 
 // Result of ray-casting the impostor cylinder: shaded (fogged) color, opacity
-// and the analytic [0,1] window depth. Misses `discard`.
+// and the analytic [0,1] window depth. Misses `discard`. `normal`/`view_dir`
+// (view space) are also returned for the selection glow's Fresnel rim.
 struct Hit {
     color: vec3<f32>,
     alpha: f32,
     depth: f32,
     eye_z: f32,
+    normal: vec3<f32>,
+    view_dir: vec3<f32>,
 };
 
 fn compute_hit(in: VsOut) -> Hit {
@@ -169,7 +172,26 @@ fn compute_hit(in: VsOut) -> Hit {
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-hit), camera.params.x > 0.5);
     let lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat));
 
-    return Hit(apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z);
+    return Hit(apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
+}
+
+// Additive cyan "rim glow" for the active (pending) selection (see sphere.wgsl).
+const GLOW_COLOR: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+
+// `camera.params.w` is the animated pulse multiplier (see render.rs).
+fn glow_alpha(normal: vec3<f32>, view_dir: vec3<f32>) -> f32 {
+    let ndotv = max(dot(normal, view_dir), 0.0);
+    let rim = pow(1.0 - ndotv, 1.5);
+    return clamp((0.45 + 1.15 * rim) * camera.params.w, 0.0, 1.0);
+}
+
+@fragment
+fn fs_glow(in: VsOut) -> FsOut {
+    let h = compute_hit(in);
+    var out: FsOut;
+    out.depth = h.depth;
+    out.color = vec4<f32>(GLOW_COLOR, glow_alpha(h.normal, h.view_dir));
+    return out;
 }
 
 @fragment

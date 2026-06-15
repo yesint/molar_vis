@@ -118,6 +118,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return shade(in);
 }
 
+// Additive cyan "rim glow" for the active (pending) selection (see sphere.wgsl):
+// the ribbon, in its own style, glows brightest at grazing angles. Two-sided like
+// `shade`. Drawn depth-tested (≤), no depth-write, additive.
+const GLOW_COLOR: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+
+@fragment
+fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
+    let nlen = length(in.normal_eye);
+    var n = select(vec3<f32>(0.0, 0.0, 1.0), in.normal_eye / nlen, nlen > 1e-6);
+    let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-in.view_pos), camera.params.x > 0.5);
+    if (dot(n, view_dir) < 0.0) {
+        n = -n;
+    }
+    let ndotv = max(dot(n, view_dir), 0.0);
+    let rim = pow(1.0 - ndotv, 1.5);
+    // `camera.params.w` is the animated pulse multiplier (see render.rs).
+    let alpha = clamp((0.45 + 1.15 * rim) * camera.params.w, 0.0, 1.0);
+    return vec4<f32>(GLOW_COLOR, alpha);
+}
+
 struct OitOut {
     @location(0) accum: vec4<f32>,
     @location(1) reveal: f32,

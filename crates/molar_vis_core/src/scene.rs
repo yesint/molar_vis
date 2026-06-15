@@ -213,6 +213,24 @@ pub enum SettingsTab {
     Periodic,
 }
 
+/// A freshly captured selection (e.g. from the lasso) that has not yet been
+/// committed to a real [`Representation`]. It is **view state** (not undoable, not
+/// in `EditState`): it renders as a glowing highlight over the atoms exactly as the
+/// existing reps already draw them, and the panel shows it with a minimal
+/// accept/discard interface instead of the normal rep controls. Accepting it
+/// creates a normal Ball-and-Stick representation over [`PendingSelection::sel_text`];
+/// discarding drops it. (The two-step scheme leaves room for later set operations —
+/// e.g. unioning a new lasso into the active selection with Shift held.)
+pub struct PendingSelection {
+    /// molar selection text reproducing the captured atom set (e.g. `index 1:3 7`),
+    /// used both when the selection is accepted as a representation and to rebuild
+    /// the glow geometry (intersected with each rep's own selection / style).
+    pub sel_text: String,
+    /// Captured atoms' global indices (sorted ascending). The glow geometry is built
+    /// per visible rep as (rep selection ∩ these atoms) in that rep's style.
+    pub atoms: Vec<usize>,
+}
+
 /// A loaded molecule. The live molar `System` is the single source of per-atom
 /// data (positions, elements, radii); we additionally keep only the guessed
 /// connectivity and a cached bounding box, plus the representations.
@@ -240,6 +258,16 @@ pub struct Molecule {
     pub box_gpu: RepGpu,
     /// Box geometry needs (re)building — toggled on, or coordinates changed.
     pub box_dirty: bool,
+    /// A not-yet-committed selection (e.g. captured by a lasso), shown as a glowing
+    /// highlight with a minimal accept/discard UI. View state, not undoable; see
+    /// [`PendingSelection`]. `None` when there is no active selection.
+    pub pending: Option<PendingSelection>,
+    /// GPU geometry for the active-selection glow: the pending atoms rebuilt in each
+    /// rep's own style (so the highlight glows in the current style). Empty when
+    /// there's no pending selection.
+    pub glow_gpu: RepGpu,
+    /// The glow geometry needs (re)building — pending changed, or its coords moved.
+    pub glow_dirty: bool,
 }
 
 impl Molecule {
@@ -263,6 +291,9 @@ impl Molecule {
             // periodic `Box` toggle can draw it without the molecule-level box ever
             // being shown. Cheap (24 verts); a no-op when there's no box.
             box_dirty: true,
+            pending: None,
+            glow_gpu: RepGpu::default(),
+            glow_dirty: false,
         }
     }
 
@@ -307,6 +338,9 @@ impl Molecule {
             return;
         }
         self.box_dirty = true; // the box can change per frame (e.g. NPT)
+        if self.pending.is_some() {
+            self.glow_dirty = true; // the glow follows the atoms' new positions
+        }
         let needs_eval = self.reps.iter().any(|r| r.dynamic);
         if needs_eval {
             if let Some(frame) = self.trajectory.frames.get(self.trajectory.current) {

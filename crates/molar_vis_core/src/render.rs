@@ -115,6 +115,27 @@ fn oit_targets() -> Vec<Option<wgpu::ColorTargetState>> {
     ]
 }
 
+/// Color-target descriptor for the selection-glow pass: a single target that adds
+/// the (cyan, Fresnel-weighted) glow onto the already-composited scene color —
+/// `dst + glow.rgb * glow.a`.
+fn glow_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
+    let add = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::SrcAlpha,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    };
+    let add_a = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    };
+    vec![Some(wgpu::ColorTargetState {
+        format: color_format,
+        blend: Some(wgpu::BlendState { color: add, alpha: add_a }),
+        write_mask: wgpu::ColorWrites::ALL,
+    })]
+}
+
 /// Offscreen render targets, recreated when the viewport size changes. Besides
 /// the composited color + depth, this holds the weighted-blended OIT `accum` and
 /// `reveal` targets and a bind group exposing them to the composite pass.
@@ -213,6 +234,16 @@ pub struct RepGpu {
     cylinders: Option<DrawBuffer>, // 4 verts/instance
     lines: Option<DrawBuffer>,     // vertex count (LineList)
     mesh: Option<MeshBuffers>,     // indexed triangles (cartoon)
+}
+
+impl RepGpu {
+    /// Whether any buffer holds drawable geometry (used to skip empty glow passes).
+    pub fn has_geometry(&self) -> bool {
+        self.spheres.is_some()
+            || self.cylinders.is_some()
+            || self.lines.is_some()
+            || self.mesh.is_some()
+    }
 }
 
 fn upload_buf<T: bytemuck::Pod>(
@@ -352,16 +383,21 @@ pub struct SceneRenderer {
     camera_capacity: u32,
 
     // Each geometry has an opaque pipeline `[0]` (single alpha-blended target,
-    // depth-write on) and a weighted-blended OIT pipeline `[1]` (accum+reveal
-    // targets, depth-write off, depth-test on). The OIT pipelines are resolved
-    // into the color target by `composite_pipeline` after the transparent pass.
-    sphere_pipeline: [wgpu::RenderPipeline; 2],
-    cylinder_pipeline: [wgpu::RenderPipeline; 2],
-    line_pipeline: [wgpu::RenderPipeline; 2],
-    mesh_pipeline: [wgpu::RenderPipeline; 2],
+    // depth-write on), a weighted-blended OIT pipeline `[1]` (accum+reveal targets,
+    // depth-write off, depth-test on), and a selection-glow pipeline `[2]` (additive
+    // cyan over the color target, depth-test `≤` against the scene, no depth-write).
+    // The OIT pipelines are resolved into the color target by `composite_pipeline`
+    // after the transparent pass; the glow pipelines run in a final pass.
+    sphere_pipeline: [wgpu::RenderPipeline; 3],
+    cylinder_pipeline: [wgpu::RenderPipeline; 3],
+    line_pipeline: [wgpu::RenderPipeline; 3],
+    mesh_pipeline: [wgpu::RenderPipeline; 3],
     oit_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
 }
+
+/// Pipeline-array index for the selection-glow pass.
+const GLOW: usize = 2;
 
 impl SceneRenderer {
     pub fn new(rs: &RenderState) -> Self {
@@ -398,23 +434,30 @@ impl SceneRenderer {
         let f = color_format;
         let opaque_t = opaque_targets(f);
         let oit_t = oit_targets();
-        let pair = |opaque: wgpu::RenderPipeline, oit: wgpu::RenderPipeline| [opaque, oit];
-        let sphere_pipeline = pair(
-            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
-            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
-        );
-        let cylinder_pipeline = pair(
-            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
-            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
-        );
-        let line_pipeline = pair(
-            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
-            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
-        );
-        let mesh_pipeline = pair(
-            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &opaque_t, true, "fs_main"),
-            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, &oit_t, false, "fs_oit"),
-        );
+        let glow_t = glow_targets(f);
+        let less = wgpu::CompareFunction::Less;
+        // Glow depth-tests `≤` (the glow geometry is identical to the scene's, so it
+        // sits at exactly the scene depth → it must pass on equality), no depth-write.
+        let lequal = wgpu::CompareFunction::LessEqual;
+        let triple = |b: &dyn Fn(&[Option<wgpu::ColorTargetState>], bool, wgpu::CompareFunction, &str) -> wgpu::RenderPipeline| {
+            [
+                b(&opaque_t, true, less, "fs_main"),
+                b(&oit_t, false, less, "fs_oit"),
+                b(&glow_t, false, lequal, "fs_glow"),
+            ]
+        };
+        let sphere_pipeline = triple(&|t, dw, dc, fs| {
+            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        });
+        let cylinder_pipeline = triple(&|t, dw, dc, fs| {
+            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        });
+        let line_pipeline = triple(&|t, dw, dc, fs| {
+            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        });
+        let mesh_pipeline = triple(&|t, dw, dc, fs| {
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        });
 
         // OIT resolve: a fullscreen pass that reads the accum + reveal targets
         // (bind group 0 here, *not* the camera) and blends the order-independent
@@ -509,6 +552,7 @@ impl SceneRenderer {
         perspective: bool,
         cue: [f32; 4],
         depth_range: [f32; 2],
+        glow_pulse: f32,
         scene: &Scene,
     ) -> TextureId {
         // Render into SSAA× targets (clamped to the device's max texture size),
@@ -534,8 +578,9 @@ impl SceneRenderer {
         // no data is duplicated. `images[mi][j]` lists the camera indices to draw
         // rep `j` of molecule `mi` at (empty = nothing; `[0]` = just the central copy).
         let viewport = [size_px[0] as f32, size_px[1] as f32];
-        let make_cam =
-            |v: Mat4| CameraUniform::new(v, proj, perspective, viewport, cue, BG, depth_range);
+        let make_cam = |v: Mat4| {
+            CameraUniform::new(v, proj, perspective, viewport, cue, BG, depth_range, glow_pulse)
+        };
         let mut cameras: Vec<CameraUniform> = vec![make_cam(view)];
         let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
         for mol in &scene.molecules {
@@ -707,9 +752,77 @@ impl SceneRenderer {
             }
         }
 
+        // Pass 4 — active-selection glow: additive cyan over the composited color,
+        // depth-tested `≤` against the scene depth (so occluded selection atoms
+        // don't glow) with no depth-write. Drawn at the central image only.
+        let has_glow = scene
+            .molecules
+            .iter()
+            .any(|m| m.visible && m.glow_gpu.has_geometry());
+        if has_glow {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("glow-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.targets.color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.targets.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.draw_glow(&mut pass, scene);
+        }
+
         rs.queue.submit(std::iter::once(encoder.finish()));
 
         self.egui_texture
+    }
+
+    /// Draw every visible molecule's active-selection glow geometry (`glow_gpu`,
+    /// built in each rep's own style restricted to the pending atoms) with the
+    /// additive glow pipelines, at the central image (camera entry 0).
+    fn draw_glow(&self, pass: &mut wgpu::RenderPass, scene: &Scene) {
+        pass.set_bind_group(0, &self.camera_bind_group, &[0]);
+        for mol in &scene.molecules {
+            if !mol.visible || !mol.glow_gpu.has_geometry() {
+                continue;
+            }
+            let g = &mol.glow_gpu;
+            if let Some(s) = &g.spheres {
+                pass.set_pipeline(&self.sphere_pipeline[GLOW]);
+                pass.set_vertex_buffer(0, s.buffer.slice(..));
+                pass.draw(0..4, 0..s.count);
+            }
+            if let Some(c) = &g.cylinders {
+                pass.set_pipeline(&self.cylinder_pipeline[GLOW]);
+                pass.set_vertex_buffer(0, c.buffer.slice(..));
+                pass.draw(0..4, 0..c.count);
+            }
+            if let Some(l) = &g.lines {
+                pass.set_pipeline(&self.line_pipeline[GLOW]);
+                pass.set_vertex_buffer(0, l.buffer.slice(..));
+                pass.draw(0..4, 0..l.count / 2);
+            }
+            if let Some(m) = &g.mesh {
+                pass.set_pipeline(&self.mesh_pipeline[GLOW]);
+                pass.set_vertex_buffer(0, m.vertices.slice(..));
+                pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+        }
     }
 
     /// Draw every visible representation matching the requested transparency into

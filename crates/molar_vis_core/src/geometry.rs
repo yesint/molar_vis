@@ -138,6 +138,22 @@ pub struct GeometryData {
     pub mesh: MeshData,
 }
 
+impl GeometryData {
+    /// Concatenate another geometry into this one (mesh indices are offset by the
+    /// current vertex count). Used to merge several reps' geometry into a single
+    /// buffer set — e.g. the active-selection glow, built per rep but drawn as one.
+    pub fn append(&mut self, mut other: GeometryData) {
+        let base = self.mesh.vertices.len() as u32;
+        self.spheres.append(&mut other.spheres);
+        self.cylinders.append(&mut other.cylinders);
+        self.lines.append(&mut other.lines);
+        self.mesh.vertices.append(&mut other.mesh.vertices);
+        self.mesh
+            .indices
+            .extend(other.mesh.indices.iter().map(|i| i + base));
+    }
+}
+
 /// An indexed triangle mesh (Cartoon representation).
 #[derive(Default)]
 pub struct MeshData {
@@ -191,12 +207,13 @@ pub fn build(
         }
         RepParams::Lines { width } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
+            let mut lines = lines(&lut, bonds, width);
+            // Lines only draws bonds, so a selected atom with no drawn bond (an ion,
+            // a lone water, …) would otherwise be invisible. VMD marks such atoms
+            // with a tiny cross — emit one per bondless atom, at the same width.
+            lines.extend(isolated_crosses(bound, &colorizer, &lut, bonds, width));
             GeometryData {
-                lines: lines(&lut, bonds, width),
-                // Lines only draws bonds, so a selected atom with no drawn bond
-                // (an ion, a lone water, …) would otherwise be invisible. VMD
-                // shows such atoms as small points — emit a small dot for each.
-                spheres: isolated_dots(bound, &colorizer, &lut, bonds),
+                lines,
                 ..Default::default()
             }
         }
@@ -286,22 +303,25 @@ pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
     v
 }
 
-/// Fraction of the van der Waals radius drawn for the Lines isolated-atom dots —
-/// the small Ball-and-Stick sphere size, kept in sync with `pick`'s pick radius
-/// so a hovered dot's glow ring matches the dot.
-const LINES_DOT_SCALE: f32 = 0.25;
+/// Half-length (nm) of each arm of the tiny "+" cross drawn for a Lines isolated
+/// atom — much lighter than the old sphere dot. (Hover/lasso still treat such an
+/// atom with the small Ball-and-Stick sphere radius; see `pick`.)
+const LINES_CROSS_HALF_LEN: f32 = 0.025;
 
-/// Small dots for selected atoms that take part in **no drawn bond** (a bond with
-/// both endpoints selected). The Lines representation renders only bonds, so
+/// Tiny "+" crosses for selected atoms that take part in **no drawn bond** (a bond
+/// with both endpoints selected). The Lines representation renders only bonds, so
 /// without these an isolated atom (ion, lone water, …) would be invisible; VMD
-/// draws the same little points. Bonded atoms are already marked by their meeting
-/// line segments, so they get no dot.
-fn isolated_dots(
+/// marks the same atoms with a small cross. Each cross is three short segments
+/// along the x/y/z axes through the atom, drawn at the rep's line `width` and the
+/// atom's color. Bonded atoms are already marked by their meeting line segments,
+/// so they get no cross.
+fn isolated_crosses(
     bound: &impl ParticleIterProvider,
     colorizer: &Colorizer,
     lut: &[Option<([f32; 3], u32)>],
     bonds: &[[usize; 2]],
-) -> Vec<SphereInstance> {
+    width: f32,
+) -> Vec<LineVertex> {
     // `lut[i].is_some()` == atom i is selected; mark every selected endpoint of a
     // drawn bond as bonded.
     let mut bonded = vec![false; lut.len()];
@@ -311,16 +331,24 @@ fn isolated_dots(
             bonded[b] = true;
         }
     }
-    bound
-        .iter_particle()
-        .filter(|p| !bonded[p.id])
-        .map(|p| SphereInstance {
-            center: [p.pos.x, p.pos.y, p.pos.z],
-            radius: p.atom.vdw() * LINES_DOT_SCALE,
-            color: colorizer.color(p.atom, p.id),
-            mat: 0,
-        })
-        .collect()
+    let h = LINES_CROSS_HALF_LEN;
+    let mut v = Vec::new();
+    for p in bound.iter_particle() {
+        if bonded[p.id] {
+            continue;
+        }
+        let c = [p.pos.x, p.pos.y, p.pos.z];
+        let color = colorizer.color(p.atom, p.id);
+        // One short segment per axis (a 3-D "+" that reads as a cross from any view).
+        for axis in 0..3 {
+            let (mut lo, mut hi) = (c, c);
+            lo[axis] -= h;
+            hi[axis] += h;
+            v.push(LineVertex { pos: lo, color, width });
+            v.push(LineVertex { pos: hi, color, width });
+        }
+    }
+    v
 }
 
 fn spheres(

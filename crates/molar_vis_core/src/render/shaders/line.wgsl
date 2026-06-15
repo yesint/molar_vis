@@ -98,6 +98,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(apply_fog(in.color.rgb, in.eye_z), in.color.a);
 }
 
+// Additive cyan glow for the active (pending) selection (see sphere.wgsl). Lines
+// are flat, so the glow is a constant additive cyan along the selected bonds.
+const GLOW_COLOR: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+
+@fragment
+fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
+    // `camera.params.w` is the animated pulse multiplier (see render.rs).
+    return vec4<f32>(GLOW_COLOR, clamp(0.85 * camera.params.w, 0.0, 1.0));
+}
+
 struct OitOut {
     @location(0) accum: vec4<f32>,
     @location(1) reveal: f32,
