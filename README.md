@@ -201,15 +201,16 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 - All six representations (Lines, Licorice, Ball-and-Stick, VDW, Cartoon, Surface).
 - Every coloring scheme; the full molar selection language.
 - Eight materials incl. order-independent transparency; perspective/orthographic; depth cueing.
-- **Trajectory** loading + VMD-style playback (native).
+- **Trajectory** loading + VMD-style playback, on the desktop **and in the browser** (the wasm
+  build streams frames in from the picked file incrementally).
 - Atom **hover-info picking** and **lasso selection** (with a glowing active selection).
 - Undo/redo; drag-reorder reps; zoom-to-selection/molecule; periodic-box wireframe.
 - **Browser build** — runs in the browser ([live demo](https://yesint.github.io/molar_vis/));
-  WebGPU with a WebGL2 fallback, in-browser file open.
+  WebGPU with a WebGL2 fallback; in-browser structure + trajectory loading.
 
 **In progress / not done:**
-- **Browser trajectory streaming** — trajectory playback is native-only today; the wasm
-  build loads single structures. A Web Worker frame streamer is the remaining browser piece.
+- Browser trajectory loading reads the whole file into memory (fine for typical sizes); true
+  random-access disk streaming for very large trajectories is a possible future addition.
 
 This is a young project under active development; expect rough edges.
 

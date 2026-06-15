@@ -409,15 +409,22 @@ History labels via `describe_change` ("edit selection", "change coloring",
     transparent reps with plain alpha blending in the opaque pass (`draw_reps` takes an explicit
     pipeline index). The theme is **pinned to Dark** (`ctx.set_theme(ThemePreference::Dark)`), else
     eframe follows the browser's light `prefers-color-scheme` and the UI comes up white.
-  - **Browser file open** — `App::open_structure` forks: native rfd picker vs. `spawn_file_picker`
-    (a web-sys `<input type=file>` → `Blob::array_buffer` → bytes through an mpsc channel, drained
-    in `ui()`), loaded by `data::load_from_bytes` (molar `FileHandler::from_reader` over a `Cursor`).
-    `add_loaded` is the shared "add molecule + frame camera" tail.
+  - **Browser file open** — the wasm picker is a shared `pick_file(accept, ctx, deliver)` helper
+    (web-sys `<input type=file>` → `Blob::array_buffer` → bytes → `deliver`). `App::open_structure`
+    forks native rfd vs `pick_file` (→ `file_rx` → `data::load_from_bytes`, molar `from_reader` over a
+    `Cursor`). `add_loaded` is the shared "add molecule + frame camera" tail.
+  - **Browser trajectory streaming** — the Load-trajectory button forks native (the dialog) vs
+    `pick_file` tagged with the molecule (→ `traj_rx`). On wasm there are no threads, so instead of
+    the native reader thread, `data::traj_wasm::TrajStream` keeps a `FileHandler` over the in-memory
+    `Cursor` and `App::poll_wasm_loaders` reads a **batch of frames per `ui()`** (`next_batch`),
+    streaming them into the `Trajectory` (same `seed_frame0`/`push_frame`/playback path as native);
+    repaints continue until the stream is drained. No range/stride dialog on wasm yet (loads all).
   - **Deploy**: `.github/workflows/pages.yml` builds `trunk build --release --public-url /<repo>/`
     and publishes to Pages (auto-enables via `actions/configure-pages`). Demo:
     **https://yesint.github.io/molar_vis/**.
-  - **Still TODO:** wasm **trajectory streaming** (a Web Worker feeding the `LoadMsg` channel) is
-    still future (native-only today); WebGPU path (vs the WebGL2 fallback) wants its own live check.
+  - **Still TODO:** the **WebGPU** path (vs the WebGL2 fallback) wants its own live check; true
+    random-access disk streaming (a Web Worker + `FileReaderSync` over a `Blob`) is unneeded for the
+    in-memory approach but would help huge trajectories.
 - ✅ M9 **Materials** — `material.rs` `Material` (8 VMD presets: Opaque/Transparent/Glass/
   Translucent/Ghost/Glossy/Diffuse/Metal; each `params()` → ambient/diffuse/specular/shininess/
   opacity) + per-rep `material` (in `EditState`) + a **material dropdown** in row 2 (next to color,

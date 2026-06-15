@@ -1061,6 +1061,16 @@ pub struct App {
     file_tx: std::sync::mpsc::Sender<(String, Vec<u8>)>,
     #[cfg(target_arch = "wasm32")]
     file_rx: std::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    /// Browser trajectory-load channel: the picker sends `(molecule, filename,
+    /// bytes)` here; `ui()` drains it into an incremental [`data::traj_wasm::TrajStream`]
+    /// per molecule (in `wasm_loaders`), whose frames are streamed into the
+    /// trajectory a batch per frame. Wasm only.
+    #[cfg(target_arch = "wasm32")]
+    traj_tx: std::sync::mpsc::Sender<(MolId, String, Vec<u8>)>,
+    #[cfg(target_arch = "wasm32")]
+    traj_rx: std::sync::mpsc::Receiver<(MolId, String, Vec<u8>)>,
+    #[cfg(target_arch = "wasm32")]
+    wasm_loaders: HashMap<MolId, data::traj_wasm::TrajStream>,
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
@@ -1325,9 +1335,12 @@ impl App {
             }
         }
 
-        // Browser file-open channel (the async picker sends bytes back here).
+        // Browser file-open + trajectory-load channels (the async pickers send
+        // their bytes back here for `ui()` to process).
         #[cfg(target_arch = "wasm32")]
         let (file_tx, file_rx) = std::sync::mpsc::channel::<(String, Vec<u8>)>();
+        #[cfg(target_arch = "wasm32")]
+        let (traj_tx, traj_rx) = std::sync::mpsc::channel::<(MolId, String, Vec<u8>)>();
 
         Ok(Self {
             renderer,
@@ -1359,6 +1372,12 @@ impl App {
             file_tx,
             #[cfg(target_arch = "wasm32")]
             file_rx,
+            #[cfg(target_arch = "wasm32")]
+            traj_tx,
+            #[cfg(target_arch = "wasm32")]
+            traj_rx,
+            #[cfg(target_arch = "wasm32")]
+            wasm_loaders: HashMap::new(),
         })
     }
 
@@ -1549,12 +1568,14 @@ fn build_glow(
     out
 }
 
-/// Browser file open: create a hidden `<input type=file>`, click it, and when the
-/// user picks a file read it (`Blob::array_buffer`) into a `Vec<u8>` and send
-/// `(name, bytes)` through `tx`. Requests a repaint so [`App::ui`] drains it. The
-/// whole flow is async (the picker dialog + the read), so this returns immediately.
+/// Browser file open: create a hidden `<input type=file>` (limited to `accept`),
+/// click it, and when the user picks a file read it (`Blob::array_buffer`) into a
+/// `Vec<u8>` and hand `(name, bytes)` to `deliver`, then request a repaint so the
+/// app processes it. Async (the dialog + the read), so this returns immediately;
+/// `deliver` runs later on the main thread. Used by both the structure-open and
+/// trajectory-load buttons (the latter's `deliver` tags the bytes with a molecule).
 #[cfg(target_arch = "wasm32")]
-fn spawn_file_picker(tx: std::sync::mpsc::Sender<(String, Vec<u8>)>, ctx: egui::Context) {
+fn pick_file(accept: &str, ctx: egui::Context, deliver: impl Fn(String, Vec<u8>) + Clone + 'static) {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast as _;
 
@@ -1568,7 +1589,7 @@ fn spawn_file_picker(tx: std::sync::mpsc::Sender<(String, Vec<u8>)>, ctx: egui::
         return;
     };
     input.set_type("file");
-    input.set_accept(".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc");
+    input.set_accept(accept);
 
     let input_for_cb = input.clone();
     let on_change = Closure::<dyn FnMut()>::new(move || {
@@ -1576,14 +1597,14 @@ fn spawn_file_picker(tx: std::sync::mpsc::Sender<(String, Vec<u8>)>, ctx: egui::
             return;
         };
         let name = file.name();
-        let tx = tx.clone();
+        let deliver = deliver.clone();
         let ctx = ctx.clone();
         // Read the Blob asynchronously, then hand the bytes to the app.
         wasm_bindgen_futures::spawn_local(async move {
             match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
                 Ok(buf) => {
                     let bytes = js_sys::Uint8Array::new(&buf).to_vec();
-                    let _ = tx.send((name, bytes));
+                    deliver(name, bytes);
                     ctx.request_repaint();
                 }
                 Err(e) => log::error!("failed to read file: {e:?}"),
@@ -1603,11 +1624,37 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         // Browser file picker results: load each (filename, bytes) the async picker
-        // delivered (see `spawn_file_picker`) as a new molecule.
+        // delivered (see `pick_file`) as a new molecule.
         #[cfg(target_arch = "wasm32")]
         while let Ok((name, bytes)) = self.file_rx.try_recv() {
             match data::load_from_bytes(&name, bytes) {
                 Ok(raw) => self.add_loaded(raw),
+                Err(e) => {
+                    log::error!("{e}");
+                    self.status = e;
+                }
+            }
+        }
+
+        // Browser trajectory picker results: open an incremental stream over the
+        // bytes (seeding frame 0 with the structure first), to be drained below.
+        #[cfg(target_arch = "wasm32")]
+        while let Ok((mol_id, name, bytes)) = self.traj_rx.try_recv() {
+            let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == mol_id) else {
+                continue;
+            };
+            mol.seed_frame0();
+            let expected = mol.n_atoms;
+            match data::traj_wasm::TrajStream::new(
+                &name,
+                bytes,
+                LoadOptions::default(),
+                expected,
+            ) {
+                Ok(stream) => {
+                    self.wasm_loaders.insert(mol_id, stream);
+                    self.status = format!("Loading {name}…");
+                }
                 Err(e) => {
                     log::error!("{e}");
                     self.status = e;
@@ -1631,6 +1678,8 @@ impl eframe::App for App {
 
         // Drain background trajectory loaders so the slider reflects arrived frames.
         self.poll_loaders();
+        #[cfg(target_arch = "wasm32")]
+        self.poll_wasm_loaders(&ctx);
 
         let panel_dirty = self.draw_left_panel(ui);
         self.view_dirty |= panel_dirty;
@@ -1999,14 +2048,33 @@ impl App {
             // Park the molecule in the trash so the delete can be undone.
             let m = self.scene.molecules.remove(i);
             // Drop any in-flight loader (its background thread exits when the
-            // receiver is dropped).
+            // receiver is dropped); likewise any browser streaming loader.
             self.loaders.remove(&m.id);
+            #[cfg(target_arch = "wasm32")]
+            self.wasm_loaders.remove(&m.id);
             self.scene.trash.insert(m.id, m);
             self.scene.clamp_selection();
             view_dirty = true;
         }
         if let Some(id) = open_load {
-            self.load_dialog = Some(LoadDialog::new(id));
+            // Native: the load dialog (file picker + range/stride/sync-async).
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.load_dialog = Some(LoadDialog::new(id));
+            }
+            // Browser: pick a trajectory file and stream all its frames in (no
+            // dialog; range/stride aren't offered on the web yet).
+            #[cfg(target_arch = "wasm32")]
+            {
+                let tx = self.traj_tx.clone();
+                pick_file(
+                    ".xtc,.trr,.dcd,.pdb,.gro,.xyz",
+                    ui.ctx().clone(),
+                    move |name, bytes| {
+                        let _ = tx.send((id, name, bytes));
+                    },
+                );
+            }
         }
         if let Some((min, max)) = focus {
             self.camera.focus_bbox(min, max);
@@ -2039,7 +2107,16 @@ impl App {
             }
         }
         #[cfg(target_arch = "wasm32")]
-        spawn_file_picker(self.file_tx.clone(), ctx.clone());
+        {
+            let tx = self.file_tx.clone();
+            pick_file(
+                ".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc",
+                ctx.clone(),
+                move |name, bytes| {
+                    let _ = tx.send((name, bytes));
+                },
+            );
+        }
     }
 
     /// Add a freshly loaded structure as a new molecule: select it, frame the
@@ -2307,6 +2384,66 @@ impl App {
         }
         for id in finished {
             self.loaders.remove(&id);
+        }
+    }
+
+    /// Browser trajectory streaming: read a batch of frames from each in-memory
+    /// [`data::traj_wasm::TrajStream`] and append them, so frames flow in without
+    /// blocking the UI. On the first batch, jump to the first trajectory frame so
+    /// the load is visible. Finished/errored streams are removed; repaints continue
+    /// while any stream is active.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_wasm_loaders(&mut self, ctx: &egui::Context) {
+        if self.wasm_loaders.is_empty() {
+            return;
+        }
+        const BATCH: usize = 64;
+        let ids: Vec<MolId> = self.wasm_loaders.keys().copied().collect();
+        let mut finished: Vec<MolId> = Vec::new();
+        let mut view_dirty = false;
+        for id in ids {
+            let Some(stream) = self.wasm_loaders.get_mut(&id) else {
+                continue;
+            };
+            let batch = stream.next_batch(BATCH);
+            let done = stream.done;
+            match batch {
+                Ok(frames) => {
+                    if let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == id) {
+                        for st in frames {
+                            mol.push_frame(st);
+                        }
+                        // First frames in → show the first trajectory frame.
+                        if mol.trajectory.current == 0 && mol.trajectory.frames.len() > 1 {
+                            mol.trajectory.current = 1;
+                            mol.apply_current_frame();
+                            view_dirty = true;
+                        }
+                        if done {
+                            self.status =
+                                format!("Loaded {} frame(s)", mol.trajectory.frames.len() - 1);
+                        }
+                    }
+                    if done {
+                        finished.push(id);
+                    }
+                }
+                Err(e) => {
+                    log::error!("{e}");
+                    self.status = e;
+                    finished.push(id);
+                }
+            }
+        }
+        for id in &finished {
+            self.wasm_loaders.remove(id);
+        }
+        if view_dirty {
+            self.view_dirty = true;
+        }
+        // Keep frames flowing while any stream is still active.
+        if !self.wasm_loaders.is_empty() {
+            ctx.request_repaint();
         }
     }
 

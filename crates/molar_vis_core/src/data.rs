@@ -7,6 +7,10 @@ mod loader;
 // from a Web Worker instead.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod traj_loader;
+// Browser trajectory streaming: incremental frame parsing from an in-memory buffer
+// (no threads), feeding the same `Trajectory` as the native loader.
+#[cfg(target_arch = "wasm32")]
+pub mod traj_wasm;
 
 pub use loader::{load, RawMolecule};
 #[cfg(target_arch = "wasm32")]
