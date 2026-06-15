@@ -32,6 +32,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
   update path) + `MOLAR_VIS_DEBUG_BOX=1` (show mol 0's periodic box) +
+  `MOLAR_VIS_DEBUG_PBC="px,py,pz"` (set mol 0 first rep's +a/+b/+c periodic image counts + box;
+  exercises periodic-image rendering — 2lao has a CRYST1 box) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
   zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
@@ -92,7 +94,8 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
   guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
-  (compiled) / `sel: Sel` (evaluated) / visible / dirty flags / `RepGpu`), `evaluate()`
+  (compiled) / `sel: Sel` (evaluated) / `periodic: PeriodicParams` (image counts + Self/Box,
+  in `EditState`) / visible / dirty flags / `RepGpu`), `evaluate()`
   (text → `SelectionExpr` → `Sel`). `Molecule` also owns a `trajectory: Trajectory` and the
   `seed_frame0`/`append_frames`/`push_frame`/`apply_current_frame` methods (see *molar integration*).
 - `trajectory.rs` — `Trajectory { frames: Vec<State>, current, playing, loop_mode, speed_fps, … }`
@@ -103,11 +106,17 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   + `data/traj_loader.rs` (**native-only**, `#[cfg(not(wasm))]`: `read_frames_sync`/`spawn_async`).
 - `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A) **plus
   Weighted-Blended OIT `accum` (RGBA16F) + `reveal` (R16F) targets** (in `Targets`, with an
-  `oit_bind_group` for the resolve), camera UBO (bind group 0), sphere/cylinder/line/**mesh**
-  pipelines (each `[opaque, oit]`) + a fullscreen **`composite_pipeline`** (`oit_bgl`), `RepGpu`
-  (per-rep buffers; mesh = vertex + u32 index buffer; buffers carry `COPY_DST`), `upload()` (recreate
-  buffers), **`update()`** (in-place `write_buffer` when element counts match, for coords-only
-  frame changes), `render_scene()` (3-pass: opaque → OIT → composite; `draw_reps` shared), `texture_id()`.
+  `oit_bind_group` for the resolve), **dynamic-offset** camera UBO (bind group 0; an array of
+  `CameraUniform` at `CAMERA_STRIDE`=256 — entry 0 is the base camera, one extra per **periodic
+  image** = base view × `Mat4::from_translation(i·a+j·b+k·c)`, grown/`make_camera_bind_group`'d as
+  needed), sphere/cylinder/line/**mesh** pipelines (each `[opaque, oit]`) + a fullscreen
+  **`composite_pipeline`** (`oit_bgl`), `RepGpu` (per-rep buffers; mesh = vertex + u32 index buffer;
+  buffers carry `COPY_DST`), `upload()` (recreate buffers), **`update()`** (in-place `write_buffer`
+  when element counts match, for coords-only frame changes), `render_scene()` (builds the per-image
+  camera list + `images[mol][rep]` = camera indices, then 3-pass: opaque → OIT → composite;
+  `draw_reps` loops a rep's images, selecting each image's camera by **dynamic offset** — same
+  geometry buffers re-drawn shifted, **no data duplication**; the box wireframe is replicated at each
+  image cell of any rep with periodic `Box` on, + the molecule-level box at entry 0), `texture_id()`.
   Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and `render/shaders/*.wgsl` (incl.
   `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit`). The cartoon mesh writes real depth
   and interleaves correctly with the impostors.
@@ -250,7 +259,10 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   dims, Surface probe/quality/smoothing + SS-algorithm + Defaults; every style now has at
   least one tunable so Defaults is always shown), **[Traj]** (`draw_traj_tab`: *Update every
   frame* = `rep.dynamic`; *Recompute SS every frame* = `ss_per_frame` for Cartoon/SecStruct;
-  more per-frame options later), **[Periodic]** (periodic-image rendering — TBD); tab in
+  more per-frame options later), **[Periodic]** (`draw_periodic_tab`, **only shown when the
+  molecule has a box** — gated by `mol.system.state().pbox.is_some()`: *Self* / *Box* checkboxes
+  + six `DragValue` spinboxes −x/+x/−y/+y/−z/+z giving the image counts along ±a,±b,±c; these
+  are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`); tab in
   `rep.settings_tab: SettingsTab`. Style and color are **icon+text** buttons built by the shared
   `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each

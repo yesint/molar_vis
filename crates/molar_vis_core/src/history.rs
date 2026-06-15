@@ -17,7 +17,7 @@ use molar::prelude::SsAlgorithm;
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
-use crate::scene::{MolId, Molecule, Representation, Scene};
+use crate::scene::{MolId, Molecule, PeriodicParams, Representation, Scene};
 
 #[derive(Clone, PartialEq)]
 struct RepState {
@@ -30,6 +30,7 @@ struct RepState {
     dynamic: bool,
     ss_per_frame: bool,
     material: Material,
+    periodic: PeriodicParams,
 }
 
 #[derive(Clone, PartialEq)]
@@ -68,6 +69,7 @@ impl EditState {
                             dynamic: r.dynamic,
                             ss_per_frame: r.ss_per_frame,
                             material: r.material,
+                            periodic: r.periodic,
                         })
                         .collect(),
                 })
@@ -116,10 +118,11 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
         if needs_rebuild {
             mol.reps[i] = rep_from_state(s);
         } else {
-            // Cheap, no-geometry changes.
+            // Cheap, no-geometry changes (periodic display is render-only too).
             mol.reps[i].visible = s.visible;
             mol.reps[i].dynamic = s.dynamic;
             mol.reps[i].ss_per_frame = s.ss_per_frame;
+            mol.reps[i].periodic = s.periodic;
         }
     }
 }
@@ -135,6 +138,7 @@ fn rep_from_state(s: &RepState) -> Representation {
         s.dynamic,
         s.ss_per_frame,
         s.material,
+        s.periodic,
     )
 }
 
@@ -183,6 +187,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             }
             if o.visible != n.visible {
                 return "toggle representation".into();
+            }
+            if o.periodic != n.periodic {
+                return "change periodicity".into();
             }
         }
     }

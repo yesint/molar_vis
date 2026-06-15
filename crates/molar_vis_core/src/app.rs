@@ -538,16 +538,25 @@ fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 
 /// Parameter controls for a representation, shown inline under its row as a tidy
 /// two-column table (parameter name on the left, control on the right).
-fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
-    // Tab bar: [Style] [Traj] [Periodic] — underline-style tabs (selected = bold
+/// Returns `true` if a render-only change was made (periodic-image params) so the
+/// caller can flag the viewport dirty; geometry changes set `rep.geom_dirty`
+/// directly. `has_box` gates the **Periodic** tab (only meaningful with a box).
+fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -> bool {
+    let mut view_dirty = false;
+    // The Periodic tab only exists when the molecule has a box; if it was the
+    // active tab and the box went away, fall back to Style.
+    if !has_box && rep.settings_tab == SettingsTab::Periodic {
+        rep.settings_tab = SettingsTab::Style;
+    }
+    // Tab bar: [Style] [Traj] [Periodic?] — underline-style tabs (selected = bold
     // text with an accent underline) rather than disconnected toggle buttons.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 14.0;
-        for (tab, label) in [
-            (SettingsTab::Style, "Style"),
-            (SettingsTab::Traj, "Traj"),
-            (SettingsTab::Periodic, "Periodic"),
-        ] {
+        let mut tabs = vec![(SettingsTab::Style, "Style"), (SettingsTab::Traj, "Traj")];
+        if has_box {
+            tabs.push((SettingsTab::Periodic, "Periodic"));
+        }
+        for (tab, label) in tabs {
             let selected = rep.settings_tab == tab;
             let txt = if selected {
                 egui::RichText::new(label).strong()
@@ -574,11 +583,11 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
     match rep.settings_tab {
         SettingsTab::Traj => {
             draw_traj_tab(ui, rep);
-            return;
+            return view_dirty;
         }
         SettingsTab::Periodic => {
-            ui.weak("Rendering of periodic images — coming soon.");
-            return;
+            view_dirty |= draw_periodic_tab(ui, rep);
+            return view_dirty;
         }
         SettingsTab::Style => {}
     }
@@ -675,6 +684,45 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation) {
     if changed {
         rep.geom_dirty = true;
     }
+    view_dirty
+}
+
+/// [Periodic] tab: render copies of the selection shifted by integer combinations
+/// of the box lattice vectors `a,b,c`. Returns true if anything changed (render-only
+/// — no geometry rebuild, the images are drawn under a translated camera). Only
+/// shown when the molecule has a box.
+fn draw_periodic_tab(ui: &mut egui::Ui, rep: &mut Representation) -> bool {
+    let p = &mut rep.periodic;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        changed |= ui
+            .checkbox(&mut p.self_img, "Self")
+            .on_hover_text("Show the central (un-shifted) copy")
+            .changed();
+        changed |= ui
+            .checkbox(&mut p.show_box, "Box")
+            .on_hover_text("Draw the periodic box wireframe at every shown image")
+            .changed();
+    });
+    ui.add_space(2.0);
+    // One row per axis: [−n] −x  [+n] +x  (counts of images along ±a, ±b, ±c).
+    egui::Grid::new("periodic_images")
+        .num_columns(4)
+        .spacing(egui::vec2(6.0, 4.0))
+        .show(ui, |ui| {
+            for (axis, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
+                changed |= ui
+                    .add(egui::DragValue::new(&mut p.neg[axis]).range(0..=8))
+                    .changed();
+                ui.label(format!("−{name}"));
+                changed |= ui
+                    .add(egui::DragValue::new(&mut p.pos[axis]).range(0..=8))
+                    .changed();
+                ui.label(format!("+{name}"));
+                ui.end_row();
+            }
+        });
+    changed
 }
 
 /// [Traj] tab of the representation settings: per-frame behavior.
@@ -992,6 +1040,22 @@ impl App {
                 mol.box_dirty = true;
             }
         }
+        // Verification hook: MOLAR_VIS_DEBUG_PBC="px,py,pz" sets the +a/+b/+c periodic
+        // image counts on mol 0's first rep (and shows the box), exercising the
+        // dynamic-camera image rendering headlessly.
+        if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_PBC") {
+            let n: Vec<u32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if let Some(mol) = scene.molecules.first_mut() {
+                if let Some(rep) = mol.reps.first_mut() {
+                    rep.periodic.pos = [
+                        n.first().copied().unwrap_or(0),
+                        n.get(1).copied().unwrap_or(0),
+                        n.get(2).copied().unwrap_or(0),
+                    ];
+                    rep.periodic.show_box = true;
+                }
+            }
+        }
 
         let mut camera = match scene.bbox() {
             Some((min, max)) => Camera::frame_bbox(min, max),
@@ -1134,11 +1198,13 @@ impl App {
                     changed = true;
                 }
             }
-            // Periodic-box wireframe: (re)build when shown and dirty. Use the
-            // current frame's box (so it tracks NPT box changes); fall back to the
-            // structure's own box when a trajectory frame carries none, so the box
-            // doesn't vanish on formats without per-frame box records.
-            if mol.show_box && mol.box_dirty {
+            // Periodic-box wireframe: (re)build when dirty, regardless of whether
+            // it's currently shown — both the molecule-level box toggle *and* a
+            // rep's periodic `Box` toggle draw this geometry, and the latter isn't
+            // tracked by `box_dirty`, so keep `box_gpu` ready whenever a box exists.
+            // Use the current frame's box (tracks NPT box changes); fall back to the
+            // structure's own box when a trajectory frame carries none.
+            if mol.box_dirty {
                 let pb = render_state
                     .pbox
                     .as_ref()
@@ -1796,6 +1862,8 @@ impl App {
 
         let mol = &mut self.scene.molecules[mi];
         let mol_id = mol.id;
+        // The Periodic tab is only offered when the molecule has a box.
+        let has_box = mol.system.state().pbox.is_some();
 
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;
@@ -1930,9 +1998,11 @@ impl App {
 
             // Inline params panel (within the side panel), shown when the gear is on.
             if rep.params_open {
-                ui.indent(egui::Id::new(("rep_params", mol_id, j)), |ui| {
-                    draw_rep_params(ui, rep);
-                });
+                view_dirty |= ui
+                    .indent(egui::Id::new(("rep_params", mol_id, j)), |ui| {
+                        draw_rep_params(ui, rep, has_box)
+                    })
+                    .inner;
             }
 
             // Reorder drop target spans the whole two-row block.

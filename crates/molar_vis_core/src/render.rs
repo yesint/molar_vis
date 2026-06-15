@@ -19,7 +19,7 @@ pub use mesh::MeshVertex;
 pub use sphere::SphereInstance;
 
 use camera_uniform::CameraUniform;
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use eframe::egui_wgpu::RenderState;
@@ -39,6 +39,37 @@ const REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 /// Scene background. Used both as the render-pass clear color and as the depth-cue
 /// fog color, so distant geometry dissolves seamlessly into the background.
 const BG: [f32; 4] = [0.02, 0.02, 0.05, 1.0];
+
+/// Stride of one camera entry in the (dynamic-offset) camera uniform buffer. The
+/// buffer holds the base camera plus one entry per periodic image (base view ×
+/// lattice translation); each draw selects its entry with a dynamic offset. 256
+/// satisfies `min_uniform_buffer_offset_alignment` on every target.
+const CAMERA_STRIDE: u64 = 256;
+
+/// Bind-group binding size for one camera entry (the actual `CameraUniform`).
+fn camera_binding_size() -> Option<std::num::NonZeroU64> {
+    std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
+}
+
+/// (Re)create the camera bind group over `buf` with a dynamic-offset binding.
+fn make_camera_bind_group(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    buf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("camera-bg"),
+        layout: bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: buf,
+                offset: 0,
+                size: camera_binding_size(),
+            }),
+        }],
+    })
+}
 
 /// Color-target descriptors for the opaque pass: a single alpha-blended target.
 fn opaque_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
@@ -306,8 +337,11 @@ pub struct SceneRenderer {
     targets: Targets,
     egui_texture: TextureId,
 
+    camera_bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    /// Number of camera entries `camera_buf` can hold (grows with periodic images).
+    camera_capacity: u32,
 
     // Each geometry has an opaque pipeline `[0]` (single alpha-blended target,
     // depth-write on) and a weighted-blended OIT pipeline `[1]` (accum+reveal
@@ -326,7 +360,9 @@ impl SceneRenderer {
         let device = &rs.device;
         let color_format = rs.target_format;
 
-        // Camera uniform = bind group 0, shared by every pipeline.
+        // Camera uniform = bind group 0, shared by every pipeline. It's a
+        // **dynamic-offset** buffer: a base camera at entry 0 plus one entry per
+        // periodic image (base view × lattice translation), selected per draw.
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -334,26 +370,20 @@ impl SceneRenderer {
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: camera_binding_size(),
                 },
                 count: None,
             }],
         });
+        let camera_capacity = 1u32;
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera-uniform"),
-            size: std::mem::size_of::<CameraUniform>() as u64,
+            size: camera_capacity as u64 * CAMERA_STRIDE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera-bg"),
-            layout: &camera_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buf.as_entire_binding(),
-            }],
-        });
+        let camera_bind_group = make_camera_bind_group(device, &camera_bgl, &camera_buf);
 
         // Opaque pass: single alpha-blended target, depth-write on, `fs_main`.
         // OIT pass: accum+reveal targets, depth-write off (test on), `fs_oit`.
@@ -419,8 +449,10 @@ impl SceneRenderer {
             color_format,
             targets,
             egui_texture,
+            camera_bgl,
             camera_buf,
             camera_bind_group,
+            camera_capacity,
             sphere_pipeline,
             cylinder_pipeline,
             line_pipeline,
@@ -481,17 +513,76 @@ impl SceneRenderer {
             );
         }
 
-        let cam = CameraUniform::new(
-            view,
-            proj,
-            perspective,
-            [size_px[0] as f32, size_px[1] as f32],
-            cue,
-            BG,
-            depth_range,
-        );
-        rs.queue
-            .write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&cam));
+        // Build the camera entries. Entry 0 = the base camera; periodic images add
+        // one entry each, its view post-multiplied by a lattice translation
+        // (`i·a + j·b + k·c`) so the *same* uploaded geometry is re-drawn shifted —
+        // no data is duplicated. `images[mi][j]` lists the camera indices to draw
+        // rep `j` of molecule `mi` at (empty = nothing; `[0]` = just the central copy).
+        let viewport = [size_px[0] as f32, size_px[1] as f32];
+        let make_cam =
+            |v: Mat4| CameraUniform::new(v, proj, perspective, viewport, cue, BG, depth_range);
+        let mut cameras: Vec<CameraUniform> = vec![make_cam(view)];
+        let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
+        for mol in &scene.molecules {
+            let box_vecs = mol.system.state().pbox.as_ref().map(|pb| {
+                let m = pb.get_matrix();
+                // Columns of the box matrix are the lattice vectors a, b, c (nm).
+                [
+                    Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
+                    Vec3::new(m[(0, 1)], m[(1, 1)], m[(2, 1)]),
+                    Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
+                ]
+            });
+            let mut mol_imgs = Vec::with_capacity(mol.reps.len());
+            for rep in &mol.reps {
+                let mut idxs: Vec<u32> = Vec::new();
+                match box_vecs {
+                    Some([a, b, c]) => {
+                        let p = &rep.periodic;
+                        for i in -(p.neg[0] as i32)..=(p.pos[0] as i32) {
+                            for j in -(p.neg[1] as i32)..=(p.pos[1] as i32) {
+                                for k in -(p.neg[2] as i32)..=(p.pos[2] as i32) {
+                                    if i == 0 && j == 0 && k == 0 {
+                                        if p.self_img {
+                                            idxs.push(0);
+                                        }
+                                        continue;
+                                    }
+                                    let off = a * i as f32 + b * j as f32 + c * k as f32;
+                                    cameras.push(make_cam(view * Mat4::from_translation(off)));
+                                    idxs.push(cameras.len() as u32 - 1);
+                                }
+                            }
+                        }
+                    }
+                    // No box → periodic display is meaningless; just the central copy.
+                    None => idxs.push(0),
+                }
+                mol_imgs.push(idxs);
+            }
+            images.push(mol_imgs);
+        }
+
+        // Grow the dynamic camera buffer if needed, then upload all entries
+        // (each padded to CAMERA_STRIDE so dynamic offsets stay aligned).
+        if cameras.len() as u32 > self.camera_capacity {
+            self.camera_capacity = cameras.len() as u32;
+            self.camera_buf = rs.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("camera-uniform"),
+                size: self.camera_capacity as u64 * CAMERA_STRIDE,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.camera_bind_group =
+                make_camera_bind_group(&rs.device, &self.camera_bgl, &self.camera_buf);
+        }
+        let mut bytes = vec![0u8; cameras.len() * CAMERA_STRIDE as usize];
+        for (idx, cam) in cameras.iter().enumerate() {
+            let off = idx * CAMERA_STRIDE as usize;
+            bytes[off..off + std::mem::size_of::<CameraUniform>()]
+                .copy_from_slice(bytemuck::bytes_of(cam));
+        }
+        rs.queue.write_buffer(&self.camera_buf, 0, &bytes);
 
         // Skip the OIT + composite passes entirely when nothing transparent is
         // visible (idle scenes pay nothing for the transparency machinery).
@@ -538,8 +629,7 @@ impl SceneRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            self.draw_reps(&mut pass, scene, false);
+            self.draw_reps(&mut pass, scene, false, &images);
         }
 
         // Pass 2 — transparent geometry into the weighted-blended OIT targets
@@ -581,8 +671,7 @@ impl SceneRenderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                self.draw_reps(&mut pass, scene, true);
+                self.draw_reps(&mut pass, scene, true, &images);
             }
 
             // Pass 3 — resolve the OIT targets over the opaque color.
@@ -616,46 +705,78 @@ impl SceneRenderer {
 
     /// Draw every visible representation matching the requested transparency into
     /// the active pass, using each geometry's opaque (`transparent == false`) or
-    /// OIT (`true`) pipeline. The periodic-box wireframe is opaque-only.
-    fn draw_reps(&self, pass: &mut wgpu::RenderPass, scene: &Scene, transparent: bool) {
+    /// OIT (`true`) pipeline. Each rep is drawn once per periodic image listed in
+    /// `images[mi][j]`, selecting that image's camera (base view × lattice shift)
+    /// via a dynamic offset — same buffers, no data duplication. The periodic-box
+    /// wireframe is opaque-only.
+    fn draw_reps(
+        &self,
+        pass: &mut wgpu::RenderPass,
+        scene: &Scene,
+        transparent: bool,
+        images: &[Vec<Vec<u32>>],
+    ) {
         let i = transparent as usize;
-        for mol in &scene.molecules {
+        let stride = CAMERA_STRIDE as u32;
+        for (mi, mol) in scene.molecules.iter().enumerate() {
             if !mol.visible {
                 continue;
             }
-            for rep in &mol.reps {
+            for (j, rep) in mol.reps.iter().enumerate() {
                 if !rep.visible || rep.material.is_transparent() != transparent {
                     continue;
                 }
-                if let Some(s) = &rep.gpu.spheres {
-                    pass.set_pipeline(&self.sphere_pipeline[i]);
-                    pass.set_vertex_buffer(0, s.buffer.slice(..));
-                    pass.draw(0..4, 0..s.count);
-                }
-                if let Some(c) = &rep.gpu.cylinders {
-                    pass.set_pipeline(&self.cylinder_pipeline[i]);
-                    pass.set_vertex_buffer(0, c.buffer.slice(..));
-                    pass.draw(0..4, 0..c.count);
-                }
-                if let Some(l) = &rep.gpu.lines {
-                    // Instanced fat-line quads: one segment (2 verts) per instance.
-                    pass.set_pipeline(&self.line_pipeline[i]);
-                    pass.set_vertex_buffer(0, l.buffer.slice(..));
-                    pass.draw(0..4, 0..l.count / 2);
-                }
-                if let Some(m) = &rep.gpu.mesh {
-                    pass.set_pipeline(&self.mesh_pipeline[i]);
-                    pass.set_vertex_buffer(0, m.vertices.slice(..));
-                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                for &cam in &images[mi][j] {
+                    pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
+                    if let Some(s) = &rep.gpu.spheres {
+                        pass.set_pipeline(&self.sphere_pipeline[i]);
+                        pass.set_vertex_buffer(0, s.buffer.slice(..));
+                        pass.draw(0..4, 0..s.count);
+                    }
+                    if let Some(c) = &rep.gpu.cylinders {
+                        pass.set_pipeline(&self.cylinder_pipeline[i]);
+                        pass.set_vertex_buffer(0, c.buffer.slice(..));
+                        pass.draw(0..4, 0..c.count);
+                    }
+                    if let Some(l) = &rep.gpu.lines {
+                        // Instanced fat-line quads: one segment (2 verts) per instance.
+                        pass.set_pipeline(&self.line_pipeline[i]);
+                        pass.set_vertex_buffer(0, l.buffer.slice(..));
+                        pass.draw(0..4, 0..l.count / 2);
+                    }
+                    if let Some(m) = &rep.gpu.mesh {
+                        pass.set_pipeline(&self.mesh_pipeline[i]);
+                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                        pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..m.index_count, 0, 0..1);
+                    }
                 }
             }
-            // Periodic-box wireframe (opaque grey).
-            if !transparent && mol.show_box {
+            // Periodic-box wireframe (opaque grey): the molecule-level box at the
+            // base camera, plus a replica at each image cell of any rep whose
+            // `Box` toggle is on.
+            if !transparent {
                 if let Some(l) = &mol.box_gpu.lines {
-                    pass.set_pipeline(&self.line_pipeline[0]);
-                    pass.set_vertex_buffer(0, l.buffer.slice(..));
-                    pass.draw(0..4, 0..l.count / 2);
+                    // Collect the camera indices the box should be drawn at.
+                    let mut box_cams: Vec<u32> = Vec::new();
+                    if mol.show_box {
+                        box_cams.push(0);
+                    }
+                    for (j, rep) in mol.reps.iter().enumerate() {
+                        if rep.visible && rep.periodic.show_box {
+                            box_cams.extend_from_slice(&images[mi][j]);
+                        }
+                    }
+                    box_cams.sort_unstable();
+                    box_cams.dedup();
+                    if !box_cams.is_empty() {
+                        pass.set_pipeline(&self.line_pipeline[0]);
+                        pass.set_vertex_buffer(0, l.buffer.slice(..));
+                        for cam in box_cams {
+                            pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
+                            pass.draw(0..4, 0..l.count / 2);
+                        }
+                    }
                 }
             }
         }

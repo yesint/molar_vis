@@ -18,6 +18,30 @@ use crate::trajectory::Trajectory;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct MolId(pub u64);
 
+/// Periodic-image display for a representation: render extra copies of the
+/// selection shifted by integer combinations of the box lattice vectors `a,b,c`.
+/// This is **purely a rendering** concern — molar stores only the "self" coords;
+/// images are drawn by re-running the same GPU geometry under a translated camera,
+/// so nothing is duplicated on the CPU or GPU. Only meaningful when the molecule
+/// has a periodic box. In `EditState` (undoable).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PeriodicParams {
+    /// Render the central, un-shifted copy.
+    pub self_img: bool,
+    /// Draw the periodic box wireframe, replicated across every shown image.
+    pub show_box: bool,
+    /// Image counts in the −a, −b, −c directions.
+    pub neg: [u32; 3],
+    /// Image counts in the +a, +b, +c directions.
+    pub pos: [u32; 3],
+}
+
+impl Default for PeriodicParams {
+    fn default() -> Self {
+        Self { self_img: true, show_box: false, neg: [0; 3], pos: [0; 3] }
+    }
+}
+
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
     pub kind: RepKind,
@@ -43,6 +67,8 @@ pub struct Representation {
     /// surfaced as a non-destructive warning). The field is flagged in the UI and
     /// the rep renders nothing; the text is kept. Transient, not in `EditState`.
     pub sel_empty: bool,
+    /// Periodic-image display (see [`PeriodicParams`]). In `EditState`.
+    pub periodic: PeriodicParams,
     pub visible: bool,
     /// Re-evaluate the (compiled) selection every time the System's State changes
     /// (i.e. each trajectory frame). For coordinate-dependent selections like
@@ -84,6 +110,7 @@ impl Representation {
             false,
             false,
             Material::default(),
+            PeriodicParams::default(),
         )
     }
 
@@ -100,6 +127,7 @@ impl Representation {
             self.dynamic,
             self.ss_per_frame,
             self.material,
+            self.periodic,
         )
     }
 
@@ -116,6 +144,7 @@ impl Representation {
         dynamic: bool,
         ss_per_frame: bool,
         material: Material,
+        periodic: PeriodicParams,
     ) -> Self {
         Self {
             kind,
@@ -128,6 +157,7 @@ impl Representation {
             sel: None,
             sel_error: None,
             sel_empty: false,
+            periodic,
             visible,
             dynamic,
             ss_per_frame,
@@ -200,7 +230,10 @@ impl Molecule {
             trajectory: Trajectory::default(),
             show_box: false,
             box_gpu: RepGpu::default(),
-            box_dirty: false,
+            // Build the box geometry up front (if the molecule has one) so a rep's
+            // periodic `Box` toggle can draw it without the molecule-level box ever
+            // being shown. Cheap (24 verts); a no-op when there's no box.
+            box_dirty: true,
         }
     }
 
