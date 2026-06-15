@@ -39,6 +39,10 @@ pub struct Representation {
     pub sel: Option<Sel>,
     /// Last selection error, shown in the UI; `None` if the selection is valid.
     pub sel_error: Option<String>,
+    /// The selection is valid but matches **zero atoms** (molar's "empty" error,
+    /// surfaced as a non-destructive warning). The field is flagged in the UI and
+    /// the rep renders nothing; the text is kept. Transient, not in `EditState`.
+    pub sel_empty: bool,
     pub visible: bool,
     /// Re-evaluate the (compiled) selection every time the System's State changes
     /// (i.e. each trajectory frame). For coordinate-dependent selections like
@@ -123,6 +127,7 @@ impl Representation {
             expr: None,
             sel: None,
             sel_error: None,
+            sel_empty: false,
             visible,
             dynamic,
             ss_per_frame,
@@ -283,15 +288,45 @@ impl Molecule {
     }
 }
 
+/// Outcome of a failed [`evaluate`]. molar treats a selection that matches zero
+/// atoms as an error, but the GUI distinguishes it from a real (syntax) error: an
+/// empty match is a non-destructive *warning* (the text stays, the field is flagged)
+/// while an invalid selection keeps the prior geometry and shows the message.
+#[derive(Debug)]
+pub enum EvalError {
+    /// Valid syntax, but the selection matched no atoms.
+    Empty,
+    /// Syntax (or other) error, with the message to surface.
+    Invalid(String),
+}
+
 /// Parse a VMD-like selection string into a compiled `SelectionExpr` and evaluate
 /// it against `system` to produce the current `Sel`. Returns both so the caller
 /// can keep the compiled expression (for per-frame re-evaluation in trajectories)
-/// alongside the evaluated index set. Syntax errors and empty matches come back as
-/// `Err`, which the UI surfaces without disturbing the existing geometry.
-pub fn evaluate(system: &System, text: &str) -> Result<(SelectionExpr, Sel), String> {
-    let expr = SelectionExpr::new(text).map_err(|e| e.to_string())?;
-    let sel = system.select(&expr).map_err(|e| e.to_string())?;
-    Ok((expr, sel))
+/// alongside the evaluated index set. `Err(Empty)` = valid but zero atoms;
+/// `Err(Invalid)` = a syntax/other error.
+pub fn evaluate(system: &System, text: &str) -> Result<(SelectionExpr, Sel), EvalError> {
+    let expr = SelectionExpr::new(text).map_err(|e| EvalError::Invalid(e.to_string()))?;
+    match system.select(&expr) {
+        Ok(sel) => Ok((expr, sel)),
+        Err(e) if is_empty_selection(&e) => Err(EvalError::Empty),
+        Err(e) => Err(EvalError::Invalid(e.to_string())),
+    }
+}
+
+/// Whether a `SelectionError` just means "matched nothing" (vs a real error) — the
+/// family of `Empty*` variants molar raises for a valid expression with no results.
+fn is_empty_selection(e: &SelectionError) -> bool {
+    matches!(
+        e,
+        SelectionError::EmptyExpr(_)
+            | SelectionError::EmptySlice
+            | SelectionError::EmptyRange
+            | SelectionError::EmptySplit
+            | SelectionError::EmptyIntersection
+            | SelectionError::EmptyDifference
+            | SelectionError::EmptyInvert
+    )
 }
 
 #[derive(Default)]

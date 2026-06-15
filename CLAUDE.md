@@ -152,8 +152,13 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   (positions, elements, radii). Each rep keeps a compiled `SelectionExpr`
   (`SelectionExpr::new(text)`, stores the text via `get_str()`) and the evaluated `Sel`
   (`system.select(&expr)`). Read coords by binding: `system.bind(&sel)` → `SelBound` →
-  `iter_particle()` (`Particle { id, atom, pos }`). Empty/invalid selection → `Err`
-  (shown in red), keeps prior geometry.
+  `iter_particle()` (`Particle { id, atom, pos }`). `scene::evaluate` returns
+  `Result<_, EvalError>` distinguishing the two molar failure modes: **`Empty`** (valid
+  syntax, 0 atoms — molar errors via `SelectionError::Empty*`; the GUI treats it as a
+  non-destructive *warning*: `rep.sel_empty=true`, drop geometry/render nothing, keep the
+  text, flag the field with a red border + right-justified "⚠ 0!" via `mark_empty_selection`)
+  vs **`Invalid`** (syntax/other error → `rep.sel_error`, shown in red below the field,
+  keeps prior geometry).
 - **Disjoint bind (molar `SelBoundParts`):** `system.bind_with_state(&sel, &state)` binds a
   selection using the system's **topology** but coordinates from an **external** `State` (e.g.
   a trajectory frame) — no copy into the System. `geometry::build` takes the bound (generic

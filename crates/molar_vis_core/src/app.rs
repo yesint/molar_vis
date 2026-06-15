@@ -38,6 +38,27 @@ fn compact_actions(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
 }
 
+/// Overlay a red border + a right-justified "⚠ 0!" on a selection field whose
+/// selection is valid but matched **zero atoms** (molar's "empty" error, surfaced
+/// as a non-destructive warning — the text stays editable).
+fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
+    let red = egui::Color32::from_rgb(220, 90, 90);
+    let painter = ui.painter();
+    painter.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.5, red),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        egui::pos2(rect.right() - 6.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        format!("{} 0!", icon::WARNING),
+        egui::FontId::proportional(13.0),
+        red,
+    );
+}
+
 /// Draw a small vector icon depicting a representation style into `rect`.
 fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: RepKind, color: egui::Color32) {
     use egui::{Pos2, Stroke, Vec2};
@@ -1052,9 +1073,24 @@ impl App {
                             rep.expr = Some(expr);
                             rep.sel = Some(sel);
                             rep.sel_error = None;
+                            rep.sel_empty = false;
                             rep.geom_dirty = true;
                         }
-                        Err(e) => rep.sel_error = Some(e),
+                        // Valid selection that matches no atoms: not an error — drop
+                        // the geometry (render nothing), keep the text, and flag the
+                        // field. The viewport must re-render to clear the old mesh.
+                        Err(scene::EvalError::Empty) => {
+                            rep.expr = None;
+                            rep.sel = None;
+                            rep.sel_error = None;
+                            rep.sel_empty = true;
+                            rep.gpu = Default::default();
+                            changed = true;
+                        }
+                        Err(scene::EvalError::Invalid(e)) => {
+                            rep.sel_error = Some(e);
+                            rep.sel_empty = false;
+                        }
                     }
                     rep.sel_dirty = false;
                 }
@@ -1769,6 +1805,8 @@ impl App {
         for j in 0..mol.reps.len() {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
             let rep = &mut mol.reps[j];
+            // Whether the selection is valid but empty (0 atoms) — flags the field.
+            let sel_empty = rep.sel_empty;
 
             // Each rep is two rows, grouped: row 1 = handle | selection | actions,
             // row 2 = style | color | gear. The whole block is the reorder target.
@@ -1796,6 +1834,9 @@ impl App {
                                     .desired_width(f32::INFINITY)
                                     .hint_text("selection"),
                             );
+                            if sel_empty {
+                                mark_empty_selection(ui, resp.rect);
+                            }
                             if resp.lost_focus() {
                                 rep.sel_dirty = true;
                                 new_editing = None;
@@ -1837,6 +1878,9 @@ impl App {
                                                 .desired_width(ui.available_width())
                                                 .hint_text("selection"),
                                         );
+                                        if sel_empty {
+                                            mark_empty_selection(ui, resp.rect);
+                                        }
                                         if resp.gained_focus() {
                                             new_editing = Some((mi, j));
                                         }
