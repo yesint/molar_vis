@@ -5,6 +5,13 @@ use egui::{Color32, FontFamily, FontId, TextStyle};
 
 /// Apply the molar_vis look. Call once at startup with the egui context.
 pub fn apply(ctx: &egui::Context) {
+    // Force the dark theme regardless of the host's color-scheme preference.
+    // Without this, eframe on the web follows the browser's `prefers-color-scheme`
+    // (often light) and resolves the active theme to Light, so the dark `Visuals`
+    // set via `set_global_style` below land on the inactive theme and the UI shows
+    // up white. Pinning the preference makes Dark the active theme everywhere.
+    ctx.set_theme(egui::ThemePreference::Dark);
+
     // Merge in the Phosphor icon font (eye / trash / copy / plus / projection
     // glyphs used by the panel) alongside the default fonts.
     let mut fonts = egui::FontDefinitions::default();

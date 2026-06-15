@@ -40,25 +40,41 @@ pub fn run(launch: AppLaunch) -> eframe::Result<()> {
 pub fn run_web() {
     use wasm_bindgen::JsCast as _;
 
-    // Route Rust panics and `log` output to the browser console.
+    // Route Rust panics and `log` output to the browser console. Info level:
+    // shows eframe/wgpu adapter + backend selection and any warnings/errors,
+    // without naga's very chatty per-expression shader-compilation debug logs.
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
+    log::info!("molar_vis: starting web runner");
 
     let web_options = eframe::WebOptions::default();
     wasm_bindgen_futures::spawn_local(async {
-        let canvas = web_sys::window()
+        let document = web_sys::window()
             .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id("molar_vis_canvas"))
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("molar_vis_canvas")
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
             .expect("page must contain a <canvas id=\"molar_vis_canvas\">");
 
-        eframe::WebRunner::new()
+        let result = eframe::WebRunner::new()
             .start(
                 canvas,
                 web_options,
                 Box::new(|cc| Ok(Box::new(App::new(cc, AppLaunch::default())?))),
             )
-            .await
-            .expect("failed to start eframe WebRunner");
+            .await;
+
+        // Surface a startup failure both to the console and into the page (the
+        // `#loading` element), so the cause is visible without opening devtools.
+        if let Err(e) = result {
+            let msg = format!("molar_vis failed to start: {e:?}");
+            log::error!("{msg}");
+            if let Some(el) = document.get_element_by_id("loading") {
+                el.set_text_content(Some(&msg));
+            }
+        } else {
+            log::info!("molar_vis: web runner started");
+        }
     });
 }

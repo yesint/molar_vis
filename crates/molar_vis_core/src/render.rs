@@ -394,6 +394,10 @@ pub struct SceneRenderer {
     mesh_pipeline: [wgpu::RenderPipeline; 3],
     oit_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
+    /// Whether the device supports weighted-blended OIT (needs `INDEPENDENT_BLEND`).
+    /// False on WebGL2: transparent reps then render with plain alpha blending in the
+    /// opaque pass, and the OIT/composite passes are skipped.
+    oit_enabled: bool,
 }
 
 /// Pipeline-array index for the selection-glow pass.
@@ -429,6 +433,22 @@ impl SceneRenderer {
         });
         let camera_bind_group = make_camera_bind_group(device, &camera_bgl, &camera_buf);
 
+        // Weighted-blended OIT needs **independent per-target blend** (the accum
+        // target blends additively while reveal blends multiplicatively). WebGL2
+        // lacks this downlevel feature, so detect it: when absent, OIT is disabled
+        // and transparent reps fall back to plain alpha blending in the opaque pass.
+        let oit_enabled = rs
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND);
+        if !oit_enabled {
+            log::warn!(
+                "device lacks INDEPENDENT_BLEND (e.g. WebGL2): order-independent \
+                 transparency disabled; transparent reps use plain alpha blending"
+            );
+        }
+
         // Opaque pass: single alpha-blended target, depth-write on, `fs_main`.
         // OIT pass: accum+reveal targets, depth-write off (test on), `fs_oit`.
         let f = color_format;
@@ -442,7 +462,14 @@ impl SceneRenderer {
         let triple = |b: &dyn Fn(&[Option<wgpu::ColorTargetState>], bool, wgpu::CompareFunction, &str) -> wgpu::RenderPipeline| {
             [
                 b(&opaque_t, true, less, "fs_main"),
-                b(&oit_t, false, less, "fs_oit"),
+                // OIT slot. Without INDEPENDENT_BLEND this pipeline would fail to
+                // create, so build a harmless single-target placeholder (never bound:
+                // `render_scene` skips the OIT pass when `oit_enabled` is false).
+                if oit_enabled {
+                    b(&oit_t, false, less, "fs_oit")
+                } else {
+                    b(&opaque_t, true, less, "fs_main")
+                },
                 b(&glow_t, false, lequal, "fs_glow"),
             ]
         };
@@ -510,6 +537,7 @@ impl SceneRenderer {
             mesh_pipeline,
             oit_bgl,
             composite_pipeline,
+            oit_enabled,
         }
     }
 
@@ -639,13 +667,16 @@ impl SceneRenderer {
         rs.queue.write_buffer(&self.camera_buf, 0, &bytes);
 
         // Skip the OIT + composite passes entirely when nothing transparent is
-        // visible (idle scenes pay nothing for the transparency machinery).
+        // visible (idle scenes pay nothing for the transparency machinery). When the
+        // device can't do OIT (WebGL2), transparent reps are drawn in the opaque pass
+        // with plain alpha blending instead, so the dedicated OIT pass never runs.
         let has_transparent = scene.molecules.iter().any(|m| {
             m.visible
                 && m.reps
                     .iter()
                     .any(|r| r.visible && r.material.is_transparent())
         });
+        let use_oit = has_transparent && self.oit_enabled;
 
         let mut encoder = rs
             .device
@@ -683,13 +714,19 @@ impl SceneRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.draw_reps(&mut pass, scene, false, &images);
+            self.draw_reps(&mut pass, scene, false, 0, &images);
+            // No-OIT fallback (WebGL2): draw transparent reps here too, with the
+            // opaque pipeline (alpha blend, depth-write on) — order-dependent, but it
+            // renders. With OIT they go to the dedicated pass below instead.
+            if has_transparent && !self.oit_enabled {
+                self.draw_reps(&mut pass, scene, true, 0, &images);
+            }
         }
 
         // Pass 2 — transparent geometry into the weighted-blended OIT targets
         // (accum cleared to 0, reveal to 1). Depth-tests against the opaque depth,
         // but writes no depth, so transparent fragments don't cull each other.
-        if has_transparent {
+        if use_oit {
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("oit-pass"),
@@ -725,7 +762,7 @@ impl SceneRenderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                self.draw_reps(&mut pass, scene, true, &images);
+                self.draw_reps(&mut pass, scene, true, 1, &images);
             }
 
             // Pass 3 — resolve the OIT targets over the opaque color.
@@ -825,20 +862,22 @@ impl SceneRenderer {
         }
     }
 
-    /// Draw every visible representation matching the requested transparency into
-    /// the active pass, using each geometry's opaque (`transparent == false`) or
-    /// OIT (`true`) pipeline. Each rep is drawn once per periodic image listed in
-    /// `images[mi][j]`, selecting that image's camera (base view × lattice shift)
-    /// via a dynamic offset — same buffers, no data duplication. The periodic-box
-    /// wireframe is opaque-only.
+    /// Draw every visible representation whose transparency matches `transparent`,
+    /// using pipeline-array slot `pipeline_idx` (0 = opaque, 1 = OIT). These are
+    /// decoupled so the WebGL2 fallback can draw transparent reps with the *opaque*
+    /// pipeline (alpha blend, depth-write on). Each rep is drawn once per periodic
+    /// image listed in `images[mi][j]`, selecting that image's camera via a dynamic
+    /// offset — same buffers, no data duplication. The box wireframe is drawn only
+    /// in the opaque (`!transparent`) call.
     fn draw_reps(
         &self,
         pass: &mut wgpu::RenderPass,
         scene: &Scene,
         transparent: bool,
+        pipeline_idx: usize,
         images: &[Vec<Vec<u32>>],
     ) {
-        let i = transparent as usize;
+        let i = pipeline_idx;
         let stride = CAMERA_STRIDE as u32;
         for (mi, mol) in scene.molecules.iter().enumerate() {
             if !mol.visible {
