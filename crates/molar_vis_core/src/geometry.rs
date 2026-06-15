@@ -193,6 +193,10 @@ pub fn build(
             let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
                 lines: lines(&lut, bonds, width),
+                // Lines only draws bonds, so a selected atom with no drawn bond
+                // (an ion, a lone water, …) would otherwise be invisible. VMD
+                // shows such atoms as small points — emit a small dot for each.
+                spheres: isolated_dots(bound, &colorizer, &lut, bonds),
                 ..Default::default()
             }
         }
@@ -280,6 +284,43 @@ pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
         v.push(LineVertex { pos: corner(i1, j1, k1), color, width: 1.0 });
     }
     v
+}
+
+/// Fraction of the van der Waals radius drawn for the Lines isolated-atom dots —
+/// the small Ball-and-Stick sphere size, kept in sync with `pick`'s pick radius
+/// so a hovered dot's glow ring matches the dot.
+const LINES_DOT_SCALE: f32 = 0.25;
+
+/// Small dots for selected atoms that take part in **no drawn bond** (a bond with
+/// both endpoints selected). The Lines representation renders only bonds, so
+/// without these an isolated atom (ion, lone water, …) would be invisible; VMD
+/// draws the same little points. Bonded atoms are already marked by their meeting
+/// line segments, so they get no dot.
+fn isolated_dots(
+    bound: &impl ParticleIterProvider,
+    colorizer: &Colorizer,
+    lut: &[Option<([f32; 3], u32)>],
+    bonds: &[[usize; 2]],
+) -> Vec<SphereInstance> {
+    // `lut[i].is_some()` == atom i is selected; mark every selected endpoint of a
+    // drawn bond as bonded.
+    let mut bonded = vec![false; lut.len()];
+    for &[a, b] in bonds {
+        if lut[a].is_some() && lut[b].is_some() {
+            bonded[a] = true;
+            bonded[b] = true;
+        }
+    }
+    bound
+        .iter_particle()
+        .filter(|p| !bonded[p.id])
+        .map(|p| SphereInstance {
+            center: [p.pos.x, p.pos.y, p.pos.z],
+            radius: p.atom.vdw() * LINES_DOT_SCALE,
+            color: colorizer.color(p.atom, p.id),
+            mat: 0,
+        })
+        .collect()
 }
 
 fn spheres(

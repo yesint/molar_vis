@@ -8,7 +8,7 @@
 use glam::{Mat4, Vec3, Vec4Swizzles};
 use molar::prelude::*;
 
-use crate::geometry::RepParams;
+use crate::geometry::{RepKind, RepParams};
 use crate::scene::Scene;
 
 /// What the picker does on hover. The dropdown currently exposes only `HoverInfo`
@@ -59,6 +59,14 @@ fn effective_radius(params: &RepParams, atom: &Atom) -> f32 {
         // Licorice / Lines / Cartoon / Surface → small Ball-and-Stick sphere size.
         _ => atom.vdw() * BALLSTICK_SPHERE_SCALE,
     }
+}
+
+/// Whether `name` is a protein **backbone** atom — the only atoms a Cartoon
+/// ribbon is built from (Cα drives the spline path, the carbonyl O its
+/// orientation; N/C round out the backbone). Side-chain atoms contribute nothing
+/// to the drawn ribbon, so they aren't pickable on a Cartoon rep.
+fn cartoon_atom(name: &str) -> bool {
+    matches!(name, "N" | "CA" | "C" | "O" | "OT1" | "OT2" | "OXT")
 }
 
 /// World-space ray (origin, unit direction) through the normalized device coords
@@ -145,6 +153,14 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
 
             let bound = mol.system.bind_with_state(sel, disp_state);
             for p in bound.iter_particle() {
+                // Skip atoms that don't form part of the visible geometry: a
+                // Cartoon ribbon is built only from backbone atoms, so side
+                // chains aren't pickable on it. Every other rep draws something
+                // at each selected atom (Lines renders bonds plus an isolated-atom
+                // dot for unbonded ones), so all selected atoms stay pickable.
+                if matches!(rep.kind, RepKind::Cartoon) && !cartoon_atom(p.atom.name.as_str()) {
+                    continue;
+                }
                 let base = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
                 let r = effective_radius(&rep.params, p.atom);
                 for &off in &offsets {
