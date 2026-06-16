@@ -277,6 +277,15 @@ pub struct Molecule {
     pub hover_gpu: RepGpu,
     /// The hover-highlight geometry needs (re)building — `hover` set changed.
     pub hover_dirty: bool,
+    /// GPU pick geometry: one id-stamped sphere impostor per **pickable** atom (the
+    /// atoms CPU `pick` ray-casts: eligible atoms of visible reps, at their displayed
+    /// position and effective radius). Rendered into the id-buffer for GPU picking.
+    /// Native only (GPU picking needs a synchronous readback wasm can't do).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub pick_gpu: RepGpu,
+    /// The pick geometry needs (re)building — geometry/coords/visibility changed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub pick_dirty: bool,
 }
 
 impl Molecule {
@@ -306,6 +315,10 @@ impl Molecule {
             hover: None,
             hover_gpu: RepGpu::default(),
             hover_dirty: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_gpu: RepGpu::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_dirty: true,
         }
     }
 

@@ -18,7 +18,7 @@ use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::material::Material;
 use crate::pick::{self, PickMode, SelectionMode};
-use crate::render::SceneRenderer;
+use crate::render::{SceneRenderer, SphereInstance};
 use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
 use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
@@ -1421,7 +1421,19 @@ impl App {
     /// true if any geometry was uploaded (so the frame needs re-rendering).
     fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
         let mut changed = false;
-        for mol in &mut self.scene.molecules {
+        // A structural change (molecule add/remove/reorder/visibility) shifts molecule
+        // indices, so the GPU pick geometry's baked `mol+1` ids must be rebuilt.
+        #[cfg(not(target_arch = "wasm32"))]
+        let structure_changed = self.view_dirty;
+        for (_mi, mol) in self.scene.molecules.iter_mut().enumerate() {
+            #[cfg(not(target_arch = "wasm32"))]
+            if structure_changed {
+                mol.pick_dirty = true;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            let pick_pending = mol.pick_dirty;
+            #[cfg(target_arch = "wasm32")]
+            let pick_pending = false;
             let any_rep_dirty = mol
                 .reps
                 .iter()
@@ -1430,6 +1442,7 @@ impl App {
                 && !(mol.show_box && mol.box_dirty)
                 && !mol.glow_dirty
                 && !mol.hover_dirty
+                && !pick_pending
             {
                 continue;
             }
@@ -1577,6 +1590,17 @@ impl App {
                 mol.hover_dirty = false;
                 changed = true;
             }
+            // GPU pick geometry (native): rebuild when the molecule's geometry/coords
+            // changed (rep_geom_changed covers both) or it was flagged dirty (init /
+            // structure change). Mirrors the atoms CPU `pick` would ray-cast.
+            #[cfg(not(target_arch = "wasm32"))]
+            if rep_geom_changed || mol.pick_dirty {
+                let geom = build_pick(mol, _mi, render_state);
+                mol.pick_gpu = self.renderer.upload(rs, &geom);
+                mol.pick_dirty = false;
+                // No `changed = true`: pick geometry isn't drawn in render_scene, so
+                // it doesn't require a scene re-render on its own.
+            }
         }
         changed
     }
@@ -1631,6 +1655,46 @@ fn build_glow(
         out.append(geom);
     }
     out
+}
+
+/// Atom-index bits in a pick id's y channel (the rest hold the rep index). 21 bits
+/// → up to ~2M atoms/molecule and 2048 reps; ample for interactive systems.
+#[cfg(not(target_arch = "wasm32"))]
+const PICK_ATOM_BITS: u32 = 21;
+
+/// Build the GPU **pick** geometry for one molecule (index `mi`): an id-stamped
+/// sphere per *pickable* atom — exactly the atoms CPU `pick` ray-casts (eligible
+/// atoms of each visible rep, at their displayed position and effective radius). The
+/// id packs `[mi+1, rep<<21 | atom]` so the readback decodes back to (mol, rep, atom).
+#[cfg(not(target_arch = "wasm32"))]
+fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geometry::GeometryData {
+    let mut spheres: Vec<SphereInstance> = Vec::new();
+    for (rj, rep) in mol.reps.iter().enumerate() {
+        if !rep.visible {
+            continue;
+        }
+        let Some(sel) = &rep.sel else { continue };
+        let smoothed = (rep.smooth_window > 1)
+            .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
+            .flatten();
+        let disp_state: &State = smoothed.as_ref().unwrap_or(state);
+        let bound = mol.system.bind_with_state(sel, disp_state);
+        let pick_x = mi as u32 + 1;
+        let pick_rep = (rj as u32) << PICK_ATOM_BITS;
+        for p in bound.iter_particle() {
+            if !pick::atom_in_rep(rep.kind, p.atom.name.as_str()) {
+                continue;
+            }
+            spheres.push(SphereInstance {
+                center: [p.pos.x, p.pos.y, p.pos.z],
+                radius: pick::effective_radius(&rep.params, p.atom),
+                color: 0,
+                mat: 0,
+                pick: [pick_x, pick_rep | (p.id as u32)],
+            });
+        }
+    }
+    geometry::GeometryData { spheres, ..Default::default() }
 }
 
 /// World-space (nm) outward shell offset for the active-selection glow mesh — large
@@ -2949,9 +3013,44 @@ impl App {
                 };
                 if let Some((ndc_x, ndc_y)) = ndc {
                     let aspect = size_px[0] as f32 / size_px[1] as f32;
-                    let view = self.camera.view();
-                    let proj = self.camera.proj(aspect);
-                    if let Some(hit) = pick::pick(&self.scene, view, proj, ndc_x, ndc_y) {
+                    // Cursor → pick-target pixel (the pick buffer is 1× = size_px).
+                    let px = (((ndc_x * 0.5 + 0.5) * size_px[0] as f32) as i32)
+                        .clamp(0, size_px[0] as i32 - 1) as u32;
+                    let py = (((1.0 - (ndc_y * 0.5 + 0.5)) * size_px[1] as f32) as i32)
+                        .clamp(0, size_px[1] as i32 - 1) as u32;
+                    // GPU id-buffer pick on native (O(1) readback, scales to huge
+                    // systems); the CPU ray-cast stays the path on wasm (WebGL2 can't
+                    // render/read back the integer id target).
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let hit = {
+                        let gpu = self
+                            .renderer
+                            .pick_atom(render_state, &self.scene, px, py, size_px)
+                            .and_then(|(m, r, a)| pick::hit_for_atom(&self.scene, m, r, a));
+                        // Headless validation: compare the GPU pick to the CPU
+                        // ray-cast at the same cursor (they should name the same atom).
+                        if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
+                            let view = self.camera.view();
+                            let proj = self.camera.proj(aspect);
+                            let cpu = pick::pick(&self.scene, view, proj, ndc_x, ndc_y);
+                            let g = gpu.as_ref().map(|h| (h.mol, h.id));
+                            let c = cpu.as_ref().map(|h| (h.mol, h.id));
+                            if g == c {
+                                log::info!("pick ok: gpu == cpu == {g:?}");
+                            } else {
+                                log::warn!("pick mismatch: gpu {g:?} != cpu {c:?}");
+                            }
+                        }
+                        gpu
+                    };
+                    #[cfg(target_arch = "wasm32")]
+                    let hit = {
+                        let _ = (px, py);
+                        let view = self.camera.view();
+                        let proj = self.camera.proj(aspect);
+                        pick::pick(&self.scene, view, proj, ndc_x, ndc_y)
+                    };
+                    if let Some(hit) = hit {
                         if self.effective_selection_mode() == SelectionMode::Residues {
                             // Expand the hit to its whole residue → steady glow.
                             let atoms = {

@@ -160,7 +160,7 @@ const BALLSTICK_SPHERE_SCALE: f32 = 0.25;
 
 /// The highlight/pick sphere radius for an atom in a given rep: the actual drawn
 /// sphere for VDW / Ball-and-Stick, else the small Ball-and-Stick sphere size.
-fn effective_radius(params: &RepParams, atom: &Atom) -> f32 {
+pub(crate) fn effective_radius(params: &RepParams, atom: &Atom) -> f32 {
     match params {
         RepParams::Vdw { scale } => atom.vdw() * scale,
         RepParams::BallAndStick { sphere_scale, .. } => atom.vdw() * sphere_scale,
@@ -182,7 +182,7 @@ fn cartoon_atom(name: &str) -> bool {
 /// selection. A Cartoon ribbon is built only from backbone atoms (side chains
 /// aren't part of it); every other style draws something at each selected atom
 /// (Lines included, via its isolated-atom dots).
-fn atom_in_rep(kind: RepKind, name: &str) -> bool {
+pub(crate) fn atom_in_rep(kind: RepKind, name: &str) -> bool {
     !matches!(kind, RepKind::Cartoon) || cartoon_atom(name)
 }
 
@@ -217,6 +217,47 @@ fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, r: f32) -> Option<f32> {
         let t1 = -b + s; // origin inside the sphere
         (t1 >= 0.0).then_some(t1)
     }
+}
+
+/// Build a [`PickHit`] for a specific atom, given the molecule + rep that drew it
+/// (as decoded from the GPU id-buffer). O(1): the real coord comes from the current
+/// frame, the displayed coord + glow radius from the named rep. Returns `None` if
+/// any index is stale/out of range. Native only (drives the GPU pick path).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn hit_for_atom(scene: &Scene, mi: usize, rep_idx: usize, aid: usize) -> Option<PickHit> {
+    let mol = scene.molecules.get(mi)?;
+    let atom = mol.system.topology().get_atom(aid)?;
+    let frame: &State = mol
+        .trajectory
+        .frames
+        .get(mol.trajectory.current)
+        .unwrap_or_else(|| mol.system.state());
+    let realp = *frame.coords.get(aid)?;
+    let real = Vec3::new(realp.x, realp.y, realp.z);
+    // Displayed position (smoothed if the rep smooths) + glow radius, from the rep
+    // that produced the hit sphere. Central image only (GPU pick draws the central).
+    let (display, radius) = match mol.reps.get(rep_idx) {
+        Some(rep) => {
+            let r = effective_radius(&rep.params, atom);
+            let disp = (rep.smooth_window > 1)
+                .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
+                .flatten()
+                .and_then(|s| s.coords.get(aid).copied())
+                .unwrap_or(realp);
+            (Vec3::new(disp.x, disp.y, disp.z), r)
+        }
+        None => (real, atom.vdw() * BALLSTICK_SPHERE_SCALE),
+    };
+    Some(PickHit {
+        mol: mi,
+        id: aid,
+        name: atom.name.as_str().to_string(),
+        resname: atom.resname.as_str().to_string(),
+        resid: atom.resid,
+        real,
+        display,
+        radius,
+    })
 }
 
 /// Ray-cast the cursor against every visible atom of every visible rep, at its

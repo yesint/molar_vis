@@ -363,6 +363,7 @@ fn spheres(
             radius: radius(p.atom),
             color: colorizer.color(p.atom, p.id),
             mat: 0,
+            pick: [0, 0],
         })
         .collect()
 }

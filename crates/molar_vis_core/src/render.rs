@@ -35,6 +35,10 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// `1 - alpha`. Both are float so the accumulation doesn't clamp/quantize.
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+/// GPU pick id-buffer format: `[x, y]` = `[mol+1, rep<<21 | atom]` per pixel
+/// (x = 0 means no hit). Two 32-bit uints, rendered without blending. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+const PICK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
 
 /// Scene background. Used both as the render-pass clear color and as the depth-cue
 /// fog color, so distant geometry dissolves seamlessly into the background.
@@ -398,10 +402,65 @@ pub struct SceneRenderer {
     /// False on WebGL2: transparent reps then render with plain alpha blending in the
     /// opaque pass, and the OIT/composite passes are skipped.
     oit_enabled: bool,
+
+    // GPU atom picking (native only — needs a synchronous readback, which WebGPU
+    // can't do, and integer render targets WebGL2 may not support): sphere impostors
+    // (one per eligible atom, id-stamped — each molecule's `pick_gpu`) rendered into
+    // an Rg32Uint id target at 1× resolution; the pixel under the cursor is read back
+    // to identify the front-most atom. Lazily sized; rendered only on a pick request.
+    // wasm falls back to the CPU ray-cast.
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_pipeline: wgpu::RenderPipeline,
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_id_tex: wgpu::Texture,
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_id_view: wgpu::TextureView,
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_depth_view: wgpu::TextureView,
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_size: [u32; 2],
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_readback: wgpu::Buffer,
 }
 
 /// Pipeline-array index for the selection-glow pass.
 const GLOW: usize = 2;
+
+/// Create the pick id target (Rg32Uint, COPY_SRC) + its depth target at `size`.
+#[cfg(not(target_arch = "wasm32"))]
+fn make_pick_targets(
+    device: &wgpu::Device,
+    size: [u32; 2],
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
+    let extent = wgpu::Extent3d {
+        width: size[0].max(1),
+        height: size[1].max(1),
+        depth_or_array_layers: 1,
+    };
+    let id_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("pick-id"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: PICK_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("pick-depth"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let id_view = id_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (id_tex, id_view, depth_view)
+}
 
 impl SceneRenderer {
     pub fn new(rs: &RenderState) -> Self {
@@ -516,6 +575,19 @@ impl SceneRenderer {
         });
         let composite_pipeline = build_composite_pipeline(device, f, &oit_bgl);
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let pick_pipeline =
+            sphere::build_pick_pipeline(device, PICK_FORMAT, DEPTH_FORMAT, &camera_bgl);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (pick_id_tex, pick_id_view, pick_depth_view) = make_pick_targets(device, [1, 1]);
+        #[cfg(not(target_arch = "wasm32"))]
+        let pick_readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pick-readback"),
+            size: 256, // one Rg32Uint texel (8 B), padded
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
         let targets = Targets::new(device, color_format, &oit_bgl, [1, 1]);
         let egui_texture = rs.renderer.write().register_native_texture(
             device,
@@ -538,7 +610,125 @@ impl SceneRenderer {
             oit_bgl,
             composite_pipeline,
             oit_enabled,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_pipeline,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_id_tex,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_id_view,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_depth_view,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_size: [1, 1],
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_readback,
         }
+    }
+
+    /// GPU atom pick: render the pick id-buffer (each molecule's `pick_gpu` sphere
+    /// impostors, one per eligible atom, id-stamped) at `size` (1× logical px), then
+    /// read back the texel under `(px, py)` and decode the front-most atom. Returns
+    /// `(mol, rep, atom)` (indices into `scene.molecules` / `mol.reps` / the System),
+    /// or `None` on a miss. Reuses camera entry 0 (the current view). Synchronous:
+    /// blocks on the 1-pixel readback (cheap; runs only on a hover request). Native
+    /// only — WebGPU can't block on a readback, and wasm uses the CPU ray-cast.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pick_atom(
+        &mut self,
+        rs: &RenderState,
+        scene: &Scene,
+        px: u32,
+        py: u32,
+        size: [u32; 2],
+    ) -> Option<(usize, usize, usize)> {
+        let size = [size[0].max(1), size[1].max(1)];
+        if self.pick_size != size {
+            let (t, v, d) = make_pick_targets(&rs.device, size);
+            self.pick_id_tex = t;
+            self.pick_id_view = v;
+            self.pick_depth_view = d;
+            self.pick_size = size;
+        }
+        let (px, py) = (px.min(size[0] - 1), py.min(size[1] - 1));
+
+        let mut encoder = rs
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pick") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pick-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.pick_id_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        // Clear to (0, 0) → x = 0 = "no hit".
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.pick_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.camera_bind_group, &[0]);
+            pass.set_pipeline(&self.pick_pipeline);
+            for mol in &scene.molecules {
+                if !mol.visible {
+                    continue;
+                }
+                if let Some(s) = &mol.pick_gpu.spheres {
+                    pass.set_vertex_buffer(0, s.buffer.slice(..));
+                    pass.draw(0..4, 0..s.count);
+                }
+            }
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.pick_id_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: px, y: py, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.pick_readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: None, // single row
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        rs.queue.submit(std::iter::once(encoder.finish()));
+
+        // Synchronous readback of the one texel (8 bytes).
+        let slice = self.pick_readback.slice(0..8);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+        let (x, y) = {
+            let data = slice.get_mapped_range();
+            let x = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            let y = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            (x, y)
+        };
+        self.pick_readback.unmap();
+
+        if x == 0 {
+            return None; // no hit
+        }
+        let mol = (x - 1) as usize;
+        let rep = (y >> 21) as usize;
+        let atom = (y & ((1 << 21) - 1)) as usize;
+        Some((mol, rep, atom))
     }
 
     /// The egui texture id of the offscreen color target (for `egui::Image`).

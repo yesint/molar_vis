@@ -26,6 +26,7 @@ struct Instance {
     @location(1) radius: f32,
     @location(2) color: u32,
     @location(3) mat: u32,
+    @location(4) pick: vec2<u32>, // pick id (x = mol+1, y = rep<<21 | atom); 0 = unused
 };
 
 struct VsOut {
@@ -35,6 +36,7 @@ struct VsOut {
     @location(2) radius: f32,
     @location(3) color: vec4<f32>, // rgb + opacity (alpha)
     @location(4) @interpolate(flat) mat: u32, // packed material lighting
+    @location(5) @interpolate(flat) pick: vec2<u32>, // pick id (id-buffer pass only)
 };
 
 fn unpack_color(c: u32) -> vec4<f32> {
@@ -105,6 +107,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
     out.radius = inst.radius;
     out.color = unpack_color(inst.color);
     out.mat = inst.mat;
+    out.pick = inst.pick;
     return out;
 }
 
@@ -196,6 +199,22 @@ fn fs_main(in: VsOut) -> FsOut {
     var out: FsOut;
     out.depth = h.depth;
     out.color = vec4<f32>(h.color, h.alpha);
+    return out;
+}
+
+// Pick id-buffer: ray-cast for the analytic silhouette + depth (front-most wins),
+// output this atom's pick id. Drawn into an Rg32Uint target; read back on the CPU.
+struct PickOut {
+    @location(0) id: vec2<u32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+@fragment
+fn fs_pick(in: VsOut) -> PickOut {
+    let h = compute_hit(in); // does the ray test (discards misses) + analytic depth
+    var out: PickOut;
+    out.depth = h.depth;
+    out.id = in.pick;
     return out;
 }
 

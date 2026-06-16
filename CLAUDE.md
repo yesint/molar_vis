@@ -37,7 +37,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_SMOOTH=<window>` (set mol 0 first rep's trajectory smoothing window; pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_PICK=1` (force hover-info pick mode + pick at the viewport center each frame, so
-  the glow/info overlay can be screenshot headlessly) +
+  the glow/info overlay can be screenshot headlessly; also logs a GPU-vs-CPU pick comparison —
+  `pick ok: gpu == cpu == …` — at `RUST_LOG=molar_vis_core=info`) +
   `MOLAR_VIS_DEBUG_SELMODE=residues|boundh` (set the lasso selection-expansion mode; default Atoms) +
   `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection on **every** molecule as an
   active/pending selection — exercises the lasso glow highlight + per-molecule accept/discard UI,
@@ -137,9 +138,10 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `render/shaders/*.wgsl` (incl. `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit` +
   `fs_glow`; the `build_pipeline`s take `depth_compare`). The cartoon mesh writes real depth and
   interleaves correctly with the impostors.
-- `pick.rs` — CPU ray-cast atom picking (`PickMode {Off, HoverInfo, Lasso}`, `PickHit` (carries
-  the hit `mol` + atom `id`),
-  `cursor_ray`, `ray_sphere`, `effective_radius`, `pick`) **and lasso selection** (`lasso_select`,
+- `pick.rs` — atom picking (`PickMode {Off, HoverInfo, Lasso}`, `PickHit` (carries the hit `mol` +
+  atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
+  uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
+  `(mol, rep, atom)`) **and lasso selection** (`lasso_select`,
   `point_in_polygon`, `index_selection_string`, `LassoSelection`). Hit-tests the cursor/lasso
   against atoms **as displayed** (smoothed + periodic images, sharing `PeriodicParams::offsets`
   with the renderer) and reports the atom's **real** stored coordinate. Both hover-pick and lasso
@@ -541,13 +543,29 @@ History labels via `describe_change` ("edit selection", "change coloring",
   set is recomputed as the cursor moves (`set_hover`/`clear_hover`, repaint on change to rebuild the
   glow next frame). `MOLAR_VIS_DEBUG_PICK=1` forces a viewport-center pick (headless verification —
   hover can't be simulated on this Wayland box); pair with `MOLAR_VIS_DEBUG_SELMODE=residues`.
+  - **GPU pick id-buffer (native hover):** the per-frame hover ray-cast is O(visible atoms), so on
+    native the hover hit comes from a **GPU id-buffer** instead (`SceneRenderer::pick_atom`): each
+    molecule's `pick_gpu` is one id-stamped sphere impostor per *pickable* atom — exactly the atoms
+    CPU `pick` ray-casts, built by `build_pick` (eligible per `atom_in_rep`, at the displayed
+    position + `effective_radius`), id = `[mol+1, rep<<21 | atom]`. They're drawn (`fs_pick` in
+    `sphere.wgsl`) into a 1× **`Rg32Uint`** target + depth (front-most wins, analytic frag_depth);
+    the pixel under the cursor is copied back and decoded → `(mol, rep, atom)` → `pick::hit_for_atom`
+    rebuilds the `PickHit` (O(1), no per-atom scan). `pick_gpu` rebuilds when geometry/coords change
+    or on a structural change (baked `mol+1` would go stale). Sync readback (`poll(Wait)`); central
+    image only (v1). **Native only** — gated `#[cfg(not(wasm))]`: WebGPU can't block on a readback
+    and WebGL2 may not render integer targets, so **wasm keeps the CPU `pick`**. Validated headlessly
+    under `MOLAR_VIS_DEBUG_PICK` (logs `gpu == cpu` per frame): matches CPU on VDW/cartoon/ball-stick.
+    TODO: periodic-image hover; async readback to avoid the per-hover GPU stall.
   - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, an LMB drag in `draw_viewport`
     accumulates `App::lasso_path` (pixel coords; **Alt+LMB orbits** instead — rotate the view without
     leaving Lasso mode; RMB/MMB/wheel still navigate), drawn as a cyan polyline; on release
     `finish_lasso` maps the path → clip-space NDC polygon and calls `lasso_select`, which projects
-    every **style-eligible, displayed** atom (any periodic image inside the polygon counts,
-    **even-odd** `point_in_polygon`) and groups hits per molecule (`LassoSelection { mol, atoms }`,
-    deduped/sorted). The hits become each molecule's selection text via
+    every **style-eligible, displayed** atom (any periodic image inside the polygon counts) and
+    groups hits per molecule (`LassoSelection { mol, atoms }`, deduped/sorted). A **screen-bbox
+    pre-reject** (the polygon's NDC bounding box) drops atoms outside the lasso's rect in a 4-compare
+    before the O(vertices) **even-odd** `point_in_polygon`, keeping the one-shot gesture cheap at
+    scale (lasso stays CPU — it must select *occluded* atoms too, which a front-most GPU id-buffer
+    can't; the GPU id-buffer is hover-only). The hits become each molecule's selection text via
     `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …` string (consecutive runs
     → inclusive ranges; 0-based global atom index).
   - **Selection mode** (`SelectionMode`, toolbar dropdown next to the pick selector;
