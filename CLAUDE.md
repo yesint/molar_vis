@@ -532,7 +532,13 @@ History labels via `describe_change` ("edit selection", "change coloring",
     that's **view state, not undoable, excluded from `EditState`**, shown two ways: (1) a **GPU glow
     highlight in the current style** — `rebuild_dirty`'s `build_glow` rebuilds, per visible rep,
     `(rep.sel ∩ pending)` in *that rep's own style/params* (Cartoon → ribbon, VDW → spheres, …),
-    merged into the molecule's `glow_gpu` (`GeometryData::append`); a final additive **glow pass**
+    merged into the molecule's `glow_gpu` (`GeometryData::append`). **Mesh-style glow (Cartoon/
+    Surface) is inflated into a thin shell** (`inflate_mesh`, `GLOW_INFLATE`=0.025 nm outward along
+    vertex normals): the glow mesh is re-splined over the *subset* of selected atoms, so it nearly
+    but not exactly coincides with the parent's full mesh (SS-dependent smoothing/cleanup diverges at
+    the subset ends) → two near-coplanar surfaces z-fight → patchy. The outward shell makes the glow
+    test cleanly *above* the parent (its back faces still fail the `≤` depth test and stay hidden, so
+    no double-blend); impostor glows coincide exactly and aren't offset. A final additive **glow pass**
     (`render_scene` pass 4, pipeline index `GLOW=2`) draws it with the shaders' `fs_glow` — an
     intense cyan **Fresnel rim** (bright at grazing angles + a strong body tint), **pulsing**: the
     camera uniform's `params.w` carries an animated multiplier (`0.70 + 0.30·sin(t·3.2)`, computed in

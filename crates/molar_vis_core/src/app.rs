@@ -1564,13 +1564,36 @@ fn build_glow(
             continue;
         };
         let bound = system.bind_with_state(&sel, state);
-        let geom = geometry::build(
+        let mut geom = geometry::build(
             &bound, n_atoms, bonds, &rep.params, rep.color, rep.material,
             rep.ss_cache.as_ref(),
         );
+        // Mesh styles (Cartoon/Surface) re-build the glow over the *subset* of
+        // selected atoms, so its mesh nearly — but not exactly — coincides with the
+        // parent rep's full mesh (the SS-dependent spline smoothing/cleanup diverges
+        // at the subset's ends). Two near-coplanar surfaces z-fight, so the glow
+        // looked patchy. Push the glow mesh a hair *outward* along its normals into a
+        // thin shell just in front of the parent, so it tests cleanly above it. (The
+        // glow pass writes no depth, so the back of the shell still fails the depth
+        // test and stays hidden.) Impostor glows coincide exactly and need no offset.
+        inflate_mesh(&mut geom.mesh, GLOW_INFLATE);
         out.append(geom);
     }
     out
+}
+
+/// World-space (nm) outward shell offset for the active-selection glow mesh — large
+/// enough to dominate the sub-Ångström divergence between the subset and parent
+/// cartoon splines (so no z-fighting), small enough to read as a tight halo.
+const GLOW_INFLATE: f32 = 0.025;
+
+/// Offset every mesh vertex outward along its normal by `d` nm (a thin shell).
+fn inflate_mesh(mesh: &mut geometry::MeshData, d: f32) {
+    for v in &mut mesh.vertices {
+        v.pos[0] += v.normal[0] * d;
+        v.pos[1] += v.normal[1] * d;
+        v.pos[2] += v.normal[2] * d;
+    }
 }
 
 /// Browser file open: create a hidden `<input type=file>` (limited to `accept`),
