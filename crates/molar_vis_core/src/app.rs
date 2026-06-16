@@ -17,7 +17,7 @@ use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::material::Material;
-use crate::pick::{self, PickMode};
+use crate::pick::{self, PickMode, SelectionMode};
 use crate::render::SceneRenderer;
 use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
@@ -1047,6 +1047,9 @@ pub struct App {
     /// atom's identity + real coords and glows its outline; `Lasso` drags a
     /// freehand selection polygon.
     pick_mode: PickMode,
+    /// How a lasso expands its hit atoms (viewport-overlay dropdown): exact atoms,
+    /// whole residues, or heavy atoms + their bonded hydrogens.
+    selection_mode: SelectionMode,
     /// In-progress lasso polygon (viewport pixel coords), accumulated while
     /// dragging in `PickMode::Lasso`. Empty when not lassoing. Transient view state.
     lasso_path: Vec<egui::Pos2>,
@@ -1369,6 +1372,11 @@ impl App {
                 PickMode::HoverInfo
             } else {
                 PickMode::default()
+            },
+            selection_mode: match std::env::var("MOLAR_VIS_DEBUG_SELMODE").as_deref() {
+                Ok("residues") => SelectionMode::Residues,
+                Ok("boundh") => SelectionMode::BoundH,
+                _ => SelectionMode::default(),
             },
             lasso_path: Vec::new(),
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
@@ -1839,6 +1847,22 @@ impl App {
                                 PickMode::Lasso.label(),
                             );
                         });
+                        // Selection-mode dropdown (how a lasso expands its hits).
+                        let sel_label =
+                            format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
+                        let resp = overlay_button(ui, &sel_label, false).on_hover_text(
+                            "Selection mode — how a lasso expands its hits:\n\
+                             Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H)",
+                        );
+                        egui::Popup::menu(&resp).show(|ui| {
+                            for m in [
+                                SelectionMode::Atoms,
+                                SelectionMode::Residues,
+                                SelectionMode::BoundH,
+                            ] {
+                                ui.selectable_value(&mut self.selection_mode, m, m.label());
+                            }
+                        });
                         // Orientation-axes dropdown: on/off + which corner.
                         let resp = overlay_button(ui, icon::ARROWS_OUT_CARDINAL, self.axes_on)
                             .on_hover_text("Orientation axes");
@@ -1860,11 +1884,14 @@ impl App {
                             });
                         });
                     });
-                    // In Lasso mode, a held modifier changes the set operation — show
-                    // it below the pick selector (matches `finish_lasso`'s `LassoOp`).
+                    // In Lasso mode, a held modifier changes the set operation (or, for
+                    // Alt, orbits the view) — show it below the pick selector (matches
+                    // `finish_lasso`'s `LassoOp` and `draw_viewport`'s Alt orbit).
                     if self.pick_mode == PickMode::Lasso {
                         let m = ui.input(|i| i.modifiers);
-                        let hint = if m.shift {
+                        let hint = if m.alt {
+                            Some((icon::ARROWS_CLOCKWISE, "rotate view", egui::Color32::from_rgb(150, 190, 230)))
+                        } else if m.shift {
                             Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
                         } else if m.command {
                             Some((icon::MINUS_CIRCLE, "subtract from selection", egui::Color32::from_rgb(230, 140, 140)))
@@ -2764,26 +2791,31 @@ impl App {
             //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
             //   RMB = pan           · Shift+RMB = move along view Z (dolly)
             //   middle = pan        · wheel = scale (zoom)
-            // In Lasso pick mode any LMB drag draws the selection polygon (the held
+            // In Lasso pick mode an LMB drag draws the selection polygon (the held
             // modifier picks the set op on release: plain = replace, Shift = add,
-            // Ctrl = subtract); orbit/roll move to the other modes.
+            // Ctrl = subtract) — except **Alt+LMB**, which orbits so the view can be
+            // rotated without leaving Lasso mode.
             let lasso_mode = self.pick_mode == PickMode::Lasso;
             if !lasso_mode {
                 self.lasso_path.clear();
             }
             let delta = response.drag_delta();
-            let shift = ui.input(|i| i.modifiers.shift);
+            let mods = ui.input(|i| i.modifiers);
+            let (shift, alt) = (mods.shift, mods.alt);
+            // Alt+drag in Lasso mode orbits; otherwise an LMB lasso draws the polygon.
+            let lasso_draw = lasso_mode && !alt;
             if response.dragged_by(egui::PointerButton::Primary) {
-                if lasso_mode {
+                if lasso_draw {
                     if let Some(pos) = response.interact_pointer_pos() {
                         // Drop near-duplicate points (drag jitter) for a clean polygon.
                         if self.lasso_path.last().is_none_or(|&p| (p - pos).length() > 1.5) {
                             self.lasso_path.push(pos);
                         }
                     }
-                } else if shift {
+                } else if shift && !lasso_mode {
                     self.camera.roll(delta.x);
                 } else {
+                    // Non-lasso LMB, or Alt+LMB in lasso mode → free orbit.
                     self.camera.orbit(delta.x, delta.y);
                 }
             } else if response.dragged_by(egui::PointerButton::Secondary) {
@@ -2962,8 +2994,12 @@ impl App {
                 }
             }
         }
+        let mode = self.selection_mode;
         for res in results {
             let mol = &mut self.scene.molecules[res.mol];
+            // Expand this gesture's raw hits per the selection mode (exact atoms /
+            // whole residues / heavy + bonded H) before combining with the op.
+            let hits = pick::expand_selection(&mol.system, &mol.bonds, &res.atoms, mode);
             // Start from the current pending atoms (sorted, unique), then apply the op.
             let mut set: std::collections::BTreeSet<usize> = mol
                 .pending
@@ -2973,9 +3009,9 @@ impl App {
             match op {
                 // For Replace the set was just cleared above, so this is just the new
                 // atoms; Add unions them in.
-                LassoOp::Replace | LassoOp::Add => set.extend(res.atoms),
+                LassoOp::Replace | LassoOp::Add => set.extend(hits),
                 LassoOp::Subtract => {
-                    for a in &res.atoms {
+                    for a in &hits {
                         set.remove(a);
                     }
                 }

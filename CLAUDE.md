@@ -38,6 +38,7 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_PICK=1` (force hover-info pick mode + pick at the viewport center each frame, so
   the glow/info overlay can be screenshot headlessly) +
+  `MOLAR_VIS_DEBUG_SELMODE=residues|boundh` (set the lasso selection-expansion mode; default Atoms) +
   `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection on **every** molecule as an
   active/pending selection — exercises the lasso glow highlight + per-molecule accept/discard UI,
   incl. the multi-molecule case, without a mouse drag) +
@@ -144,10 +145,14 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   share `atom_in_rep(kind, name)` — the **style-specific contribution filter**: a Cartoon rep is
   hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal OT1/OT2/OXT — what the
   ribbon is built from, never side chains); every other style hits all selected atoms (Lines
-  included, via its isolated-atom crosses). `lasso_select` also captures each atom's effective
-  glow radius. Drives the hover-info overlay (`draw_pick_overlay`/`draw_glow_ring` in `app.rs`).
-  The lasso result is staged as a molecule's active (pending) selection, highlighted by a GPU
-  glow pass (not an egui overlay) — see *active selection* under M11. M11.
+  included, via its isolated-atom crosses). Drives the hover-info overlay
+  (`draw_pick_overlay`/`draw_glow_ring` in `app.rs`). The lasso result is staged as a molecule's
+  active (pending) selection, highlighted by a GPU glow pass (not an egui overlay) — see *active
+  selection* under M11. **`SelectionMode` + `expand_selection`** (overlay dropdown next to the pick
+  selector; `App::selection_mode`): how a lasso expands its raw hits per molecule — `Atoms` (exact),
+  `Residues` (any hit residue selected whole, by `resindex`), or `BoundH` (hit **heavy** atoms +
+  the H bonded to them via the guessed `bonds`; a hit H whose heavy atom isn't selected is dropped).
+  Applied to each gesture's hits in `finish_lasso` *before* the set op.
 
 ## Key architecture
 
@@ -282,18 +287,19 @@ Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + at
 a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
 **orthographic is the default**) and a **depth-cue** button (`GRADIENT` glyph) that toggles
 (`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), a **pick-mode
-dropdown** (`Off` default / `Hover info` / `Lasso select` — see `pick.rs` / M11; in `Lasso` a
-plain-LMB drag accumulates `App::lasso_path` (Shift+LMB still rolls), the polygon is drawn as a
-cyan polyline, and on release `finish_lasso` stages the enclosed atoms as each molecule's
-**active (pending) selection** (`Molecule::pending`, *not* a rep yet) — a glowing highlight +
-minimal accept/discard UI; **two-step**, so accepting is the only undoable part), and an
-**axes-gizmo dropdown**
+dropdown** (`Off` default / `Hover info` / `Lasso select` — see `pick.rs` / M11; in `Lasso` an
+LMB drag accumulates `App::lasso_path` and **Alt+LMB orbits** (rotate the view without leaving
+Lasso mode), the polygon is drawn as a cyan polyline, and on release `finish_lasso` stages the
+enclosed atoms as each molecule's **active (pending) selection** (`Molecule::pending`, *not* a rep
+yet) — a glowing highlight + minimal accept/discard UI; **two-step**, so accepting is the only
+undoable part), a **selection-mode dropdown** (`Atoms`/`Residues`/`Bound H` — how the lasso expands
+its hits; `App::selection_mode`, see `pick::expand_selection`), and an **axes-gizmo dropdown**
 (`ARROWS_OUT_CARDINAL`: an *On* checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,
 BottomLeft,BottomRight}`, default BottomRight — VMD-style orientation axes;
-`MOLAR_VIS_DEBUG_AXES=1` enables it headlessly). All four are the **same `overlay_button`
+`MOLAR_VIS_DEBUG_AXES=1` enables it headlessly). All are the **same `overlay_button`
 helper** — a fixed-height framed button whose glyph/label is **centered by its ink bounds**
 (`Galley::mesh_bounds`), not the font line-box, so Phosphor glyphs with different metrics line
-up vertically (`ui.button`/`selectable_label` center the line-box → ragged row); the two
+up vertically (`ui.button`/`selectable_label` center the line-box → ragged row); the
 dropdowns hang off `egui::Popup::menu(&resp)`. More scene controls will join it later.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
@@ -514,19 +520,25 @@ History labels via `describe_change` ("edit selection", "change coloring",
   position + a **framed** lower-left info box `name resname resid` / `x, y, z` (real coords, **nm**).
   `MOLAR_VIS_DEBUG_PICK=1` forces a viewport-center pick (headless verification — hover can't be
   simulated on this Wayland box).
-  - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, a plain-LMB drag in `draw_viewport`
-    accumulates `App::lasso_path` (pixel coords; Shift+LMB still rolls, RMB/MMB/wheel still
-    navigate), drawn as a cyan polyline; on release `finish_lasso` maps the path → clip-space NDC
-    polygon and calls `lasso_select`, which projects every **style-eligible, displayed** atom (any
-    periodic image inside the polygon counts, **even-odd** `point_in_polygon`) and groups hits per
-    molecule (`LassoSelection { atoms, radii }`, deduped/sorted; `radii` = each atom's effective
-    glow size from the style it was captured in). The hits become each molecule's selection text
-    via `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …` string (consecutive
-    runs → inclusive ranges; 0-based global atom index).
+  - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, an LMB drag in `draw_viewport`
+    accumulates `App::lasso_path` (pixel coords; **Alt+LMB orbits** instead — rotate the view without
+    leaving Lasso mode; RMB/MMB/wheel still navigate), drawn as a cyan polyline; on release
+    `finish_lasso` maps the path → clip-space NDC polygon and calls `lasso_select`, which projects
+    every **style-eligible, displayed** atom (any periodic image inside the polygon counts,
+    **even-odd** `point_in_polygon`) and groups hits per molecule (`LassoSelection { mol, atoms }`,
+    deduped/sorted). The hits become each molecule's selection text via
+    `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …` string (consecutive runs
+    → inclusive ranges; 0-based global atom index).
+  - **Selection mode** (`SelectionMode`, overlay dropdown next to the pick selector;
+    `pick::expand_selection`): each gesture's raw hits are expanded per molecule **before** the set
+    op — `Atoms` (exact), `Residues` (any hit residue selected whole, grouped by `resindex`), or
+    `Bound H` (hit **heavy** atoms + the H bonded to them via the guessed `bonds`; a hit H whose heavy
+    atom isn't itself selected is dropped). `MOLAR_VIS_DEBUG_SELMODE=residues|boundh` sets it
+    headlessly. Tested: `expand_residues_selects_whole_residue`, `expand_bound_h` (synthetic methane).
   - **Lasso set ops** (release modifier; `LassoOp` in `app.rs`): plain drag **replaces** the active
     selection, **Shift**+drag **adds** (unions), **Ctrl/⌘**+drag **subtracts** — merged per molecule
     in `finish_lasso` via a `BTreeSet` over the existing pending atoms (empty result → clears it). In
-    Lasso mode *any* LMB drag draws the polygon (orbit/roll live in the other pick modes).
+    Lasso mode an LMB drag draws the polygon unless **Alt** is held (then it orbits).
   - **Active (pending) selection — two-step commit** (`scene::PendingSelection`,
     `Molecule::pending`): a lasso does **not** make a rep directly. It stages a *pending* selection
     that's **view state, not undoable, excluded from `EditState`**, shown two ways: (1) a **GPU glow

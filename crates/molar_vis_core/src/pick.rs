@@ -34,6 +34,93 @@ impl PickMode {
     }
 }
 
+/// How a raw set of hit atoms (from a lasso) is expanded into the final selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SelectionMode {
+    /// Exactly the atoms hit.
+    #[default]
+    Atoms,
+    /// Every atom of any residue that has at least one hit atom.
+    Residues,
+    /// Hit **heavy** atoms plus the hydrogens bonded to them. A hit hydrogen whose
+    /// bonded heavy atom isn't itself hit is dropped ("lone H are not selected").
+    BoundH,
+}
+
+impl SelectionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SelectionMode::Atoms => "Atoms",
+            SelectionMode::Residues => "Residues",
+            SelectionMode::BoundH => "Bound H",
+        }
+    }
+}
+
+/// Expand a raw set of hit atom indices according to `mode`, using the molecule's
+/// topology (`system`) for residue/element lookup and its guessed `bonds` for the
+/// hydrogen attachment. Returns sorted, de-duplicated global atom indices; `Atoms`
+/// is the identity. Called once per lasso gesture (not per frame), so the single
+/// `select_all` pass over the molecule is fine.
+pub fn expand_selection(
+    system: &System,
+    bonds: &[[usize; 2]],
+    atoms: &[usize],
+    mode: SelectionMode,
+) -> Vec<usize> {
+    use std::collections::{BTreeSet, HashSet};
+    if atoms.is_empty() || mode == SelectionMode::Atoms {
+        return atoms.to_vec();
+    }
+    let want: HashSet<usize> = atoms.iter().copied().collect();
+    let all = system.select_all();
+    let bound = system.bind(&all);
+    match mode {
+        SelectionMode::Atoms => unreachable!(),
+        SelectionMode::Residues => {
+            // One pass: record each atom's residue, and which residues are hit.
+            let mut by_res: Vec<(usize, usize)> = Vec::new(); // (atom id, resindex)
+            let mut hit_res: HashSet<usize> = HashSet::new();
+            for p in bound.iter_particle() {
+                by_res.push((p.id, p.atom.resindex));
+                if want.contains(&p.id) {
+                    hit_res.insert(p.atom.resindex);
+                }
+            }
+            let mut out: Vec<usize> = by_res
+                .into_iter()
+                .filter(|&(_, r)| hit_res.contains(&r))
+                .map(|(id, _)| id)
+                .collect();
+            out.sort_unstable();
+            out
+        }
+        SelectionMode::BoundH => {
+            // Hydrogen flag per atom id (atomic number 1).
+            let mut is_h: HashSet<usize> = HashSet::new();
+            for p in bound.iter_particle() {
+                if p.atom.atomic_number == 1 {
+                    is_h.insert(p.id);
+                }
+            }
+            // Keep the hit heavy atoms; a snapshot drives the bond test so newly
+            // added H can't chain further.
+            let heavy: BTreeSet<usize> =
+                want.iter().copied().filter(|i| !is_h.contains(i)).collect();
+            let mut out = heavy.clone();
+            for &[a, b] in bonds {
+                if heavy.contains(&a) && is_h.contains(&b) {
+                    out.insert(b);
+                }
+                if heavy.contains(&b) && is_h.contains(&a) {
+                    out.insert(a);
+                }
+            }
+            out.into_iter().collect()
+        }
+    }
+}
+
 /// A hovered atom. `real` is the atom's actual stored coordinate; `display` is where
 /// it's drawn (smoothed + periodic shift) — used to place the glow.
 pub struct PickHit {
@@ -464,5 +551,105 @@ mod tests {
         }
         // And the backbone is a strict subset of the protein selection.
         assert!(atoms.len() < n_protein, "expected fewer than all protein atoms");
+    }
+
+    #[test]
+    fn expand_atoms_is_identity() {
+        let scene = scene_with_rep(RepKind::Vdw, "all");
+        let mol = &scene.molecules[0];
+        let atoms = vec![5usize, 1, 9, 1]; // unsorted, with a dup
+        let out = expand_selection(&mol.system, &mol.bonds, &atoms, SelectionMode::Atoms);
+        assert_eq!(out, atoms, "Atoms mode must be the identity (no reorder/dedup)");
+    }
+
+    #[test]
+    fn expand_residues_selects_whole_residue() {
+        let scene = scene_with_rep(RepKind::Vdw, "all");
+        let mol = &scene.molecules[0];
+
+        // resindex of every atom, and all atoms grouped by resindex.
+        let all = mol.system.select_all();
+        let bound = mol.system.bind(&all);
+        let mut resindex_by_id = vec![0usize; mol.n_atoms];
+        let mut atoms_in_res: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+        for p in bound.iter_particle() {
+            resindex_by_id[p.id] = p.atom.resindex;
+            atoms_in_res.entry(p.atom.resindex).or_default().push(p.id);
+        }
+
+        // Seed with one atom from residue 0 and one from a later residue.
+        let r0 = 0usize;
+        let later = resindex_by_id[mol.n_atoms - 1];
+        let seed = vec![atoms_in_res[&r0][0], atoms_in_res[&later][0]];
+        let out = expand_selection(&mol.system, &mol.bonds, &seed, SelectionMode::Residues);
+
+        // Output is exactly the union of the two residues' atoms, sorted.
+        let mut expected: Vec<usize> = atoms_in_res[&r0]
+            .iter()
+            .chain(atoms_in_res[&later].iter())
+            .copied()
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(out, expected);
+        // Every output atom shares a hit residue; nothing leaks in.
+        for &id in &out {
+            assert!(resindex_by_id[id] == r0 || resindex_by_id[id] == later);
+        }
+        assert!(out.len() > seed.len(), "residue expansion should grow the set");
+    }
+
+    /// Build a tiny methane (C + 4 bonded H) plus one far-away "lone" H, written as
+    /// a PDB and loaded through `data::load` so bonds are guessed exactly as in the
+    /// app. Atom indices: 0=C, 1..=4=bonded H, 5=lone H.
+    fn methane_with_lone_h() -> crate::data::RawMolecule {
+        // Tetrahedral C-H ≈ 1.09 Å (bonded); lone H 8.7 Å away (unbonded).
+        let coords = [
+            ("C", 0.0, 0.0, 0.0),
+            ("H1", 0.629, 0.629, 0.629),
+            ("H2", -0.629, -0.629, 0.629),
+            ("H3", -0.629, 0.629, -0.629),
+            ("H4", 0.629, -0.629, -0.629),
+            ("H5", 5.0, 5.0, 5.0),
+        ];
+        let mut pdb = String::new();
+        for (i, (name, x, y, z)) in coords.iter().enumerate() {
+            let elem = if name.starts_with('C') { "C" } else { "H" };
+            // Columns: name 13-16, x/y/z 31-54 (8.3), element 77-78.
+            pdb.push_str(&format!(
+                "ATOM  {:>5} {:^4} MOL A   1    {:>8.3}{:>8.3}{:>8.3}  1.00  0.00          {:>2}\n",
+                i + 1, name, x, y, z, elem
+            ));
+        }
+        pdb.push_str("END\n");
+        let path = std::env::temp_dir().join("molar_vis_methane_test.pdb");
+        std::fs::write(&path, pdb).expect("write methane pdb");
+        let raw = crate::data::load(&path).expect("load methane pdb");
+        let _ = std::fs::remove_file(&path);
+        raw
+    }
+
+    #[test]
+    fn expand_bound_h() {
+        let raw = methane_with_lone_h();
+        // Sanity: the loader read the elements and guessed the 4 C–H bonds.
+        let all = raw.system.select_all();
+        let bound = raw.system.bind(&all);
+        let z: Vec<u8> = bound.iter_particle().map(|p| p.atom.atomic_number).collect();
+        assert_eq!(z, vec![6, 1, 1, 1, 1, 1], "expected C + 5 H");
+        let c_bonds = raw.bonds.iter().filter(|b| b.contains(&0)).count();
+        assert_eq!(c_bonds, 4, "carbon should have 4 bonded H (lone H unbonded)");
+
+        let exp = |atoms: &[usize]| {
+            expand_selection(&raw.system, &raw.bonds, atoms, SelectionMode::BoundH)
+        };
+
+        // Heavy atom hit → it plus all 4 bonded H.
+        assert_eq!(exp(&[0]), vec![0, 1, 2, 3, 4]);
+        // Heavy + a far lone H → lone H dropped, bonded H added.
+        assert_eq!(exp(&[0, 5]), vec![0, 1, 2, 3, 4]);
+        // Only a bonded H hit (its carbon not selected) → dropped.
+        assert_eq!(exp(&[1]), Vec::<usize>::new());
+        // Only the lone H → dropped.
+        assert_eq!(exp(&[5]), Vec::<usize>::new());
     }
 }
