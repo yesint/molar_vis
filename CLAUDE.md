@@ -38,8 +38,9 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_PICK=1` (force hover-info pick mode + pick at the viewport center each frame, so
   the glow/info overlay can be screenshot headlessly) +
-  `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection of mol 0 as an active/pending
-  selection — exercises the lasso glow highlight + accept/discard UI without a mouse drag) +
+  `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection on **every** molecule as an
+  active/pending selection — exercises the lasso glow highlight + per-molecule accept/discard UI,
+  incl. the multi-molecule case, without a mouse drag) +
   `MOLAR_VIS_DEBUG_AXES=1` (show the VMD-style orientation-axes gizmo) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises

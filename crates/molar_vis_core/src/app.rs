@@ -1311,16 +1311,21 @@ impl App {
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_PENDING=<selection> stages that selection
-        // of mol 0 as an active (pending) selection — exercises the lasso glow +
-        // accept/discard UI without simulating a mouse drag.
+        // as an active (pending) selection on **every** molecule — exercises the lasso
+        // glow + per-molecule accept/discard UI (incl. the multi-molecule case) without
+        // simulating a mouse drag.
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_PENDING") {
-            if let Some(mol) = scene.molecules.first_mut() {
+            for mol in &mut scene.molecules {
                 if let Ok((_, sel)) = scene::evaluate(&mol.system, &sel_text) {
                     let atoms: Vec<usize> = {
                         let bound = mol.system.bind(&sel);
                         bound.iter_particle().map(|p| p.id).collect()
                     };
-                    mol.pending = Some(scene::PendingSelection { sel_text, atoms });
+                    if atoms.is_empty() {
+                        continue;
+                    }
+                    mol.pending = Some(scene::PendingSelection { sel_text: sel_text.clone(), atoms });
+                    mol.reps_open = true;
                     mol.glow_dirty = true;
                 }
             }

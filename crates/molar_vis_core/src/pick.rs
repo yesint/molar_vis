@@ -398,6 +398,39 @@ mod tests {
     }
 
     #[test]
+    fn lasso_selects_in_every_visible_molecule() {
+        // Two overlapping molecules (same structure, same coords): a full-screen
+        // lasso must return one result per molecule, each with its own atom set.
+        let mut scene = scene_with_rep(RepKind::Vdw, "all");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
+        let raw = crate::data::load(std::path::Path::new(path)).expect("load 2lao.pdb");
+        scene.add(raw, RepKind::Vdw);
+        // Evaluate the second molecule's default rep so it has an atom set too.
+        {
+            let mol = &mut scene.molecules[1];
+            let (expr, sel) = crate::scene::evaluate(&mol.system, "all").expect("eval");
+            mol.reps[0].kind = RepKind::Vdw;
+            mol.reps[0].sel_text = "all".to_string();
+            mol.reps[0].expr = Some(expr);
+            mol.reps[0].sel = Some(sel);
+        }
+        let (min, max) = scene.bbox().unwrap();
+        let cam = Camera::frame_bbox(min, max);
+        let hits = lasso_select(&scene, cam.view(), cam.proj(1.0), &full_screen_polygon());
+        assert_eq!(hits.len(), 2, "lasso should hit both visible molecules");
+        assert_eq!(hits[0].mol, 0);
+        assert_eq!(hits[1].mol, 1);
+        assert_eq!(hits[0].atoms.len(), scene.molecules[0].n_atoms);
+        assert_eq!(hits[1].atoms.len(), scene.molecules[1].n_atoms);
+
+        // A hidden molecule is skipped entirely.
+        scene.molecules[0].visible = false;
+        let hits = lasso_select(&scene, cam.view(), cam.proj(1.0), &full_screen_polygon());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].mol, 1);
+    }
+
+    #[test]
     fn lasso_cartoon_selects_only_backbone() {
         let scene = scene_with_rep(RepKind::Cartoon, "protein");
         let mol = &scene.molecules[0];
