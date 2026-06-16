@@ -327,6 +327,21 @@ pub fn lasso_select(scene: &Scene, view: Mat4, proj: Mat4, polygon: &[Vec2]) -> 
         let c = vp * w.extend(1.0);
         (c.w > 0.0).then(|| Vec2::new(c.x / c.w, c.y / c.w))
     };
+    // Screen-space (NDC) bounding box of the polygon: a cheap 4-compare reject so the
+    // O(vertices) even-odd `point_in_polygon` only runs for atoms projecting into the
+    // lasso's rect — the rest (the vast majority) are dropped in a few ops.
+    let (mut pmin, mut pmax) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for v in polygon {
+        pmin = pmin.min(*v);
+        pmax = pmax.max(*v);
+    }
+    let in_polygon = |ndc: Vec2| -> bool {
+        ndc.x >= pmin.x
+            && ndc.x <= pmax.x
+            && ndc.y >= pmin.y
+            && ndc.y <= pmax.y
+            && point_in_polygon(ndc, polygon)
+    };
 
     let mut out = Vec::new();
     for (mi, mol) in scene.molecules.iter().enumerate() {
@@ -374,7 +389,7 @@ pub fn lasso_select(scene: &Scene, view: Mat4, proj: Mat4, polygon: &[Vec2]) -> 
                 let base = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
                 let inside = offsets
                     .iter()
-                    .any(|&off| project(base + off).is_some_and(|ndc| point_in_polygon(ndc, polygon)));
+                    .any(|&off| project(base + off).is_some_and(in_polygon));
                 if inside {
                     picked.insert(p.id);
                 }
