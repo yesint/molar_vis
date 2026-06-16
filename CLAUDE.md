@@ -272,7 +272,7 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 ## UI layout
 
 **Left panel** = toolbar + the molecule list directly (no `Scene`/`Molecules`
-collapsing headers; global scene controls moved to the viewport overlay below).
+collapsing headers; global scene controls live in the top view toolbar, below).
 Toolbar: **`Open`** button (`App::open_structure` — native `rfd` picker filtered to
 topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
 molecule, frames the camera on the first one, undoable via the normal checkpoint) · then
@@ -283,24 +283,30 @@ Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + at
 `Camera::focus_bbox`) · eye · trash; a trajectory control bar + slider appears below when
 >1 frame; reps listed (indented) when the molecule caret is open.
 
-**Viewport overlay** (`draw_scene_overlay`, top-left `egui::Area` over the 3D image):
-a single **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
-**orthographic is the default**) and a **depth-cue** button (`GRADIENT` glyph) that toggles
-(`cue_panel_open`) an inline cue panel (enabled + Strength/Start sliders), a **pick-mode
-dropdown** (`Off` default / `Hover info` / `Lasso select` — see `pick.rs` / M11; in `Lasso` an
-LMB drag accumulates `App::lasso_path` and **Alt+LMB orbits** (rotate the view without leaving
-Lasso mode), the polygon is drawn as a cyan polyline, and on release `finish_lasso` stages the
-enclosed atoms as each molecule's **active (pending) selection** (`Molecule::pending`, *not* a rep
-yet) — a glowing highlight + minimal accept/discard UI; **two-step**, so accepting is the only
-undoable part), a **selection-mode dropdown** (`Atoms`/`Residues`/`Bound H` — how the lasso expands
-its hits; `App::selection_mode`, see `pick::expand_selection`), and an **axes-gizmo dropdown**
-(`ARROWS_OUT_CARDINAL`: an *On* checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,
-BottomLeft,BottomRight}`, default BottomRight — VMD-style orientation axes;
-`MOLAR_VIS_DEBUG_AXES=1` enables it headlessly). All are the **same `overlay_button`
+**Top view toolbar** (`draw_view_toolbar`, an `egui::Panel::top("view_toolbar")` *above*
+the viewport — a real panel, **not** a floating `Area` over the 3D image; spans the central
+area right of the left panel, added in `ui()` between the left panel and `draw_viewport`).
+Two groups split by a `ui.separator()`:
+**view** — a **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
+**orthographic is the default**), a **depth-cue** button (`GRADIENT` glyph, filled when the cue
+is enabled) opening a `Popup::menu` cue panel (enabled + Strength/Start sliders — a popup, so the
+toolbar stays fixed-height), and an **axes-gizmo dropdown** (`ARROWS_OUT_CARDINAL`: an *On*
+checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,BottomLeft,BottomRight}`, default
+BottomRight — VMD-style orientation axes drawn onto the 3D image by `draw_axes_overlay`;
+`MOLAR_VIS_DEBUG_AXES=1` enables it headlessly);
+**selection** — a **pick-mode dropdown** (`Off` default / `Hover info` / `Lasso select` — see
+`pick.rs` / M11; in `Lasso` an LMB drag accumulates `App::lasso_path` and **Alt+LMB orbits**
+(rotate the view without leaving Lasso mode), the polygon is drawn as a cyan polyline, and on
+release `finish_lasso` stages the enclosed atoms as each molecule's **active (pending) selection**
+(`Molecule::pending`, *not* a rep yet) — a glowing highlight + minimal accept/discard UI;
+**two-step**, so accepting is the only undoable part) and a **selection-mode dropdown**
+(`Atoms`/`Residues`/`Bound H` — how the lasso expands its hits; `App::selection_mode`, see
+`pick::expand_selection`). In Lasso mode the trailing **modifier hint** (rotate/add/subtract)
+follows on the right. All buttons are the **same `overlay_button`
 helper** — a fixed-height framed button whose glyph/label is **centered by its ink bounds**
 (`Galley::mesh_bounds`), not the font line-box, so Phosphor glyphs with different metrics line
 up vertically (`ui.button`/`selectable_label` center the line-box → ragged row); the
-dropdowns hang off `egui::Popup::menu(&resp)`. More scene controls will join it later.
+dropdowns/popups hang off `egui::Popup::menu(&resp)`. More scene controls will join it later.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):
@@ -494,8 +500,9 @@ History labels via `describe_change` ("edit selection", "change coloring",
   SAS-area API) are MSMS-style crack-prone and were abandoned; Ball-Pivoting re-meshing worked
   visually but was too slow. The grid is the only reliably watertight, scalable approach.
 - ✅ **UI revamp + installable** — no `Scene`/`Molecules` headers (molecules listed directly);
-  global scene controls (projection cycle + depth-cue) moved to a floating top-left
-  **viewport overlay** (`draw_scene_overlay`); per-rep **settings caret** (not a gear) opening
+  view/selection controls (projection · depth-cue · axes · pick mode · selection mode) live in a
+  **top view toolbar** (`draw_view_toolbar`, `Panel::top` above the viewport — was a floating
+  `draw_scene_overlay` Area on the 3D image); per-rep **settings caret** (not a gear) opening
   a **tabbed** panel **[Style] / [Traj] / [Periodic]** (`SettingsTab`); selection errors shown
   under the field; VMD mouse nav extended (roll on Shift+LMB, dolly on Shift+RMB) and
   zoom-to-fit fills ~90%. Crate is **installable** from GitHub git-deps (no local paths/patch).

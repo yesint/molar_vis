@@ -1041,9 +1041,7 @@ pub struct App {
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
-    /// Whether the depth-cue panel in the viewport overlay is expanded.
-    cue_panel_open: bool,
-    /// Picking mode (viewport-overlay dropdown). `HoverInfo` shows the hovered
+    /// Picking mode (top view-toolbar dropdown). `HoverInfo` shows the hovered
     /// atom's identity + real coords and glows its outline; `Lasso` drags a
     /// freehand selection polygon.
     pick_mode: PickMode,
@@ -1365,7 +1363,6 @@ impl App {
             editing_rep: None,
             load_dialog: None,
             loaders: HashMap::new(),
-            cue_panel_open: false,
             // MOLAR_VIS_DEBUG_PICK forces hover-info on (and picks at the viewport
             // center each frame; see draw_viewport) for headless verification.
             pick_mode: if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
@@ -1755,6 +1752,9 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
+        // View/selection controls live in a top toolbar above the viewport (right of
+        // the left panel); the central panel then fills the rest with the 3D image.
+        self.draw_view_toolbar(ui);
         self.draw_viewport(ui, frame);
 
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
@@ -1792,122 +1792,43 @@ impl App {
         view_dirty
     }
 
-    /// Small floating scene-controls overlay anchored to the viewport's top-left:
-    /// a projection-cycle button and a depth-cue toggle that expands a cue panel.
-    /// (More controls — lighting/background/etc. — will join it later.)
-    fn draw_scene_overlay(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        egui::Area::new(ui.id().with("scene_overlay"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
+    /// Top toolbar over the viewport (a real panel *above* the 3D image, not a
+    /// floating overlay on it): **view** controls (projection · depth-cue popup ·
+    /// orientation-axes dropdown) and **selection** controls (pick mode · selection
+    /// mode), grouped by a separator. The lasso modifier hint trails on the right.
+    /// All buttons are the shared `overlay_button` (uniform height, framed,
+    /// ink-centered glyph); dropdowns/popups hang off `egui::Popup::menu`.
+    fn draw_view_toolbar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("view_toolbar")
+            .frame(
+                egui::Frame::default()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(6, 4)),
+            )
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
-                    // All four controls are the same `overlay_button` (uniform
-                    // height, framed, ink-centered glyph); `left_to_right` centres
-                    // them on the row. Dropdowns hang off a `Popup::menu`.
-                    ui.horizontal(|ui| {
-                        // Projection toggle (perspective ↔ orthographic).
-                        let persp = self.camera.is_perspective();
-                        let (glyph, tip) = if persp {
-                            (icon::PERSPECTIVE, "Perspective — click for orthographic")
+
+                    // — View controls —
+                    // Projection toggle (perspective ↔ orthographic).
+                    let persp = self.camera.is_perspective();
+                    let (glyph, tip) = if persp {
+                        (icon::PERSPECTIVE, "Perspective — click for orthographic")
+                    } else {
+                        (icon::CUBE, "Orthographic — click for perspective")
+                    };
+                    if overlay_button(ui, glyph, false).on_hover_text(tip).clicked() {
+                        self.camera.projection = if persp {
+                            Projection::Orthographic
                         } else {
-                            (icon::CUBE, "Orthographic — click for perspective")
+                            Projection::Perspective
                         };
-                        if overlay_button(ui, glyph, false).on_hover_text(tip).clicked() {
-                            self.camera.projection = if persp {
-                                Projection::Orthographic
-                            } else {
-                                Projection::Perspective
-                            };
-                        }
-                        // Depth-cue panel toggle (filled while open).
-                        if overlay_button(ui, icon::GRADIENT, self.cue_panel_open)
-                            .on_hover_text("Depth cue")
-                            .clicked()
-                        {
-                            self.cue_panel_open = !self.cue_panel_open;
-                        }
-                        // Pick mode dropdown (label + caret). Off by default.
-                        let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
-                        let resp = overlay_button(ui, &pick_label, false).on_hover_text("Pick mode");
-                        egui::Popup::menu(&resp).show(|ui| {
-                            ui.selectable_value(
-                                &mut self.pick_mode,
-                                PickMode::Off,
-                                PickMode::Off.label(),
-                            );
-                            ui.selectable_value(
-                                &mut self.pick_mode,
-                                PickMode::HoverInfo,
-                                PickMode::HoverInfo.label(),
-                            );
-                            ui.selectable_value(
-                                &mut self.pick_mode,
-                                PickMode::Lasso,
-                                PickMode::Lasso.label(),
-                            );
-                        });
-                        // Selection-mode dropdown (how a lasso expands its hits).
-                        let sel_label =
-                            format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
-                        let resp = overlay_button(ui, &sel_label, false).on_hover_text(
-                            "Selection mode — how a lasso expands its hits:\n\
-                             Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H)",
-                        );
-                        egui::Popup::menu(&resp).show(|ui| {
-                            for m in [
-                                SelectionMode::Atoms,
-                                SelectionMode::Residues,
-                                SelectionMode::BoundH,
-                            ] {
-                                ui.selectable_value(&mut self.selection_mode, m, m.label());
-                            }
-                        });
-                        // Orientation-axes dropdown: on/off + which corner.
-                        let resp = overlay_button(ui, icon::ARROWS_OUT_CARDINAL, self.axes_on)
-                            .on_hover_text("Orientation axes");
-                        egui::Popup::menu(&resp).show(|ui| {
-                            ui.checkbox(&mut self.axes_on, "On");
-                            ui.add_enabled_ui(self.axes_on, |ui| {
-                                ui.add_space(2.0);
-                                // 2×2 of corner radio buttons (top row, bottom row).
-                                egui::Grid::new("axes_corner")
-                                    .spacing(egui::vec2(18.0, 6.0))
-                                    .show(ui, |ui| {
-                                        ui.radio_value(&mut self.axes_corner, Corner::TopLeft, "");
-                                        ui.radio_value(&mut self.axes_corner, Corner::TopRight, "");
-                                        ui.end_row();
-                                        ui.radio_value(&mut self.axes_corner, Corner::BottomLeft, "");
-                                        ui.radio_value(&mut self.axes_corner, Corner::BottomRight, "");
-                                        ui.end_row();
-                                    });
-                            });
-                        });
-                    });
-                    // In Lasso mode, a held modifier changes the set operation (or, for
-                    // Alt, orbits the view) — show it below the pick selector (matches
-                    // `finish_lasso`'s `LassoOp` and `draw_viewport`'s Alt orbit).
-                    if self.pick_mode == PickMode::Lasso {
-                        let m = ui.input(|i| i.modifiers);
-                        let hint = if m.alt {
-                            Some((icon::ARROWS_CLOCKWISE, "rotate view", egui::Color32::from_rgb(150, 190, 230)))
-                        } else if m.shift {
-                            Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
-                        } else if m.command {
-                            Some((icon::MINUS_CIRCLE, "subtract from selection", egui::Color32::from_rgb(230, 140, 140)))
-                        } else {
-                            None
-                        };
-                        if let Some((glyph, text, color)) = hint {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                ui.colored_label(color, egui::RichText::new(glyph).size(16.0));
-                                ui.colored_label(color, text);
-                            });
-                        }
                     }
-                    if self.cue_panel_open {
-                        ui.separator();
+                    // Depth-cue popup (button filled when the cue is enabled). The
+                    // panel is a popup so the toolbar keeps a fixed height.
+                    let cue_on = self.camera.depth_cue.enabled;
+                    let resp = overlay_button(ui, icon::GRADIENT, cue_on).on_hover_text("Depth cue");
+                    egui::Popup::menu(&resp).show(|ui| {
                         let cue = &mut self.camera.depth_cue;
                         ui.checkbox(&mut cue.enabled, "Depth cue").on_hover_text(
                             "Fade distant geometry toward the background for depth perception",
@@ -1931,6 +1852,74 @@ impl App {
                                     ui.end_row();
                                 });
                         });
+                    });
+                    // Orientation-axes dropdown: on/off + which corner.
+                    let resp = overlay_button(ui, icon::ARROWS_OUT_CARDINAL, self.axes_on)
+                        .on_hover_text("Orientation axes");
+                    egui::Popup::menu(&resp).show(|ui| {
+                        ui.checkbox(&mut self.axes_on, "On");
+                        ui.add_enabled_ui(self.axes_on, |ui| {
+                            ui.add_space(2.0);
+                            // 2×2 of corner radio buttons (top row, bottom row).
+                            egui::Grid::new("axes_corner")
+                                .spacing(egui::vec2(18.0, 6.0))
+                                .show(ui, |ui| {
+                                    ui.radio_value(&mut self.axes_corner, Corner::TopLeft, "");
+                                    ui.radio_value(&mut self.axes_corner, Corner::TopRight, "");
+                                    ui.end_row();
+                                    ui.radio_value(&mut self.axes_corner, Corner::BottomLeft, "");
+                                    ui.radio_value(&mut self.axes_corner, Corner::BottomRight, "");
+                                    ui.end_row();
+                                });
+                        });
+                    });
+
+                    ui.separator();
+
+                    // — Selection controls —
+                    // Pick mode dropdown (label + caret). Off by default.
+                    let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
+                    let resp = overlay_button(ui, &pick_label, false).on_hover_text("Pick mode");
+                    egui::Popup::menu(&resp).show(|ui| {
+                        for m in [PickMode::Off, PickMode::HoverInfo, PickMode::Lasso] {
+                            ui.selectable_value(&mut self.pick_mode, m, m.label());
+                        }
+                    });
+                    // Selection-mode dropdown (how a lasso expands its hits).
+                    let sel_label = format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
+                    let resp = overlay_button(ui, &sel_label, false).on_hover_text(
+                        "Selection mode — how a lasso expands its hits:\n\
+                         Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H)",
+                    );
+                    egui::Popup::menu(&resp).show(|ui| {
+                        for m in [
+                            SelectionMode::Atoms,
+                            SelectionMode::Residues,
+                            SelectionMode::BoundH,
+                        ] {
+                            ui.selectable_value(&mut self.selection_mode, m, m.label());
+                        }
+                    });
+
+                    // In Lasso mode, a held modifier changes the set operation (or, for
+                    // Alt, orbits the view) — trail the hint on the right (matches
+                    // `finish_lasso`'s `LassoOp` and `draw_viewport`'s Alt orbit).
+                    if self.pick_mode == PickMode::Lasso {
+                        let m = ui.input(|i| i.modifiers);
+                        let hint = if m.alt {
+                            Some((icon::ARROWS_CLOCKWISE, "rotate view", egui::Color32::from_rgb(150, 190, 230)))
+                        } else if m.shift {
+                            Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
+                        } else if m.command {
+                            Some((icon::MINUS_CIRCLE, "subtract from selection", egui::Color32::from_rgb(230, 140, 140)))
+                        } else {
+                            None
+                        };
+                        if let Some((glyph, text, color)) = hint {
+                            ui.separator();
+                            ui.colored_label(color, egui::RichText::new(glyph).size(16.0));
+                            ui.colored_label(color, text);
+                        }
                     }
                 });
             });
@@ -2949,13 +2938,11 @@ impl App {
                 self.finish_lasso(rect, size_px, op);
             }
 
-            // VMD-style orientation axes gizmo in the chosen corner.
+            // VMD-style orientation axes gizmo in the chosen corner (a gizmo painted
+            // onto the 3D image; its on/off + corner live in the top view toolbar).
             if self.axes_on {
                 draw_axes_overlay(ui, rect, &self.camera, self.axes_corner);
             }
-
-            // Floating scene controls (projection / depth cue) over the viewport.
-            self.draw_scene_overlay(ui, rect);
         });
     }
 
