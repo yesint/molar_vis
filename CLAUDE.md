@@ -304,14 +304,15 @@ toolbar stays fixed-height), and an **axes-gizmo dropdown** (`ARROWS_OUT_CARDINA
 checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,BottomLeft,BottomRight}`, default
 BottomRight — VMD-style orientation axes drawn onto the 3D image by `draw_axes_overlay`;
 `MOLAR_VIS_DEBUG_AXES=1` enables it headlessly);
-**selection** — a **pick-mode dropdown** (`Off` default / `Hover info` / `Lasso select` — see
-`pick.rs` / M11; in `Lasso` an LMB drag accumulates `App::lasso_path` and **Alt+LMB orbits**
+**selection** — a **`Sel. mode`-labelled pick-mode dropdown** (`Off` default / `Hover` / `Lasso` —
+see `pick.rs` / M11; in `Lasso` an LMB drag accumulates `App::lasso_path` and **Alt+LMB orbits**
 (rotate the view without leaving Lasso mode), the polygon is drawn as a cyan polyline, and on
 release `finish_lasso` stages the enclosed atoms as each molecule's **active (pending) selection**
 (`Molecule::pending`, *not* a rep yet) — a glowing highlight + minimal accept/discard UI;
-**two-step**, so accepting is the only undoable part) and a **selection-mode dropdown**
-(`Atoms`/`Residues`/`Bound H` — how the lasso expands its hits; `App::selection_mode`, see
-`pick::expand_selection`). In Lasso mode the trailing **modifier hint** (rotate/add/subtract)
+**two-step**, so accepting is the only undoable part; tooltip "Selection mode") and — **only when
+the selection mode isn't `Off`** — an **expand-mode dropdown** (`Atoms`/`Residues`/`Bound H` — how
+a hit expands; `App::selection_mode`, see `pick::expand_selection`; tooltip "Expand mode"). In Lasso
+mode the trailing **modifier hint** (rotate/add/subtract)
 follows on the right. All buttons are the **same `overlay_button`
 helper** — a fixed-height framed button whose glyph/label is **centered by its ink bounds**
 (`Galley::mesh_bounds`), not the font line-box, so Phosphor glyphs with different metrics line

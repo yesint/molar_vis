@@ -28,8 +28,8 @@ impl PickMode {
     pub fn label(self) -> &'static str {
         match self {
             PickMode::Off => "Off",
-            PickMode::HoverInfo => "Hover info",
-            PickMode::Lasso => "Lasso select",
+            PickMode::HoverInfo => "Hover",
+            PickMode::Lasso => "Lasso",
         }
     }
 }

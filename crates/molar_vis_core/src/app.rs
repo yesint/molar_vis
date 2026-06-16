@@ -2082,36 +2082,41 @@ impl App {
                     ui.separator();
 
                     // — Selection controls —
-                    // Pick mode dropdown (label + caret). Off by default.
+                    // Pick/selection-mode dropdown (label + caret). Off by default.
+                    ui.label("Sel. mode");
                     let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
-                    let resp = overlay_button(ui, &pick_label, false).on_hover_text("Pick mode");
+                    let resp = overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
                     egui::Popup::menu(&resp).show(|ui| {
                         for m in [PickMode::Off, PickMode::HoverInfo, PickMode::Lasso] {
                             ui.selectable_value(&mut self.pick_mode, m, m.label());
                         }
                     });
-                    // Selection-mode dropdown (how a lasso/hover expands its hits).
-                    // `Bound H` is meaningless for single-atom hover picking, so it's
-                    // hidden in HoverInfo mode (and a stale value snaps back to Atoms).
-                    let hover = self.pick_mode == PickMode::HoverInfo;
-                    if hover && self.selection_mode == SelectionMode::BoundH {
-                        self.selection_mode = SelectionMode::Atoms;
-                    }
-                    let modes: &[SelectionMode] = if hover {
-                        &[SelectionMode::Atoms, SelectionMode::Residues]
-                    } else {
-                        &[SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH]
-                    };
-                    let sel_label = format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
-                    let resp = overlay_button(ui, &sel_label, false).on_hover_text(
-                        "Selection mode — how a lasso/hover expands its hits:\n\
-                         Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H, lasso only)",
-                    );
-                    egui::Popup::menu(&resp).show(|ui| {
-                        for &m in modes {
-                            ui.selectable_value(&mut self.selection_mode, m, m.label());
+                    // Expand-mode dropdown (how a hit expands: Atoms / Residues / Bound H).
+                    // Only relevant when picking is on, so it's hidden while pick mode is
+                    // Off. `Bound H` is meaningless for single-atom hover, so it's hidden
+                    // in HoverInfo (and a stale value snaps back to Atoms).
+                    if self.pick_mode != PickMode::Off {
+                        let hover = self.pick_mode == PickMode::HoverInfo;
+                        if hover && self.selection_mode == SelectionMode::BoundH {
+                            self.selection_mode = SelectionMode::Atoms;
                         }
-                    });
+                        let modes: &[SelectionMode] = if hover {
+                            &[SelectionMode::Atoms, SelectionMode::Residues]
+                        } else {
+                            &[SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH]
+                        };
+                        let sel_label =
+                            format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
+                        let resp = overlay_button(ui, &sel_label, false).on_hover_text(
+                            "Expand mode — how a hit expands:\n\
+                             Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H, lasso only)",
+                        );
+                        egui::Popup::menu(&resp).show(|ui| {
+                            for &m in modes {
+                                ui.selectable_value(&mut self.selection_mode, m, m.label());
+                            }
+                        });
+                    }
 
                     // In Lasso mode, a held modifier changes the set operation (or, for
                     // Alt, orbits the view) — trail the hint on the right (matches
