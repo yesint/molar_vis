@@ -551,11 +551,12 @@ History labels via `describe_change` ("edit selection", "change coloring",
     `sphere.wgsl`) into a 1× **`Rg32Uint`** target + depth (front-most wins, analytic frag_depth);
     the pixel under the cursor is copied back and decoded → `(mol, rep, atom)` → `pick::hit_for_atom`
     rebuilds the `PickHit` (O(1), no per-atom scan). `pick_gpu` rebuilds when geometry/coords change
-    or on a structural change (baked `mol+1` would go stale). Sync readback (`poll(Wait)`); central
-    image only (v1). **Native only** — gated `#[cfg(not(wasm))]`: WebGPU can't block on a readback
-    and WebGL2 may not render integer targets, so **wasm keeps the CPU `pick`**. Validated headlessly
-    under `MOLAR_VIS_DEBUG_PICK` (logs `gpu == cpu` per frame): matches CPU on VDW/cartoon/ball-stick.
-    TODO: periodic-image hover; async readback to avoid the per-hover GPU stall.
+    or on a structural change (baked `mol+1` would go stale). **Periodic images are baked into
+    `pick_gpu`** (a sphere per atom per drawn image, shifted by the lattice offset, same id), so the
+    single-camera pick pass covers every image like CPU `pick`. **Native only** — gated
+    `#[cfg(not(wasm))]`: WebGPU can't block on a readback and WebGL2 may not render integer targets,
+    so **wasm keeps the CPU `pick`**. Validated headlessly under `MOLAR_VIS_DEBUG_PICK` (logs
+    `gpu == cpu` per frame): matches CPU on VDW/cartoon/ball-stick and with periodic images on.
   - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, an LMB drag in `draw_viewport`
     accumulates `App::lasso_path` (pixel coords; **Alt+LMB orbits** instead — rotate the view without
     leaving Lasso mode; RMB/MMB/wheel still navigate), drawn as a cyan polyline; on release

@@ -1666,8 +1666,21 @@ const PICK_ATOM_BITS: u32 = 21;
 /// sphere per *pickable* atom — exactly the atoms CPU `pick` ray-casts (eligible
 /// atoms of each visible rep, at their displayed position and effective radius). The
 /// id packs `[mi+1, rep<<21 | atom]` so the readback decodes back to (mol, rep, atom).
+/// **Periodic images are baked in**: a rep with periodic display emits one sphere per
+/// atom per drawn image (shifted by the lattice offset), so the single-camera pick
+/// pass covers every image — matching what CPU `pick` tests. The id is the same for
+/// all images, so a hit on any image still reports the (central) atom.
 #[cfg(not(target_arch = "wasm32"))]
 fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geometry::GeometryData {
+    // Box lattice vectors (columns of the box matrix), for periodic image offsets.
+    let box_vecs = state.pbox.as_ref().map(|pb| {
+        let m = pb.get_matrix();
+        [
+            glam::Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
+            glam::Vec3::new(m[(0, 1)], m[(1, 1)], m[(2, 1)]),
+            glam::Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
+        ]
+    });
     let mut spheres: Vec<SphereInstance> = Vec::new();
     for (rj, rep) in mol.reps.iter().enumerate() {
         if !rep.visible {
@@ -1678,6 +1691,10 @@ fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geometry::Geom
             .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
             .flatten();
         let disp_state: &State = smoothed.as_ref().unwrap_or(state);
+        let offsets = match box_vecs {
+            Some([a, b, c]) => rep.periodic.offsets(a, b, c),
+            None => vec![glam::Vec3::ZERO],
+        };
         let bound = mol.system.bind_with_state(sel, disp_state);
         let pick_x = mi as u32 + 1;
         let pick_rep = (rj as u32) << PICK_ATOM_BITS;
@@ -1685,13 +1702,19 @@ fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geometry::Geom
             if !pick::atom_in_rep(rep.kind, p.atom.name.as_str()) {
                 continue;
             }
-            spheres.push(SphereInstance {
-                center: [p.pos.x, p.pos.y, p.pos.z],
-                radius: pick::effective_radius(&rep.params, p.atom),
-                color: 0,
-                mat: 0,
-                pick: [pick_x, pick_rep | (p.id as u32)],
-            });
+            let base = glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z);
+            let radius = pick::effective_radius(&rep.params, p.atom);
+            let id = [pick_x, pick_rep | (p.id as u32)];
+            for off in &offsets {
+                let c = base + *off;
+                spheres.push(SphereInstance {
+                    center: [c.x, c.y, c.z],
+                    radius,
+                    color: 0,
+                    mat: 0,
+                    pick: id,
+                });
+            }
         }
     }
     geometry::GeometryData { spheres, ..Default::default() }
