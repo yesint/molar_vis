@@ -421,6 +421,10 @@ pub struct SceneRenderer {
     pick_size: [u32; 2],
     #[cfg(not(target_arch = "wasm32"))]
     pick_readback: wgpu::Buffer,
+    /// In-flight async pick: the readback is mapped; the flag flips when the GPU
+    /// finishes (set in the `map_async` callback, read in `poll_pick`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Pipeline-array index for the selection-glow pass.
@@ -622,6 +626,8 @@ impl SceneRenderer {
             pick_size: [1, 1],
             #[cfg(not(target_arch = "wasm32"))]
             pick_readback,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_pending: None,
         }
     }
 
@@ -629,18 +635,31 @@ impl SceneRenderer {
     /// impostors, one per eligible atom, id-stamped) at `size` (1× logical px), then
     /// read back the texel under `(px, py)` and decode the front-most atom. Returns
     /// `(mol, rep, atom)` (indices into `scene.molecules` / `mol.reps` / the System),
-    /// or `None` on a miss. Reuses camera entry 0 (the current view). Synchronous:
-    /// blocks on the 1-pixel readback (cheap; runs only on a hover request). Native
-    /// only — WebGPU can't block on a readback, and wasm uses the CPU ray-cast.
+    /// Whether an async pick is in flight (its readback hasn't been consumed yet).
+    /// While true, callers should keep repainting so `poll_pick` runs and the result
+    /// is picked up.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn pick_atom(
+    pub fn pick_in_flight(&self) -> bool {
+        self.pick_pending.is_some()
+    }
+
+    /// Start an async GPU pick: render the pick id-buffer (each molecule's `pick_gpu`
+    /// sphere impostors, id-stamped, periodic images baked in) at `size` (1× logical
+    /// px) and kick off a non-blocking readback of the texel under `(px, py)`. No-op
+    /// if one is already in flight. Reuses camera entry 0 (the current view). The
+    /// result is collected later by [`poll_pick`]. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request_pick(
         &mut self,
         rs: &RenderState,
         scene: &Scene,
         px: u32,
         py: u32,
         size: [u32; 2],
-    ) -> Option<(usize, usize, usize)> {
+    ) {
+        if self.pick_pending.is_some() {
+            return; // one at a time; the latest cursor is picked when this completes
+        }
         let size = [size[0].max(1), size[1].max(1)];
         if self.pick_size != size {
             let (t, v, d) = make_pick_targets(&rs.device, size);
@@ -710,25 +729,52 @@ impl SceneRenderer {
         );
         rs.queue.submit(std::iter::once(encoder.finish()));
 
-        // Synchronous readback of the one texel (8 bytes).
-        let slice = self.pick_readback.slice(0..8);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+        // Kick off the async map; the callback flips `ready` when the GPU is done.
+        // `poll_pick` (driven each frame) advances the device and collects it.
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ready.clone();
+        self.pick_readback
+            .slice(0..8)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                if res.is_ok() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
+        self.pick_pending = Some(ready);
+    }
+
+    /// Drive the device and, if an async pick has completed, read + decode it.
+    /// Returns `Some(hit)` when a pick finished this call (`hit` = `Some((mol, rep,
+    /// atom))` or `None` for a miss), or `None` if nothing completed. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn poll_pick(&mut self, rs: &RenderState) -> Option<Option<(usize, usize, usize)>> {
+        self.pick_pending.as_ref()?; // nothing in flight → skip the device poll
+        // Non-blocking: lets the map callback fire without stalling on the GPU.
+        let _ = rs.device.poll(wgpu::PollType::Poll);
+        if !self
+            .pick_pending
+            .as_ref()
+            .unwrap()
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
         let (x, y) = {
-            let data = slice.get_mapped_range();
+            let data = self.pick_readback.slice(0..8).get_mapped_range();
             let x = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
             let y = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
             (x, y)
         };
         self.pick_readback.unmap();
+        self.pick_pending = None;
 
         if x == 0 {
-            return None; // no hit
+            return Some(None); // a pick completed, but it was a miss
         }
         let mol = (x - 1) as usize;
         let rep = (y >> 21) as usize;
         let atom = (y & ((1 << 21) - 1)) as usize;
-        Some((mol, rep, atom))
+        Some(Some((mol, rep, atom)))
     }
 
     /// The egui texture id of the offscreen color target (for `egui::Image`).

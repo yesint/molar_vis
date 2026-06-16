@@ -1077,6 +1077,16 @@ pub struct App {
     /// In-progress lasso polygon (viewport pixel coords), accumulated while
     /// dragging in `PickMode::Lasso`. Empty when not lassoing. Transient view state.
     lasso_path: Vec<egui::Pos2>,
+    /// Last completed GPU hover pick `(mol, rep, atom)` (native only). The async
+    /// id-buffer readback lags a frame or two, so the hit is cached here and the
+    /// `PickHit` is rebuilt from it each frame. `None` = nothing hovered.
+    #[cfg(not(target_arch = "wasm32"))]
+    hover_pick: Option<(usize, usize, usize)>,
+    /// Pick-target pixel of the last requested GPU pick (native). A new pick is only
+    /// requested when the cursor moves or the view changes, so a stationary hover
+    /// stays idle (0 GPU) instead of re-picking every frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    last_pick_px: Option<(u32, u32)>,
     /// Whether the VMD-style orientation axes gizmo is shown in the viewport.
     axes_on: bool,
     /// Which viewport corner the axes gizmo is anchored to.
@@ -1402,6 +1412,10 @@ impl App {
                 _ => SelectionMode::default(),
             },
             lasso_path: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            hover_pick: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_pick_px: None,
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
             axes_corner: Corner::BottomRight,
             #[cfg(target_arch = "wasm32")]
@@ -3013,12 +3027,32 @@ impl App {
             egui::Image::new(egui::load::SizedTexture::new(texture_id, rect.size()))
                 .paint_at(ui, rect);
 
-            // Hover-info picking: ray-cast the cursor against the atoms *as drawn*
-            // (smoothed + periodic-replicated). In **Atoms** mode, glow the hit atom
-            // (egui ring) and show its identity + **real** coords. In **Residues**
-            // mode, stage the whole hovered residue as a steady GPU glow highlight
-            // (`Molecule::hover`, like a pending selection but no pulse / no UI) and
-            // report the residue. Skipped while dragging the camera.
+            // Hover-info picking. On native the hit comes from the **async GPU
+            // id-buffer** (collect a finished readback, request the next); on wasm it's
+            // the CPU ray-cast. **Atoms** mode → ring + info box on the hit atom;
+            // **Residues** mode → the whole residue staged as a steady glow
+            // (`Molecule::hover`) + a residue box. Skipped while dragging the camera.
+            //
+            // Drain a finished async pick first — every frame, even when not hovering —
+            // so the readback frees up (else `request_pick` would stay blocked). When
+            // a result lands it updates the cached `hover_pick` ids.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(ids) = self.renderer.poll_pick(render_state) {
+                if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
+                    // DEBUG forces a center pick; compare to the CPU ray-cast there.
+                    let aspect = size_px[0] as f32 / size_px[1] as f32;
+                    let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
+                    let c = pick::pick(&self.scene, view, proj, 0.0, 0.0).map(|h| (h.mol, h.id));
+                    let g = ids.map(|(m, _, a)| (m, a));
+                    if g == c {
+                        log::info!("pick ok: gpu == cpu == {g:?}");
+                    } else {
+                        log::warn!("pick mismatch: gpu {g:?} != cpu {c:?}");
+                    }
+                }
+                self.hover_pick = ids;
+            }
+
             let hovering = self.pick_mode == PickMode::HoverInfo && !response.dragged();
             let mut residue_hit = false;
             if hovering {
@@ -3036,39 +3070,33 @@ impl App {
                 };
                 if let Some((ndc_x, ndc_y)) = ndc {
                     let aspect = size_px[0] as f32 / size_px[1] as f32;
-                    // Cursor → pick-target pixel (the pick buffer is 1× = size_px).
-                    let px = (((ndc_x * 0.5 + 0.5) * size_px[0] as f32) as i32)
-                        .clamp(0, size_px[0] as i32 - 1) as u32;
-                    let py = (((1.0 - (ndc_y * 0.5 + 0.5)) * size_px[1] as f32) as i32)
-                        .clamp(0, size_px[1] as i32 - 1) as u32;
-                    // GPU id-buffer pick on native (O(1) readback, scales to huge
+                    // GPU id-buffer pick on native (async O(1) readback, scales to huge
                     // systems); the CPU ray-cast stays the path on wasm (WebGL2 can't
                     // render/read back the integer id target).
                     #[cfg(not(target_arch = "wasm32"))]
                     let hit = {
-                        let gpu = self
-                            .renderer
-                            .pick_atom(render_state, &self.scene, px, py, size_px)
-                            .and_then(|(m, r, a)| pick::hit_for_atom(&self.scene, m, r, a));
-                        // Headless validation: compare the GPU pick to the CPU
-                        // ray-cast at the same cursor (they should name the same atom).
-                        if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
-                            let view = self.camera.view();
-                            let proj = self.camera.proj(aspect);
-                            let cpu = pick::pick(&self.scene, view, proj, ndc_x, ndc_y);
-                            let g = gpu.as_ref().map(|h| (h.mol, h.id));
-                            let c = cpu.as_ref().map(|h| (h.mol, h.id));
-                            if g == c {
-                                log::info!("pick ok: gpu == cpu == {g:?}");
-                            } else {
-                                log::warn!("pick mismatch: gpu {g:?} != cpu {c:?}");
-                            }
+                        // Cursor → pick-target pixel (the pick buffer is 1× = size_px).
+                        let px = (((ndc_x * 0.5 + 0.5) * size_px[0] as f32) as i32)
+                            .clamp(0, size_px[0] as i32 - 1) as u32;
+                        let py = (((1.0 - (ndc_y * 0.5 + 0.5)) * size_px[1] as f32) as i32)
+                            .clamp(0, size_px[1] as i32 - 1) as u32;
+                        // Re-pick only when the cursor moved or the view changed (else a
+                        // stationary hover would spin the GPU every frame).
+                        let view_moved = geom_changed || cam_changed || size_changed;
+                        if view_moved || self.last_pick_px != Some((px, py)) {
+                            self.renderer.request_pick(render_state, &self.scene, px, py, size_px);
+                            self.last_pick_px = Some((px, py));
                         }
-                        gpu
+                        if self.renderer.pick_in_flight() {
+                            ui.ctx().request_repaint(); // keep polling until it lands
+                        }
+                        // Rebuild the PickHit from the cached ids each frame (keeps the
+                        // displayed position current as coords change). Lags 1–2 frames.
+                        self.hover_pick
+                            .and_then(|(m, r, a)| pick::hit_for_atom(&self.scene, m, r, a))
                     };
                     #[cfg(target_arch = "wasm32")]
                     let hit = {
-                        let _ = (px, py);
                         let view = self.camera.view();
                         let proj = self.camera.proj(aspect);
                         pick::pick(&self.scene, view, proj, ndc_x, ndc_y)
@@ -3095,6 +3123,20 @@ impl App {
                             draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
                         }
                     }
+                } else {
+                    // Cursor left the viewport → drop the cached GPU hit.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.hover_pick = None;
+                        self.last_pick_px = None;
+                    }
+                }
+            } else {
+                // Not in hover mode (or dragging) → drop the cached GPU hit.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.hover_pick = None;
+                    self.last_pick_px = None;
                 }
             }
             // Drop any stale hover highlight (left a residue, no hit, or not hovering).

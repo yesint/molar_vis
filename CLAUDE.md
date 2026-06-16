@@ -544,19 +544,24 @@ History labels via `describe_change` ("edit selection", "change coloring",
   glow next frame). `MOLAR_VIS_DEBUG_PICK=1` forces a viewport-center pick (headless verification —
   hover can't be simulated on this Wayland box); pair with `MOLAR_VIS_DEBUG_SELMODE=residues`.
   - **GPU pick id-buffer (native hover):** the per-frame hover ray-cast is O(visible atoms), so on
-    native the hover hit comes from a **GPU id-buffer** instead (`SceneRenderer::pick_atom`): each
-    molecule's `pick_gpu` is one id-stamped sphere impostor per *pickable* atom — exactly the atoms
-    CPU `pick` ray-casts, built by `build_pick` (eligible per `atom_in_rep`, at the displayed
-    position + `effective_radius`), id = `[mol+1, rep<<21 | atom]`. They're drawn (`fs_pick` in
-    `sphere.wgsl`) into a 1× **`Rg32Uint`** target + depth (front-most wins, analytic frag_depth);
-    the pixel under the cursor is copied back and decoded → `(mol, rep, atom)` → `pick::hit_for_atom`
-    rebuilds the `PickHit` (O(1), no per-atom scan). `pick_gpu` rebuilds when geometry/coords change
-    or on a structural change (baked `mol+1` would go stale). **Periodic images are baked into
-    `pick_gpu`** (a sphere per atom per drawn image, shifted by the lattice offset, same id), so the
-    single-camera pick pass covers every image like CPU `pick`. **Native only** — gated
-    `#[cfg(not(wasm))]`: WebGPU can't block on a readback and WebGL2 may not render integer targets,
-    so **wasm keeps the CPU `pick`**. Validated headlessly under `MOLAR_VIS_DEBUG_PICK` (logs
-    `gpu == cpu` per frame): matches CPU on VDW/cartoon/ball-stick and with periodic images on.
+    native the hover hit comes from an **async GPU id-buffer** instead. Each molecule's `pick_gpu` is
+    one id-stamped sphere impostor per *pickable* atom — exactly the atoms CPU `pick` ray-casts, built
+    by `build_pick` (eligible per `atom_in_rep`, at the displayed position + `effective_radius`),
+    id = `[mol+1, rep<<21 | atom]`. They're drawn (`fs_pick` in `sphere.wgsl`) into a 1× **`Rg32Uint`**
+    target + depth (front-most wins, analytic frag_depth). **Async, two methods:** `request_pick`
+    renders the buffer + `copy_texture_to_buffer` the cursor texel + `map_async` (no stall);
+    `poll_pick` (called every frame — also when *not* hovering, to free the readback) drives a
+    non-blocking `device.poll(Poll)` and, when the map callback fires, decodes the texel →
+    `(mol, rep, atom)`. The result lags 1–2 frames and is cached in `App::hover_pick`;
+    `pick::hit_for_atom` rebuilds the `PickHit` from it each frame (O(1), no per-atom scan). A new
+    pick is requested **only when the cursor moves or the view changes** (`last_pick_px`), so a
+    stationary hover stays idle (0 GPU). `pick_gpu` rebuilds on geometry/coords change or a structural
+    change (baked `mol+1` would go stale). **Periodic images are baked into `pick_gpu`** (a sphere per
+    atom per drawn image, shifted by the lattice offset, same id), so the single-camera pick pass
+    covers every image like CPU `pick`. **Native only** — gated `#[cfg(not(wasm))]`: WebGPU can't
+    block on a readback and WebGL2 may not render integer targets, so **wasm keeps the CPU `pick`**.
+    Validated headlessly under `MOLAR_VIS_DEBUG_PICK` (logs `gpu == cpu`): matches CPU on
+    VDW/cartoon/ball-stick and with periodic images on.
   - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, an LMB drag in `draw_viewport`
     accumulates `App::lasso_path` (pixel coords; **Alt+LMB orbits** instead — rotate the view without
     leaving Lasso mode; RMB/MMB/wheel still navigate), drawn as a cyan polyline; on release
