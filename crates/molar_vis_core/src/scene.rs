@@ -268,6 +268,15 @@ pub struct Molecule {
     pub glow_gpu: RepGpu,
     /// The glow geometry needs (re)building — pending changed, or its coords moved.
     pub glow_dirty: bool,
+    /// Transient hover highlight (Residues hover-pick mode): the hovered residue's
+    /// atoms, glowing in the current style like a pending selection but **steady**
+    /// (no pulse) and with no accept/discard UI. Recomputed as the cursor moves;
+    /// not undoable, not in `EditState`. `None` when nothing is hovered.
+    pub hover: Option<Vec<usize>>,
+    /// GPU geometry for the steady hover highlight (built from `hover`).
+    pub hover_gpu: RepGpu,
+    /// The hover-highlight geometry needs (re)building — `hover` set changed.
+    pub hover_dirty: bool,
 }
 
 impl Molecule {
@@ -294,6 +303,9 @@ impl Molecule {
             pending: None,
             glow_gpu: RepGpu::default(),
             glow_dirty: false,
+            hover: None,
+            hover_gpu: RepGpu::default(),
+            hover_dirty: false,
         }
     }
 

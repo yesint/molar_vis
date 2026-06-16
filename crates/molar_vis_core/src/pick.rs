@@ -124,6 +124,10 @@ pub fn expand_selection(
 /// A hovered atom. `real` is the atom's actual stored coordinate; `display` is where
 /// it's drawn (smoothed + periodic shift) — used to place the glow.
 pub struct PickHit {
+    /// Index of the hit atom's molecule in `scene.molecules`.
+    pub mol: usize,
+    /// Global atom index of the hit atom within its molecule's `System`.
+    pub id: usize,
     pub name: String,
     pub resname: String,
     pub resid: i32,
@@ -212,7 +216,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
     let mut best_t = f32::INFINITY;
     let mut best: Option<PickHit> = None;
 
-    for mol in &scene.molecules {
+    for (mi, mol) in scene.molecules.iter().enumerate() {
         if !mol.visible {
             continue;
         }
@@ -266,6 +270,8 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                             best_t = t;
                             let real = frame.coords[p.id];
                             best = Some(PickHit {
+                                mol: mi,
+                                id: p.id,
                                 name: p.atom.name.as_str().to_string(),
                                 resname: p.atom.resname.as_str().to_string(),
                                 resid: p.atom.resid,

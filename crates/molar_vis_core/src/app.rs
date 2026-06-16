@@ -107,16 +107,41 @@ fn draw_pick_overlay(
     draw_glow_ring(&painter, center, rpx);
 
     // Lower-left info box: "name resname resid" / "x, y, z" (real coords, nm).
+    draw_info_box(
+        &painter,
+        rect,
+        &[
+            format!("{} {} {}", hit.name, hit.resname, hit.resid),
+            format!("{:.3}, {:.3}, {:.3}", hit.real.x, hit.real.y, hit.real.z),
+        ],
+    );
+}
+
+/// Lower-left info box for the **Residues** hover mode: reports the hovered residue
+/// (no ring — the steady GPU glow shows which atoms are highlighted).
+fn draw_residue_info_overlay(ui: &egui::Ui, rect: egui::Rect, hit: &crate::pick::PickHit, n: usize) {
+    draw_info_box(
+        &ui.painter_at(rect),
+        rect,
+        &[
+            format!("{} {}", hit.resname, hit.resid),
+            format!("residue · {n} atom{}", if n == 1 { "" } else { "s" }),
+        ],
+    );
+}
+
+/// Draw a framed lower-left info box with `lines` of monospace text.
+fn draw_info_box(painter: &egui::Painter, rect: egui::Rect, lines: &[String]) {
     let font = egui::FontId::monospace(13.0);
     let tc = egui::Color32::from_gray(240);
-    let l1 = format!("{} {} {}", hit.name, hit.resname, hit.resid);
-    let l2 = format!("{:.3}, {:.3}, {:.3}", hit.real.x, hit.real.y, hit.real.z);
-    let g1 = painter.layout_no_wrap(l1, font.clone(), tc);
-    let g2 = painter.layout_no_wrap(l2, font, tc);
-    let (s1, s2) = (g1.size(), g2.size());
+    let galleys: Vec<_> = lines
+        .iter()
+        .map(|l| painter.layout_no_wrap(l.clone(), font.clone(), tc))
+        .collect();
     let pad = 6.0;
-    let w = s1.x.max(s2.x) + pad * 2.0;
-    let h = s1.y + s2.y + pad * 2.0;
+    let w = galleys.iter().map(|g| g.size().x).fold(0.0_f32, f32::max) + pad * 2.0;
+    let line_h = galleys.first().map(|g| g.size().y).unwrap_or(0.0);
+    let h = line_h * galleys.len() as f32 + pad * 2.0;
     let x = rect.left() + 8.0;
     let y = rect.bottom() - 8.0 - h;
     let box_rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
@@ -127,8 +152,9 @@ fn draw_pick_overlay(
         egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
         egui::StrokeKind::Inside,
     );
-    painter.galley(egui::pos2(x + pad, y + pad), g1, tc);
-    painter.galley(egui::pos2(x + pad, y + pad + s1.y), g2, tc);
+    for (i, g) in galleys.into_iter().enumerate() {
+        painter.galley(egui::pos2(x + pad, y + pad + line_h * i as f32), g, tc);
+    }
 }
 
 /// Draw a VMD-style orientation-axes gizmo into the chosen corner of `rect`.
@@ -1400,7 +1426,11 @@ impl App {
                 .reps
                 .iter()
                 .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty);
-            if !any_rep_dirty && !(mol.show_box && mol.box_dirty) && !mol.glow_dirty {
+            if !any_rep_dirty
+                && !(mol.show_box && mol.box_dirty)
+                && !mol.glow_dirty
+                && !mol.hover_dirty
+            {
                 continue;
             }
             // The coordinates to render: the current trajectory frame, read by
@@ -1513,9 +1543,12 @@ impl App {
             }
 
             // If any rep's geometry was rebuilt (style/selection/coords changed) and
-            // there's an active selection, rebuild its glow so it follows the change.
+            // there's a pending/hover highlight, rebuild its glow so it follows.
             if rep_geom_changed && mol.pending.is_some() {
                 mol.glow_dirty = true;
+            }
+            if rep_geom_changed && mol.hover.is_some() {
+                mol.hover_dirty = true;
             }
 
             // Active-selection glow: rebuild the pending atoms in each rep's own
@@ -1524,7 +1557,7 @@ impl App {
             if mol.glow_dirty {
                 let geom = match &mol.pending {
                     Some(pending) => build_glow(
-                        &mol.system, &mol.bonds, &mol.reps, pending, render_state, n_atoms,
+                        &mol.system, &mol.bonds, &mol.reps, &pending.atoms, render_state, n_atoms,
                     ),
                     None => geometry::GeometryData::default(),
                 };
@@ -1532,26 +1565,39 @@ impl App {
                 mol.glow_dirty = false;
                 changed = true;
             }
+            // Hover highlight: same builder, the hovered residue's atoms (steady glow).
+            if mol.hover_dirty {
+                let geom = match &mol.hover {
+                    Some(atoms) => build_glow(
+                        &mol.system, &mol.bonds, &mol.reps, atoms, render_state, n_atoms,
+                    ),
+                    None => geometry::GeometryData::default(),
+                };
+                mol.hover_gpu = self.renderer.upload(rs, &geom);
+                mol.hover_dirty = false;
+                changed = true;
+            }
         }
         changed
     }
 }
 
-/// Build the active-selection glow geometry for one molecule: for each visible
-/// rep, the rep's selection intersected with the `pending` atoms, built in that
-/// rep's own style/params, merged into one geometry. The element colors/materials
-/// are irrelevant (the glow shaders emit a fixed cyan Fresnel rim), so the rep's
-/// own values are reused. Cartoon/SecStruct reps are skipped until their SS cache
-/// exists (it's filled by the same `rebuild_dirty` pass, just before this).
+/// Build the selection glow geometry for one molecule: for each visible rep, the
+/// rep's selection intersected with the highlighted `atoms`, built in that rep's
+/// own style/params, merged into one geometry. Used for both the pending (lasso)
+/// selection and the hover highlight. The element colors/materials are irrelevant
+/// (the glow shaders emit a fixed cyan Fresnel rim), so the rep's own values are
+/// reused. Cartoon/SecStruct reps are skipped until their SS cache exists (it's
+/// filled by the same `rebuild_dirty` pass, just before this).
 fn build_glow(
     system: &molar::prelude::System,
     bonds: &[[usize; 2]],
     reps: &[Representation],
-    pending: &scene::PendingSelection,
+    atoms: &[usize],
     state: &State,
     n_atoms: usize,
 ) -> geometry::GeometryData {
-    let Some(index_str) = pick::index_selection_string(&pending.atoms) else {
+    let Some(index_str) = pick::index_selection_string(atoms) else {
         return geometry::GeometryData::default();
     };
     let mut out = geometry::GeometryData::default();
@@ -1885,18 +1931,25 @@ impl App {
                             ui.selectable_value(&mut self.pick_mode, m, m.label());
                         }
                     });
-                    // Selection-mode dropdown (how a lasso expands its hits).
+                    // Selection-mode dropdown (how a lasso/hover expands its hits).
+                    // `Bound H` is meaningless for single-atom hover picking, so it's
+                    // hidden in HoverInfo mode (and a stale value snaps back to Atoms).
+                    let hover = self.pick_mode == PickMode::HoverInfo;
+                    if hover && self.selection_mode == SelectionMode::BoundH {
+                        self.selection_mode = SelectionMode::Atoms;
+                    }
+                    let modes: &[SelectionMode] = if hover {
+                        &[SelectionMode::Atoms, SelectionMode::Residues]
+                    } else {
+                        &[SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH]
+                    };
                     let sel_label = format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
                     let resp = overlay_button(ui, &sel_label, false).on_hover_text(
-                        "Selection mode — how a lasso expands its hits:\n\
-                         Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H)",
+                        "Selection mode — how a lasso/hover expands its hits:\n\
+                         Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H, lasso only)",
                     );
                     egui::Popup::menu(&resp).show(|ui| {
-                        for m in [
-                            SelectionMode::Atoms,
-                            SelectionMode::Residues,
-                            SelectionMode::BoundH,
-                        ] {
+                        for &m in modes {
                             ui.selectable_value(&mut self.selection_mode, m, m.label());
                         }
                     });
@@ -2874,9 +2927,14 @@ impl App {
                 .paint_at(ui, rect);
 
             // Hover-info picking: ray-cast the cursor against the atoms *as drawn*
-            // (smoothed + periodic-replicated), glow the hit, and show its identity
-            // + **real** (stored) coordinates. Skipped while dragging the camera.
-            if self.pick_mode == PickMode::HoverInfo && !response.dragged() {
+            // (smoothed + periodic-replicated). In **Atoms** mode, glow the hit atom
+            // (egui ring) and show its identity + **real** coords. In **Residues**
+            // mode, stage the whole hovered residue as a steady GPU glow highlight
+            // (`Molecule::hover`, like a pending selection but no pulse / no UI) and
+            // report the residue. Skipped while dragging the camera.
+            let hovering = self.pick_mode == PickMode::HoverInfo && !response.dragged();
+            let mut residue_hit = false;
+            if hovering {
                 // Normally the cursor; the debug hook forces the viewport center so
                 // the overlay can be screenshot without simulating a mouse.
                 let ndc = if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
@@ -2894,9 +2952,32 @@ impl App {
                     let view = self.camera.view();
                     let proj = self.camera.proj(aspect);
                     if let Some(hit) = pick::pick(&self.scene, view, proj, ndc_x, ndc_y) {
-                        draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
+                        if self.effective_selection_mode() == SelectionMode::Residues {
+                            // Expand the hit to its whole residue → steady glow.
+                            let atoms = {
+                                let mol = &self.scene.molecules[hit.mol];
+                                pick::expand_selection(
+                                    &mol.system,
+                                    &mol.bonds,
+                                    &[hit.id],
+                                    SelectionMode::Residues,
+                                )
+                            };
+                            draw_residue_info_overlay(ui, rect, &hit, atoms.len());
+                            if self.set_hover(hit.mol, atoms) {
+                                ui.ctx().request_repaint();
+                            }
+                            residue_hit = true;
+                        } else {
+                            // Atoms mode: egui ring + atom info box.
+                            draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
+                        }
                     }
                 }
+            }
+            // Drop any stale hover highlight (left a residue, no hit, or not hovering).
+            if !residue_hit && self.clear_hover() {
+                ui.ctx().request_repaint();
             }
 
             // The active (pending) selection is highlighted by a GPU glow pass
@@ -2944,6 +3025,50 @@ impl App {
                 draw_axes_overlay(ui, rect, &self.camera, self.axes_corner);
             }
         });
+    }
+
+    /// The selection mode in effect for the current pick mode. `Bound H` is
+    /// meaningless for single-atom hover picking, so it falls back to `Atoms` there
+    /// (and the toolbar hides it); it stays available for the lasso.
+    fn effective_selection_mode(&self) -> SelectionMode {
+        if self.pick_mode == PickMode::HoverInfo && self.selection_mode == SelectionMode::BoundH {
+            SelectionMode::Atoms
+        } else {
+            self.selection_mode
+        }
+    }
+
+    /// Set molecule `mi`'s steady hover highlight to `atoms`, clearing every other
+    /// molecule's. Returns whether anything changed (so the caller can request a
+    /// repaint to rebuild the glow).
+    fn set_hover(&mut self, mi: usize, atoms: Vec<usize>) -> bool {
+        let mut changed = false;
+        for (i, mol) in self.scene.molecules.iter_mut().enumerate() {
+            if i != mi && mol.hover.take().is_some() {
+                mol.hover_dirty = true;
+                changed = true;
+            }
+        }
+        if let Some(mol) = self.scene.molecules.get_mut(mi) {
+            if mol.hover.as_deref() != Some(atoms.as_slice()) {
+                mol.hover = Some(atoms);
+                mol.hover_dirty = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Clear every molecule's hover highlight. Returns whether anything changed.
+    fn clear_hover(&mut self) -> bool {
+        let mut changed = false;
+        for mol in &mut self.scene.molecules {
+            if mol.hover.take().is_some() {
+                mol.hover_dirty = true;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Finish a lasso gesture: convert the screen-space path to a clip-space

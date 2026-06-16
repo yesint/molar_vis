@@ -609,7 +609,13 @@ impl SceneRenderer {
         let make_cam = |v: Mat4| {
             CameraUniform::new(v, proj, perspective, viewport, cue, BG, depth_range, glow_pulse)
         };
-        let mut cameras: Vec<CameraUniform> = vec![make_cam(view)];
+        // Entry 0 = base camera with the (animated) glow pulse; entry 1 = the same
+        // base camera but with a *steady* pulse (1.0), used to draw the hover
+        // highlight without it breathing. Periodic-image cameras follow from index 2.
+        let mut cameras: Vec<CameraUniform> = vec![
+            make_cam(view),
+            CameraUniform::new(view, proj, perspective, viewport, cue, BG, depth_range, 1.0),
+        ];
         let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
         for mol in &scene.molecules {
             let box_vecs = mol.system.state().pbox.as_ref().map(|pb| {
@@ -795,7 +801,7 @@ impl SceneRenderer {
         let has_glow = scene
             .molecules
             .iter()
-            .any(|m| m.visible && m.glow_gpu.has_geometry());
+            .any(|m| m.visible && (m.glow_gpu.has_geometry() || m.hover_gpu.has_geometry()));
         if has_glow {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glow-pass"),
@@ -828,37 +834,51 @@ impl SceneRenderer {
         self.egui_texture
     }
 
-    /// Draw every visible molecule's active-selection glow geometry (`glow_gpu`,
-    /// built in each rep's own style restricted to the pending atoms) with the
-    /// additive glow pipelines, at the central image (camera entry 0).
+    /// Draw the additive selection glows at the central image: each molecule's
+    /// **pending** glow (`glow_gpu`) with the pulsing camera (entry 0) and its
+    /// **hover** highlight (`hover_gpu`) with the steady camera (entry 1) — so the
+    /// lasso/pending selection breathes while the hover highlight holds still.
     fn draw_glow(&self, pass: &mut wgpu::RenderPass, scene: &Scene) {
+        let stride = CAMERA_STRIDE as u32;
+        // Pending (pulsing) at entry 0.
         pass.set_bind_group(0, &self.camera_bind_group, &[0]);
         for mol in &scene.molecules {
-            if !mol.visible || !mol.glow_gpu.has_geometry() {
-                continue;
+            if mol.visible && mol.glow_gpu.has_geometry() {
+                self.draw_glow_geom(pass, &mol.glow_gpu);
             }
-            let g = &mol.glow_gpu;
-            if let Some(s) = &g.spheres {
-                pass.set_pipeline(&self.sphere_pipeline[GLOW]);
-                pass.set_vertex_buffer(0, s.buffer.slice(..));
-                pass.draw(0..4, 0..s.count);
+        }
+        // Hover (steady) at entry 1.
+        pass.set_bind_group(0, &self.camera_bind_group, &[stride]);
+        for mol in &scene.molecules {
+            if mol.visible && mol.hover_gpu.has_geometry() {
+                self.draw_glow_geom(pass, &mol.hover_gpu);
             }
-            if let Some(c) = &g.cylinders {
-                pass.set_pipeline(&self.cylinder_pipeline[GLOW]);
-                pass.set_vertex_buffer(0, c.buffer.slice(..));
-                pass.draw(0..4, 0..c.count);
-            }
-            if let Some(l) = &g.lines {
-                pass.set_pipeline(&self.line_pipeline[GLOW]);
-                pass.set_vertex_buffer(0, l.buffer.slice(..));
-                pass.draw(0..4, 0..l.count / 2);
-            }
-            if let Some(m) = &g.mesh {
-                pass.set_pipeline(&self.mesh_pipeline[GLOW]);
-                pass.set_vertex_buffer(0, m.vertices.slice(..));
-                pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..m.index_count, 0, 0..1);
-            }
+        }
+    }
+
+    /// Draw one glow geometry with the additive `GLOW` pipelines (camera bind group
+    /// already set by the caller).
+    fn draw_glow_geom(&self, pass: &mut wgpu::RenderPass, g: &RepGpu) {
+        if let Some(s) = &g.spheres {
+            pass.set_pipeline(&self.sphere_pipeline[GLOW]);
+            pass.set_vertex_buffer(0, s.buffer.slice(..));
+            pass.draw(0..4, 0..s.count);
+        }
+        if let Some(c) = &g.cylinders {
+            pass.set_pipeline(&self.cylinder_pipeline[GLOW]);
+            pass.set_vertex_buffer(0, c.buffer.slice(..));
+            pass.draw(0..4, 0..c.count);
+        }
+        if let Some(l) = &g.lines {
+            pass.set_pipeline(&self.line_pipeline[GLOW]);
+            pass.set_vertex_buffer(0, l.buffer.slice(..));
+            pass.draw(0..4, 0..l.count / 2);
+        }
+        if let Some(m) = &g.mesh {
+            pass.set_pipeline(&self.mesh_pipeline[GLOW]);
+            pass.set_vertex_buffer(0, m.vertices.slice(..));
+            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..m.index_count, 0, 0..1);
         }
     }
 

@@ -137,7 +137,8 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `render/shaders/*.wgsl` (incl. `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit` +
   `fs_glow`; the `build_pipeline`s take `depth_compare`). The cartoon mesh writes real depth and
   interleaves correctly with the impostors.
-- `pick.rs` — CPU ray-cast atom picking (`PickMode {Off, HoverInfo, Lasso}`, `PickHit`,
+- `pick.rs` — CPU ray-cast atom picking (`PickMode {Off, HoverInfo, Lasso}`, `PickHit` (carries
+  the hit `mol` + atom `id`),
   `cursor_ray`, `ray_sphere`, `effective_radius`, `pick`) **and lasso selection** (`lasso_select`,
   `point_in_polygon`, `index_selection_string`, `LassoSelection`). Hit-tests the cursor/lasso
   against atoms **as displayed** (smoothed + periodic images, sharing `PeriodicParams::offsets`
@@ -148,11 +149,13 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   included, via its isolated-atom crosses). Drives the hover-info overlay
   (`draw_pick_overlay`/`draw_glow_ring` in `app.rs`). The lasso result is staged as a molecule's
   active (pending) selection, highlighted by a GPU glow pass (not an egui overlay) — see *active
-  selection* under M11. **`SelectionMode` + `expand_selection`** (overlay dropdown next to the pick
-  selector; `App::selection_mode`): how a lasso expands its raw hits per molecule — `Atoms` (exact),
-  `Residues` (any hit residue selected whole, by `resindex`), or `BoundH` (hit **heavy** atoms +
-  the H bonded to them via the guessed `bonds`; a hit H whose heavy atom isn't selected is dropped).
-  Applied to each gesture's hits in `finish_lasso` *before* the set op.
+  selection* under M11. **`SelectionMode` + `expand_selection`** (toolbar dropdown next to the pick
+  selector; `App::selection_mode`): how a lasso/hover expands its raw hits per molecule — `Atoms`
+  (exact), `Residues` (any hit residue selected whole, by `resindex`), or `BoundH` (hit **heavy**
+  atoms + the H bonded to them via the guessed `bonds`; a hit H whose heavy atom isn't selected is
+  dropped). Applied to each lasso gesture's hits in `finish_lasso` *before* the set op, and to the
+  hovered atom in `draw_viewport` (Residues → whole-residue highlight). `BoundH` is lasso-only
+  (`App::effective_selection_mode` falls back to Atoms for hover).
 
 ## Key architecture
 
@@ -521,12 +524,20 @@ History labels via `describe_change` ("edit selection", "change coloring",
   coord (`frame.coords[id]`, central image, un-smoothed), per the user's hard requirement.
   Pick/glow radius = the rep's drawn sphere (VDW `vdw·scale`, BallAndStick `vdw·sphere_scale`) else
   the **small Ball-and-Stick sphere size** (`vdw·0.25` = `BALLSTICK_SPHERE_SCALE` —
-  Licorice/Lines/Cartoon/Surface). Pick-mode **dropdown** in the viewport overlay (next to
-  depth-cue; Off default → no per-hover cost). In `HoverInfo`, `draw_viewport` ray-casts the hover,
-  and `draw_pick_overlay` paints a **cyan glowing outline ring** at the hit's projected displayed
-  position + a **framed** lower-left info box `name resname resid` / `x, y, z` (real coords, **nm**).
-  `MOLAR_VIS_DEBUG_PICK=1` forces a viewport-center pick (headless verification — hover can't be
-  simulated on this Wayland box).
+  Licorice/Lines/Cartoon/Surface). Pick-mode **dropdown** in the top view toolbar (Off default →
+  no per-hover cost). `PickHit` also carries the hit's `mol` + global atom `id`.
+  **Hover-info respects the selection mode** (`App::effective_selection_mode`): in **Atoms** mode,
+  `draw_pick_overlay` paints a **cyan glowing outline ring** at the hit's projected displayed
+  position + a **framed** lower-left info box `name resname resid` / `x, y, z` (real coords, **nm**);
+  in **Residues** mode the whole hovered residue (`expand_selection` of the hit) is staged as the
+  molecule's steady hover highlight (`Molecule::hover` → `hover_gpu`, glowing in the current style
+  like a pending selection **but not pulsing and with no accept/discard UI**; rendered in the glow
+  pass via the steady camera entry 1) + a residue info box (`draw_residue_info_overlay`:
+  `resname resid` / `residue · N atoms`). `Bound H` is meaningless for single-atom hover, so it
+  falls back to Atoms and is hidden from the toolbar dropdown in HoverInfo (lasso-only). The hover
+  set is recomputed as the cursor moves (`set_hover`/`clear_hover`, repaint on change to rebuild the
+  glow next frame). `MOLAR_VIS_DEBUG_PICK=1` forces a viewport-center pick (headless verification —
+  hover can't be simulated on this Wayland box); pair with `MOLAR_VIS_DEBUG_SELMODE=residues`.
   - **Lasso select** (`lasso_select`): in `PickMode::Lasso`, an LMB drag in `draw_viewport`
     accumulates `App::lasso_path` (pixel coords; **Alt+LMB orbits** instead — rotate the view without
     leaving Lasso mode; RMB/MMB/wheel still navigate), drawn as a cyan polyline; on release
@@ -536,12 +547,14 @@ History labels via `describe_change` ("edit selection", "change coloring",
     deduped/sorted). The hits become each molecule's selection text via
     `pick::index_selection_string(atoms)` — a compact molar `index lo:hi …` string (consecutive runs
     → inclusive ranges; 0-based global atom index).
-  - **Selection mode** (`SelectionMode`, overlay dropdown next to the pick selector;
+  - **Selection mode** (`SelectionMode`, toolbar dropdown next to the pick selector;
     `pick::expand_selection`): each gesture's raw hits are expanded per molecule **before** the set
     op — `Atoms` (exact), `Residues` (any hit residue selected whole, grouped by `resindex`), or
     `Bound H` (hit **heavy** atoms + the H bonded to them via the guessed `bonds`; a hit H whose heavy
-    atom isn't itself selected is dropped). `MOLAR_VIS_DEBUG_SELMODE=residues|boundh` sets it
-    headlessly. Tested: `expand_residues_selects_whole_residue`, `expand_bound_h` (synthetic methane).
+    atom isn't itself selected is dropped). Also drives **hover-info** (Atoms → ring + atom; Residues
+    → steady whole-residue glow + residue box; `Bound H` is lasso-only and hidden in HoverInfo).
+    `MOLAR_VIS_DEBUG_SELMODE=residues|boundh` sets it headlessly. Tested:
+    `expand_residues_selects_whole_residue`, `expand_bound_h` (synthetic methane).
   - **Lasso set ops** (release modifier; `LassoOp` in `app.rs`): plain drag **replaces** the active
     selection, **Shift**+drag **adds** (unions), **Ctrl/⌘**+drag **subtracts** — merged per molecule
     in `finish_lasso` via a `BTreeSet` over the existing pending atoms (empty result → clears it). In
