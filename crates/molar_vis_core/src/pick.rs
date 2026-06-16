@@ -60,59 +60,73 @@ impl SelectionMode {
 /// Expand a raw set of hit atom indices according to `mode`, using the molecule's
 /// topology (`system`) for residue/element lookup and its guessed `bonds` for the
 /// hydrogen attachment. Returns sorted, de-duplicated global atom indices; `Atoms`
-/// is the identity. Called once per lasso gesture (not per frame), so the single
-/// `select_all` pass over the molecule is fine.
+/// is the identity. `Topology`'s index is the identity (atom `i` *is* global atom
+/// `i`), so this never scans the whole system.
 pub fn expand_selection(
     system: &System,
     bonds: &[[usize; 2]],
     atoms: &[usize],
     mode: SelectionMode,
 ) -> Vec<usize> {
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::BTreeSet;
     if atoms.is_empty() || mode == SelectionMode::Atoms {
         return atoms.to_vec();
     }
-    let want: HashSet<usize> = atoms.iter().copied().collect();
-    let all = system.select_all();
-    let bound = system.bind(&all);
+    let topo = system.topology();
     match mode {
         SelectionMode::Atoms => unreachable!(),
         SelectionMode::Residues => {
-            // One pass: record each atom's residue, and which residues are hit.
-            let mut by_res: Vec<(usize, usize)> = Vec::new(); // (atom id, resindex)
-            let mut hit_res: HashSet<usize> = HashSet::new();
-            for p in bound.iter_particle() {
-                by_res.push((p.id, p.atom.resindex));
-                if want.contains(&p.id) {
-                    hit_res.insert(p.atom.resindex);
+            // A residue is a *contiguous* run of atom indices (atoms are stored
+            // grouped by residue), so grow each hit outward — down then up — while
+            // the residue index holds, instead of scanning the whole system. That's
+            // O(residue size) per residue. Skipping seeds already collected makes
+            // each residue walked once even when a lasso hits many atoms in it.
+            let mut out: BTreeSet<usize> = BTreeSet::new();
+            for &seed in atoms {
+                if out.contains(&seed) {
+                    continue;
+                }
+                let Some(r) = topo.get_atom(seed).map(|a| a.resindex) else {
+                    continue;
+                };
+                out.insert(seed);
+                let mut i = seed; // walk down to the residue's first atom
+                while i > 0 {
+                    i -= 1;
+                    match topo.get_atom(i) {
+                        Some(a) if a.resindex == r => {
+                            out.insert(i);
+                        }
+                        _ => break,
+                    }
+                }
+                let mut i = seed + 1; // walk up to its last atom
+                while let Some(a) = topo.get_atom(i) {
+                    if a.resindex == r {
+                        out.insert(i);
+                        i += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
-            let mut out: Vec<usize> = by_res
-                .into_iter()
-                .filter(|&(_, r)| hit_res.contains(&r))
-                .map(|(id, _)| id)
-                .collect();
-            out.sort_unstable();
-            out
+            out.into_iter().collect()
         }
         SelectionMode::BoundH => {
-            // Hydrogen flag per atom id (atomic number 1).
-            let mut is_h: HashSet<usize> = HashSet::new();
-            for p in bound.iter_particle() {
-                if p.atom.atomic_number == 1 {
-                    is_h.insert(p.id);
-                }
-            }
-            // Keep the hit heavy atoms; a snapshot drives the bond test so newly
-            // added H can't chain further.
-            let heavy: BTreeSet<usize> =
-                want.iter().copied().filter(|i| !is_h.contains(i)).collect();
+            let is_h = |i: usize| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1);
+            // Hit heavy atoms; then the hydrogens bonded to them (the `heavy`
+            // snapshot drives the bond test so added H can't chain further).
+            let heavy: BTreeSet<usize> = atoms
+                .iter()
+                .copied()
+                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.atomic_number != 1))
+                .collect();
             let mut out = heavy.clone();
             for &[a, b] in bonds {
-                if heavy.contains(&a) && is_h.contains(&b) {
+                if heavy.contains(&a) && is_h(b) {
                     out.insert(b);
                 }
-                if heavy.contains(&b) && is_h.contains(&a) {
+                if heavy.contains(&b) && is_h(a) {
                     out.insert(a);
                 }
             }
@@ -583,10 +597,12 @@ mod tests {
             atoms_in_res.entry(p.atom.resindex).or_default().push(p.id);
         }
 
-        // Seed with one atom from residue 0 and one from a later residue.
+        // Seed with one atom from residue 0 and a *middle* atom of a later residue,
+        // so the outward walk is exercised in both directions (down and up).
         let r0 = 0usize;
         let later = resindex_by_id[mol.n_atoms - 1];
-        let seed = vec![atoms_in_res[&r0][0], atoms_in_res[&later][0]];
+        let mid = atoms_in_res[&later][atoms_in_res[&later].len() / 2];
+        let seed = vec![atoms_in_res[&r0][0], mid];
         let out = expand_selection(&mol.system, &mol.bonds, &seed, SelectionMode::Residues);
 
         // Output is exactly the union of the two residues' atoms, sorted.

@@ -151,11 +151,14 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   active (pending) selection, highlighted by a GPU glow pass (not an egui overlay) — see *active
   selection* under M11. **`SelectionMode` + `expand_selection`** (toolbar dropdown next to the pick
   selector; `App::selection_mode`): how a lasso/hover expands its raw hits per molecule — `Atoms`
-  (exact), `Residues` (any hit residue selected whole, by `resindex`), or `BoundH` (hit **heavy**
-  atoms + the H bonded to them via the guessed `bonds`; a hit H whose heavy atom isn't selected is
-  dropped). Applied to each lasso gesture's hits in `finish_lasso` *before* the set op, and to the
-  hovered atom in `draw_viewport` (Residues → whole-residue highlight). `BoundH` is lasso-only
-  (`App::effective_selection_mode` falls back to Atoms for hover).
+  (exact), `Residues` (any hit residue selected whole), or `BoundH` (hit **heavy** atoms + the H
+  bonded to them via the guessed `bonds`; a hit H whose heavy atom isn't selected is dropped).
+  `Residues` grows each hit by **walking outward by atom index** (down then up) while `resindex`
+  holds — residues are contiguous index runs, so this is O(residue size), never a full-system scan
+  (`system.topology().get_atom(i)` is identity-indexed). Applied to each lasso gesture's hits in
+  `finish_lasso` *before* the set op, and to the hovered atom in `draw_viewport` (Residues →
+  whole-residue highlight). `BoundH` is lasso-only (`App::effective_selection_mode` falls back to
+  Atoms for hover).
 
 ## Key architecture
 
@@ -549,7 +552,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
     → inclusive ranges; 0-based global atom index).
   - **Selection mode** (`SelectionMode`, toolbar dropdown next to the pick selector;
     `pick::expand_selection`): each gesture's raw hits are expanded per molecule **before** the set
-    op — `Atoms` (exact), `Residues` (any hit residue selected whole, grouped by `resindex`), or
+    op — `Atoms` (exact), `Residues` (any hit residue selected whole — grown by walking outward by
+    atom index while `resindex` holds, O(residue size), no full-system scan), or
     `Bound H` (hit **heavy** atoms + the H bonded to them via the guessed `bonds`; a hit H whose heavy
     atom isn't itself selected is dropped). Also drives **hover-info** (Atoms → ring + atom; Residues
     → steady whole-residue glow + residue box; `Bound H` is lasso-only and hidden in HoverInfo).
