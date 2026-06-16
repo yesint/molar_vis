@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use molar::prelude::{ParticleIterProvider, SsAlgorithm, State};
+use molar::prelude::{AtomProvider, ParticleIterProvider, SsAlgorithm, State};
 
 use crate::camera::{Camera, Projection};
 use crate::color::ColorMethod;
@@ -1530,6 +1530,13 @@ impl App {
                     };
                     rep.ss_cache = fresh_ss;
                     rep.gpu = self.renderer.upload(rs, &geom);
+                    // Cache the cartoon ribbon CPU mesh (with residue tags) for the
+                    // selection glow to extract sub-ribbons from; clear for other styles.
+                    rep.cartoon_cache = if matches!(rep.kind, RepKind::Cartoon) {
+                        Some(geom.mesh)
+                    } else {
+                        None
+                    };
                     rep.geom_dirty = false;
                     rep.coords_dirty = false;
                     changed = true;
@@ -1546,6 +1553,9 @@ impl App {
                         )
                     };
                     self.renderer.update(rs, &mut rep.gpu, &geom);
+                    if matches!(rep.kind, RepKind::Cartoon) {
+                        rep.cartoon_cache = Some(geom.mesh); // keep the glow's cache fresh
+                    }
                     rep.coords_dirty = false;
                     changed = true;
                     rep_geom_changed = true;
@@ -1638,9 +1648,25 @@ fn build_glow(
     let Some(index_str) = pick::index_selection_string(atoms) else {
         return geometry::GeometryData::default();
     };
+    // Highlighted residues (resindex), for extracting the Cartoon sub-ribbon.
+    let topo = system.topology();
+    let res_set: std::collections::HashSet<u32> = atoms
+        .iter()
+        .filter_map(|&a| topo.get_atom(a).map(|at| at.resindex as u32))
+        .collect();
     let mut out = geometry::GeometryData::default();
     for rep in reps {
         if !rep.visible {
+            continue;
+        }
+        // Cartoon: don't rebuild a (degenerate, divergent) subset ribbon — extract the
+        // chosen residues' triangles straight from the parent's *exact* cached mesh.
+        // Coincident geometry passes the glow pass's `≤` depth test cleanly (no z-fight,
+        // no inflation) and a single residue still yields its ribbon segment.
+        if matches!(rep.kind, RepKind::Cartoon) {
+            if let Some(cache) = &rep.cartoon_cache {
+                out.append(cartoon_submesh(cache, &res_set));
+            }
             continue;
         }
         if geometry::needs_ss(&rep.params, rep.color) && rep.ss_cache.is_none() {
@@ -1657,18 +1683,50 @@ fn build_glow(
             &bound, n_atoms, bonds, &rep.params, rep.color, rep.material,
             rep.ss_cache.as_ref(),
         );
-        // Mesh styles (Cartoon/Surface) re-build the glow over the *subset* of
-        // selected atoms, so its mesh nearly — but not exactly — coincides with the
-        // parent rep's full mesh (the SS-dependent spline smoothing/cleanup diverges
-        // at the subset's ends). Two near-coplanar surfaces z-fight, so the glow
-        // looked patchy. Push the glow mesh a hair *outward* along its normals into a
-        // thin shell just in front of the parent, so it tests cleanly above it. (The
-        // glow pass writes no depth, so the back of the shell still fails the depth
-        // test and stays hidden.) Impostor glows coincide exactly and need no offset.
+        // Surface re-builds the glow over the *subset* of selected atoms, so its mesh
+        // nearly — but not exactly — coincides with the parent's (the grid isosurface
+        // shifts at the subset boundary). Two near-coplanar surfaces z-fight, so push
+        // the glow mesh a hair *outward* along its normals into a thin shell just in
+        // front of the parent. (The glow pass writes no depth, so the shell's back
+        // still fails the depth test and stays hidden.) Impostor glows coincide
+        // exactly and need no offset; Cartoon reuses the parent mesh (handled above).
         inflate_mesh(&mut geom.mesh, GLOW_INFLATE);
         out.append(geom);
     }
     out
+}
+
+/// Extract the sub-ribbon of a cached Cartoon mesh for the residues in `res_set`:
+/// keep a triangle when a majority (≥2) of its vertices belong to chosen residues
+/// (a clean cut at residue boundaries), compacting the referenced vertices. The
+/// result shares the parent's exact vertex positions, so the glow is coincident.
+fn cartoon_submesh(
+    mesh: &geometry::MeshData,
+    res_set: &std::collections::HashSet<u32>,
+) -> geometry::GeometryData {
+    let mut vertices: Vec<crate::render::MeshVertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for tri in mesh.indices.chunks_exact(3) {
+        let chosen = tri
+            .iter()
+            .filter(|&&v| res_set.contains(&mesh.vert_res[v as usize]))
+            .count();
+        if chosen < 2 {
+            continue;
+        }
+        for &v in tri {
+            let nv = *remap.entry(v).or_insert_with(|| {
+                vertices.push(mesh.vertices[v as usize]);
+                (vertices.len() - 1) as u32
+            });
+            indices.push(nv);
+        }
+    }
+    geometry::GeometryData {
+        mesh: geometry::MeshData { vertices, indices, vert_res: Vec::new() },
+        ..Default::default()
+    }
 }
 
 /// Atom-index bits in a pick id's y channel (the rest hold the rep index). 21 bits

@@ -148,6 +148,7 @@ impl GeometryData {
         self.cylinders.append(&mut other.cylinders);
         self.lines.append(&mut other.lines);
         self.mesh.vertices.append(&mut other.mesh.vertices);
+        self.mesh.vert_res.append(&mut other.mesh.vert_res);
         self.mesh
             .indices
             .extend(other.mesh.indices.iter().map(|i| i + base));
@@ -155,10 +156,15 @@ impl GeometryData {
 }
 
 /// An indexed triangle mesh (Cartoon representation).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MeshData {
     pub vertices: Vec<MeshVertex>,
     pub indices: Vec<u32>,
+    /// Per-vertex source residue index (`resindex`), parallel to `vertices`. Only
+    /// the Cartoon builder fills this (for selecting the sub-ribbon of given
+    /// residues when building the selection glow); empty for other meshes. Not
+    /// uploaded to the GPU.
+    pub vert_res: Vec<u32>,
 }
 
 /// Whether a representation needs secondary structure (for the Cartoon shape or

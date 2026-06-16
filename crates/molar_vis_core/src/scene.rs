@@ -106,6 +106,11 @@ pub struct Representation {
     /// Cached secondary structure from the last full (structural) build, reused
     /// for coordinate-only frame updates when `ss_per_frame` is off. Transient.
     pub ss_cache: Option<SsMap>,
+    /// Cached CPU copy of the last-built **Cartoon** ribbon mesh (with per-vertex
+    /// `vert_res` residue tags), so the selection glow can extract just the chosen
+    /// residues' sub-ribbon from this *exact* geometry (coincident → no z-fight, and
+    /// works for a single residue). `None` for non-cartoon reps. Transient.
+    pub cartoon_cache: Option<crate::geometry::MeshData>,
     /// Transient UI state: whether this rep's inline settings panel is expanded.
     /// Not part of `EditState` (view state, not undoable).
     pub params_open: bool,
@@ -191,6 +196,7 @@ impl Representation {
             dynamic,
             ss_per_frame,
             ss_cache: None,
+            cartoon_cache: None,
             params_open: false,
             settings_tab: SettingsTab::default(),
             sel_dirty: true,

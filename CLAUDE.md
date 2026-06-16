@@ -105,7 +105,9 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   the base) flaring to `arrow_base` then a linear taper to a point at the strand's last Cα (then
   ramping back up into the following coil) — the only departure from the original ellipse path.
   (A degenerate/zero normal — failed frame, arrow tip — is guarded in `mesh.wgsl` so it doesn't
-  `normalize`→NaN→white on NVIDIA.)
+  `normalize`→NaN→white on NVIDIA.) Every emitted vertex is tagged with its source `resindex` in
+  `MeshData::vert_res` (parallel to `vertices`, not uploaded) so the selection glow can extract a
+  given residue's ribbon segment from the *exact* parent mesh (`cartoon_cache` + `cartoon_submesh`).
 - `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
   guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
@@ -590,15 +592,19 @@ History labels via `describe_change` ("edit selection", "change coloring",
   - **Active (pending) selection — two-step commit** (`scene::PendingSelection`,
     `Molecule::pending`): a lasso does **not** make a rep directly. It stages a *pending* selection
     that's **view state, not undoable, excluded from `EditState`**, shown two ways: (1) a **GPU glow
-    highlight in the current style** — `rebuild_dirty`'s `build_glow` rebuilds, per visible rep,
+    highlight in the current style** — `rebuild_dirty`'s `build_glow` builds, per visible rep,
     `(rep.sel ∩ pending)` in *that rep's own style/params* (Cartoon → ribbon, VDW → spheres, …),
-    merged into the molecule's `glow_gpu` (`GeometryData::append`). **Mesh-style glow (Cartoon/
-    Surface) is inflated into a thin shell** (`inflate_mesh`, `GLOW_INFLATE`=0.025 nm outward along
-    vertex normals): the glow mesh is re-splined over the *subset* of selected atoms, so it nearly
-    but not exactly coincides with the parent's full mesh (SS-dependent smoothing/cleanup diverges at
-    the subset ends) → two near-coplanar surfaces z-fight → patchy. The outward shell makes the glow
-    test cleanly *above* the parent (its back faces still fail the `≤` depth test and stay hidden, so
-    no double-blend); impostor glows coincide exactly and aren't offset. A final additive **glow pass**
+    merged into the molecule's `glow_gpu` (`GeometryData::append`). **Cartoon glow reuses the parent
+    ribbon's exact geometry**: the cartoon builder tags every vertex with its source `resindex`
+    (`MeshData::vert_res`) and the last-built ribbon mesh is cached on the rep (`cartoon_cache`);
+    `cartoon_submesh` then extracts just the chosen residues' triangles (kept when ≥2 of a triangle's
+    3 verts are in the residue set — a clean cut at residue boundaries) and re-indexes them. Because
+    it's the *same* vertices as the parent, the glow is coincident → passes the `≤` depth test cleanly
+    (**no z-fight, no inflation**) and a **single residue** still yields its ribbon segment (a 1-residue
+    spline is degenerate, which is why re-splining a subset failed). **Surface glow** still re-builds a
+    subset isosurface (no residue tags) that diverges from the parent, so it's inflated into a thin
+    shell (`inflate_mesh`, `GLOW_INFLATE`=0.025 nm outward along normals) to test above it; impostor
+    glows coincide exactly and aren't offset. A final additive **glow pass**
     (`render_scene` pass 4, pipeline index `GLOW=2`) draws it with the shaders' `fs_glow` — an
     intense cyan **Fresnel rim** (bright at grazing angles + a strong body tint), **pulsing**: the
     camera uniform's `params.w` carries an animated multiplier (`0.70 + 0.30·sin(t·3.2)`, computed in

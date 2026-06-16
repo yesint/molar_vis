@@ -541,7 +541,7 @@ fn surface_nets(
         );
     }
 
-    MeshData { vertices, indices }
+    MeshData { vertices, indices, vert_res: Vec::new() }
 }
 
 /// Central-difference gradient of the scalar field at a grid sample (clamped).

@@ -204,16 +204,23 @@ fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
         strands: &strands,
     };
 
-    // Sample the spline into cross-section rings.
+    // Sample the spline into cross-section rings, tagging each with its nearest
+    // residue's `resindex` (so the selection glow can extract just the sub-ribbon of
+    // chosen residues from this exact mesh).
     let mut rings: Vec<Ring> = Vec::with_capacity((n - 1) * STEPS + 1);
+    let mut ring_res: Vec<u32> = Vec::with_capacity((n - 1) * STEPS + 1);
     for i in 0..n - 1 {
         for s in 0..STEPS {
-            rings.push(sample(&ctx, i, s as f32 / STEPS as f32));
+            let u = s as f32 / STEPS as f32;
+            rings.push(sample(&ctx, i, u));
+            let nearest = if u < 0.5 { i } else { i + 1 };
+            ring_res.push(run[nearest].resindex as u32);
         }
     }
     rings.push(sample(&ctx, n - 2, 1.0));
+    ring_res.push(run[n - 1].resindex as u32);
 
-    emit(&rings, mesh);
+    emit(&rings, &ring_res, mesh);
 }
 
 /// Demote single-residue helix/sheet runs to coil.
@@ -348,10 +355,12 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
 }
 
 /// Turn the list of rings into a triangle mesh (ribbon body + end caps).
-fn emit(rings: &[Ring], mesh: &mut MeshData) {
+/// `ring_res[i]` is the source residue of ring `i`, stamped onto every vertex of
+/// that ring (and the adjacent end cap) into `mesh.vert_res`.
+fn emit(rings: &[Ring], ring_res: &[u32], mesh: &mut MeshData) {
     let base = mesh.vertices.len() as u32;
 
-    for r in rings {
+    for (ri, r) in rings.iter().enumerate() {
         for k in 0..RING {
             let theta = std::f32::consts::TAU * k as f32 / RING as f32;
             let (s, c) = theta.sin_cos();
@@ -365,6 +374,7 @@ fn emit(rings: &[Ring], mesh: &mut MeshData) {
                 color: r.color,
                 mat: 0,
             });
+            mesh.vert_res.push(ring_res[ri]);
         }
     }
 
@@ -383,12 +393,12 @@ fn emit(rings: &[Ring], mesh: &mut MeshData) {
     }
 
     // Flat end caps (fan around a center vertex).
-    add_cap(mesh, rings.first().unwrap(), base, true);
+    add_cap(mesh, rings.first().unwrap(), ring_res[0], base, true);
     let last_base = base + ((rings.len() - 1) * RING) as u32;
-    add_cap(mesh, rings.last().unwrap(), last_base, false);
+    add_cap(mesh, rings.last().unwrap(), ring_res[rings.len() - 1], last_base, false);
 }
 
-fn add_cap(mesh: &mut MeshData, ring: &Ring, ring_base: u32, front: bool) {
+fn add_cap(mesh: &mut MeshData, ring: &Ring, res: u32, ring_base: u32, front: bool) {
     // Skip near-degenerate rings (e.g. an arrow point that lands on a run end):
     // their fan would be slivers with unstable normals and ~zero area anyway.
     if ring.hw < 1e-3 || ring.ht < 1e-3 {
@@ -402,6 +412,7 @@ fn add_cap(mesh: &mut MeshData, ring: &Ring, ring_base: u32, front: bool) {
         color: ring.color,
         mat: 0,
     });
+    mesh.vert_res.push(res);
     for k in 0..RING {
         let k2 = (k + 1) % RING;
         let a = ring_base + k as u32;
