@@ -552,3 +552,12 @@ History labels via `describe_change` ("edit selection", "change coloring",
     `lasso_full_screen_selects_all_for_vdw`, `lasso_cartoon_selects_only_backbone`.
   - **TODO:** more pick modes in the dropdown. Picking/lasso is O(visible atoms × images) — fine for
     small/medium systems; a spatial grid / GPU id-buffer is the optimization for huge ones.
+
+## Roadmap
+
+Forward-looking feature list (deleting traj frames, save/load state, app settings, more depth-cue
+methods, background color, material editor, labels/measurement, Python bindings, embedded command
+language, geometric primitives, raytracing, movies, whole-residue pick mode, CG/Martini bonds+SS,
+plugins, selection-input improvements, drug-discovery goodies (PLIP interactions, SDF reading),
+dashed PBC half-bonds, and visual structure editing) lives in **[ROADMAP.md](ROADMAP.md)** — in no
+particular order. Move items into *Milestone status* above as they ship.
