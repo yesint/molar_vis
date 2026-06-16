@@ -1487,6 +1487,13 @@ impl App {
             camera.depth_cue.strength = 0.9;
             camera.depth_cue.start = 0.0;
         }
+        // Verification hook: MOLAR_VIS_DEBUG_AO[=strength] enables ambient occlusion.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_AO") {
+            camera.ao.enabled = true;
+            if let Ok(s) = v.trim().parse::<f32>() {
+                camera.ao.strength = s.clamp(0.0, 1.0);
+            }
+        }
         // Verification hook: MOLAR_VIS_DEBUG_FOCUS=<selection> zooms the camera to
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
@@ -2266,6 +2273,39 @@ impl App {
                                         ui.label("Start");
                                         ui.add(
                                             egui::Slider::new(&mut cue.start, 0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                    });
+                            });
+                        });
+                    // Ambient-occlusion popup (button filled when AO is on): enable +
+                    // Strength / Radius. Like the cue popup, stays open while adjusting.
+                    let ao_on = self.camera.ao.enabled;
+                    let resp = overlay_button(ui, icon::CIRCLE_HALF, ao_on)
+                        .on_hover_text("Ambient occlusion");
+                    egui::Popup::menu(&resp)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            let ao = &mut self.camera.ao;
+                            ui.checkbox(&mut ao.enabled, "Ambient occlusion").on_hover_text(
+                                "Darken creases and contact points (screen-space AO)",
+                            );
+                            ui.add_enabled_ui(ao.enabled, |ui| {
+                                egui::Grid::new("ao_opts")
+                                    .num_columns(2)
+                                    .spacing(egui::vec2(8.0, 4.0))
+                                    .show(ui, |ui| {
+                                        ui.label("Strength");
+                                        ui.add(
+                                            egui::Slider::new(&mut ao.strength, 0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                        ui.label("Radius");
+                                        ui.add(
+                                            egui::Slider::new(&mut ao.radius, 0.1..=1.0)
+                                                .suffix(" nm")
                                                 .fixed_decimals(2),
                                         );
                                         ui.end_row();
@@ -3802,6 +3842,7 @@ impl App {
                     proj,
                     self.camera.is_perspective(),
                     self.camera.cue_uniform(),
+                    self.camera.ao_uniform(),
                     self.camera.eye_depth_range(),
                     glow_pulse,
                     &self.scene,

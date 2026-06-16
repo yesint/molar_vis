@@ -62,8 +62,16 @@ fn unpack_mat(m: u32) -> vec4<f32> {
     let amb = f32((m >> 0u) & 0xffu) / 255.0;
     let dif = f32((m >> 8u) & 0xffu) / 255.0;
     let spc = f32((m >> 16u) & 0xffu) / 255.0;
-    let shn = f32((m >> 24u) & 0xffu) / 255.0;
+    let shn = f32((m >> 24u) & 0x7fu) / 127.0; // top bit is the outline flag
     return vec4<f32>(amb, dif, spc, shn);
+}
+
+// VMD "Outline": darken fragments at grazing angles (silhouette edge). The flag is
+// the top bit of the packed shininess byte (see sphere.wgsl).
+fn apply_outline(color: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, m: u32) -> vec3<f32> {
+    let on = f32((m >> 31u) & 1u);
+    let edge = pow(1.0 - abs(dot(normal, view_dir)), 2.0);
+    return color * (1.0 - on * 0.9 * edge);
 }
 
 // Blinn-Phong shade in view space (white specular highlight; `view_dir` to eye).
@@ -179,7 +187,8 @@ fn compute_hit(in: VsOut) -> Hit {
 
     // Per-material Blinn-Phong (view dir to eye: origin for perspective, +z ortho).
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-hit), camera.params.x > 0.5);
-    let lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat));
+    var lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat));
+    lit = apply_outline(lit, normal, view_dir, in.mat);
 
     return Hit(apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
 }

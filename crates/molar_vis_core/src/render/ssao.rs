@@ -1,0 +1,115 @@
+//! Screen-space ambient occlusion: the GPU uniform + bind-group layout + pipeline
+//! for the fullscreen SSAO pass (see `shaders/ssao.wgsl`). The pass reads the
+//! scene depth and multiply-blends an occlusion factor onto the color target.
+
+use bytemuck::{Pod, Zeroable};
+use glam::Mat4;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct SsaoUniform {
+    pub proj: [[f32; 4]; 4],
+    pub inv_proj: [[f32; 4]; 4],
+    /// `[radius, bias, strength, perspective(1/0)]`.
+    pub params: [f32; 4],
+    /// `[render_w, render_h, _, _]` (the SSAA target size in pixels).
+    pub misc: [f32; 4],
+}
+
+impl SsaoUniform {
+    /// `ao` is `[radius, bias, strength, enabled]` (enabled handled by the caller).
+    pub fn new(proj: Mat4, perspective: bool, ao: [f32; 4], render_size: [u32; 2]) -> Self {
+        Self {
+            proj: proj.to_cols_array_2d(),
+            inv_proj: proj.inverse().to_cols_array_2d(),
+            params: [ao[0], ao[1], ao[2], if perspective { 1.0 } else { 0.0 }],
+            misc: [render_size[0] as f32, render_size[1] as f32, 0.0, 0.0],
+        }
+    }
+}
+
+/// Bind group 0: the (sampleable) scene depth texture + the SSAO uniform.
+pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("ssao-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Fullscreen SSAO pipeline: outputs the AO factor with a **multiply** blend
+/// (`result = dst × src`) so it darkens the existing color in crevices.
+pub fn build_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("ssao-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ssao.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("ssao-layout"),
+        bind_group_layouts: &[Some(bgl)],
+        immediate_size: 0,
+    });
+    let blend = wgpu::BlendState {
+        // rgb = 0·src + dst·src = dst × ao
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::Src,
+            operation: wgpu::BlendOperation::Add,
+        },
+        // keep the destination alpha unchanged
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("ssao-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}

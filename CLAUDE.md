@@ -261,6 +261,20 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   change; the top-view-toolbar depth-cue popup has the **mode tabs** (`tab_bar`) + Strength/Start
   sliders and stays open until you click outside/the button (`CloseOnClickOutside`).
   `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2` sets it headlessly.
+- **Ambient occlusion (SSAO)** — a fullscreen pass (`render/ssao.rs` + `shaders/ssao.wgsl`) inserted
+  after the opaque pass: it reads the scene **depth** (the depth target now carries `TEXTURE_BINDING`
+  so it's sampleable; impostors' analytic `frag_depth` makes it exact), reconstructs view-space
+  positions via the inverse projection, and estimates occlusion **without normals** — for each pixel
+  it counts neighbours (a fixed golden-angle spiral kernel, world-radius scaled to screen by the
+  projection) that sit *in front* of it in view space, so creases/contacts darken but flat surfaces
+  don't self-shadow. The AO factor is written back with a **multiply blend** (`result = dst×ao`)
+  onto the opaque color before the OIT composite — no extra targets, no separate blur (the 2× SSAA
+  downsample smooths the mild banding from the unrotated kernel). Settings live in `Camera::ao`
+  (`Ao { enabled, strength, radius }`, off by default) → re-renders via `PartialEq`, serialized in
+  sessions; `Camera::ao_uniform` feeds the pass `[radius, bias, strength, enabled]`. **Gated to full
+  WebGPU** (`ssao_pipeline: Option`, built only when `oit_enabled`): WebGL2 can't reliably sample
+  the depth texture, so it skips SSAO rather than risk a startup shader-compile failure. Works on
+  both impostors (VDW) and meshes (surface/cartoon). `MOLAR_VIS_DEBUG_AO[=strength]` enables it.
 - **Scene graph** — N molecules × M reps. Each rep has a molar **selection string**
   compiled to atom indices (`compile_selection` → `system.select`). Geometry is built
   only for selected atoms (and bonds whose endpoints are both selected).
@@ -377,7 +391,9 @@ Two groups split by a `ui.separator()`:
 **orthographic is the default**), a **depth-cue** button (`GRADIENT` glyph, filled when the cue
 is enabled) opening a `Popup::menu` cue panel (enabled + **mode tabs** Linear/Exp/Exp² via the
 shared `tab_bar` + Strength/Start sliders — a popup, so the toolbar stays fixed-height; the popup
-is **`CloseOnClickOutside`** so adjusting sliders / switching mode keeps it open), and an
+is **`CloseOnClickOutside`** so adjusting sliders / switching mode keeps it open), an
+**ambient-occlusion** button (`CIRCLE_HALF`, filled when AO is on) opening a `CloseOnClickOutside`
+popup (enable + Strength/Radius sliders; `Camera::ao`), and an
 **axes-gizmo dropdown** (`ARROWS_OUT_CARDINAL`: an *On*
 checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,BottomLeft,BottomRight}`, default
 BottomRight — VMD-style orientation axes drawn onto the 3D image by `draw_axes_overlay`;
@@ -538,10 +554,16 @@ History labels via `describe_change` ("edit selection", "change coloring",
   - **Still TODO:** the **WebGPU** path (vs the WebGL2 fallback) wants its own live check; true
     random-access disk streaming (a Web Worker + `FileReaderSync` over a `Blob`) is unneeded for the
     in-memory approach but would help huge trajectories.
-- ✅ M9 **Materials** — `material.rs` `Material` (8 VMD presets: Opaque/Transparent/Glass/
-  Translucent/Ghost/Glossy/Diffuse/Metal; each `params()` → ambient/diffuse/specular/shininess/
-  opacity) + per-rep `material` (in `EditState`) + a **material dropdown** in row 2 (next to color,
-  `material_picker`/`paint_material_icon`).
+- ✅ M9 **Materials** — `material.rs` `Material` (11 VMD presets: Opaque/Transparent/Glass/
+  Translucent/Ghost/Glossy/Diffuse/Metal + the **AO trio** AoChalky/AoShiny/AoEdgy; each
+  `params()` → ambient/diffuse/specular/shininess/opacity/**outline**) + per-rep `material` (in
+  `EditState`) + a **material dropdown** in row 2 (next to color, `material_picker`/
+  `paint_material_icon`). The **AO materials** are VMD's ambient-occlusion-oriented presets
+  (high diffuse, AoChalky matte / AoShiny with a highlight / AoEdgy matte + outline); they keep a
+  small ambient so they're not pitch-black until real AO lands (SSAO assessed feasible; see the
+  roadmap). **Outline** (VMD silhouette darkening) is packed as the **top bit of the shininess
+  byte** (shininess uses the low 7 bits) — no vertex-layout change; the lit shaders' `apply_outline`
+  darkens grazing-angle fragments (same Fresnel term as the selection-glow rim, subtractive).
   - **Transparency (Weighted-Blended OIT)**: `geometry::build` folds the material opacity into each
     element's color alpha; all shaders output it. **Each geometry has two pipelines** `[opaque, oit]`:
     `[0]` writes a single alpha-blended color target + depth (`fs_main`); `[1]` is the OIT pipeline —
@@ -688,6 +710,16 @@ History labels via `describe_change` ("edit selection", "change coloring",
   the world point under the cursor stays put (focal-plane half-height `distance·tan(fov/2)` for both
   projections). Unit test `zoom_is_centered_on_cursor` (point projects back to the same screen NDC,
   both projections).
+- ✅ M18 **VMD AO materials + screen-space ambient occlusion** — (1) added VMD's AO-oriented
+  material presets `AoChalky`/`AoShiny`/`AoEdgy` (11 materials now); `AoEdgy` needed VMD's
+  silhouette **Outline**, so `MaterialParams` gained `outline`, packed as the **top bit of the
+  shininess byte** (no vertex-layout change), and the lit shaders gained `apply_outline` (grazing-
+  angle darkening, same Fresnel term as the glow rim). (2) **SSAO** (`render/ssao.rs` +
+  `shaders/ssao.wgsl`): a fullscreen multiply-blend pass after the opaque pass, normal-free
+  (neighbour-in-front obscurance, golden-angle spiral kernel), reading the now-sampleable depth
+  target; `Camera::ao` settings + a top-toolbar AO popup; gated to full WebGPU (skipped on WebGL2).
+  See the *Ambient occlusion (SSAO)* architecture note. Verified: WGSL compiles, crevices darken on
+  VDW (impostors) and surface (mesh), no startup regression. 30 tests pass.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

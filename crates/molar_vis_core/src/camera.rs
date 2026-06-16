@@ -63,6 +63,23 @@ impl Default for DepthCue {
     }
 }
 
+/// Screen-space ambient occlusion: darken creases/contact points where geometry
+/// occludes nearby ambient light, adding depth/shape cues (off by default, like
+/// VMD). `radius` is the sampling radius in nm; `strength` scales the darkening.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Ao {
+    pub enabled: bool,
+    pub strength: f32,
+    /// World-space sampling radius (nm).
+    pub radius: f32,
+}
+
+impl Default for Ao {
+    fn default() -> Self {
+        Self { enabled: false, strength: 0.9, radius: 0.4 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     /// Point the camera looks at (pannable).
@@ -76,6 +93,10 @@ pub struct Camera {
     pub fov_y: f32,
     pub projection: Projection,
     pub depth_cue: DepthCue,
+    /// Screen-space ambient occlusion. `#[serde(default)]` so sessions written
+    /// before this field existed still load.
+    #[serde(default)]
+    pub ao: Ao,
 }
 
 impl Default for Camera {
@@ -108,6 +129,7 @@ impl Camera {
             fov_y,
             projection: Projection::Orthographic,
             depth_cue: DepthCue::default(),
+            ao: Ao::default(),
         }
     }
 
@@ -142,6 +164,13 @@ impl Camera {
             CueMode::Exp2 => 2.0,
         };
         [near, far, strength, mode]
+    }
+
+    /// SSAO parameters for the renderer: `[radius, bias, strength, enabled]`
+    /// (radius/bias in nm/eye-space; `enabled == 0` skips the AO pass).
+    pub fn ao_uniform(&self) -> [f32; 4] {
+        let enabled = if self.ao.enabled { 1.0 } else { 0.0 };
+        [self.ao.radius.max(1e-3), 0.015, self.ao.strength, enabled]
     }
 
     /// Eye-space distance range `[front, back]` (positive, away from the camera)

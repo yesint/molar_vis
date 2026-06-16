@@ -12,6 +12,7 @@ mod cylinder;
 mod line;
 mod mesh;
 mod sphere;
+mod ssao;
 
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
@@ -19,6 +20,7 @@ pub use mesh::MeshVertex;
 pub use sphere::SphereInstance;
 
 use camera_uniform::CameraUniform;
+use ssao::SsaoUniform;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -80,6 +82,30 @@ fn make_camera_bind_group(
                 size: camera_binding_size(),
             }),
         }],
+    })
+}
+
+/// (Re)create the SSAO bind group over the scene `depth_view` + the SSAO uniform.
+/// Recreated whenever the targets (hence the depth view) change.
+fn make_ssao_bind_group(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    depth_view: &wgpu::TextureView,
+    buf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("ssao-bg"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(depth_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: buf.as_entire_binding(),
+            },
+        ],
     })
 }
 
@@ -181,7 +207,8 @@ impl Targets {
         let attach_sample =
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let color_tex = make("scene-color", color_format, attach_sample);
-        let depth_tex = make("scene-depth", DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        // The depth target is sampled by the SSAO pass, so it also needs TEXTURE_BINDING.
+        let depth_tex = make("scene-depth", DEPTH_FORMAT, attach_sample);
         let accum_tex = make("oit-accum", ACCUM_FORMAT, attach_sample);
         let reveal_tex = make("oit-reveal", REVEAL_FORMAT, attach_sample);
 
@@ -398,6 +425,15 @@ pub struct SceneRenderer {
     mesh_pipeline: [wgpu::RenderPipeline; 3],
     oit_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
+    /// SSAO: a fullscreen pass (after opaque) that reads the scene depth and
+    /// multiply-blends an occlusion factor onto the color. `ssao_bind_group`
+    /// references the depth view, so it is recreated whenever `targets` change.
+    ssao_bgl: wgpu::BindGroupLayout,
+    ssao_buf: wgpu::Buffer,
+    /// `None` when the device can't support the SSAO pass (WebGL2 — sampling the
+    /// depth texture isn't reliable there); the pass is then skipped.
+    ssao_pipeline: Option<wgpu::RenderPipeline>,
+    ssao_bind_group: wgpu::BindGroup,
     /// Whether the device supports weighted-blended OIT (needs `INDEPENDENT_BLEND`).
     /// False on WebGL2: transparent reps then render with plain alpha blending in the
     /// opaque pass, and the OIT/composite passes are skipped.
@@ -579,6 +615,19 @@ impl SceneRenderer {
         });
         let composite_pipeline = build_composite_pipeline(device, f, &oit_bgl);
 
+        // SSAO: bind-group layout, uniform buffer, fullscreen multiply-blend pipeline.
+        let ssao_bgl = ssao::bind_group_layout(device);
+        let ssao_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ssao-uniform"),
+            size: std::mem::size_of::<SsaoUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // Only on a full-WebGPU device (WebGL2 — `!oit_enabled` — can't reliably
+        // sample the depth texture the SSAO pass needs).
+        let ssao_pipeline =
+            oit_enabled.then(|| ssao::build_pipeline(device, color_format, &ssao_bgl));
+
         #[cfg(not(target_arch = "wasm32"))]
         let pick_pipeline =
             sphere::build_pick_pipeline(device, PICK_FORMAT, DEPTH_FORMAT, &camera_bgl);
@@ -593,6 +642,8 @@ impl SceneRenderer {
         });
 
         let targets = Targets::new(device, color_format, &oit_bgl, [1, 1]);
+        let ssao_bind_group =
+            make_ssao_bind_group(device, &ssao_bgl, &targets.depth_view, &ssao_buf);
         let egui_texture = rs.renderer.write().register_native_texture(
             device,
             &targets.color_view,
@@ -613,6 +664,10 @@ impl SceneRenderer {
             mesh_pipeline,
             oit_bgl,
             composite_pipeline,
+            ssao_bgl,
+            ssao_buf,
+            ssao_pipeline,
+            ssao_bind_group,
             oit_enabled,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
@@ -815,6 +870,7 @@ impl SceneRenderer {
         proj: Mat4,
         perspective: bool,
         cue: [f32; 4],
+        ao: [f32; 4],
         depth_range: [f32; 2],
         glow_pulse: f32,
         scene: &Scene,
@@ -828,6 +884,13 @@ impl SceneRenderer {
         ];
         if render_size != self.targets.size {
             self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
+            // The SSAO bind group references the (new) depth view → recreate it.
+            self.ssao_bind_group = make_ssao_bind_group(
+                &rs.device,
+                &self.ssao_bgl,
+                &self.targets.depth_view,
+                &self.ssao_buf,
+            );
             rs.renderer.write().update_egui_texture_from_wgpu_texture(
                 &rs.device,
                 &self.targets.color_view,
@@ -962,6 +1025,35 @@ impl SceneRenderer {
             // renders. With OIT they go to the dedicated pass below instead.
             if has_transparent && !self.oit_enabled {
                 self.draw_reps(&mut pass, scene, true, 0, &images);
+            }
+        }
+
+        // Pass 1.5 — SSAO: read the opaque depth and multiply-blend an occlusion
+        // factor onto the opaque color (darkening crevices), before transparent
+        // geometry is composited over it. Skipped when AO is disabled.
+        if ao[3] > 0.5 {
+            if let Some(ssao_pipeline) = &self.ssao_pipeline {
+            let su = SsaoUniform::new(proj, perspective, ao, render_size);
+            rs.queue.write_buffer(&self.ssao_buf, 0, bytemuck::bytes_of(&su));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.targets.color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(ssao_pipeline);
+            pass.set_bind_group(0, &self.ssao_bind_group, &[]);
+            pass.draw(0..3, 0..1);
             }
         }
 
