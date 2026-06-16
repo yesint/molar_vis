@@ -28,6 +28,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
   `MOLAR_VIS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
   `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`,
+  `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2` (set the depth-cue falloff curve + bump strength so it
+  shows in a screenshot),
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
@@ -246,13 +248,19 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   perpendicular to the segment by `width` px in `line.wgsl` (uses the viewport size carried
   in the camera uniform's `params.yz`); width stays constant in pixels at any zoom, like VMD.
   Half-bond coloring = two half-segments per bond, colored by each endpoint atom.
-- **Depth cueing (fog)** — linear fog fades all geometry toward the background (`BG` in
-  `render.rs`, also the clear color) by eye-space distance. The camera uniform carries
-  `cue = [near, far, strength, _]` (eye-space, derived per frame by `Camera::cue_uniform`
-  from `distance`/`scene_radius` + the scene-relative `DepthCue { enabled, start, strength }`
-  on `Camera`) + `fog_color`. Every fragment shader applies the shared `apply_fog(color,
-  eye_z)`; line/mesh pass eye-space `z` as a varying, the impostors use their ray hit. Lives
-  in `Camera` so its `PartialEq` re-renders on change; controls in the Scene panel.
+- **Depth cueing (fog)** — fog fades all geometry toward the background (`BG` in
+  `render.rs`, also the clear color) by eye-space distance, with three VMD-style falloff
+  **`CueMode`s** (matching the OpenGL fog equations): **Linear**, **Exp** (`1−e^(−k·t)`), **Exp²**
+  (`1−e^(−(k·t)²)`), all normalized to reach full fog at the far plane so switching modes keeps the
+  far-fog at `strength` and only changes the ramp shape. The camera uniform carries
+  `cue = [near, far, strength, mode]` (eye-space, derived per frame by `Camera::cue_uniform`
+  from `distance`/`scene_radius` + the scene-relative `DepthCue { enabled, start, strength, mode }`
+  on `Camera`) + `fog_color`. Every fragment shader applies the shared `apply_fog(color, eye_z)`
+  (computes normalized depth `t∈[0,1]`, selects the curve by `cue.w`); line/mesh pass eye-space `z`
+  as a varying, the impostors use their ray hit. Lives in `Camera` so its `PartialEq` re-renders on
+  change; the top-view-toolbar depth-cue popup has the **mode tabs** (`tab_bar`) + Strength/Start
+  sliders and stays open until you click outside/the button (`CloseOnClickOutside`).
+  `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2` sets it headlessly.
 - **Scene graph** — N molecules × M reps. Each rep has a molar **selection string**
   compiled to atom indices (`compile_selection` → `system.select`). Geometry is built
   only for selected atoms (and bonds whose endpoints are both selected).
@@ -367,8 +375,10 @@ area right of the left panel, added in `ui()` between the left panel and `draw_v
 Two groups split by a `ui.separator()`:
 **view** — a **projection-cycle** button (Perspective↔Orthographic, icon+tooltip change;
 **orthographic is the default**), a **depth-cue** button (`GRADIENT` glyph, filled when the cue
-is enabled) opening a `Popup::menu` cue panel (enabled + Strength/Start sliders — a popup, so the
-toolbar stays fixed-height), and an **axes-gizmo dropdown** (`ARROWS_OUT_CARDINAL`: an *On*
+is enabled) opening a `Popup::menu` cue panel (enabled + **mode tabs** Linear/Exp/Exp² via the
+shared `tab_bar` + Strength/Start sliders — a popup, so the toolbar stays fixed-height; the popup
+is **`CloseOnClickOutside`** so adjusting sliders / switching mode keeps it open), and an
+**axes-gizmo dropdown** (`ARROWS_OUT_CARDINAL`: an *On*
 checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,BottomLeft,BottomRight}`, default
 BottomRight — VMD-style orientation axes drawn onto the 3D image by `draw_axes_overlay`;
 `MOLAR_VIS_DEBUG_AXES=1` enables it headlessly);
@@ -667,6 +677,17 @@ History labels via `describe_change` ("edit selection", "change coloring",
   committed. Verified: bond count unchanged from the whole protein (1855); no long lines/ribbons
   across the box; dashed stubs reach the partner image; the cartoon ribbon is dashed beyond the
   boundary.
+- ✅ M17 **Depth-cue modes (VMD `cuemode`) + cursor-centered zoom** — two "Rendering & visuals"
+  items. (1) **Depth-cue falloff curves**: `CueMode {Linear, Exp, Exp2}` on `DepthCue` (matching
+  the OpenGL fog equations), passed in `cue.w`; `apply_fog` (all 4 lit shaders) computes normalized
+  depth `t∈[0,1]` and selects linear / `1−e^(−k·t)` / `1−e^(−(k·t)²)` (k=3), **normalized to reach
+  full fog at the far plane** so switching modes keeps far-fog = `strength` and only changes the
+  ramp. Mode tabs added to the depth-cue popup (shared `tab_bar`), which is now
+  `CloseOnClickOutside` so it stays open while adjusting. `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2`.
+  (2) **Cursor-centered wheel zoom**: `Camera::zoom_scroll(scroll, ndc, aspect)` pans `target` so
+  the world point under the cursor stays put (focal-plane half-height `distance·tan(fov/2)` for both
+  projections). Unit test `zoom_is_centered_on_cursor` (point projects back to the same screen NDC,
+  both projections).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

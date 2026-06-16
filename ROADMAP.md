@@ -17,7 +17,7 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
   - ~~Suggestions of available chains, residue and index ranges~~ — hint under the field per keyword
 
 ## Rendering & visuals
-- Different depth-cue methods
+- ~~Different depth-cue methods~~ — **shipped** (M17; Linear/Exp/Exp² cue modes)
 - More materials and a material editor
 - On-screen labels and measurement
 - Drawing geometric primitives

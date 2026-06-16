@@ -12,7 +12,7 @@ use molar::prelude::{AtomProvider, ParticleIterProvider, SsAlgorithm, State};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
-use crate::camera::{Camera, Projection};
+use crate::camera::{Camera, CueMode, Projection};
 use crate::color::ColorMethod;
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
@@ -1475,6 +1475,18 @@ impl App {
         if std::env::var("MOLAR_VIS_DEBUG_ORTHO").is_ok() {
             camera.projection = Projection::Orthographic;
         }
+        // Verification hook: MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2 sets the depth-
+        // cue falloff curve (and bumps strength so it's visible in a screenshot).
+        if let Ok(m) = std::env::var("MOLAR_VIS_DEBUG_CUEMODE") {
+            camera.depth_cue.mode = match m.to_ascii_lowercase().as_str() {
+                "exp" => CueMode::Exp,
+                "exp2" => CueMode::Exp2,
+                _ => CueMode::Linear,
+            };
+            camera.depth_cue.enabled = true;
+            camera.depth_cue.strength = 0.9;
+            camera.depth_cue.start = 0.0;
+        }
         // Verification hook: MOLAR_VIS_DEBUG_FOCUS=<selection> zooms the camera to
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
@@ -2228,31 +2240,38 @@ impl App {
                     // panel is a popup so the toolbar keeps a fixed height.
                     let cue_on = self.camera.depth_cue.enabled;
                     let resp = overlay_button(ui, icon::GRADIENT, cue_on).on_hover_text("Depth cue");
-                    egui::Popup::menu(&resp).show(|ui| {
-                        let cue = &mut self.camera.depth_cue;
-                        ui.checkbox(&mut cue.enabled, "Depth cue").on_hover_text(
-                            "Fade distant geometry toward the background for depth perception",
-                        );
-                        ui.add_enabled_ui(cue.enabled, |ui| {
-                            egui::Grid::new("depth_cue")
-                                .num_columns(2)
-                                .spacing(egui::vec2(8.0, 4.0))
-                                .show(ui, |ui| {
-                                    ui.label("Strength");
-                                    ui.add(
-                                        egui::Slider::new(&mut cue.strength, 0.0..=1.0)
-                                            .fixed_decimals(2),
-                                    );
-                                    ui.end_row();
-                                    ui.label("Start");
-                                    ui.add(
-                                        egui::Slider::new(&mut cue.start, 0.0..=1.0)
-                                            .fixed_decimals(2),
-                                    );
-                                    ui.end_row();
-                                });
+                    // Stay open while adjusting the controls / switching the mode;
+                    // close only on a click outside (or on the button again).
+                    egui::Popup::menu(&resp)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            let cue = &mut self.camera.depth_cue;
+                            ui.checkbox(&mut cue.enabled, "Depth cue").on_hover_text(
+                                "Fade distant geometry toward the background for depth perception",
+                            );
+                            ui.add_enabled_ui(cue.enabled, |ui| {
+                                // Falloff curve (VMD cuemode), the app's standard tabs.
+                                tab_bar(ui, &mut cue.mode, &CueMode::ALL.map(|m| (m, m.label())));
+                                ui.add_space(2.0);
+                                egui::Grid::new("depth_cue")
+                                    .num_columns(2)
+                                    .spacing(egui::vec2(8.0, 4.0))
+                                    .show(ui, |ui| {
+                                        ui.label("Strength");
+                                        ui.add(
+                                            egui::Slider::new(&mut cue.strength, 0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                        ui.label("Start");
+                                        ui.add(
+                                            egui::Slider::new(&mut cue.start, 0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                    });
+                            });
                         });
-                    });
                     // Orientation-axes dropdown: on/off + which corner.
                     let resp = overlay_button(ui, icon::ARROWS_OUT_CARDINAL, self.axes_on)
                         .on_hover_text("Orientation axes");

@@ -6,18 +6,27 @@ struct Camera {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
     params: vec4<f32>, // params.x: 1.0 = perspective, 0.0 = orthographic
-    cue: vec4<f32>,    // depth cue: near, far, strength, _
+    cue: vec4<f32>,    // depth cue: near, far, strength, mode
     fog_color: vec4<f32>,
     depth_range: vec4<f32>, // OIT: eye-space [front, back, _, _]
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 
-// Linear depth cueing: fade toward the background as eye-space distance grows.
+// Depth cueing (VMD cuemode): fade toward the background as eye-space distance
+// grows. cue = [near, far, strength, mode]; mode 0 = linear, 1 = exp, 2 = exp2.
+// All curves are normalized to reach full fog at the far plane, scaled by strength.
 fn apply_fog(color: vec3<f32>, eye_z: f32) -> vec3<f32> {
     let d = -eye_z; // eye-space distance (camera looks down -Z)
-    let f = clamp((d - camera.cue.x) / max(camera.cue.y - camera.cue.x, 1e-6), 0.0, 1.0) * camera.cue.z;
-    return mix(color, camera.fog_color.rgb, f);
+    let t = clamp((d - camera.cue.x) / max(camera.cue.y - camera.cue.x, 1e-6), 0.0, 1.0);
+    let k = 3.0;
+    var b = t; // linear
+    if (camera.cue.w > 1.5) {
+        b = (1.0 - exp(-k * k * t * t)) / (1.0 - exp(-k * k)); // exp2
+    } else if (camera.cue.w > 0.5) {
+        b = (1.0 - exp(-k * t)) / (1.0 - exp(-k)); // exp
+    }
+    return mix(color, camera.fog_color.rgb, b * camera.cue.z);
 }
 
 struct Instance {

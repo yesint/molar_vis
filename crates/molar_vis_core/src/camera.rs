@@ -13,10 +13,36 @@ pub enum Projection {
     Orthographic,
 }
 
-/// Linear depth cueing (fog): geometry fades toward the background color as it
-/// recedes from the camera, adding depth perception (VMD's "Depth Cueing").
-/// `start`/`strength` are unitless and scene-relative so they stay meaningful at
-/// any zoom; the actual eye-space range is derived from the camera each frame.
+/// Depth-cue (fog) falloff curve, matching VMD's `cuemode` (the OpenGL fog
+/// equations). All are normalized so the fog reaches `strength` at the back of
+/// the scene; the mode only changes the *shape* of the ramp from `start` to back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CueMode {
+    /// Fog grows linearly with eye-space distance (the previous behavior).
+    #[default]
+    Linear,
+    /// `1 − e^(−k·t)` — fades in quickly up front, then eases off.
+    Exp,
+    /// `1 − e^(−(k·t)²)` — stays clear up front, then ramps hard toward the back.
+    Exp2,
+}
+
+impl CueMode {
+    pub const ALL: [CueMode; 3] = [CueMode::Linear, CueMode::Exp, CueMode::Exp2];
+    pub fn label(self) -> &'static str {
+        match self {
+            CueMode::Linear => "Linear",
+            CueMode::Exp => "Exp",
+            CueMode::Exp2 => "Exp²",
+        }
+    }
+}
+
+/// Depth cueing (fog): geometry fades toward the background color as it recedes
+/// from the camera, adding depth perception (VMD's "Depth Cueing"). `start`/
+/// `strength` are unitless and scene-relative so they stay meaningful at any zoom;
+/// the actual eye-space range is derived from the camera each frame. `mode`
+/// selects the falloff curve (see [`CueMode`]).
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DepthCue {
     pub enabled: bool,
@@ -25,11 +51,15 @@ pub struct DepthCue {
     pub start: f32,
     /// Fog opacity at the back of the scene (0 = none, 1 = fully background).
     pub strength: f32,
+    /// Falloff curve. `#[serde(default)]` so sessions written before this field
+    /// existed still load (defaulting to `Linear`).
+    #[serde(default)]
+    pub mode: CueMode,
 }
 
 impl Default for DepthCue {
     fn default() -> Self {
-        Self { enabled: true, start: 0.3, strength: 0.55 }
+        Self { enabled: true, start: 0.3, strength: 0.55, mode: CueMode::Linear }
     }
 }
 
@@ -97,15 +127,21 @@ impl Camera {
         matches!(self.projection, Projection::Perspective)
     }
 
-    /// Depth-cue parameters for the GPU camera uniform: `[near, far, strength, _]`
-    /// in eye-space distance (positive, away from the camera). The fog ramps from
-    /// `near` (no fog) to `far` (full `strength`), spanning the molecule's depth.
-    /// When disabled, `strength` is 0 so the shaders apply no fog.
+    /// Depth-cue parameters for the GPU camera uniform: `[near, far, strength,
+    /// mode]` in eye-space distance (positive, away from the camera). The fog ramps
+    /// from `near` (no fog) to `far` (full `strength`) along the curve `mode`
+    /// (0 = linear, 1 = exp, 2 = exp²; see [`CueMode`]). When disabled, `strength`
+    /// is 0 so the shaders apply no fog.
     pub fn cue_uniform(&self) -> [f32; 4] {
         let near = (self.distance - self.scene_radius) + self.depth_cue.start * 2.0 * self.scene_radius;
         let far = (self.distance + self.scene_radius).max(near + 1e-3);
         let strength = if self.depth_cue.enabled { self.depth_cue.strength } else { 0.0 };
-        [near, far, strength, 0.0]
+        let mode = match self.depth_cue.mode {
+            CueMode::Linear => 0.0,
+            CueMode::Exp => 1.0,
+            CueMode::Exp2 => 2.0,
+        };
+        [near, far, strength, mode]
     }
 
     /// Eye-space distance range `[front, back]` (positive, away from the camera)
