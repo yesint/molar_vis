@@ -16,6 +16,8 @@ mod pick;
 mod render;
 mod scene;
 mod secstruct;
+mod session;
+mod suggest;
 mod theme;
 mod trajectory;
 

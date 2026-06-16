@@ -5,9 +5,9 @@
 //! All distances are in nanometers (molar's native unit); near/far are derived
 //! from the scene radius each frame, never hardcoded.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Projection {
     Perspective,
     Orthographic,
@@ -17,7 +17,7 @@ pub enum Projection {
 /// recedes from the camera, adding depth perception (VMD's "Depth Cueing").
 /// `start`/`strength` are unitless and scene-relative so they stay meaningful at
 /// any zoom; the actual eye-space range is derived from the camera each frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DepthCue {
     pub enabled: bool,
     /// Where the fog begins, as a fraction of the molecule's front→back depth
@@ -33,7 +33,7 @@ impl Default for DepthCue {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     /// Point the camera looks at (pannable).
     pub target: Vec3,
@@ -182,9 +182,19 @@ impl Camera {
         self.target += -self.right() * dx * scale + self.up() * dy * scale;
     }
 
-    /// Zoom by mouse wheel (`scroll` in points; positive = wheel up = zoom in).
-    pub fn zoom_scroll(&mut self, scroll: f32) {
+    /// Zoom by mouse wheel **toward the cursor** (`scroll` in points; positive =
+    /// wheel up = zoom in). `ndc` is the cursor position in `[-1, 1]` (y up) and
+    /// `aspect = width/height`; the target is panned so the world point under the
+    /// cursor stays fixed on screen as the zoom changes (map-style zoom-to-cursor).
+    pub fn zoom_scroll(&mut self, scroll: f32, ndc: Vec2, aspect: f32) {
+        let d0 = self.distance;
         self.apply_zoom(-scroll * 0.0015);
+        // At the target plane the view half-height is `distance·tan(fov/2)` for both
+        // projections, so the cursor's world offset from the target scales with the
+        // distance. Shift the target by the change in that offset to keep the point
+        // under the cursor put (so zooming in homes in on the cursor).
+        let k = (d0 - self.distance) * (self.fov_y * 0.5).tan();
+        self.target += self.right() * (ndc.x * aspect * k) + self.up() * (ndc.y * k);
     }
 
     /// Zoom by right-drag (`dy` in points; drag down = zoom out).
@@ -226,10 +236,10 @@ mod tests {
     fn scroll_zooms_in_and_clamps() {
         let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0));
         let d0 = cam.distance;
-        cam.zoom_scroll(100.0); // wheel up = zoom in = smaller distance
+        cam.zoom_scroll(100.0, Vec2::ZERO, 1.0); // wheel up = zoom in = smaller distance
         assert!(cam.distance < d0);
         for _ in 0..1000 {
-            cam.zoom_scroll(1000.0);
+            cam.zoom_scroll(1000.0, Vec2::ZERO, 1.0);
         }
         assert!(cam.distance >= cam.scene_radius * 0.05 - 1e-6, "zoom-in is clamped");
     }
@@ -240,5 +250,27 @@ mod tests {
         let t0 = cam.target;
         cam.pan(50.0, -30.0, 800.0);
         assert!((cam.target - t0).length() > 1e-4);
+    }
+
+    /// Wheel-zoom is cursor-centered: the world point under the cursor before the
+    /// zoom must still project to the same screen position after it, for both
+    /// projections.
+    #[test]
+    fn zoom_is_centered_on_cursor() {
+        let aspect = 1.6_f32;
+        let ndc = Vec2::new(0.7, -0.4);
+        for proj in [Projection::Perspective, Projection::Orthographic] {
+            let mut cam = Camera::frame_bbox(Vec3::splat(-2.0), Vec3::splat(2.0));
+            cam.orientation = Quat::from_rotation_y(0.6) * Quat::from_rotation_x(0.3);
+            cam.projection = proj;
+            // World point on the focal (target) plane under the cursor, pre-zoom.
+            let half_h = cam.distance * (cam.fov_y * 0.5).tan();
+            let p = cam.target + cam.right() * (ndc.x * half_h * aspect) + cam.up() * (ndc.y * half_h);
+            cam.zoom_scroll(120.0, ndc, aspect);
+            // After zooming in, that point must still land under the cursor.
+            let clip = cam.proj(aspect) * cam.view() * p.extend(1.0);
+            let got = Vec2::new(clip.x / clip.w, clip.y / clip.w);
+            assert!((got - ndc).length() < 1e-3, "{proj:?}: {got:?} vs {ndc:?}");
+        }
     }
 }

@@ -104,7 +104,7 @@ pub fn beta_ramp(t: f32) -> [u8; 4] {
 }
 
 /// How atoms are colored. Secondary-structure coloring lands with M6 (DSSP).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ColorMethod {
     Element,
     Chain,

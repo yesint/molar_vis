@@ -9,6 +9,8 @@ use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 use molar::prelude::{AtomProvider, ParticleIterProvider, SsAlgorithm, State};
+#[cfg(not(target_arch = "wasm32"))]
+use molar::prelude::FileHandler;
 
 use crate::camera::{Camera, Projection};
 use crate::color::ColorMethod;
@@ -21,6 +23,11 @@ use crate::pick::{self, PickMode, SelectionMode};
 use crate::render::{SceneRenderer, SphereInstance};
 use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::session::{Session, ViewState};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::scene::{MoleculeSource, TrajLoad};
+use crate::suggest::SelHints;
 use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
 
 use egui_phosphor::regular as icon;
@@ -58,6 +65,90 @@ fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
         egui::FontId::proportional(13.0),
         red,
     );
+}
+
+/// Drop a rep's stale selection feedback (error message, in-field red highlight,
+/// and the empty-match warning) — called while the user is editing the text, so
+/// the old evaluation's markers don't linger over text they no longer match. The
+/// feedback is recomputed when the edit is committed (`sel_dirty` → `rebuild_dirty`).
+fn clear_sel_feedback(rep: &mut Representation) {
+    rep.sel_error = None;
+    rep.sel_error_caret = None;
+    rep.sel_empty = false;
+}
+
+/// Write a molecule (whole, `rep = None`) or one representation's selection
+/// (`rep = Some(j)`) to `path` via molar, at the **currently displayed** frame.
+/// Trajectory frames render by reference and aren't held in the `System`, so the
+/// displayed `State` is swapped in around the write and restored afterwards. The
+/// file format is chosen by molar from `path`'s extension. Native only (molar's
+/// `FileHandler::create` writes to the filesystem).
+#[cfg(not(target_arch = "wasm32"))]
+fn save_displayed(
+    mol: &mut scene::Molecule,
+    path: &std::path::Path,
+    rep: Option<usize>,
+) -> Result<(), String> {
+    let displayed = mol.render_state().clone();
+    let prev = mol.system.set_state(displayed).map_err(|e| e.to_string())?;
+    let res = (|| -> Result<(), String> {
+        let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
+        match rep {
+            Some(j) => {
+                let sel = mol.reps[j].sel.as_ref().ok_or("selection is empty")?;
+                let bound = mol.system.bind(sel);
+                h.write(&bound).map_err(|e| e.to_string())
+            }
+            None => h.write(&mol.system).map_err(|e| e.to_string()),
+        }
+    })();
+    let _ = mol.system.set_state(prev); // restore the System's own state
+    res
+}
+
+/// Draw the rep selection `TextEdit`. When `error_caret` is `Some(off)`, the text
+/// from character `off` to the end is painted **red** (via a custom layouter),
+/// highlighting the part of the selection where molar reported a parse error
+/// (the caret position in its message). Returns the field's `Response`.
+fn sel_text_edit(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    id: egui::Id,
+    width: f32,
+    error_caret: Option<usize>,
+) -> egui::Response {
+    let red = egui::Color32::from_rgb(240, 120, 120);
+    let fmt = |font_id: egui::FontId, color: egui::Color32| egui::text::TextFormat {
+        font_id,
+        color,
+        ..Default::default()
+    };
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+        let s = buf.as_str();
+        let font_id = egui::TextStyle::Body.resolve(ui.style());
+        let base = ui.visuals().text_color();
+        let mut job = egui::text::LayoutJob::default();
+        match error_caret.filter(|_| !s.is_empty()) {
+            Some(off) => {
+                let nchars = s.chars().count();
+                // If the caret sits at/after the end (an "expected more" error),
+                // highlight the last character so there's always a visible mark.
+                let off = off.min(nchars.saturating_sub(1));
+                let split = s.char_indices().nth(off).map(|(b, _)| b).unwrap_or(s.len());
+                job.append(&s[..split], 0.0, fmt(font_id.clone(), base));
+                job.append(&s[split..], 0.0, fmt(font_id, red));
+            }
+            None => job.append(s, 0.0, fmt(font_id, base)),
+        }
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .desired_width(width)
+            .hint_text("selection")
+            .layouter(&mut layouter),
+    )
 }
 
 /// The blue glow ring shared by hover-picking and the active-selection highlight:
@@ -727,23 +818,17 @@ fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 /// Returns `true` if a render-only change was made (periodic-image params) so the
 /// caller can flag the viewport dirty; geometry changes set `rep.geom_dirty`
 /// directly. `has_box` gates the **Periodic** tab (only meaningful with a box).
-fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -> bool {
-    let mut view_dirty = false;
-    // The Periodic tab only exists when the molecule has a box; if it was the
-    // active tab and the box went away, fall back to Style.
-    if !has_box && rep.settings_tab == SettingsTab::Periodic {
-        rep.settings_tab = SettingsTab::Style;
-    }
-    // Tab bar: [Style] [Traj] [Periodic?] — underline-style tabs (selected = bold
-    // text with an accent underline) rather than disconnected toggle buttons.
+/// The app's standard **tab bar**: underline-style tabs (the selected tab is bold
+/// with an accent underline; the others are weak, clickable text) instead of
+/// disconnected toggle buttons. Sets `*current` to the clicked tab and returns
+/// whether the selection changed. Use this for *all* tabbed UIs so they look the
+/// same (rep settings, the delete-frames dialog, …).
+fn tab_bar<T: Copy + PartialEq>(ui: &mut egui::Ui, current: &mut T, tabs: &[(T, &str)]) -> bool {
+    let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 14.0;
-        let mut tabs = vec![(SettingsTab::Style, "Style"), (SettingsTab::Traj, "Traj")];
-        if has_box {
-            tabs.push((SettingsTab::Periodic, "Periodic"));
-        }
-        for (tab, label) in tabs {
-            let selected = rep.settings_tab == tab;
+        for &(tab, label) in tabs {
+            let selected = *current == tab;
             let txt = if selected {
                 egui::RichText::new(label).strong()
             } else {
@@ -752,8 +837,9 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -
             let resp = ui
                 .add(egui::Label::new(txt).sense(egui::Sense::click()))
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-            if resp.clicked() {
-                rep.settings_tab = tab;
+            if resp.clicked() && !selected {
+                *current = tab;
+                changed = true;
             }
             if selected {
                 let r = resp.rect;
@@ -765,6 +851,22 @@ fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -
             }
         }
     });
+    changed
+}
+
+fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -> bool {
+    let mut view_dirty = false;
+    // The Periodic tab only exists when the molecule has a box; if it was the
+    // active tab and the box went away, fall back to Style.
+    if !has_box && rep.settings_tab == SettingsTab::Periodic {
+        rep.settings_tab = SettingsTab::Style;
+    }
+    // Tab bar: [Style] [Traj] [Periodic?] — the app's standard underline tabs.
+    let mut tabs = vec![(SettingsTab::Style, "Style"), (SettingsTab::Traj, "Traj")];
+    if has_box {
+        tabs.push((SettingsTab::Periodic, "Periodic"));
+    }
+    tab_bar(ui, &mut rep.settings_tab, &tabs);
     ui.separator();
     match rep.settings_tab {
         SettingsTab::Traj => {
@@ -1062,8 +1164,14 @@ pub struct App {
     pending_redo_n: Option<usize>,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
+    /// Cached per-molecule selection hints (distinct chains/resnames/names +
+    /// numeric ranges), shown under the selection field while editing. Computed
+    /// lazily on first edit of a molecule (topology is static); keyed by [`MolId`].
+    sel_hints: HashMap<MolId, SelHints>,
     /// Open trajectory-load dialog, if any (one at a time).
     load_dialog: Option<LoadDialog>,
+    /// Open "delete trajectory frames" dialog, if any.
+    delete_frames_dialog: Option<DeleteFramesDialog>,
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
@@ -1111,11 +1219,12 @@ pub struct App {
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Corner {
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum Corner {
     TopLeft,
     TopRight,
     BottomLeft,
+    #[default]
     BottomRight,
 }
 
@@ -1152,6 +1261,30 @@ enum DialogAction {
     Keep,
     Cancel,
     Load,
+}
+
+/// How the "Delete frames" dialog selects which frames to drop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeleteFramesMode {
+    /// Delete the inclusive frame range `[from, to]`.
+    Range,
+    /// Keep every `stride`-th frame, drop the rest.
+    Decimate,
+}
+
+/// State of the "Delete frames" modal (trajectory frame deletion).
+struct DeleteFramesDialog {
+    mol_id: MolId,
+    mode: DeleteFramesMode,
+    from: usize,
+    to: usize,
+    stride: usize,
+}
+
+impl DeleteFramesDialog {
+    fn new(mol_id: MolId) -> Self {
+        Self { mol_id, mode: DeleteFramesMode::Range, from: 0, to: 0, stride: 2 }
+    }
 }
 
 impl App {
@@ -1280,6 +1413,12 @@ impl App {
                 ) {
                     Ok(frames) => {
                         mol.append_frames(frames);
+                        mol.traj_loads.push(crate::scene::TrajLoad {
+                            path: std::path::PathBuf::from(&traj_path),
+                            from: opts.from,
+                            to: opts.to,
+                            stride: opts.stride,
+                        });
                         let frame = std::env::var("MOLAR_VIS_DEBUG_FRAME")
                             .ok()
                             .and_then(|s| s.parse::<usize>().ok())
@@ -1384,7 +1523,8 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (traj_tx, traj_rx) = std::sync::mpsc::channel::<(MolId, String, Vec<u8>)>();
 
-        Ok(Self {
+        #[allow(unused_mut)]
+        let mut app = Self {
             renderer,
             camera,
             scene,
@@ -1397,7 +1537,9 @@ impl App {
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,
+            sel_hints: HashMap::new(),
             load_dialog: None,
+            delete_frames_dialog: None,
             loaders: HashMap::new(),
             // MOLAR_VIS_DEBUG_PICK forces hover-info on (and picks at the viewport
             // center each frame; see draw_viewport) for headless verification.
@@ -1428,7 +1570,50 @@ impl App {
             traj_rx,
             #[cfg(target_arch = "wasm32")]
             wasm_loaders: HashMap::new(),
-        })
+        };
+
+        // Verification hooks (native): exercise the session save/load round-trip
+        // headlessly, since the rfd file dialogs can't be driven in a headless run.
+        // MOLAR_VIS_DEBUG_LOAD_SESSION=<path> replaces the scene from a session
+        // file; MOLAR_VIS_DEBUG_SAVE_SESSION=<path> writes the current state out.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_LOAD_SESSION") {
+                app.load_session_from(std::path::Path::new(&path));
+            }
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_SESSION") {
+                app.save_session_to(std::path::Path::new(&path));
+            }
+            // MOLAR_VIS_DEBUG_SAVE_MOL=<path> writes mol 0 to a structure file
+            // (exercises the molar FileHandler write + displayed-frame swap path).
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_MOL") {
+                if let Some(mol) = app.scene.molecules.first_mut() {
+                    match save_displayed(mol, std::path::Path::new(&path), None) {
+                        Ok(()) => log::info!("debug: saved molecule to {path}"),
+                        Err(e) => log::error!("debug save molecule failed: {e}"),
+                    }
+                }
+            }
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_DELFRAMES=1 opens the delete-frames
+        // dialog for mol 0 (pair with MOLAR_VIS_DEBUG_TRAJ to have frames).
+        if std::env::var("MOLAR_VIS_DEBUG_DELFRAMES").is_ok() {
+            if let Some(mol) = app.scene.molecules.first() {
+                app.delete_frames_dialog = Some(DeleteFramesDialog::new(mol.id));
+            }
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_EDIT_REP=1 opens mol 0's first rep
+        // selection field in edit mode, so the contextual suggestion hint (and a
+        // selection error's in-field highlight) can be screenshot headlessly.
+        if std::env::var("MOLAR_VIS_DEBUG_EDIT_REP").is_ok()
+            && app.scene.molecules.first().is_some_and(|m| !m.reps.is_empty())
+        {
+            app.editing_rep = Some((0, 0));
+        }
+
+        Ok(app)
     }
 
     /// Recompile dirty selections and rebuild/reupload dirty geometry. Returns
@@ -1480,6 +1665,7 @@ impl App {
                             rep.expr = Some(expr);
                             rep.sel = Some(sel);
                             rep.sel_error = None;
+                            rep.sel_error_caret = None;
                             rep.sel_empty = false;
                             rep.geom_dirty = true;
                         }
@@ -1490,12 +1676,20 @@ impl App {
                             rep.expr = None;
                             rep.sel = None;
                             rep.sel_error = None;
+                            rep.sel_error_caret = None;
                             rep.sel_empty = true;
                             rep.gpu = Default::default();
                             changed = true;
                         }
                         Err(scene::EvalError::Invalid(e)) => {
-                            rep.sel_error = Some(e);
+                            let (msg, caret) = crate::suggest::parse_sel_error(&e);
+                            // molar trims the input before parsing, so shift the
+                            // caret past any leading whitespace to align it with
+                            // the field's text.
+                            let lead =
+                                rep.sel_text.chars().take_while(|c| c.is_whitespace()).count();
+                            rep.sel_error = Some(msg);
+                            rep.sel_error_caret = caret.map(|c| c + lead);
                             rep.sel_empty = false;
                         }
                     }
@@ -1922,8 +2116,9 @@ impl eframe::App for App {
         let panel_dirty = self.draw_left_panel(ui);
         self.view_dirty |= panel_dirty;
 
-        // The "Load trajectory" modal floats above everything (driven from ctx).
+        // The "Load trajectory" / "Delete frames" modals float above everything.
         self.draw_load_dialog(&ctx);
+        self.draw_delete_frames_dialog(&ctx);
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
         let applied = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {
@@ -2156,6 +2351,36 @@ impl App {
             {
                 self.open_structure(ui.ctx());
             }
+            // Session menu: New (empty scene) / Save / Load the whole visualization
+            // state. Native only: the wasm build has no filesystem to reload
+            // molecule sources from.
+            #[cfg(not(target_arch = "wasm32"))]
+            ui.menu_button(format!("{}  Session  {}", icon::STACK, icon::CARET_DOWN), |ui| {
+                if ui
+                    .button(format!("{}  New", icon::FILE))
+                    .on_hover_text("Clear all molecules and start an empty scene")
+                    .clicked()
+                {
+                    self.new_session();
+                    ui.close();
+                }
+                if ui
+                    .button(format!("{}  Save…", icon::FLOPPY_DISK))
+                    .on_hover_text("Save the visualization state (molecules, representations, camera)")
+                    .clicked()
+                {
+                    self.save_session();
+                    ui.close();
+                }
+                if ui
+                    .button(format!("{}  Load…", icon::ARCHIVE_BOX))
+                    .on_hover_text("Load a saved visualization state, replacing the current scene")
+                    .clicked()
+                {
+                    self.load_session();
+                    ui.close();
+                }
+            });
             ui.separator();
 
             let can_undo = self.history.can_undo();
@@ -2218,6 +2443,11 @@ impl App {
         let mut view_dirty = false;
         let mut delete: Option<usize> = None;
         let mut open_load: Option<MolId> = None;
+        // Deferred actions from the per-molecule menu, applied after the loop so
+        // they don't conflict with the `&mut` molecule borrow.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut save_mol: Option<usize> = None;
+        let mut open_del_frames: Option<MolId> = None;
         // A camera "zoom to fit" request (whole-molecule bbox), applied after the
         // loop so it doesn't conflict with the `&mut` molecule borrow.
         let mut focus: Option<(glam::Vec3, glam::Vec3)> = None;
@@ -2241,12 +2471,48 @@ impl App {
                     if icon_button(ui, icon::FOLDER_OPEN, "Load trajectory").clicked() {
                         open_load = Some(mol.id);
                     }
-                    // Right-justified action group: add-rep · eye · trash.
+                    // Right-justified action group: add-rep · zoom · eye · menu.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         compact_actions(ui);
-                        if icon_button(ui, icon::TRASH, "Delete molecule").clicked() {
-                            delete = Some(i);
-                        }
+                        // Per-molecule menu (replaces the lone delete button): save,
+                        // periodic-box toggle, delete frames, delete molecule.
+                        ui.menu_button(icon::LIST, |ui| {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if ui
+                                .button(format!("{}  Save molecule…", icon::FLOPPY_DISK))
+                                .clicked()
+                            {
+                                save_mol = Some(i);
+                                ui.close();
+                            }
+                            if ui
+                                .checkbox(&mut mol.show_box, "Show periodic box")
+                                .changed()
+                            {
+                                mol.box_dirty = true;
+                                view_dirty = true;
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    mol.trajectory.has_playback(),
+                                    egui::Button::new(format!("{}  Delete frames…", icon::SCISSORS)),
+                                )
+                                .clicked()
+                            {
+                                open_del_frames = Some(mol.id);
+                                ui.close();
+                            }
+                            if ui
+                                .button(format!("{}  Delete molecule", icon::TRASH))
+                                .clicked()
+                            {
+                                delete = Some(i);
+                                ui.close();
+                            }
+                        })
+                        .response
+                        .on_hover_text("Molecule menu");
                         let eye = if mol.visible { icon::EYE } else { icon::EYE_SLASH };
                         if ui
                             .selectable_label(mol.visible, eye)
@@ -2260,15 +2526,6 @@ impl App {
                             .clicked()
                         {
                             focus = Some(mol.current_bbox());
-                        }
-                        if ui
-                            .selectable_label(mol.show_box, icon::BOUNDING_BOX)
-                            .on_hover_text("Show periodic box")
-                            .clicked()
-                        {
-                            mol.show_box = !mol.show_box;
-                            mol.box_dirty = true;
-                            view_dirty = true;
                         }
                         if ui
                             .button(format!("{} rep", icon::PLUS))
@@ -2316,6 +2573,15 @@ impl App {
             self.scene.trash.insert(m.id, m);
             self.scene.clamp_selection();
             view_dirty = true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(i) = save_mol {
+            self.save_molecule(i);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = save_mol;
+        if let Some(id) = open_del_frames {
+            self.delete_frames_dialog = Some(DeleteFramesDialog::new(id));
         }
         if let Some(id) = open_load {
             // Native: the load dialog (file picker + range/stride/sync-async).
@@ -2398,6 +2664,249 @@ impl App {
         self.view_dirty = true;
     }
 
+    /// Tear down the current document: drop all molecules (and the trash), cancel
+    /// in-flight trajectory loaders, and clear transient editing/dialog state.
+    /// Shared by [`Self::new_session`] (start empty) and [`Self::apply_session`]
+    /// (start empty, then reload from a file).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reset_document(&mut self) {
+        self.scene.molecules.clear();
+        self.scene.trash.clear();
+        self.loaders.clear();
+        self.editing_rep = None;
+        self.load_dialog = None;
+        self.sel_hints.clear();
+    }
+
+    /// Start a new, empty visualization state: remove every molecule, reset the
+    /// camera, and clear the undo history (a new document is its own baseline).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new_session(&mut self) {
+        self.reset_document();
+        self.scene.selected_mol = None;
+        self.scene.clamp_selection();
+        self.camera = Camera::default();
+        self.last_render_camera = None;
+        self.history = History::new(EditState::capture(&self.scene));
+        self.view_dirty = true;
+        self.status = "New session".to_string();
+    }
+
+    /// Save molecule `i` to a structure file (rfd save dialog), at the currently
+    /// displayed frame. Coordinates + topology of the whole molecule.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_molecule(&mut self, i: usize) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Structure", &["pdb", "gro", "xyz", "ent"])
+            .set_file_name("molecule.pdb")
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match save_displayed(&mut self.scene.molecules[i], &path, None) {
+            Ok(()) => format!("Saved molecule to {}", path.display()),
+            Err(e) => {
+                log::error!("save molecule: {e}");
+                format!("Save failed: {e}")
+            }
+        };
+    }
+
+    /// Save representation `j` of molecule `mi`'s selection (just the selected
+    /// atoms) to a structure file (rfd save dialog), at the displayed frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_rep_selection(&mut self, mi: usize, j: usize) {
+        if self.scene.molecules[mi].reps[j].sel.is_none() {
+            self.status = "Selection is empty — nothing to save".to_string();
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Structure", &["pdb", "gro", "xyz", "ent"])
+            .set_file_name("selection.pdb")
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match save_displayed(&mut self.scene.molecules[mi], &path, Some(j)) {
+            Ok(()) => format!("Saved selection to {}", path.display()),
+            Err(e) => {
+                log::error!("save selection: {e}");
+                format!("Save failed: {e}")
+            }
+        };
+    }
+
+    /// The persistable global view state (camera + view-toolbar toggles). This and
+    /// [`Self::apply_view_state`] are the **only** manual plumbing the save/load
+    /// framework needs: a new persisted global setting is added to
+    /// [`ViewState`](crate::session::ViewState) and read/written in these two
+    /// functions. (Per-rep state needs no plumbing — it rides
+    /// [`RepState`](crate::history::RepState).)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            camera: Some(self.camera),
+            pick_mode: self.pick_mode,
+            selection_mode: self.selection_mode,
+            axes_on: self.axes_on,
+            axes_corner: self.axes_corner,
+        }
+    }
+
+    /// Restore the global view state captured by [`Self::view_state`].
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_view_state(&mut self, view: ViewState) {
+        if let Some(cam) = view.camera {
+            self.camera = cam;
+        }
+        self.pick_mode = view.pick_mode;
+        self.selection_mode = view.selection_mode;
+        self.axes_on = view.axes_on;
+        self.axes_corner = view.axes_corner;
+    }
+
+    /// Save the current visualization state to a JSON session file (rfd picker).
+    /// Records molecule sources + the full rep document + global view state;
+    /// molecule coordinates are *not* embedded (they are reloaded from disk).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_session(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("molar_vis session", &["mvs", "json"])
+            .set_file_name("session.mvs")
+            .save_file()
+        else {
+            return;
+        };
+        self.save_session_to(&path);
+    }
+
+    /// Write the current state to `path` (the file half of [`Self::save_session`],
+    /// also driven by the `MOLAR_VIS_DEBUG_SAVE_SESSION` verification hook).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_session_to(&mut self, path: &std::path::Path) {
+        let session = Session::capture(&self.scene, self.view_state());
+        let result = session
+            .to_json()
+            .and_then(|json| std::fs::write(path, json).map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => self.status = format!("Saved session to {}", path.display()),
+            Err(e) => {
+                log::error!("save session: {e}");
+                self.status = format!("Save failed: {e}");
+            }
+        }
+    }
+
+    /// Load a visualization state from a JSON session file (rfd picker), replacing
+    /// the current scene (open-document semantics).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_session(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("molar_vis session", &["mvs", "json"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.load_session_from(&path);
+    }
+
+    /// Read and apply a session file at `path` (the file half of
+    /// [`Self::load_session`], also driven by `MOLAR_VIS_DEBUG_LOAD_SESSION`).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_session_from(&mut self, path: &std::path::Path) {
+        let json = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("can't read {}: {e}", path.display());
+                return;
+            }
+        };
+        match Session::from_json(&json) {
+            Ok(session) => self.apply_session(session),
+            Err(e) => {
+                log::error!("{e}");
+                self.status = e;
+            }
+        }
+    }
+
+    /// Rebuild the scene from a parsed [`Session`]: reload each molecule from its
+    /// source file, restore its representations / visibility / box / trajectory,
+    /// then apply the global view state. Reloading a session is treated as opening
+    /// a new document — the undo history is reset to the loaded state.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_session(&mut self, session: Session) {
+        // Replace the whole document.
+        self.reset_document();
+
+        let mut errors: Vec<String> = Vec::new();
+        let mut loaded = 0usize;
+        for ms in &session.molecules {
+            let MoleculeSource::File(path) = &ms.source else {
+                errors.push(format!(
+                    "“{}” was loaded from memory (no file) — cannot reload",
+                    ms.name
+                ));
+                continue;
+            };
+            let raw = match data::load(path) {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
+            self.scene.add(raw, self.default_rep);
+            let mol = self.scene.molecules.last_mut().unwrap();
+            mol.visible = ms.visible;
+            mol.show_box = ms.show_box;
+            mol.box_dirty = true;
+            mol.reps = ms.build_reps(self.default_rep);
+            mol.selected_rep = (!mol.reps.is_empty()).then_some(0);
+
+            // Replay trajectory loads (synchronous: a session load is a discrete
+            // action and the frames are needed before the first render).
+            if !ms.traj_loads.is_empty() {
+                mol.seed_frame0();
+                for tl in &ms.traj_loads {
+                    let opts = LoadOptions {
+                        from: tl.from,
+                        to: tl.to,
+                        stride: tl.stride.max(1),
+                    };
+                    match data::traj_loader::read_frames_sync(&tl.path, &opts, mol.n_atoms) {
+                        Ok(frames) => {
+                            mol.append_frames(frames);
+                            mol.traj_loads.push(tl.clone());
+                        }
+                        Err(e) => errors.push(format!("trajectory {}: {e}", tl.path.display())),
+                    }
+                }
+                mol.trajectory.set_current(ms.current_frame);
+                mol.apply_current_frame();
+            }
+            loaded += 1;
+        }
+
+        self.scene.clamp_selection();
+        self.scene.selected_mol = (!self.scene.molecules.is_empty()).then_some(0);
+        self.apply_view_state(session.view);
+
+        // Opening a document is a new baseline, not an undo step.
+        self.history = History::new(EditState::capture(&self.scene));
+        self.view_dirty = true;
+        self.last_render_camera = None;
+
+        self.status = if errors.is_empty() {
+            format!("Loaded session: {loaded} molecule(s)")
+        } else {
+            for e in &errors {
+                log::warn!("load session: {e}");
+            }
+            format!("Loaded {loaded} molecule(s); {} issue(s) — see log", errors.len())
+        };
+    }
+
     /// Load the small bundled structure (2lao) so the web/GitHub-Pages demo opens
     /// to a molecule instead of an empty viewport. Wasm only (embeds the file in
     /// the binary); the native app starts empty and loads via the Open button.
@@ -2407,6 +2916,115 @@ impl App {
         match data::load_from_bytes("2lao.pdb", DEMO_PDB.to_vec()) {
             Ok(raw) => self.add_loaded(raw),
             Err(e) => log::error!("demo load failed: {e}"),
+        }
+    }
+
+    /// Render the "Delete frames" modal: pick a frame range to drop or a decimate
+    /// stride (keep every Nth frame), with Delete/Cancel. Trajectory frames are
+    /// view state, so this is not undoable (like loading frames).
+    fn draw_delete_frames_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.delete_frames_dialog.take() else {
+            return;
+        };
+        let n_frames = self
+            .scene
+            .molecules
+            .iter()
+            .find(|m| m.id == dialog.mol_id)
+            .map(|m| m.trajectory.n_frames());
+        let last = n_frames.unwrap_or(0).saturating_sub(1);
+        let mut do_delete = false;
+        let mut close = false;
+
+        let modal = egui::Modal::new(egui::Id::new("del_frames_modal")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.heading("Delete trajectory frames");
+            match n_frames {
+                Some(nf) => {
+                    ui.label(format!("{nf} frames loaded (indices 0..{last})"));
+                }
+                None => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(240, 120, 120),
+                        "molecule no longer exists",
+                    );
+                }
+            }
+            ui.separator();
+            tab_bar(
+                ui,
+                &mut dialog.mode,
+                &[
+                    (DeleteFramesMode::Range, "Range"),
+                    (DeleteFramesMode::Decimate, "Decimate"),
+                ],
+            );
+            ui.add_space(4.0);
+            match dialog.mode {
+                DeleteFramesMode::Range => {
+                    egui::Grid::new("del_range_opts")
+                        .num_columns(2)
+                        .spacing(egui::vec2(8.0, 4.0))
+                        .show(ui, |ui| {
+                            ui.label("First frame");
+                            ui.add(egui::DragValue::new(&mut dialog.from).range(0..=last));
+                            ui.end_row();
+                            ui.label("Last frame");
+                            ui.add(egui::DragValue::new(&mut dialog.to).range(0..=last));
+                            ui.end_row();
+                        });
+                    ui.weak("Deletes frames in [first, last] inclusive.");
+                }
+                DeleteFramesMode::Decimate => {
+                    ui.horizontal(|ui| {
+                        ui.label("Keep every");
+                        ui.add(egui::DragValue::new(&mut dialog.stride).range(2..=100_000));
+                        ui.label("-th frame");
+                    });
+                    ui.weak("Keeps frames 0, N, 2N, … and deletes the rest.");
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(n_frames.is_some(), egui::Button::new("Delete"))
+                    .clicked()
+                {
+                    do_delete = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if modal.should_close() {
+            close = true;
+        }
+
+        if do_delete {
+            if let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id) {
+                let removed = match dialog.mode {
+                    DeleteFramesMode::Range => mol.trajectory.delete_range(dialog.from, dialog.to),
+                    DeleteFramesMode::Decimate => mol.trajectory.decimate(dialog.stride),
+                };
+                // Re-render at the (clamped) current frame, or the static structure
+                // if every frame was removed.
+                mol.box_dirty = true;
+                if mol.trajectory.frames.is_empty() {
+                    for rep in &mut mol.reps {
+                        rep.coords_dirty = true;
+                    }
+                    if mol.pending.is_some() {
+                        mol.glow_dirty = true;
+                    }
+                } else {
+                    mol.apply_current_frame();
+                }
+                self.status = format!("Deleted {removed} frame(s)");
+                self.view_dirty = true;
+            }
+        } else if !close {
+            self.delete_frames_dialog = Some(dialog); // keep open
         }
     }
 
@@ -2560,6 +3178,15 @@ impl App {
             mol.n_atoms
         };
 
+        // Record the load so a saved session can replay it (native paths only).
+        #[cfg(not(target_arch = "wasm32"))]
+        let record = TrajLoad {
+            path: path.clone(),
+            from: opts.from,
+            to: opts.to,
+            stride: opts.stride,
+        };
+
         match dialog.mode {
             LoadMode::Sync => {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2574,6 +3201,7 @@ impl App {
                         .ok_or("molecule no longer exists")?;
                     let first_new = mol.trajectory.frames.len();
                     mol.append_frames(frames);
+                    mol.traj_loads.push(record);
                     mol.trajectory.current = first_new; // jump to first loaded frame
                     mol.apply_current_frame();
                     self.status = format!("Loaded {added} frame(s)");
@@ -2590,6 +3218,11 @@ impl App {
                 {
                     let rx = data::traj_loader::spawn_async(path, opts, expected);
                     self.loaders.insert(dialog.mol_id, rx);
+                    if let Some(mol) =
+                        self.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id)
+                    {
+                        mol.traj_loads.push(record);
+                    }
                     self.status = "Loading trajectory…".to_string();
                 }
                 #[cfg(target_arch = "wasm32")]
@@ -2725,6 +3358,20 @@ impl App {
             .map(|(_, r)| r);
         let mut new_editing = self.editing_rep;
 
+        // Contextual suggestion for the rep being edited here: compute (and cache,
+        // lazily) this molecule's distinct values, then derive the hint for the
+        // last keyword in the edited rep's current selection text. Done up front,
+        // before the `&mut` borrow of the molecule, so it can read both the system
+        // (to build hints) and the sel text via shared borrows.
+        let active_hint: Option<String> = editing.and_then(|r| {
+            let mol_id = self.scene.molecules[mi].id;
+            self.sel_hints
+                .entry(mol_id)
+                .or_insert_with(|| SelHints::compute(&self.scene.molecules[mi].system));
+            let rep = self.scene.molecules[mi].reps.get(r)?;
+            self.sel_hints[&mol_id].hint_for(&rep.sel_text)
+        });
+
         let mol = &mut self.scene.molecules[mi];
         let mol_id = mol.id;
         // The Periodic tab is only offered when the molecule has a box.
@@ -2734,6 +3381,8 @@ impl App {
         let mut duplicate: Option<usize> = None;
         let mut reorder: Option<(usize, usize)> = None;
         let mut zoom_rep: Option<usize> = None;
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut save_rep: Option<usize> = None;
 
         for j in 0..mol.reps.len() {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
@@ -2761,13 +3410,20 @@ impl App {
 
                         if editing == Some(j) {
                             // Focused: the selection field fills the whole row.
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut rep.sel_text)
-                                    .id(sel_id)
-                                    .desired_width(f32::INFINITY)
-                                    .hint_text("selection"),
+                            let resp = sel_text_edit(
+                                ui,
+                                &mut rep.sel_text,
+                                sel_id,
+                                f32::INFINITY,
+                                rep.sel_error_caret,
                             );
-                            if sel_empty {
+                            // Editing invalidates the last evaluation: drop the
+                            // stale error message / red highlight / empty flag
+                            // until the new text is committed (re-evaluated).
+                            if resp.changed() {
+                                clear_sel_feedback(rep);
+                            }
+                            if sel_empty && !resp.changed() {
                                 mark_empty_selection(ui, resp.rect);
                             }
                             if resp.lost_focus() {
@@ -2780,6 +3436,14 @@ impl App {
                                 compact_actions(ui);
                                 if icon_button(ui, icon::TRASH, "Delete").clicked() {
                                     delete = Some(j);
+                                }
+                                // Save just the selected atoms to a structure file
+                                // (sits left of delete). Native only.
+                                #[cfg(not(target_arch = "wasm32"))]
+                                if icon_button(ui, icon::FLOPPY_DISK, "Save selection to file")
+                                    .clicked()
+                                {
+                                    save_rep = Some(j);
                                 }
                                 if icon_button(ui, icon::COPY, "Duplicate").clicked() {
                                     duplicate = Some(j);
@@ -2805,13 +3469,18 @@ impl App {
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        let resp = ui.add(
-                                            egui::TextEdit::singleline(&mut rep.sel_text)
-                                                .id(sel_id)
-                                                .desired_width(ui.available_width())
-                                                .hint_text("selection"),
+                                        let width = ui.available_width();
+                                        let resp = sel_text_edit(
+                                            ui,
+                                            &mut rep.sel_text,
+                                            sel_id,
+                                            width,
+                                            rep.sel_error_caret,
                                         );
-                                        if sel_empty {
+                                        if resp.changed() {
+                                            clear_sel_feedback(rep);
+                                        }
+                                        if sel_empty && !resp.changed() {
                                             mark_empty_selection(ui, resp.rect);
                                         }
                                         if resp.gained_focus() {
@@ -2833,6 +3502,24 @@ impl App {
                             ui.add_space(row2_indent);
                             ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
                         });
+                    }
+
+                    // Contextual suggestion for the keyword being typed (e.g.
+                    // `chains: A B C R`, `resid: 2..120`), shown only on the rep
+                    // currently being edited.
+                    if editing == Some(j) {
+                        if let Some(hint) = &active_hint {
+                            ui.horizontal(|ui| {
+                                ui.add_space(row2_indent);
+                                // Truncate to the panel width with an ellipsis so a
+                                // long value list (many resnames/names) stays on one
+                                // line instead of wrapping.
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(hint).small().weak())
+                                        .truncate(),
+                                );
+                            });
+                        }
                     }
 
                     // Row 2: [settings expander] style | color | material. The caret
@@ -2974,6 +3661,14 @@ impl App {
             }
         }
 
+        // Save a rep's selection to a file (after the `mol` borrow above ends).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(j) = save_rep {
+            self.save_rep_selection(mi, j);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = save_rep;
+
         self.editing_rep = new_editing;
         view_dirty
     }
@@ -3036,7 +3731,18 @@ impl App {
             if response.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll != 0.0 {
-                    self.camera.zoom_scroll(scroll);
+                    // Zoom toward the cursor: pass its NDC position (y up) + aspect.
+                    let ndc = response
+                        .hover_pos()
+                        .map(|p| {
+                            glam::vec2(
+                                ((p.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+                                1.0 - ((p.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+                            )
+                        })
+                        .unwrap_or(glam::Vec2::ZERO);
+                    let aspect = rect.width() / rect.height().max(1.0);
+                    self.camera.zoom_scroll(scroll, ndc, aspect);
                 }
             }
 

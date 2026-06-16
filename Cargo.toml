@@ -19,13 +19,15 @@ eframe = { version = "0.34", default-features = false, features = [
 ] }
 egui-wgpu = "0.34"
 wgpu = "29"
-glam = "0.32"
+glam = { version = "0.32", features = ["serde"] }
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # molar (default features => Float = f32), from GitHub so the crate is installable
 # without a local sibling checkout. molar pulls its own powersasa git dependency.
 # Pinned to the rev with wasm runtime support (web-time clock + serial rayon shim).
-molar = { git = "https://github.com/yesint/molar.git", rev = "ea33c5f9a034f4fbce6ff1bdfbcd09cac5e29bfd", default-features = false }
+molar = { git = "https://github.com/yesint/molar.git", rev = "6ac04e8", default-features = false }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]

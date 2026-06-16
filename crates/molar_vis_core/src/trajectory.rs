@@ -81,6 +81,44 @@ impl Trajectory {
         moved
     }
 
+    /// Delete the inclusive frame range `[from, to]` (clamped to valid indices),
+    /// then clamp `current` into the remaining range. Returns how many frames were
+    /// removed.
+    pub fn delete_range(&mut self, from: usize, to: usize) -> usize {
+        let n = self.frames.len();
+        if n == 0 || from > to || from >= n {
+            return 0;
+        }
+        let to = to.min(n - 1);
+        let removed = to - from + 1;
+        self.frames.drain(from..=to);
+        self.clamp_current();
+        removed
+    }
+
+    /// Keep every `stride`-th frame (0, stride, 2·stride, …) and drop the rest,
+    /// then clamp `current`. `stride <= 1` is a no-op. Returns how many frames were
+    /// removed.
+    pub fn decimate(&mut self, stride: usize) -> usize {
+        if stride <= 1 {
+            return 0;
+        }
+        let before = self.frames.len();
+        let mut i = 0usize;
+        self.frames.retain(|_| {
+            let keep = i % stride == 0;
+            i += 1;
+            keep
+        });
+        self.clamp_current();
+        before - self.frames.len()
+    }
+
+    /// Clamp `current` to a valid index after the frame set shrank.
+    fn clamp_current(&mut self) {
+        self.current = self.current.min(self.frames.len().saturating_sub(1));
+    }
+
     /// Step by `delta` frames (e.g. `-1`/`+1`), honoring [`LoopMode`] at the ends.
     /// Returns whether the current frame moved.
     pub fn step(&mut self, delta: i32) -> bool {
@@ -282,6 +320,34 @@ mod tests {
         assert_eq!(t.current, 2);
         assert!(!t.set_current(99)); // clamped to 2, no move
         assert_eq!(t.current, 2);
+    }
+
+    #[test]
+    fn delete_range_removes_and_clamps_current() {
+        let mut t = traj(10);
+        t.current = 8;
+        assert_eq!(t.delete_range(3, 5), 3); // remove indices 3,4,5
+        assert_eq!(t.frames.len(), 7);
+        assert_eq!(t.current, 6); // clamped to new last index
+        // Out-of-range / inverted ranges are no-ops.
+        assert_eq!(t.delete_range(100, 200), 0);
+        assert_eq!(t.delete_range(5, 2), 0);
+        assert_eq!(t.frames.len(), 7);
+        // Deleting everything reverts to no frames (falls back to the structure).
+        assert_eq!(t.delete_range(0, 6), 7);
+        assert_eq!(t.frames.len(), 0);
+        assert_eq!(t.current, 0);
+    }
+
+    #[test]
+    fn decimate_keeps_every_nth() {
+        let mut t = traj(10);
+        t.current = 9;
+        assert_eq!(t.decimate(3), 6); // keep 0,3,6,9 → drop 6
+        assert_eq!(t.frames.len(), 4);
+        assert_eq!(t.current, 3);
+        assert_eq!(t.decimate(1), 0); // no-op
+        assert_eq!(t.frames.len(), 4);
     }
 
     #[test]

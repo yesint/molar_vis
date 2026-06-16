@@ -14,7 +14,7 @@ use crate::secstruct::SsMap;
 mod cartoon;
 mod surface;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RepKind {
     Vdw,
     Licorice,
@@ -65,7 +65,7 @@ impl RepKind {
 /// knobs it actually uses; `for_kind` resets to that style's VMD-derived
 /// defaults (VMD's Å values / 10). The variant always matches the rep's
 /// `RepKind` — switching style replaces it wholesale.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RepParams {
     Vdw {
         /// VDW radius multiplier (1.0 = true van der Waals radii).
@@ -181,7 +181,7 @@ pub fn needs_ss(params: &RepParams, color: ColorMethod) -> bool {
 /// structure (required for Cartoon / SecStruct color, else `None`). Spheres come
 /// from the selected atoms; bonds are emitted only where both endpoints are selected.
 pub fn build(
-    bound: &(impl ParticleIterProvider + PosProvider + AtomProvider),
+    bound: &(impl ParticleIterProvider + PosProvider + AtomProvider + BoxProvider),
     n_atoms: usize,
     bonds: &[[usize; 2]],
     params: &RepParams,
@@ -190,6 +190,11 @@ pub fn build(
     ss: Option<&SsMap>,
 ) -> GeometryData {
     let colorizer = Colorizer::new(color, bound, n_atoms, ss);
+    // The periodic box (if any) lets bond rendering use the minimum image, so a
+    // bond crossing a box face is drawn as two dashed half-bond stubs (one from
+    // each atom toward its partner's nearest image) instead of a long line
+    // stretching across the box.
+    let pbox = bound.get_box();
     let mut data = match *params {
         RepParams::Vdw { scale } => GeometryData {
             spheres: spheres(bound, &colorizer, |a| a.vdw() * scale),
@@ -199,7 +204,7 @@ pub fn build(
             let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
                 spheres: spheres(bound, &colorizer, |_| bond_radius),
-                cylinders: cylinders(&lut, bonds, bond_radius),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox),
                 ..Default::default()
             }
         }
@@ -207,13 +212,13 @@ pub fn build(
             let lut = selected_lut(bound, &colorizer, n_atoms);
             GeometryData {
                 spheres: spheres(bound, &colorizer, |a| a.vdw() * sphere_scale),
-                cylinders: cylinders(&lut, bonds, bond_radius),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox),
                 ..Default::default()
             }
         }
         RepParams::Lines { width } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
-            let mut lines = lines(&lut, bonds, width);
+            let mut lines = lines(&lut, bonds, width, pbox);
             // Lines only draws bonds, so a selected atom with no drawn bond (an ion,
             // a lone water, …) would otherwise be invisible. VMD marks such atoms
             // with a tiny cross — emit one per bondless atom, at the same width.
@@ -233,6 +238,7 @@ pub fn build(
                     coil_radius,
                     ribbon_width,
                     ribbon_thickness,
+                    pbox,
                 ),
                 ..Default::default()
             }
@@ -263,7 +269,12 @@ pub fn build(
         l.color = with_opacity(l.color);
     }
     for v in &mut data.mesh.vertices {
-        v.color = with_opacity(v.color);
+        // Multiply (not overwrite) the alpha so a per-vertex fade set by the
+        // builder survives — the Cartoon ribbon fades its alpha to 0 at a PBC
+        // break (a bond/ribbon crossing the box face); see `cartoon.rs`.
+        let va = (v.color >> 24) & 0xff;
+        let blended = (va * a as u32) / 255;
+        v.color = (v.color & 0x00ff_ffff) | (blended << 24);
         v.mat = lighting;
     }
     data
@@ -392,31 +403,112 @@ fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5]
 }
 
+/// Dash geometry (nm): a wrapping half-bond stub is split into short solid pieces
+/// with gaps so it reads as dashed.
+const DASH_LEN: f32 = 0.02;
+const DASH_GAP: f32 = 0.015;
+
+/// The two half-bond endpoints for a bond `a→b` plus whether it **crosses a box
+/// face** (wraps). A normal bond uses the usual midpoint split (`a → mid`, `b →
+/// mid`), drawn solid. A **wrapping** bond is instead drawn as two stubs that run
+/// from each atom **to its partner's nearest periodic image** (the full bond
+/// toward the image, not beyond it): `a → b_image` and `b → a_image`. These cross
+/// opposite box faces, reach where the partner actually is in the nearest cell,
+/// never cross the box interior, and are dashed.
+fn half_bond_ends(
+    pa: [f32; 3],
+    pb: [f32; 3],
+    pbox: Option<&PeriodicBox>,
+) -> ([f32; 3], [f32; 3], bool) {
+    if let Some(b) = pbox {
+        let pa_p = Pos::new(pa[0], pa[1], pa[2]);
+        let pb_p = Pos::new(pb[0], pb[1], pb[2]);
+        // `closest_image(point, target)` = the image of `point` nearest `target`.
+        let b_img = b.closest_image(&pb_p, &pa_p); // image of b nearest a
+        let a_img = b.closest_image(&pa_p, &pb_p); // image of a nearest b
+        // Wraps iff b's nearest image to a isn't b's real position.
+        let (dx, dy, dz) = (b_img.x - pb[0], b_img.y - pb[1], b_img.z - pb[2]);
+        if dx * dx + dy * dy + dz * dz > 1e-8 {
+            let a_end = [b_img.x, b_img.y, b_img.z];
+            let b_end = [a_img.x, a_img.y, a_img.z];
+            return (a_end, b_end, true);
+        }
+    }
+    (midpoint(pa, pb), midpoint(pa, pb), false)
+}
+
+/// Split `p0 → p1` into dash segments (`DASH_LEN` on, `DASH_GAP` off). Always
+/// emits at least one segment.
+fn dashes(p0: [f32; 3], p1: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
+    let d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if len < 1e-6 {
+        return Vec::new();
+    }
+    let dir = [d[0] / len, d[1] / len, d[2] / len];
+    let at = |t: f32| [p0[0] + dir[0] * t, p0[1] + dir[1] * t, p0[2] + dir[2] * t];
+    let period = DASH_LEN + DASH_GAP;
+    let mut out = Vec::new();
+    let mut t = 0.0;
+    while t < len {
+        out.push((at(t), at((t + DASH_LEN).min(len))));
+        t += period;
+    }
+    if out.is_empty() {
+        out.push((p0, p1));
+    }
+    out
+}
+
 fn cylinders(
     lut: &[Option<([f32; 3], u32)>],
     bonds: &[[usize; 2]],
     radius: f32,
+    pbox: Option<&PeriodicBox>,
 ) -> Vec<CylinderInstance> {
     let mut v = Vec::new();
+    let mut push = |p0, p1, color, dashed: bool| {
+        if dashed {
+            for (s, e) in dashes(p0, p1) {
+                v.push(CylinderInstance { p0: s, radius, p1: e, color, mat: 0 });
+            }
+        } else {
+            v.push(CylinderInstance { p0, radius, p1, color, mat: 0 });
+        }
+    };
     for &[a, b] in bonds {
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
-            let m = midpoint(pa, pb);
-            v.push(CylinderInstance { p0: pa, radius, p1: m, color: ca, mat: 0 });
-            v.push(CylinderInstance { p0: m, radius, p1: pb, color: cb, mat: 0 });
+            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox);
+            push(pa, a_end, ca, wrapped);
+            push(pb, b_end, cb, wrapped);
         }
     }
     v
 }
 
-fn lines(lut: &[Option<([f32; 3], u32)>], bonds: &[[usize; 2]], width: f32) -> Vec<LineVertex> {
+fn lines(
+    lut: &[Option<([f32; 3], u32)>],
+    bonds: &[[usize; 2]],
+    width: f32,
+    pbox: Option<&PeriodicBox>,
+) -> Vec<LineVertex> {
     let mut v = Vec::new();
+    let mut push = |p0: [f32; 3], p1: [f32; 3], color, dashed: bool| {
+        if dashed {
+            for (s, e) in dashes(p0, p1) {
+                v.push(LineVertex { pos: s, color, width });
+                v.push(LineVertex { pos: e, color, width });
+            }
+        } else {
+            v.push(LineVertex { pos: p0, color, width });
+            v.push(LineVertex { pos: p1, color, width });
+        }
+    };
     for &[a, b] in bonds {
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
-            let m = midpoint(pa, pb);
-            v.push(LineVertex { pos: pa, color: ca, width });
-            v.push(LineVertex { pos: m, color: ca, width });
-            v.push(LineVertex { pos: m, color: cb, width });
-            v.push(LineVertex { pos: pb, color: cb, width });
+            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox);
+            push(pa, a_end, ca, wrapped);
+            push(pb, b_end, cb, wrapped);
         }
     }
     v

@@ -5,16 +5,16 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 [CLAUDE.md](CLAUDE.md) under *Milestone status*; this file is the forward-looking list.
 
 ## File I/O & state
-- Deleting trajectory frames
-- Saving molecules and selections to file
-- Saving / loading visualization state
+- ~~Deleting trajectory frames~~ — **shipped** (M15; Range/Decimate dialog from the molecule menu)
+- ~~Saving molecules and selections to file~~ — **shipped** (M15; molecule menu + per-rep save button)
+- ~~Saving / loading visualization state~~ — **shipped** (M13; see CLAUDE.md *Milestone status*)
 
 ## App & UI
 - App settings
 - Background color selection
-- Selection input improvements:
-  - Visual errors
-  - Suggestions of available chains, residue and index ranges
+- ~~Selection input improvements~~ — **shipped** (M14; see CLAUDE.md *Milestone status*):
+  - ~~Visual errors~~ — erroring span highlighted red in the field (molar caret) + message
+  - ~~Suggestions of available chains, residue and index ranges~~ — hint under the field per keyword
 
 ## Rendering & visuals
 - Different depth-cue methods
@@ -23,10 +23,10 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - Drawing geometric primitives
 - High-quality rendering with raytracing
 - Movies
-- Rendering of bonds over PBC as dashed "half-bonds" without artifacts across the box
+- ~~Rendering of bonds over PBC as dashed "half-bonds" without artifacts across the box~~ — **shipped** (M16)
 
 ## Selection & picking
-- Pick modes: whole residues
+- ~~Pick modes: whole residues~~
 
 ## Coarse-grained
 - CG (Martini) bonds and secondary-structure display

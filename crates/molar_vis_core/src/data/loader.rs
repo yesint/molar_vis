@@ -12,6 +12,7 @@ use glam::Vec3;
 use molar::prelude::*;
 
 use crate::data::bonds;
+use crate::scene::MoleculeSource;
 
 // We read molar positions (Point3<Float>) as f32 into GPU buffers, which is only
 // valid when Float == f32. molar's `f64` feature is opt-in and disabled here
@@ -23,6 +24,8 @@ const _: () = assert!(std::mem::size_of::<molar::Float>() == 4);
 /// `scene::Molecule` (with representations) by the caller.
 pub struct RawMolecule {
     pub name: String,
+    /// Where this structure came from, so a saved session can reload it.
+    pub source: MoleculeSource,
     pub system: System,
     pub n_atoms: usize,
     pub bonds: Vec<[usize; 2]>,
@@ -38,7 +41,7 @@ pub fn load(path: &Path) -> Result<RawMolecule, String> {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "molecule".to_string());
-    Ok(assemble(system, name))
+    Ok(assemble(system, name, MoleculeSource::File(path.to_path_buf())))
 }
 
 /// Load a structure from in-memory bytes (the browser path: the file picker reads
@@ -57,13 +60,17 @@ pub fn load_from_bytes(name: &str, bytes: Vec<u8>) -> Result<RawMolecule, String
         .read()
         .map_err(|e| format!("failed to parse {name}: {e}"))?;
     let system = System::new(top, st).map_err(|e| format!("invalid structure in {name}: {e}"))?;
-    Ok(assemble(system, name.to_string()))
+    Ok(assemble(
+        system,
+        name.to_string(),
+        MoleculeSource::Bytes { name: name.to_string() },
+    ))
 }
 
 /// Shared tail of [`load`]/[`load_from_bytes`]: guess bonds and the bounding box
 /// from the freshly loaded `system`, using only transient arrays (positions/radii)
 /// that are dropped here — the `System` stays the single source of coordinates.
-fn assemble(system: System, name: String) -> RawMolecule {
+fn assemble(system: System, name: String, source: MoleculeSource) -> RawMolecule {
     let (bonds, bbox_min, bbox_max, n) = {
         let all = system.select_all_bound();
         let (min, max) = all.min_max();
@@ -75,7 +82,10 @@ fn assemble(system: System, name: String) -> RawMolecule {
             positions.push([pos.x, pos.y, pos.z]);
             vdw.push(atom.vdw());
         }
-        let bonds = bonds::guess(&all, &positions, &vdw);
+        // PBC-aware bond guessing when the structure has a box (finds bonds that
+        // cross a box face in a wrapped structure; rendered as dashed half-bonds).
+        let pbox = system.state().pbox.clone();
+        let bonds = bonds::guess(&all, &positions, &vdw, pbox.as_ref());
         (
             bonds,
             Vec3::new(min.x, min.y, min.z),
@@ -88,6 +98,7 @@ fn assemble(system: System, name: String) -> RawMolecule {
 
     RawMolecule {
         name,
+        source,
         system,
         n_atoms: n,
         bonds,

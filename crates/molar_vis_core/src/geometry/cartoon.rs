@@ -33,6 +33,7 @@ const ARROW_LEN: f32 = 1.6;
 /// Arrowhead base half-width, as a multiple of the ribbon half-width.
 const ARROW_BASE_SCALE: f32 = 1.7;
 
+#[derive(Clone)]
 struct Residue {
     ca: Vector3f,
     /// Carbonyl O position, if present (for the ribbon orientation).
@@ -50,6 +51,7 @@ pub fn build(
     coil_radius: f32,
     ribbon_width: f32,
     ribbon_thickness: f32,
+    pbox: Option<&PeriodicBox>,
 ) -> MeshData {
     // Group atoms by residue (BTreeMap keeps ascending resindex order).
     struct Acc {
@@ -98,20 +100,76 @@ pub fn build(
     let mut mesh = MeshData::default();
 
     // Split into runs of consecutive, same-chain residues (break on chain change
-    // or a gap in resindex — i.e. a chain break / missing residues).
+    // or a gap in resindex — i.e. a chain break / missing residues) **and on a
+    // periodic-box jump**: when consecutive Cα sit on opposite faces of the box
+    // (a wrapped structure), the ribbon must not interpolate across the box. Such
+    // a break is a *PBC break* — the chain actually continues across the boundary,
+    // so the run end is faded out (vs. a hard cap at a real chain terminus).
     let mut start = 0;
     while start < residues.len() {
         let mut end = start + 1;
         while end < residues.len()
             && residues[end].chain == residues[start].chain
             && residues[end].resindex == residues[end - 1].resindex + 1
+            && !is_pbc_jump(residues[end - 1].ca, residues[end].ca, pbox)
         {
             end += 1;
         }
-        build_run(&residues[start..end], &shape, &mut mesh);
+        // The chain continues across this boundary (only a PBC jump split it) iff
+        // the neighbour residue is the contiguous next/prev one but wrapped.
+        let pbc_break = |i: usize, j: usize| {
+            residues[j].chain == residues[i].chain
+                && residues[j].resindex == residues[i].resindex + 1
+                && is_pbc_jump(residues[i].ca, residues[j].ca, pbox)
+        };
+        // Build the run, **extending it one residue past each PBC-break end** with a
+        // "ghost" control point at the across-boundary neighbour's nearest image.
+        // The ribbon then runs out through the face toward where the partner really
+        // is (like the dashed bonds) and is striped/faded only there — staying 100%
+        // opaque up to the boundary. `fade_lo`/`fade_hi` = ghosts prepended/appended.
+        let mut run_vec: Vec<Residue> = Vec::with_capacity(end - start + 2);
+        let mut ext_lo = 0;
+        if start > 0 && pbc_break(start - 1, start) {
+            run_vec.push(ghost_of(&residues[start - 1], residues[start].ca, pbox));
+            ext_lo = 1;
+        }
+        run_vec.extend_from_slice(&residues[start..end]);
+        let mut ext_hi = 0;
+        if end < residues.len() && pbc_break(end - 1, end) {
+            run_vec.push(ghost_of(&residues[end], residues[end - 1].ca, pbox));
+            ext_hi = 1;
+        }
+        build_run(&run_vec, &shape, ext_lo, ext_hi, pbox, &mut mesh);
         start = end;
     }
     mesh
+}
+
+/// A spline control point placed at `neighbour`'s nearest periodic image to
+/// `anchor`, copying its appearance. Used to extend a ribbon one residue past a
+/// PBC break, out through the box face toward where the chain continues.
+fn ghost_of(neighbour: &Residue, anchor: Vector3f, pbox: Option<&PeriodicBox>) -> Residue {
+    let ca = match pbox {
+        Some(b) => b
+            .closest_image(
+                &Pos::new(neighbour.ca.x, neighbour.ca.y, neighbour.ca.z),
+                &Pos::new(anchor.x, anchor.y, anchor.z),
+            )
+            .coords,
+        None => neighbour.ca,
+    };
+    Residue { ca, o: None, ..neighbour.clone() }
+}
+
+/// Whether consecutive Cα cross a periodic-box face — i.e. `next`'s nearest image
+/// to `prev` is not `next` itself. `false` with no box.
+fn is_pbc_jump(prev: Vector3f, next: Vector3f, pbox: Option<&PeriodicBox>) -> bool {
+    let Some(b) = pbox else { return false };
+    let prev_p = Pos::new(prev.x, prev.y, prev.z);
+    let next_p = Pos::new(next.x, next.y, next.z);
+    let img = b.closest_image(&next_p, &prev_p);
+    let (dx, dy, dz) = (img.x - next.x, img.y - next.y, img.z - next.z);
+    dx * dx + dy * dy + dz * dz > 1e-8
 }
 
 /// Cross-section dimensions per DSSP class.
@@ -132,7 +190,14 @@ impl Shape {
     }
 }
 
-fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
+fn build_run(
+    run: &[Residue],
+    shape: &Shape,
+    ext_lo: usize,
+    ext_hi: usize,
+    pbox: Option<&PeriodicBox>,
+    mesh: &mut MeshData,
+) {
     let n = run.len();
     if n < 2 {
         return;
@@ -219,6 +284,35 @@ fn build_run(run: &[Residue], shape: &Shape, mesh: &mut MeshData) {
     }
     rings.push(sample(&ctx, n - 2, 1.0));
     ring_res.push(run[n - 1].resindex as u32);
+
+    // PBC-break ends: the ribbon is fully opaque up to the box face, then the
+    // ghost extension *beyond* the face (rings whose center is outside the box) is
+    // **dashed** — opaque stripe rings with transparent gap rings (matching the
+    // dashed PBC bonds; no fade). `r = ring_index / STEPS` is the continuous
+    // residue coordinate (0 … n-1); the ghost segments are `r < ext_lo` (start)
+    // and `r > (n-1) - ext_hi` (end). Striping is per-ring (the finest the spline
+    // sampling allows).
+    if (ext_lo > 0 || ext_hi > 0) && pbox.is_some() {
+        const STRIPE_RINGS: usize = 1;
+        let b = pbox.unwrap();
+        let max_r = (n - 1) as f32;
+        for (idx, ring) in rings.iter_mut().enumerate() {
+            let r = idx as f32 / STEPS as f32;
+            let in_ghost = (ext_lo > 0 && r < ext_lo as f32)
+                || (ext_hi > 0 && r > max_r - ext_hi as f32);
+            if !in_ghost {
+                continue; // a real residue → opaque
+            }
+            let center = Pos::new(ring.center.x, ring.center.y, ring.center.z);
+            if b.is_inside(&center) {
+                continue; // still inside the box → opaque (up to the face)
+            }
+            // Gap rings of the dash become transparent; stripe rings stay opaque.
+            if (idx / STRIPE_RINGS) % 2 != 0 {
+                ring.color &= 0x00ff_ffff;
+            }
+        }
+    }
 
     emit(&rings, &ring_res, mesh);
 }

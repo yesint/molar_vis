@@ -1,9 +1,11 @@
 //! The scene graph: a set of molecules, each with its own representations.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use glam::Vec3;
 use molar::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::color::ColorMethod;
 use crate::data::RawMolecule;
@@ -15,7 +17,7 @@ use crate::trajectory::Trajectory;
 
 /// Stable per-molecule identity, so undo/redo can reference molecules across
 /// deletion (a deleted molecule is parked in [`Scene::trash`] by this id).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct MolId(pub u64);
 
 /// Periodic-image display for a representation: render extra copies of the
@@ -24,7 +26,7 @@ pub struct MolId(pub u64);
 /// images are drawn by re-running the same GPU geometry under a translated camera,
 /// so nothing is duplicated on the CPU or GPU. Only meaningful when the molecule
 /// has a periodic box. In `EditState` (undoable).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PeriodicParams {
     /// Render the central, un-shifted copy.
     pub self_img: bool,
@@ -63,6 +65,38 @@ impl PeriodicParams {
     }
 }
 
+/// Where a molecule's structure was loaded from, so a saved visualization state
+/// can reload the same atoms. Sessions reference molecules by source rather than
+/// embedding their coordinates (that is a separate "save molecules to file"
+/// feature) — small, and lets the structure file evolve independently.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MoleculeSource {
+    /// A structure file on disk (native). Reloaded with [`crate::data::load`].
+    File(PathBuf),
+    /// In-memory bytes (the browser file picker, or the bundled demo): there is no
+    /// path to reload from, so a session referencing this cannot restore the atoms
+    /// in a fresh process. We keep the original name for display/diagnostics.
+    Bytes { name: String },
+}
+
+impl Default for MoleculeSource {
+    fn default() -> Self {
+        MoleculeSource::Bytes { name: "molecule".to_string() }
+    }
+}
+
+/// A record of one trajectory file loaded into a molecule, so a saved session can
+/// replay the same loads. Multiple loads concatenate (see [`Trajectory`]); the
+/// list preserves that order. Native-only in practice (paths), but the type is
+/// platform-agnostic so the session format is uniform.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrajLoad {
+    pub path: PathBuf,
+    pub from: usize,
+    pub to: Option<usize>,
+    pub stride: usize,
+}
+
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
     pub kind: RepKind,
@@ -84,6 +118,10 @@ pub struct Representation {
     pub sel: Option<Sel>,
     /// Last selection error, shown in the UI; `None` if the selection is valid.
     pub sel_error: Option<String>,
+    /// For a parse error, the character offset into `sel_text` the molar caret
+    /// points at, so the UI can highlight the erroring part of the text in place.
+    /// `None` for non-positional errors. Transient, not in `EditState`.
+    pub sel_error_caret: Option<usize>,
     /// The selection is valid but matches **zero atoms** (molar's "empty" error,
     /// surfaced as a non-destructive warning). The field is flagged in the UI and
     /// the rep renders nothing; the text is kept. Transient, not in `EditState`.
@@ -189,6 +227,7 @@ impl Representation {
             expr: None,
             sel: None,
             sel_error: None,
+            sel_error_caret: None,
             sel_empty: false,
             periodic,
             smooth_window,
@@ -243,6 +282,14 @@ pub struct PendingSelection {
 pub struct Molecule {
     pub id: MolId,
     pub name: String,
+    /// Where the structure was loaded from (for saving/reloading sessions). Only
+    /// read by the (native) session capture, hence allowed-dead on wasm.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub source: MoleculeSource,
+    /// Trajectory files loaded into this molecule, in load order, so a session can
+    /// replay them. Appended whenever frames are loaded from a file.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub traj_loads: Vec<TrajLoad>,
     pub system: System,
     pub bonds: Vec<[usize; 2]>,
     pub n_atoms: usize,
@@ -299,6 +346,8 @@ impl Molecule {
         Self {
             id,
             name: raw.name,
+            source: raw.source,
+            traj_loads: Vec::new(),
             system: raw.system,
             bonds: raw.bonds,
             n_atoms: raw.n_atoms,

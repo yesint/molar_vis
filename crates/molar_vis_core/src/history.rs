@@ -13,32 +13,93 @@
 //! label (derived by diffing the two states) shown in the undo/redo dropdowns.
 
 use molar::prelude::SsAlgorithm;
+use serde::{Deserialize, Serialize};
 
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
 use crate::scene::{MolId, Molecule, PeriodicParams, Representation, Scene};
 
-#[derive(Clone, PartialEq)]
-struct RepState {
-    kind: RepKind,
-    params: RepParams,
-    color: ColorMethod,
-    ss_algo: SsAlgorithm,
-    sel_text: String,
-    visible: bool,
-    dynamic: bool,
-    ss_per_frame: bool,
-    material: Material,
-    periodic: PeriodicParams,
-    smooth_window: u32,
+/// The editable state of a single representation — the canonical "document" unit.
+///
+/// **This is the one place to add a persisted, undoable representation field.**
+/// Both undo/redo (via [`EditState`]) and save/load (via [`crate::session`]) read
+/// and write reps through this struct, so a field added here is automatically
+/// snapshotted *and* serialized — no other site to remember. New fields should
+/// carry `#[serde(default)]` so older saved sessions still load.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepState {
+    pub kind: RepKind,
+    pub params: RepParams,
+    pub color: ColorMethod,
+    #[serde(with = "SsAlgorithmDef")]
+    pub ss_algo: SsAlgorithm,
+    pub sel_text: String,
+    pub visible: bool,
+    pub dynamic: bool,
+    pub ss_per_frame: bool,
+    pub material: Material,
+    pub periodic: PeriodicParams,
+    pub smooth_window: u32,
 }
 
-#[derive(Clone, PartialEq)]
-struct MolState {
-    id: MolId,
-    visible: bool,
-    reps: Vec<RepState>,
+/// serde mirror for molar's foreign [`SsAlgorithm`] (which derives no serde). Used
+/// via `#[serde(with = ...)]`; the variants must stay in sync with molar's enum.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "SsAlgorithm")]
+enum SsAlgorithmDef {
+    Dssp,
+    DsspGmx,
+    Dss,
+}
+
+impl RepState {
+    /// Snapshot a live representation's editable fields.
+    pub fn capture(r: &Representation) -> Self {
+        Self {
+            kind: r.kind,
+            params: r.params,
+            color: r.color,
+            ss_algo: r.ss_algo,
+            sel_text: r.sel_text.clone(),
+            visible: r.visible,
+            dynamic: r.dynamic,
+            ss_per_frame: r.ss_per_frame,
+            material: r.material,
+            periodic: r.periodic,
+            smooth_window: r.smooth_window,
+        }
+    }
+
+    /// Build a fresh (unbuilt, dirty) representation from this snapshot.
+    pub fn to_representation(&self) -> Representation {
+        Representation::restore(
+            self.kind,
+            self.params,
+            self.color,
+            self.ss_algo,
+            self.sel_text.clone(),
+            self.visible,
+            self.dynamic,
+            self.ss_per_frame,
+            self.material,
+            self.periodic,
+            self.smooth_window,
+        )
+    }
+}
+
+/// The editable state of a molecule (its representations + visibility). The
+/// molecule's heavy data (the molar `System`, source, trajectory) is referenced
+/// by [`MolId`] for undo/redo and by source for sessions — never snapshotted here.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct MolState {
+    /// Runtime identity; only meaningful within a live session (undo/redo). Not
+    /// persisted — a loaded session reassigns ids when it reloads molecules.
+    #[serde(skip)]
+    pub id: MolId,
+    pub visible: bool,
+    pub reps: Vec<RepState>,
 }
 
 /// A snapshot of the editable document. `PartialEq` decides whether anything
@@ -57,23 +118,7 @@ impl EditState {
                 .map(|m| MolState {
                     id: m.id,
                     visible: m.visible,
-                    reps: m
-                        .reps
-                        .iter()
-                        .map(|r| RepState {
-                            kind: r.kind,
-                            params: r.params,
-                            color: r.color,
-                            ss_algo: r.ss_algo,
-                            sel_text: r.sel_text.clone(),
-                            visible: r.visible,
-                            dynamic: r.dynamic,
-                            ss_per_frame: r.ss_per_frame,
-                            material: r.material,
-                            periodic: r.periodic,
-                            smooth_window: r.smooth_window,
-                        })
-                        .collect(),
+                    reps: m.reps.iter().map(RepState::capture).collect(),
                 })
                 .collect(),
         }
@@ -104,7 +149,7 @@ impl EditState {
 
 fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
     if mol.reps.len() != target.len() {
-        mol.reps = target.iter().map(rep_from_state).collect();
+        mol.reps = target.iter().map(RepState::to_representation).collect();
         return;
     }
     for (i, s) in target.iter().enumerate() {
@@ -118,7 +163,7 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
                 || cur.material != s.material
         };
         if needs_rebuild {
-            mol.reps[i] = rep_from_state(s);
+            mol.reps[i] = s.to_representation();
         } else {
             // Cheap, no-geometry changes (periodic display is render-only too).
             mol.reps[i].visible = s.visible;
@@ -132,22 +177,6 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
             }
         }
     }
-}
-
-fn rep_from_state(s: &RepState) -> Representation {
-    Representation::restore(
-        s.kind,
-        s.params,
-        s.color,
-        s.ss_algo,
-        s.sel_text.clone(),
-        s.visible,
-        s.dynamic,
-        s.ss_per_frame,
-        s.material,
-        s.periodic,
-        s.smooth_window,
-    )
 }
 
 /// A short human-readable label for the change from `old` to `new`, shown in the

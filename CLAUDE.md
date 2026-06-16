@@ -46,8 +46,19 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_AXES=1` (show the VMD-style orientation-axes gizmo) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
-  zoom-to-selection). Generate a quick test trajectory with the Python snippet that wrote
-  `tests/2lao_traj.pdb` (multi-MODEL, **not in git**).
+  zoom-to-selection) +
+  `MOLAR_VIS_DEBUG_SAVE_SESSION=<path>` / `MOLAR_VIS_DEBUG_LOAD_SESSION=<path>` (save the
+  startup scene to / replace it from a JSON session file during `App::new` — drives the
+  save/load-state round-trip headlessly, since the rfd dialogs can't be; a save→load→save
+  round-trip is byte-identical) +
+  `MOLAR_VIS_DEBUG_EDIT_REP=1` (open mol 0's first rep selection field in edit mode, so the
+  contextual selection-suggestion hint and an invalid selection's in-field red error highlight
+  can be screenshot headlessly — pair with `MOLAR_VIS_DEBUG_SEL`) +
+  `MOLAR_VIS_DEBUG_SAVE_MOL=<path>` (write mol 0 to a structure file at startup — exercises the
+  molar `FileHandler` write + displayed-frame swap path headlessly) +
+  `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
+  `MOLAR_VIS_DEBUG_TRAJ`). Generate a quick test
+  trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not in git**).
 
 ## Tech stack (working versions)
 
@@ -75,7 +86,10 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `theme.rs` — installs the Phosphor icon font + a high-contrast dark style, larger fonts.
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
-  `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll`. Perspective
+  `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
+  takes the cursor NDC + aspect and pans `target` so the world point under the cursor stays put —
+  the focal-plane half-height is `distance·tan(fov/2)` for both projections, so the offset scales
+  with distance). Perspective
   **and** orthographic projection. `frame_bbox`/`focus_bbox` use `fit_distance` (fit the
   bbox's **longest dimension to ~90%** of the viewport; bounding-sphere radius still drives
   near/far). `#[derive(PartialEq)]` drives render-skip.
@@ -86,7 +100,21 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `build(system, sel, bonds, params, color)` binds the `Sel` (`system.bind`), reads
   positions/atoms via `iter_particle` (nothing cached), and dispatches on `params`. Spheres
   come from the selected atoms; bonds are half-bond split, colored by each atom. Computes a
-  `SsMap` once when the rep is Cartoon or colored by SecStruct.
+  `SsMap` once when the rep is Cartoon or colored by SecStruct. **PBC dashed half-bonds**: when
+  the bound has a box (`BoxProvider::get_box`), each bond's two ends are the **minimum-image**
+  half-bonds (`half_bond_ends`, via `PeriodicBox::closest_image`). A bond that crosses a box face
+  is drawn as two **dashed** stubs (`dashes()`) running from each atom **to its partner's nearest
+  image** (`a→b_image`, `b→a_image` — the full bond toward the image, not beyond it) — so they
+  cross opposite faces, reach where the partner actually is in the nearest cell, and nothing crosses
+  the box interior (no long-line artifact). Non-wrapping bonds use the usual solid midpoint split.
+  Applies to cylinders (Licorice/BallAndStick) and lines. **Cartoon over PBC** (`cartoon.rs`):
+  runs are split at a PBC jump between consecutive Cα (`is_pbc_jump`), so the ribbon never crosses
+  the box. A run ending at such a jump is **extended one residue past the face** with a *ghost*
+  control point at the across-boundary partner's nearest image (`ghost_of`); the ribbon stays 100%
+  opaque up to the box face (`PeriodicBox::is_inside`), then the part **beyond** the face is
+  **dashed** — opaque stripe rings with transparent gap rings (`STRIPE_RINGS`, per-ring; matching
+  the dashed bonds; no fade). The mesh material stamping in `build` *multiplies* (not overwrites)
+  the per-vertex alpha so the transparent gap rings survive.
 - `geometry/cartoon.rs` — per-chain spline through Cα using VMD's **modified Catmull-Rom
   basis (slope 1.25, interpolating)** + 12 subdivisions — helices genuinely coil but the
   slope-1.25 tangents make the loops round/smooth (standard CR slope 2 looked angular). SS
@@ -114,7 +142,37 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   (compiled) / `sel: Sel` (evaluated) / `periodic: PeriodicParams` (image counts + Self/Box,
   in `EditState`) / visible / dirty flags / `RepGpu`), `evaluate()`
   (text → `SelectionExpr` → `Sel`). `Molecule` also owns a `trajectory: Trajectory` and the
-  `seed_frame0`/`append_frames`/`push_frame`/`apply_current_frame` methods (see *molar integration*).
+  `seed_frame0`/`append_frames`/`push_frame`/`apply_current_frame` methods (see *molar integration*),
+  plus a `source: MoleculeSource` (`File(path)`/`Bytes{name}`) and `traj_loads: Vec<TrajLoad>`
+  (the trajectory files loaded into it, in order) — both for session save/load (see `session.rs`).
+- `session.rs` — **save/load visualization state** (M13). `Session { format, version, view:
+  ViewState, molecules: Vec<MolSession> }`, serialized to JSON. The design goal is
+  *extensible-without-ceremony*: the per-rep document is serialized through the **same**
+  `history::RepState` undo/redo uses, so a new undoable rep field is saved/loaded **for free**
+  (no second site to update); the only manual seam is global `ViewState` (camera + view-toolbar
+  toggles) via `App::view_state`/`apply_view_state`. Every field is `#[serde(default)]` →
+  forward/back-compatible (unknown fields ignored, missing ones default), so older/newer files
+  still load. Molecules are referenced **by source path** (reloaded from disk), not embedded —
+  embedding atoms is the separate "save molecules to file" roadmap item. `MolSession` carries
+  source / reps (`RepState`) / visibility / show_box / `traj_loads` / `current_frame`. Pure
+  data + serde (no IO, WASM-safe); the native `Session` menu (New/Save/Load) + rfd dialogs +
+  `std::fs` + scene-reload live in `app.rs`: `save_session`/`load_session` → `_to`/`_from`
+  workers; `new_session` (+ shared `reset_document`) starts an empty scene; `apply_session`
+  reloads each molecule via `data::load`, rebuilds reps, replays trajectories with
+  `read_frames_sync`, applies the view state, and resets the undo history — loading a session (or
+  New) = opening a document, not an undo step.
+  `SsAlgorithm` (foreign, no serde) rides a `#[serde(remote)]` shim in `history.rs`; `Camera`
+  derives serde via glam's `serde` feature.
+- `suggest.rs` — **selection-input assistance** for the rep selection field (M14). `SelHints`
+  (distinct chains / resnames / names + resid/resindex/index ranges, computed once from the
+  static topology and cached per molecule on `App::sel_hints`); `SelHints::hint_for(text)` finds
+  the **last grammar keyword** in the text and returns a one-line hint (`chains: A B C R`,
+  `resid: 2..120`, `index: 0..N`, capped value lists with `… (+N)`). `parse_sel_error(raw)` parses
+  molar's parse-error string (`"syntax error: \n<text>\n----^\nExpected <…>"`) into a concise
+  message + the **caret char-offset** the `^` points at. Pure logic, WASM-safe. The field draw
+  (`app.rs::sel_text_edit`) uses a `TextEdit` **layouter** to paint the text from the caret offset
+  to the end **red** (in-place error highlight); the hint renders under the focused field
+  (`active_hint` in `draw_reps_for`).
 - `trajectory.rs` — `Trajectory { frames: Vec<State>, current, playing, loop_mode, speed_fps, … }`
   (`n_frames`/`has_playback`/`set_current`/`step`/`tick`), `LoadOptions {from,to,stride}`,
   `LoadMode {Sync,Async}`, `LoadMsg {Frame,Done,Error}`. Pure data + playback math, **WASM-safe**.
@@ -258,7 +316,10 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   tab, Cartoon / SecStruct only; in `EditState`) forces DSSP recompute every frame when
   motion changes SS.
 - Bonds aren't in GRO (partial in PDB); guessed at load (`distance_search_single` +
-  `dist < 0.6*(vdw_i+vdw_j)`).
+  `dist < 0.6*(vdw_i+vdw_j)`). **PBC-aware when the structure has a box** (`bonds::guess` takes the
+  `PeriodicBox`): uses `distance_search_single_pbc` + minimum-image distance scoring, so a covalent
+  bond whose atoms sit on opposite faces of a wrapped structure is still found (then rendered as a
+  dashed PBC half-bond). A whole protein in a box gets the same bonds as the non-PBC path.
 - Secondary structure for M6 cartoon: `molar::Dssp` (10-variant `SS` enum).
 
 ## Conventions & gotchas
@@ -285,12 +346,19 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 collapsing headers; global scene controls live in the top view toolbar, below).
 Toolbar: **`Open`** button (`App::open_structure` — native `rfd` picker filtered to
 topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
-molecule, frames the camera on the first one, undoable via the normal checkpoint) · then
+molecule, frames the camera on the first one, undoable via the normal checkpoint) · then a
+**`Session` menu** (`STACK`; native only — the wasm build has no filesystem to reload molecule
+sources from) with **New** (`App::new_session` — drop all molecules + reset camera/history to an
+empty document), **Save…** (`App::save_session`), **Load…** (`App::load_session`), saving/loading
+the whole visualization state as a JSON session (see `session.rs`) · then
 undo/redo buttons, each with a `▼` dropdown for **cumulative** undo/redo (also Ctrl+Z /
 Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + atom count +
 **Load-trajectory** (`FOLDER_OPEN`, left of the name), right-justified **add-rep** ·
-**periodic-box toggle** (`BOUNDING_BOX`) · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
-`Camera::focus_bbox`) · eye · trash; a trajectory control bar + slider appears below when
+**zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` → `Camera::focus_bbox`) · eye · a **per-molecule
+menu** (`LIST` hamburger, replacing the old standalone trash/box buttons): **Save molecule…**
+(`FLOPPY_DISK` → `save_molecule`, native), **Show periodic box** checkbox (`mol.show_box`),
+**Delete frames…** (`SCISSORS` → the delete-frames modal; enabled only with a loaded
+trajectory), **Delete molecule** (`TRASH`). A trajectory control bar + slider appears below when
 >1 frame; reps listed (indented) when the molecule caret is open.
 
 **Top view toolbar** (`draw_view_toolbar`, an `egui::Panel::top("view_toolbar")` *above*
@@ -325,8 +393,15 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   **selection field** (fills width; focusing sets `editing_rep` and expands it to a
   full-width editor, collapsing on Enter/blur) · right-justified compact actions
   (`Layout::right_to_left` + `compact_actions`): **zoom-to-selection** (`MAGNIFYING_GLASS_PLUS`
-  → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · duplicate · trash. The rep's
-  **selection error** (if any) is shown in red on the next line, aligned under the field.
+  → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · duplicate · **save selection to file**
+  (`FLOPPY_DISK` → `save_rep_selection`, native; just left of trash) · trash. The rep's
+  **selection error** (if any) is shown in red on the next line, aligned under the field — and
+  the **erroring span of the text is painted red in-place** (a `sel_text_edit` layouter colors
+  from the molar caret offset to the end; see `suggest.rs`). Editing the field (`resp.changed()`)
+  immediately **clears the stale message / red highlight / empty flag** (`clear_sel_feedback`),
+  recomputed on commit. While the field is focused, a faint **suggestion hint** for the keyword
+  being typed (e.g. `chains: A B C R`, `resid: 2..120`) appears under it (`active_hint`, from the
+  cached `SelHints`), **truncated with `…`** (`Label::truncate`) so a long value list stays on one line.
 - **Row 2** (a **settings caret** — `CARET_RIGHT`/`CARET_DOWN`, where the drag handle is in
   row 1 — toggles `params_open`; then) **style** dropdown · **color** dropdown · **material**
   dropdown (`material_picker`, shaded-sphere icon faded by opacity). The expanded settings
@@ -340,7 +415,10 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   molecule has a box** — gated by `mol.system.state().pbox.is_some()`: *Self* / *Box* checkboxes
   + six `DragValue` spinboxes −x/+x/−y/+y/−z/+z giving the image counts along ±a,±b,±c; these
   are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`); tab in
-  `rep.settings_tab: SettingsTab`. Style and color are **icon+text** buttons built by the shared
+  `rep.settings_tab: SettingsTab`. The tab bar uses the shared **`tab_bar(ui, &mut current, &[(T,
+  label)…])`** helper — the **app-default tab style** (underline tabs: selected = bold + accent
+  underline, others weak/clickable), reused by every tabbed UI (rep settings, the delete-frames
+  dialog, …) so they stay consistent. Style and color are **icon+text** buttons built by the shared
   `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
   `ColorMethod` (Element = CPK dots, Chain = interlocking colored links, ResID =
@@ -417,7 +495,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `WebRunner` (wgpu, with a **WebGL2 fallback**), built/bundled with `trunk` and **deployed to
   GitHub Pages**. **Decision: single-threaded** (no SharedArrayBuffer/COOP-COEP/nightly — hostable on
   any static server). Pieces:
-  - **molar wasm runtime** (committed + pushed to molar, rev *ea33c5f*; molar_vis pins that git rev):
+  - **molar wasm runtime** (committed + pushed to molar at rev *ea33c5f*; molar_vis now pins a later
+    rev — *6ac04e8*, which also carries the selection-grammar word-boundary fix):
     `web_time::Instant` for the clock (std panics on wasm) + a `src/par.rs` serial-iterator shim so
     molar's rayon calls run single-threaded on wasm (rayon is now native-only); `IoStateIterator`
     reads serially on wasm.
@@ -524,6 +603,70 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `swatch_button`) + a full `color_picker_color32`; the submenu is `CloseOnClickOutside` so dragging
   the picker doesn't dismiss it). Undoable for free — `RepState` already snapshots `rep.color` and
   history compares `ColorMethod` generically.
+- ✅ M13 **Save / load visualization state** — a JSON "session" file capturing the loaded
+  molecules (by **source path**, reloaded from disk — not embedded), the full per-rep document,
+  per-molecule visibility/box/trajectory, and the global view (camera/projection/depth-cue/
+  axes/pick+selection modes). `session.rs` (`Session`/`MolSession`/`ViewState`/`MoleculeSource`/
+  `TrajLoad`) + a **`Session` toolbar menu** (New/Save/Load) + native
+  `App::{new_session,save_session,load_session,apply_session}` + `MOLAR_VIS_DEBUG_{SAVE,LOAD}_SESSION`
+  hooks. **Built for extensibility — the design point:**
+  the per-rep document is serialized through the *same* `history::RepState` undo/redo uses, so a
+  new undoable rep field is persisted automatically with no second site to touch; the only manual
+  plumbing is the small `ViewState` ⇄ `App::{view_state,apply_view_state}` seam. All fields are
+  `#[serde(default)]` → forward/back-compatible. The domain types themselves (`RepKind`,
+  `RepParams`, `ColorMethod`, `Material`, `PeriodicParams`, `Camera`, …) derive serde directly
+  (no mirror structs to drift); `SsAlgorithm` rides a `#[serde(remote)]` shim, `Camera` uses
+  glam's `serde` feature. Loading replaces the scene (open-document semantics) and resets undo
+  history. Verified: 4 unit round-trip/compat tests + a headless save→load→save round-trip that
+  is **byte-identical** (incl. a replayed 20-frame trajectory restored to frame 2, SS-colored
+  Cartoon over `protein`, and the camera). Native only (wasm has no filesystem to reload sources);
+  `session.rs` stays WASM-safe for a future browser download/upload path.
+- ✅ M14 **Selection-input improvements** — `suggest.rs`. (1) **Visual errors**: molar formats a
+  parse error with a `^` caret line; `parse_sel_error` extracts the caret char-offset + the
+  "Expected …" message, and `sel_text_edit`'s `TextEdit` layouter paints the text from that offset
+  to the end **red** (caret-at-end → highlights the last char), so the error is shown *in place* in
+  the field (plus the clean message below). (2) **Suggestions**: `SelHints` (distinct chains /
+  resnames / names + resid/resindex/index ranges, computed once from topology, cached per molecule
+  on `App::sel_hints`); while editing, `SelHints::hint_for` shows the values for the **last keyword**
+  typed (`chains: A B C R`, `resid: 2..120`, …) faintly under the field, **truncated with `…`** to one
+  line. Both stale-feedback cues clear the moment the text is edited (`clear_sel_feedback` on
+  `resp.changed()`) and are recomputed on commit. 3 unit tests
+  (`last_keyword`, error-caret parse, pass-through); verified headlessly via
+  `MOLAR_VIS_DEBUG_EDIT_REP` + `MOLAR_VIS_DEBUG_SEL`.
+- ✅ M15 **Save molecules / selections to file + delete trajectory frames + molecule menu** —
+  three "File I/O & state" roadmap items. (1) **Save** (native): `save_displayed(mol, path, rep)`
+  writes via molar's `FileHandler::create` + `write` (whole `System` when `rep=None`, else
+  `system.bind(sel)` = just the selected atoms) at the **displayed** frame — the frame `State` is
+  swapped into the System around the write (frames render by reference, not held in the System) and
+  restored after; format from the path extension (pdb/gro/xyz/ent). `App::save_molecule` (from the
+  molecule menu) + `App::save_rep_selection` (a `FLOPPY_DISK` button just left of the rep's trash).
+  (2) **Delete trajectory frames**: `Trajectory::delete_range(from,to)` / `decimate(stride)` (pure
+  data, WASM-safe, clamp `current`) driven by a **`DeleteFramesDialog`** modal (Range / Decimate
+  via the shared `tab_bar` tabs, `draw_delete_frames_dialog`) opened from the menu; not undoable
+  (trajectory is view state). Empty
+  result reverts to the static structure. (3) **Per-molecule `LIST` menu** replaces the standalone
+  trash/box buttons: Save molecule · Show-periodic-box checkbox · Delete frames · Delete molecule.
+  2 trajectory unit tests; save path verified headlessly (`MOLAR_VIS_DEBUG_SAVE_MOL` → valid PDB,
+  1911 atoms). Save is native-only (molar writes to the filesystem); the menu/dialog/frame-deletion
+  are cross-platform.
+- ✅ M16 **Bonds + cartoon over PBC (dashed half-bonds / faded ribbon)** — a "Rendering & visuals"
+  roadmap item. (1) **PBC-aware bond guessing** (`data/bonds.rs`, `distance_search_single_pbc` +
+  minimum-image scoring when the structure has a box) so cross-face covalent bonds in a *wrapped*
+  structure are found at all. (2) **Minimum-image dashed half-bonds** (`geometry.rs`
+  `half_bond_ends` via `PeriodicBox::closest_image`; box from the bound's `BoxProvider::get_box`,
+  no call-site changes): a bond crossing a face is drawn as two **dashed** stubs running from each
+  atom **to its partner's nearest image** (full bond toward the image, not beyond — reaches where
+  the partner is in the next cell), crossing opposite faces; nothing crosses the box interior.
+  Cylinders + lines. (3) **Cartoon**: runs split at a PBC jump (`is_pbc_jump`) so the ribbon never
+  crosses the box; a jump end is **extended one residue past the face** (ghost control point at the
+  partner's image), stays opaque up to the face (`is_inside`), then is **dashed** beyond it
+  (per-ring opaque/transparent stripes, no fade; mesh material stamping now *multiplies* alpha so
+  the transparent gaps survive). Test fixtures:
+  `tests/pbc_pair.pdb` (2-atom wrapped bond) + `tests/2lao_pbc_broken.pdb` (2lao shifted by
+  half a box in X and wrapped into a snug box, so the protein is split across the X face) — both
+  committed. Verified: bond count unchanged from the whole protein (1855); no long lines/ribbons
+  across the box; dashed stubs reach the partner image; the cartoon ribbon is dashed beyond the
+  boundary.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

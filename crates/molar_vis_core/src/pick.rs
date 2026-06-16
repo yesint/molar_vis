@@ -12,7 +12,7 @@ use crate::geometry::{RepKind, RepParams};
 use crate::scene::Scene;
 
 /// What the picker does on hover / drag.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum PickMode {
     /// Picking disabled (no per-hover cost).
     #[default]
@@ -35,7 +35,7 @@ impl PickMode {
 }
 
 /// How a raw set of hit atoms (from a lasso) is expanded into the final selection.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum SelectionMode {
     /// Exactly the atoms hit.
     #[default]
