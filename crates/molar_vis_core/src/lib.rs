@@ -17,6 +17,7 @@ mod render;
 mod scene;
 mod secstruct;
 mod session;
+mod spatial;
 mod suggest;
 mod theme;
 mod trajectory;

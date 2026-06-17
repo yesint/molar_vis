@@ -231,6 +231,30 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `finish_lasso` *before* the set op, and to the hovered atom in `draw_viewport` (Residues →
   whole-residue highlight). `BoundH` is lasso-only (`App::effective_selection_mode` falls back to
   Atoms for hover).
+- `spatial.rs` — `AtomGrid`: a uniform spatial grid of atom positions for **ray-neighborhood**
+  queries (`atoms_near_ray`), the inverse of `within`/`dist point` — the cursor is a *line*, and a
+  line spans the box so molar's `dist line` is brute O(N). The grid (mirroring molar's distance-search
+  grid, minus the periodic part: bin into `extent/dims` cells, flat `x + y·dx + z·dx·dy`) walks only
+  the cells in the ray's R-tube (sub-cell march + R-skirt, dedup), so a query is O(tube + nearby), not
+  O(N). Pure logic, WASM-safe; 3 unit tests.
+- **Hover detail lens** (QoL, `app.rs` + `scene.rs` `HoverDetail`): in Hover mode, the atoms within
+  R≈0.7 nm of the cursor **view line** of a visible **Cartoon/Surface** molecule are shown as a
+  distance-faded **CPK ball-and-stick** aid over the ribbon — to hint *where the atoms are*. It is
+  **driven by the cursor ray, NOT a pick hit** (`draw_viewport` triggers it whenever the cursor is in
+  the viewport, picking the molecule with the most atoms in the tube), so it appears **between** atoms
+  / in ribbon gaps too — that's the whole point. The grid is filtered to the atoms the lens should
+  reveal: **Cartoon → the N–CA–C chain trace** (no carbonyl/terminal backbone oxygens — just what the
+  ribbon traces);
+  **Surface → solvent-exposed only** (per-atom SASA `bound.sasa().areas() > 0.01 nm²`, not deep-buried
+  atoms). The set comes from a lazily-built, frame/geom-invalidated `Molecule::hover_grid` (`AtomGrid`)
+  queried with the cursor ray (`cursor_ray`);
+  `build_hover_detail` builds Ball-and-Stick (Element color) and `fade_by_ray` sets each element's
+  alpha by perpendicular distance to the ray (opaque on-axis → 0 at R). Stored in
+  `Molecule::hover_detail` / `hover_detail_gpu` (rebuilt in `rebuild_dirty` when the cursor moves),
+  drawn last (`draw_hover_detail`, render pass 5) with the opaque pipelines over the composite with a
+  **freshly cleared depth** — so it reveals the atoms *over* the ribbon (depth-testing the scene would
+  let the opaque ribbon occlude the very atoms being exposed) while still self-occluding correctly.
+  Trajectory caveat: the grid/eval use the displayed frame's coords (grid invalidated per frame).
 
 ## Key architecture
 
@@ -437,8 +461,11 @@ release `finish_lasso` stages the enclosed atoms as each molecule's **active (pe
 **view-settings hamburger** (`LIST`, right-aligned) — toggles a **`Window`** (`App::view_menu_open`,
 `view_settings_window`; **not** a `Popup` — a Popup's `CloseOnClickOutside` fights the nested
 click-to-open dropdowns/color pickers below, which was the bug), positioned under the button
-(`Align2::RIGHT_TOP` pivot). It **closes on a click outside it**, but *not* while a child popup is
-open (`egui::Popup::is_any_open`) nor when the click is on the hamburger itself. Tabs via the shared
+(`Align2::RIGHT_TOP` pivot). It **closes on a click outside it** — detected by **layer**
+(`ctx.layer_id_at(p) == inner.response.layer_id`), *not* the window's `rect` (with `title_bar(false)`
+that rect doesn't cover the content, so in-window clicks like switching tabs read as "outside" and
+closed it) — but *not* while a child popup is open (`egui::Popup::is_any_open`) nor when the click is
+on the hamburger itself. Tabs via the shared
 `tab_bar`: **Camera / Lighting / Scene** (`App::view_tab: ViewTab`), each rendered by
 `view_tab_camera/lighting/scene`:
   - **Camera**: **Projection** two **icon-only** `selectable_label`s (Persp/Ortho glyphs, tooltips;
@@ -478,7 +505,12 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   cached `SelHints`), **truncated with `…`** (`Label::truncate`) so a long value list stays on one line.
 - **Row 2** (a **settings caret** — `CARET_RIGHT`/`CARET_DOWN`, where the drag handle is in
   row 1 — toggles `params_open`; then) **style** dropdown · **color** dropdown · **material**
-  dropdown (`material_picker`, shaded-sphere icon faded by opacity). The expanded settings
+  dropdown (`material_picker`: button = a small shaded-sphere icon faded by opacity; the popup is a
+  **grid of material previews** — each `material_cell` renders a **two-sphere-and-bond fragment**
+  shaded with that material as an `egui::Mesh` (per-vertex Blinn-Phong via `preview_shade`, matching
+  the lit shaders: `base·(amb+dif·N·L)+spec·(N·H)^exp` + outline + opacity-as-alpha;
+  `push_preview_sphere`/`push_preview_bond`), so Glossy/Metal/Diffuse/Glass/Ghost/AO… read
+  distinctly). The expanded settings
   panel (`draw_rep_params`) is **tabbed** — **[Style]** (per-style geometry params: VDW
   *Sphere scale*, Lines *Line width (px)*, Licorice/Ball-and-Stick radii, Cartoon ribbon
   dims, Surface probe/quality/smoothing + SS-algorithm + Defaults; every style now has at

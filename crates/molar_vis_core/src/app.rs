@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use molar::prelude::{AtomProvider, ParticleIterProvider, SsAlgorithm, State};
+use molar::prelude::{AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, State};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
@@ -18,7 +18,7 @@ use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
-use crate::material::Material;
+use crate::material::{Material, MaterialParams};
 use crate::pick::{self, PickMode, SelectionMode};
 use crate::render::{SceneRenderer, SphereInstance};
 use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
@@ -775,6 +775,141 @@ fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
 
 /// Draw a small icon depicting a material: a shaded sphere whose opacity mirrors
 /// the material's, with a specular highlight whose size tracks shininess.
+/// Blinn-Phong shade of a surface point (screen-space unit normal `n`, +y down) for
+/// a material preview — mirrors the lit shaders' model: `base·(amb + dif·N·L) +
+/// spec·(N·H)^exp`, white highlight, plus the silhouette `outline` (grazing-rim
+/// darkening) and the material `opacity` as alpha.
+fn preview_shade(
+    n: glam::Vec3,
+    base: glam::Vec3,
+    p: &MaterialParams,
+    light: glam::Vec3,
+    half: glam::Vec3,
+    exp: f32,
+    alpha: f32,
+) -> egui::Color32 {
+    let ndl = n.dot(light).max(0.0);
+    let ndh = n.dot(half).max(0.0);
+    let diff = p.ambient + p.diffuse * ndl;
+    let spec = p.specular * ndh.powf(exp);
+    let rim = (1.0 - n.z.max(0.0)).powi(2);
+    let col = (base * diff + glam::Vec3::splat(spec)) * (1.0 - p.outline * 0.9 * rim);
+    let col = col.clamp(glam::Vec3::ZERO, glam::Vec3::ONE);
+    egui::Color32::from_rgba_unmultiplied(
+        (col.x * 255.0) as u8,
+        (col.y * 255.0) as u8,
+        (col.z * 255.0) as u8,
+        (alpha * 255.0) as u8,
+    )
+}
+
+/// Append a shaded sphere (an `egui::Mesh` of a polar grid, each vertex shaded by
+/// its surface normal) to `mesh`, for the material preview.
+#[allow(clippy::too_many_arguments)]
+fn push_preview_sphere(
+    mesh: &mut egui::Mesh,
+    center: egui::Pos2,
+    radius: f32,
+    base: glam::Vec3,
+    p: &MaterialParams,
+    light: glam::Vec3,
+    half: glam::Vec3,
+    exp: f32,
+    alpha: f32,
+) {
+    const RINGS: usize = 6;
+    const SEG: usize = 24;
+    let start = mesh.vertices.len() as u32;
+    mesh.colored_vertex(
+        center,
+        preview_shade(glam::Vec3::Z, base, p, light, half, exp, alpha),
+    );
+    for i in 1..=RINGS {
+        let rr = i as f32 / RINGS as f32;
+        for s in 0..SEG {
+            let a = s as f32 / SEG as f32 * std::f32::consts::TAU;
+            let (nx, ny) = (rr * a.cos(), rr * a.sin());
+            let nz = (1.0 - rr * rr).max(0.0).sqrt();
+            mesh.colored_vertex(
+                center + egui::vec2(nx * radius, ny * radius),
+                preview_shade(glam::Vec3::new(nx, ny, nz), base, p, light, half, exp, alpha),
+            );
+        }
+    }
+    let ring = |i: usize| start + 1 + ((i - 1) * SEG) as u32;
+    for s in 0..SEG {
+        mesh.add_triangle(start, ring(1) + s as u32, ring(1) + ((s + 1) % SEG) as u32);
+    }
+    for i in 1..RINGS {
+        for s in 0..SEG {
+            let (s1, n) = (s as u32, ((s + 1) % SEG) as u32);
+            let (a0, a1) = (ring(i) + s1, ring(i) + n);
+            let (b0, b1) = (ring(i + 1) + s1, ring(i + 1) + n);
+            mesh.add_triangle(a0, b0, b1);
+            mesh.add_triangle(a0, b1, a1);
+        }
+    }
+}
+
+/// Append a shaded bond (a side-on cylinder: a quad strip shaded across its width by
+/// the cross-section normal) between `a` and `b` to `mesh`.
+#[allow(clippy::too_many_arguments)]
+fn push_preview_bond(
+    mesh: &mut egui::Mesh,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    half_w: f32,
+    base: glam::Vec3,
+    p: &MaterialParams,
+    light: glam::Vec3,
+    half: glam::Vec3,
+    exp: f32,
+    alpha: f32,
+) {
+    const N: usize = 9;
+    let dir = (b - a).normalized();
+    let perp = egui::vec2(-dir.y, dir.x);
+    let start = mesh.vertices.len() as u32;
+    for end in [a, b] {
+        for j in 0..N {
+            let t = -1.0 + 2.0 * j as f32 / (N - 1) as f32;
+            let nz = (1.0 - t * t).max(0.0).sqrt();
+            let n = glam::Vec3::new(perp.x * t, perp.y * t, nz);
+            mesh.colored_vertex(
+                end + perp * (t * half_w),
+                preview_shade(n, base, p, light, half, exp, alpha),
+            );
+        }
+    }
+    for j in 0..(N as u32 - 1) {
+        let (a0, a1) = (start + j, start + j + 1);
+        let (b0, b1) = (start + N as u32 + j, start + N as u32 + j + 1);
+        mesh.add_triangle(a0, b0, b1);
+        mesh.add_triangle(a0, b1, a1);
+    }
+}
+
+/// Paint a material preview — two spheres joined by a bond, shaded with `material`'s
+/// lighting (so Glossy/Metal/Diffuse/Glass/AO… read distinctly) — into `rect`.
+fn paint_material_preview(painter: &egui::Painter, rect: egui::Rect, material: Material) {
+    let p = material.params();
+    let base = glam::Vec3::new(0.60, 0.62, 0.68);
+    let light = glam::Vec3::new(-0.4, -0.5, 0.78).normalize();
+    let half = (light + glam::Vec3::Z).normalize();
+    let exp = 2.0 + p.shininess * 128.0;
+    let alpha = (p.opacity * 0.85 + 0.15).clamp(0.0, 1.0); // floor so faint mats show
+    let r = (rect.height() * 0.34).min(rect.width() * 0.22);
+    let cy = rect.center().y;
+    let a = egui::pos2(rect.center().x - r * 1.45, cy);
+    let b = egui::pos2(rect.center().x + r * 1.45, cy);
+    let mut mesh = egui::Mesh::default();
+    // Bond first, then spheres on top (so the spheres cap the bond ends).
+    push_preview_bond(&mut mesh, a, b, r * 0.5, base, &p, light, half, exp, alpha);
+    push_preview_sphere(&mut mesh, a, r, base, &p, light, half, exp, alpha);
+    push_preview_sphere(&mut mesh, b, r, base, &p, light, half, exp, alpha);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 fn paint_material_icon(painter: &egui::Painter, rect: egui::Rect, material: Material) {
     use egui::Color32;
     let p = material.params();
@@ -789,41 +924,59 @@ fn paint_material_icon(painter: &egui::Painter, rect: egui::Rect, material: Mate
     }
 }
 
-/// A clickable icon+label row inside the material dropdown. Returns true if clicked.
-fn material_option(ui: &mut egui::Ui, material: Material, selected: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 22.0), egui::Sense::click());
+/// A grid cell in the material picker: a two-sphere-and-bond **preview** rendered
+/// with the material's lighting, plus its label. Returns true if clicked.
+fn material_cell(ui: &mut egui::Ui, material: Material, selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(82.0, 70.0), egui::Sense::click());
     if selected || resp.hovered() {
         ui.painter()
-            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
-    let icon_rect =
-        egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
-    paint_material_icon(ui.painter(), icon_rect, material);
+    if selected {
+        ui.painter().rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(1.5, ui.visuals().selection.bg_fill),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let preview = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(4.0, 4.0),
+        egui::vec2(rect.width() - 8.0, 44.0),
+    );
+    paint_material_preview(ui.painter(), preview, material);
     ui.painter().text(
-        egui::pos2(icon_rect.right() + 8.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
+        egui::pos2(rect.center().x, rect.bottom() - 11.0),
+        egui::Align2::CENTER_CENTER,
         material.label(),
-        egui::FontId::proportional(15.0),
+        egui::FontId::proportional(11.5),
         ui.visuals().text_color(),
     );
     resp.clicked()
 }
 
-/// A drawn material icon + label button that opens a dropdown of materials.
-/// A material change forces a geometry rebuild (the opacity/lighting are baked
-/// per geometry element).
+/// A drawn material icon + label button that opens a **grid** of material previews
+/// (each a two-sphere-and-bond fragment shaded with that material). A material
+/// change forces a geometry rebuild (opacity/lighting are baked per geometry element).
 fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     let material = rep.material;
     let resp = picker_button(ui, material.label(), |p, r| paint_material_icon(p, r, material));
 
     egui::Popup::menu(&resp).show(|ui| {
-        for material in Material::ALL {
-            if material_option(ui, material, material == rep.material) {
-                rep.material = material;
-                rep.geom_dirty = true;
-                ui.close();
-            }
-        }
+        egui::Grid::new("material_grid")
+            .spacing(egui::vec2(4.0, 4.0))
+            .show(ui, |ui| {
+                for (i, material) in Material::ALL.into_iter().enumerate() {
+                    if material_cell(ui, material, material == rep.material) {
+                        rep.material = material;
+                        rep.geom_dirty = true;
+                        ui.close();
+                    }
+                    if (i + 1) % 3 == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
     });
 }
 
@@ -1311,6 +1464,9 @@ pub struct App {
     /// In-progress lasso polygon (viewport pixel coords), accumulated while
     /// dragging in `PickMode::Lasso`. Empty when not lassoing. Transient view state.
     lasso_path: Vec<egui::Pos2>,
+    /// Last cursor NDC the hover detail lens was rebuilt at, so it only rebuilds as
+    /// the cursor actually moves (the fade follows the ray, so any move rebuilds).
+    last_lens_ndc: Option<(f32, f32)>,
     /// Last completed GPU hover pick `(mol, rep, atom)` (native only). The async
     /// id-buffer readback lags a frame or two, so the hit is cached here and the
     /// `PickHit` is rebuilt from it each frame. `None` = nothing hovered.
@@ -1738,6 +1894,7 @@ impl App {
                 _ => SelectionMode::default(),
             },
             lasso_path: Vec::new(),
+            last_lens_ndc: None,
             #[cfg(not(target_arch = "wasm32"))]
             hover_pick: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1827,6 +1984,7 @@ impl App {
                 && !(mol.show_box && mol.box_dirty)
                 && !mol.glow_dirty
                 && !mol.hover_dirty
+                && !mol.hover_detail_dirty
                 && !pick_pending
             {
                 continue;
@@ -1967,6 +2125,12 @@ impl App {
             if rep_geom_changed && mol.hover.is_some() {
                 mol.hover_dirty = true;
             }
+            if rep_geom_changed && mol.hover_detail.is_some() {
+                mol.hover_detail_dirty = true;
+            }
+            if rep_geom_changed {
+                mol.hover_grid = None; // its filtered atom set depends on the reps/coords
+            }
 
             // Active-selection glow: rebuild the pending atoms in each rep's own
             // style (so the highlight glows in the current style), or clear it. Runs
@@ -1994,6 +2158,19 @@ impl App {
                 mol.hover_dirty = false;
                 changed = true;
             }
+            // Hover detail lens: faded CPK ball-and-stick of the atoms near the
+            // cursor view-line (built from `hover_detail`), over a Cartoon/Surface rep.
+            if mol.hover_detail_dirty {
+                let geom = match &mol.hover_detail {
+                    Some(d) => {
+                        build_hover_detail(&mol.system, &mol.bonds, d, render_state, n_atoms)
+                    }
+                    None => geometry::GeometryData::default(),
+                };
+                mol.hover_detail_gpu = self.renderer.upload(rs, &geom);
+                mol.hover_detail_dirty = false;
+                changed = true;
+            }
             // GPU pick geometry (native): rebuild when the molecule's geometry/coords
             // changed (rep_geom_changed covers both) or it was flagged dirty (init /
             // structure change). Mirrors the atoms CPU `pick` would ray-cast.
@@ -2007,6 +2184,64 @@ impl App {
             }
         }
         changed
+    }
+}
+
+/// Build the hover detail "lens": a distance-faded CPK ball-and-stick of the atoms
+/// near the cursor view-line (`detail.atoms`, found by the spatial grid). Rendered
+/// over a Cartoon/Surface rep to reveal local atomic detail the abstraction hides.
+fn build_hover_detail(
+    system: &molar::prelude::System,
+    bonds: &[[usize; 2]],
+    detail: &crate::scene::HoverDetail,
+    state: &molar::prelude::State,
+    n_atoms: usize,
+) -> geometry::GeometryData {
+    let Some(index_str) = pick::index_selection_string(&detail.atoms) else {
+        return geometry::GeometryData::default();
+    };
+    let Ok((_, sel)) = scene::evaluate(system, &index_str) else {
+        return geometry::GeometryData::default();
+    };
+    let bound = system.bind_with_state(&sel, state);
+    let params = RepParams::BallAndStick { sphere_scale: 0.25, bond_radius: 0.04 };
+    let mut geom = geometry::build(
+        &bound,
+        n_atoms,
+        bonds,
+        &params,
+        ColorMethod::Element,
+        crate::material::Material::Opaque,
+        None,
+    );
+    fade_by_ray(&mut geom, detail.ray_o, detail.ray_d, detail.radius);
+    geom
+}
+
+/// Set each element's alpha by its perpendicular distance from the ray `o + t·d`:
+/// opaque on-axis, fading to 0 at `radius` — so the lens dissolves softly into the
+/// ribbon. The alpha is the color's top byte (matching the geometry packing).
+fn fade_by_ray(geom: &mut geometry::GeometryData, o: glam::Vec3, d: glam::Vec3, radius: f32) {
+    const MAX_A: f32 = 235.0;
+    let d = d.normalize_or_zero();
+    let radius = radius.max(1e-3);
+    let alpha_of = |p: [f32; 3]| -> u32 {
+        let w = glam::Vec3::from(p) - o;
+        let perp = (w - d * w.dot(d)).length();
+        let f = (1.0 - perp / radius).clamp(0.0, 1.0);
+        (f * MAX_A) as u32
+    };
+    let set = |c: u32, a: u32| (c & 0x00ff_ffff) | (a << 24);
+    for s in &mut geom.spheres {
+        s.color = set(s.color, alpha_of(s.center));
+    }
+    for c in &mut geom.cylinders {
+        let mid = [
+            (c.p0[0] + c.p1[0]) * 0.5,
+            (c.p0[1] + c.p1[1]) * 0.5,
+            (c.p0[2] + c.p1[2]) * 0.5,
+        ];
+        c.color = set(c.color, alpha_of(mid));
     }
 }
 
@@ -2507,11 +2742,18 @@ impl App {
                     ViewTab::Scene => self.view_tab_scene(ui),
                 }
             });
+        // Close on a click outside the window — detected by **layer**, not by the
+        // window's `rect` (with `title_bar(false)` that rect doesn't reliably cover
+        // the content, so an in-window click — e.g. switching tabs — read as
+        // "outside" and closed the menu). A click whose top layer is the window's own
+        // layer is inside; a child popup (dropdown / color picker) keeps it open via
+        // `Popup::is_any_open`; clicks on the hamburger (`anchor`) are its own toggle.
         if let Some(inner) = inner {
             let clicked = ctx.input(|i| i.pointer.any_click());
             if clicked && !egui::Popup::is_any_open(ctx) {
                 if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
-                    if !inner.response.rect.contains(p) && !anchor.contains(p) {
+                    let over_menu = ctx.layer_id_at(p) == Some(inner.response.layer_id);
+                    if !over_menu && !anchor.contains(p) {
                         self.view_menu_open = false;
                     }
                 }
@@ -4138,6 +4380,7 @@ impl App {
 
             let hovering = self.pick_mode == PickMode::HoverInfo && !response.dragged();
             let mut residue_hit = false;
+            let mut lens_shown = false;
             if hovering {
                 // Normally the cursor; the debug hook forces the viewport center so
                 // the overlay can be screenshot without simulating a mouse.
@@ -4206,6 +4449,103 @@ impl App {
                             draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
                         }
                     }
+                    // Hover detail lens: **independent of any atom hit** — wherever the
+                    // cursor view-line passes near a Cartoon/Surface molecule's atoms
+                    // (including *between* atoms / in ribbon gaps, which is the whole
+                    // point: hint where the atoms are), reveal a faded ball-and-stick of
+                    // those atoms. Rebuilt as the cursor moves (grid query is cheap).
+                    {
+                        let moved = self.last_lens_ndc.map_or(true, |(lx, ly)| {
+                            (lx - ndc_x).abs() > 0.004 || (ly - ndc_y).abs() > 0.004
+                        });
+                        if moved {
+                            const R: f32 = 0.7; // lens radius (nm)
+                            let view = self.camera.view();
+                            let proj = self.camera.proj(aspect);
+                            let (o, d) = pick::cursor_ray(view, proj, ndc_x, ndc_y);
+                            let t_max = 2.0 * (self.camera.distance + self.camera.scene_radius);
+                            // The Cartoon/Surface molecule with the most atoms in the
+                            // view-line tube (one lens at a time).
+                            let mut best: Option<(usize, Vec<usize>)> = None;
+                            for mi in 0..self.scene.molecules.len() {
+                                let mol = &mut self.scene.molecules[mi];
+                                let wants = mol.visible
+                                    && mol.reps.iter().any(|r| {
+                                        r.visible
+                                            && matches!(r.kind, RepKind::Cartoon | RepKind::Surface)
+                                    });
+                                if !wants {
+                                    continue;
+                                }
+                                if mol.hover_grid.is_none() {
+                                    // The grid holds only the atoms the lens should
+                                    // reveal: for Cartoon, just the **backbone** (what
+                                    // the ribbon traces); for Surface, only **exposed**
+                                    // atoms (per-atom SASA > 0), not deep-buried ones.
+                                    let has_cartoon = mol.reps.iter().any(|r| {
+                                        r.visible && matches!(r.kind, RepKind::Cartoon)
+                                    });
+                                    let has_surface = mol.reps.iter().any(|r| {
+                                        r.visible && matches!(r.kind, RepKind::Surface)
+                                    });
+                                    let grid = {
+                                        let st = mol.render_state();
+                                        let all = mol.system.select_all();
+                                        let b = mol.system.bind_with_state(&all, st);
+                                        let sasa = if has_surface {
+                                            b.sasa().ok().map(|s| s.areas().to_vec())
+                                        } else {
+                                            None
+                                        };
+                                        let pts = b.iter_particle().filter_map(|p| {
+                                            // Cartoon → the N–CA–C chain trace only (no
+                                            // carbonyl / terminal backbone oxygens).
+                                            let keep = (has_cartoon
+                                                && matches!(p.atom.name.as_str(), "N" | "CA" | "C"))
+                                                || (has_surface
+                                                    && sasa.as_ref().is_some_and(|a| {
+                                                        a.get(p.id).copied().unwrap_or(0.0) > 0.01
+                                                    }));
+                                            keep.then_some((
+                                                p.id as u32,
+                                                glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z),
+                                            ))
+                                        });
+                                        crate::spatial::AtomGrid::build(
+                                            pts,
+                                            mol.bbox_min,
+                                            mol.bbox_max,
+                                            R,
+                                        )
+                                    };
+                                    mol.hover_grid = Some(grid);
+                                }
+                                let atoms = mol
+                                    .hover_grid
+                                    .as_ref()
+                                    .unwrap()
+                                    .atoms_near_ray(o, d, R, 0.0, t_max)
+                                    .into_iter()
+                                    .map(|i| i as usize)
+                                    .collect::<Vec<usize>>();
+                                if !atoms.is_empty()
+                                    && best.as_ref().map_or(true, |(_, a)| atoms.len() > a.len())
+                                {
+                                    best = Some((mi, atoms));
+                                }
+                            }
+                            if let Some((mi, atoms)) = best {
+                                self.set_hover_detail(mi, atoms, o, d, R);
+                                lens_shown = true;
+                            }
+                            self.last_lens_ndc = Some((ndc_x, ndc_y));
+                            ui.ctx().request_repaint();
+                        } else {
+                            // Cursor barely moved: keep the current lens (if any).
+                            lens_shown =
+                                self.scene.molecules.iter().any(|m| m.hover_detail.is_some());
+                        }
+                    }
                 } else {
                     // Cursor left the viewport → drop the cached GPU hit.
                     #[cfg(not(target_arch = "wasm32"))]
@@ -4224,6 +4564,11 @@ impl App {
             }
             // Drop any stale hover highlight (left a residue, no hit, or not hovering).
             if !residue_hit && self.clear_hover() {
+                ui.ctx().request_repaint();
+            }
+            // Drop the detail lens when the view-line isn't near a Cartoon/Surface
+            // molecule's atoms (or not hovering).
+            if !lens_shown && self.clear_hover_detail() {
                 ui.ctx().request_repaint();
             }
 
@@ -4315,6 +4660,40 @@ impl App {
                 changed = true;
             }
         }
+        changed
+    }
+
+    /// Stage molecule `mi`'s hover detail lens (always rebuilt — the fade tracks the
+    /// ray, so any cursor move changes it). Clears the lens on other molecules.
+    fn set_hover_detail(
+        &mut self,
+        mi: usize,
+        atoms: Vec<usize>,
+        ray_o: glam::Vec3,
+        ray_d: glam::Vec3,
+        radius: f32,
+    ) {
+        for (i, mol) in self.scene.molecules.iter_mut().enumerate() {
+            if i != mi && mol.hover_detail.take().is_some() {
+                mol.hover_detail_dirty = true;
+            }
+        }
+        if let Some(mol) = self.scene.molecules.get_mut(mi) {
+            mol.hover_detail = Some(crate::scene::HoverDetail { atoms, ray_o, ray_d, radius });
+            mol.hover_detail_dirty = true;
+        }
+    }
+
+    /// Clear every molecule's hover detail lens. Returns whether anything changed.
+    fn clear_hover_detail(&mut self) -> bool {
+        let mut changed = false;
+        for mol in &mut self.scene.molecules {
+            if mol.hover_detail.take().is_some() {
+                mol.hover_detail_dirty = true;
+                changed = true;
+            }
+        }
+        self.last_lens_ndc = None;
         changed
     }
 

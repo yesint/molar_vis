@@ -276,6 +276,16 @@ pub struct PendingSelection {
     pub atoms: Vec<usize>,
 }
 
+/// The hover detail "lens": the atoms within `radius` of the cursor view-line
+/// (`ray_o`, `ray_d` in world space), shown as a faded ball-and-stick aid over a
+/// Cartoon/Surface rep. The geometry is rebuilt from this when the ray moves.
+pub struct HoverDetail {
+    pub atoms: Vec<usize>,
+    pub ray_o: Vec3,
+    pub ray_d: Vec3,
+    pub radius: f32,
+}
+
 /// A loaded molecule. The live molar `System` is the single source of per-atom
 /// data (positions, elements, radii); we additionally keep only the guessed
 /// connectivity and a cached bounding box, plus the representations.
@@ -330,6 +340,16 @@ pub struct Molecule {
     pub hover_gpu: RepGpu,
     /// The hover-highlight geometry needs (re)building — `hover` set changed.
     pub hover_dirty: bool,
+    /// Hover **detail lens** (when hovering a Cartoon/Surface rep, where atoms are
+    /// hidden): the atoms within a radius of the cursor view-line, shown as a
+    /// distance-faded ball-and-stick aid. `None` when inactive.
+    pub hover_detail: Option<HoverDetail>,
+    /// GPU geometry for the detail lens (faded CPK ball-and-stick from `hover_detail`).
+    pub hover_detail_gpu: RepGpu,
+    pub hover_detail_dirty: bool,
+    /// Lazily-built spatial grid of this molecule's atoms (over the displayed frame),
+    /// for the lens's ray-neighborhood query. Invalidated (`None`) on a frame change.
+    pub hover_grid: Option<crate::spatial::AtomGrid>,
     /// GPU pick geometry: one id-stamped sphere impostor per **pickable** atom (the
     /// atoms CPU `pick` ray-casts: eligible atoms of visible reps, at their displayed
     /// position and effective radius). Rendered into the id-buffer for GPU picking.
@@ -370,6 +390,10 @@ impl Molecule {
             hover: None,
             hover_gpu: RepGpu::default(),
             hover_dirty: false,
+            hover_detail: None,
+            hover_detail_gpu: RepGpu::default(),
+            hover_detail_dirty: false,
+            hover_grid: None,
             #[cfg(not(target_arch = "wasm32"))]
             pick_gpu: RepGpu::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -418,6 +442,7 @@ impl Molecule {
             return;
         }
         self.box_dirty = true; // the box can change per frame (e.g. NPT)
+        self.hover_grid = None; // positions changed → the lens grid is stale
         if self.pending.is_some() {
             self.glow_dirty = true; // the glow follows the atoms' new positions
         }

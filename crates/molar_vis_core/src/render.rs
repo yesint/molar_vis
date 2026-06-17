@@ -1345,6 +1345,44 @@ impl SceneRenderer {
             self.draw_glow(&mut pass, scene);
         }
 
+        // Pass 5 — hover detail lens: the faded CPK ball-and-stick of atoms near the
+        // cursor view-line, over a Cartoon/Surface rep. Drawn last with the opaque
+        // (alpha-blending) pipelines over the composited image, with a **freshly
+        // cleared** depth so the lens reveals the hidden atoms *over* the ribbon
+        // (depth-testing against the scene depth would let the opaque ribbon occlude
+        // the very atoms we're trying to expose). The lens still depth-tests against
+        // itself, so its own atoms occlude correctly; the distance fade softens it.
+        let has_lens = scene
+            .molecules
+            .iter()
+            .any(|m| m.visible && m.hover_detail_gpu.has_geometry());
+        if has_lens {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hover-detail-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.targets.color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.targets.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.draw_hover_detail(&mut pass, scene);
+        }
+
         rs.queue.submit(std::iter::once(encoder.finish()));
 
         self.egui_texture
@@ -1430,6 +1468,29 @@ impl SceneRenderer {
             pass.set_vertex_buffer(0, m.vertices.slice(..));
             pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..m.index_count, 0, 0..1);
+        }
+    }
+
+    /// Draw the hover detail lens (each molecule's `hover_detail_gpu` ball-and-stick)
+    /// with the opaque pipelines (alpha-blend + depth-test) at the base camera, so
+    /// the faded geometry blends over the scene and the ribbon occludes it.
+    fn draw_hover_detail(&self, pass: &mut wgpu::RenderPass, scene: &Scene) {
+        pass.set_bind_group(0, &self.camera_bind_group, &[0]);
+        for mol in &scene.molecules {
+            if !mol.visible {
+                continue;
+            }
+            let g = &mol.hover_detail_gpu;
+            if let Some(s) = &g.spheres {
+                pass.set_pipeline(&self.sphere_pipeline[0]);
+                pass.set_vertex_buffer(0, s.buffer.slice(..));
+                pass.draw(0..4, 0..s.count);
+            }
+            if let Some(c) = &g.cylinders {
+                pass.set_pipeline(&self.cylinder_pipeline[0]);
+                pass.set_vertex_buffer(0, c.buffer.slice(..));
+                pass.draw(0..4, 0..c.count);
+            }
         }
     }
 
