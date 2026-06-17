@@ -266,24 +266,29 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   grid, minus the periodic part: bin into `extent/dims` cells, flat `x + y·dx + z·dx·dy`) walks only
   the cells in the ray's R-tube (sub-cell march + R-skirt, dedup), so a query is O(tube + nearby), not
   O(N). Pure logic, WASM-safe; 3 unit tests.
-- **Hover detail lens** (QoL, `app.rs` + `scene.rs` `HoverDetail`): in Hover mode, the atoms within
-  R≈0.7 nm of the cursor **view line** of a visible **Cartoon/Surface** molecule are shown as a
-  distance-faded **CPK ball-and-stick** aid over the ribbon — to hint *where the atoms are*. It is
-  **driven by the cursor ray, NOT a pick hit** (`draw_viewport` triggers it whenever the cursor is in
-  the viewport, picking the molecule with the most atoms in the tube), so it appears **between** atoms
-  / in ribbon gaps too — that's the whole point. The grid is filtered to the atoms the lens should
-  reveal: **Cartoon → the N–CA–C chain trace** (no carbonyl/terminal backbone oxygens — just what the
-  ribbon traces);
-  **Surface → solvent-exposed only** (per-atom SASA `bound.sasa().areas() > 0.01 nm²`, not deep-buried
-  atoms). The set comes from a lazily-built, frame/geom-invalidated `Molecule::hover_grid` (`AtomGrid`)
-  queried with the cursor ray (`cursor_ray`);
-  `build_hover_detail` builds Ball-and-Stick (Element color) and `fade_by_ray` sets each element's
-  alpha by perpendicular distance to the ray (opaque on-axis → 0 at R). Stored in
-  `Molecule::hover_detail` / `hover_detail_gpu` (rebuilt in `rebuild_dirty` when the cursor moves),
-  drawn last (`draw_hover_detail`, render pass 5) with the opaque pipelines over the composite with a
-  **freshly cleared depth** — so it reveals the atoms *over* the ribbon (depth-testing the scene would
-  let the opaque ribbon occlude the very atoms being exposed) while still self-occluding correctly.
-  Trajectory caveat: the grid/eval use the displayed frame's coords (grid invalidated per frame).
+- **Hover detail lens** (QoL, `app.rs` + `scene.rs` `HoverDetail`): in Hover mode, the **front-facing
+  residues** under the cursor **view line** of a visible **Cartoon/Surface** molecule are shown as a
+  distance-faded **CPK ball-and-stick** aid over the ribbon/surface — to hint *where the atoms are*. It
+  is **driven by the cursor ray, NOT a pick hit** (`draw_viewport` triggers it whenever the cursor is
+  in the viewport, picking the molecule with the most atoms in the tube), so it appears **between**
+  atoms / in surface dimples too — that's the whole point. A lazily-built, frame/geom-invalidated
+  `Molecule::hover_grid` (`AtomGrid`) holds the lens **seed** atoms (which residues the line passes
+  near): **Cartoon → the N–CA–C chain trace** (no carbonyl/terminal backbone oxygens — what the ribbon
+  traces); **Surface → solvent-exposed only** (per-atom SASA `bound.sasa().areas() > 0.01 nm²`, not
+  deep-buried atoms). The query (`AtomGrid::atoms_near_ray_t`, which returns each hit's signed `t`
+  along the ray) keeps only the seeds on the **near (camera-facing) half** along the ray (`t ≤
+  midpoint` of the hit `t`-range — so the far side no longer bleeds through the cleared-depth overlay)
+  and **expands them to whole residues** (`pick::expand_selection` Residues), so complete front
+  residues poke through. `build_hover_detail` builds Ball-and-Stick (Element color) and `fade_by_ray`
+  sets each element's alpha by perpendicular distance to the ray (opaque on-axis → 0 at the fade
+  radius, **R·1.8** — widened past the R-tube selection radius so whole residues' side chains stay
+  visible). Stored in `Molecule::hover_detail` / `hover_detail_gpu` (rebuilt in `rebuild_dirty` when
+  the cursor moves), drawn last (`draw_hover_detail`, render pass 5) with the opaque pipelines over the
+  composite with a **freshly cleared depth** — so it reveals the atoms *over* the ribbon/surface
+  (depth-testing the scene would let the opaque geometry occlude the very atoms being exposed) while
+  still self-occluding correctly; the near-half filter is what keeps it from also revealing the *back*
+  surface the cleared depth would otherwise expose. Trajectory caveat: the grid/eval use the displayed
+  frame's coords (grid invalidated per frame).
 
 ## Key architecture
 

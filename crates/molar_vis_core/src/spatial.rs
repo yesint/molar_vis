@@ -80,18 +80,20 @@ impl AtomGrid {
     }
 
     /// Atom indices within `r` of the ray segment `origin + t·dir`, `t ∈ [t_min,
-    /// t_max]`. Marches the segment in sub-cell steps, gathering the cells within the
-    /// R-skirt of each step (deduped) and testing their atoms' distance to the
-    /// segment — so each candidate atom is tested at most once and total work scales
-    /// with the tube, not the molecule.
-    pub fn atoms_near_ray(
+    /// t_max]`, **each with its signed distance `t` along the (normalized) ray**
+    /// (`(p − origin)·dir`) so the caller can order hits front-to-back (the lens keeps
+    /// only the near, camera-facing half). Marches the segment in sub-cell steps,
+    /// gathering the cells within the R-skirt of each step (deduped) and testing their
+    /// atoms' distance to the segment — so each candidate atom is tested at most once
+    /// and total work scales with the tube, not the molecule.
+    pub fn atoms_near_ray_t(
         &self,
         origin: Vec3,
         dir: Vec3,
         r: f32,
         t_min: f32,
         t_max: f32,
-    ) -> Vec<u32> {
+    ) -> Vec<(u32, f32)> {
         let dir = dir.normalize_or_zero();
         if dir == Vec3::ZERO || t_max <= t_min {
             return Vec::new();
@@ -108,7 +110,7 @@ impl AtomGrid {
         let n_steps = (((t_max - t_min) / step).ceil() as i64).max(1);
 
         let mut seen: HashSet<usize> = HashSet::new();
-        let mut out: Vec<u32> = Vec::new();
+        let mut out: Vec<(u32, f32)> = Vec::new();
         for s in 0..=n_steps {
             let t = (t_min + step * s as f32).min(t_max);
             let base = self.cell_of(origin + dir * t);
@@ -119,7 +121,7 @@ impl AtomGrid {
                             if seen.insert(ci) {
                                 for &(id, p) in &self.cells[ci] {
                                     if dist2_point_seg(p, a, b) <= r2 {
-                                        out.push(id);
+                                        out.push((id, (p - origin).dot(dir)));
                                     }
                                 }
                             }
@@ -151,6 +153,11 @@ mod tests {
         AtomGrid::build(pts.iter().copied(), Vec3::splat(-5.0), Vec3::splat(5.0), 1.0)
     }
 
+    /// Drop the per-hit `t`, keeping just the atom ids (most tests only check membership).
+    fn ids(hits: Vec<(u32, f32)>) -> Vec<u32> {
+        hits.into_iter().map(|(id, _)| id).collect()
+    }
+
     #[test]
     fn ray_finds_atoms_near_line_only() {
         // Atoms strung along / near the x axis at various perpendicular offsets.
@@ -163,7 +170,7 @@ mod tests {
         ];
         let g = grid_of(&pts);
         // Ray along +x through the origin.
-        let mut got = g.atoms_near_ray(Vec3::new(-5.0, 0.0, 0.0), Vec3::X, 0.5, 0.0, 10.0);
+        let mut got = ids(g.atoms_near_ray_t(Vec3::new(-5.0, 0.0, 0.0), Vec3::X, 0.5, 0.0, 10.0));
         got.sort_unstable();
         assert_eq!(got, vec![0, 1, 2], "only atoms within 0.5 of the x axis");
     }
@@ -176,8 +183,24 @@ mod tests {
         ];
         let g = grid_of(&pts);
         // Segment only covers x ∈ [-1, +1] worth of the axis → both endpoints excluded.
-        let got = g.atoms_near_ray(Vec3::new(0.0, 0.0, 0.0), Vec3::X, 0.5, -1.0, 1.0);
+        let got = ids(g.atoms_near_ray_t(Vec3::new(0.0, 0.0, 0.0), Vec3::X, 0.5, -1.0, 1.0));
         assert!(got.is_empty(), "atoms beyond the segment are excluded, got {got:?}");
+    }
+
+    #[test]
+    fn ray_t_orders_front_to_back() {
+        // Two on-axis atoms at x = -2 and +2; the ray runs +x from x = -5, so the
+        // near one (-2) has the smaller `t`. Lets the Surface lens split front/back.
+        let pts = [
+            (7, Vec3::new(2.0, 0.0, 0.0)),  // far
+            (3, Vec3::new(-2.0, 0.0, 0.0)), // near
+        ];
+        let g = grid_of(&pts);
+        let hits = g.atoms_near_ray_t(Vec3::new(-5.0, 0.0, 0.0), Vec3::X, 0.5, 0.0, 10.0);
+        let near = hits.iter().find(|(id, _)| *id == 3).unwrap().1;
+        let far = hits.iter().find(|(id, _)| *id == 7).unwrap().1;
+        assert!(near < far, "near atom must have smaller t ({near} vs {far})");
+        assert!((near - 3.0).abs() < 1e-3, "t = (p-origin)·dir = 3 for x=-2");
     }
 
     #[test]
@@ -188,7 +211,7 @@ mod tests {
             (2, Vec3::new(-2.0, 2.0, 0.0)),      // far off
         ];
         let g = grid_of(&pts);
-        let mut got = g.atoms_near_ray(Vec3::splat(-4.0), Vec3::ONE, 0.5, 0.0, 20.0);
+        let mut got = ids(g.atoms_near_ray_t(Vec3::splat(-4.0), Vec3::ONE, 0.5, 0.0, 20.0));
         got.sort_unstable();
         assert_eq!(got, vec![0, 1]);
     }

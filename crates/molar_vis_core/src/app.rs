@@ -5033,10 +5033,12 @@ impl App {
                                     continue;
                                 }
                                 if mol.hover_grid.is_none() {
-                                    // The grid holds only the atoms the lens should
-                                    // reveal: for Cartoon, just the **backbone** (what
-                                    // the ribbon traces); for Surface, only **exposed**
-                                    // atoms (per-atom SASA > 0), not deep-buried ones.
+                                    // The grid holds the lens **seed** atoms — which
+                                    // residues the view line passes near: for Cartoon the
+                                    // **backbone** (what the ribbon traces); for Surface the
+                                    // **solvent-exposed** atoms (per-atom SASA > 0), not
+                                    // deep-buried ones. The query then keeps the near,
+                                    // camera-facing seeds and expands them to whole residues.
                                     let has_cartoon = mol.reps.iter().any(|r| {
                                         r.visible && matches!(r.kind, RepKind::Cartoon)
                                     });
@@ -5075,14 +5077,37 @@ impl App {
                                     };
                                     mol.hover_grid = Some(grid);
                                 }
-                                let atoms = mol
-                                    .hover_grid
-                                    .as_ref()
-                                    .unwrap()
-                                    .atoms_near_ray(o, d, R, 0.0, t_max)
-                                    .into_iter()
-                                    .map(|i| i as usize)
-                                    .collect::<Vec<usize>>();
+                                // Show the **front-facing residues** under the view line
+                                // (both Cartoon and Surface). The grid seeds mark which
+                                // residues the line passes near — the ribbon backbone for
+                                // Cartoon, the solvent-exposed atoms for Surface; keep only
+                                // the seeds on the near (camera-facing) half along the ray
+                                // (so the far side no longer bleeds through the
+                                // cleared-depth overlay), then expand each to its whole
+                                // residue so complete residues poke through.
+                                let grid = mol.hover_grid.as_ref().unwrap();
+                                let cand = grid.atoms_near_ray_t(o, d, R, 0.0, t_max);
+                                let atoms: Vec<usize> = if cand.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    let (mut t_near, mut t_far) = (f32::INFINITY, f32::NEG_INFINITY);
+                                    for &(_, t) in &cand {
+                                        t_near = t_near.min(t);
+                                        t_far = t_far.max(t);
+                                    }
+                                    let mid = 0.5 * (t_near + t_far);
+                                    let seeds: Vec<usize> = cand
+                                        .iter()
+                                        .filter(|&&(_, t)| t <= mid)
+                                        .map(|&(id, _)| id as usize)
+                                        .collect();
+                                    pick::expand_selection(
+                                        &mol.system,
+                                        &mol.bonds,
+                                        &seeds,
+                                        SelectionMode::Residues,
+                                    )
+                                };
                                 if !atoms.is_empty()
                                     && best.as_ref().map_or(true, |(_, a)| atoms.len() > a.len())
                                 {
@@ -5090,7 +5115,11 @@ impl App {
                                 }
                             }
                             if let Some((mi, atoms)) = best {
-                                self.set_hover_detail(mi, atoms, o, d, R);
+                                // The lens now shows whole residues (≈0.8 nm) for both
+                                // Cartoon and Surface, so widen the perpendicular fade past
+                                // the R-tube selection radius or residue side chains would
+                                // fade out.
+                                self.set_hover_detail(mi, atoms, o, d, R * 1.8);
                                 lens_shown = true;
                             }
                             self.last_lens_ndc = Some((ndc_x, ndc_y));
