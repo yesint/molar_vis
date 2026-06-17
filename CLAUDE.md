@@ -32,7 +32,7 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   shows in a screenshot),
   `MOLAR_VIS_DEBUG_AO[=strength]` (enable screen-space ambient occlusion),
   `MOLAR_VIS_DEBUG_SHADOW[=strength]` (enable real-time cast shadows),
-  `MOLAR_VIS_DEBUG_BG=gradient` (set a gradient viewport background),
+  `MOLAR_VIS_DEBUG_BG=gradient|white` (set a gradient / white viewport background),
   `MOLAR_VIS_DEBUG_REFLECT[=amount]` (enable the reflective ground plane — needs perspective),
   `MOLAR_VIS_DEBUG_PERSP=1` (force perspective projection) +
   `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor` so e.g. the floor comes into frame),
@@ -316,13 +316,19 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `CameraUniform` in place of the old `BG` const. `MOLAR_VIS_DEBUG_BG=gradient`.
 - **Reflective ground plane** — `Camera::reflect` (0 = off, serialized). When on **and perspective**
   (a horizontal plane is edge-on in orthographic → skipped there), the scene is rendered a second
-  time **mirrored across a view-space plane** `y = floor_y` (the bottom of the molecule, from
-  `depth_range`) into a reflection color+depth target (`Targets::reflect_*`, reusing the opaque
-  pipelines via a mirror-matrix camera entry); then a **floor pass** (`render/floor.rs` +
-  `shaders/floor.wgsl`) draws a large view-space quad at `y = floor_y`, sampling the reflection by
-  screen position, mixing `reflectivity·reflection + (1-reflectivity)·base` (base = the background
-  lifted slightly) and fading toward the horizon. The floor is depth-tested + depth-writing (the
-  molecule occludes it; it also receives the deferred AO/shadow pass below). `MOLAR_VIS_DEBUG_REFLECT`.
+  time **mirrored across a view-space plane** `y = floor_y` into a reflection color+depth target
+  (`Targets::reflect_*`, reusing the opaque pipelines via a mirror-matrix camera entry); then a
+  **floor pass** (`render/floor.rs` + `shaders/floor.wgsl`) draws a large view-space quad at `y =
+  floor_y`, sampling the reflection by screen position, mixing `reflectivity·reflection +
+  (1-reflectivity)·base` (base = the background lifted slightly) and fading toward the horizon.
+  **`floor_y` = the lowest of the molecule's outer-shell atoms in view space** (`Molecule::shell`,
+  the ~4096 atoms farthest from the bbox center, precomputed at load) — the molecule's *actual*
+  bottom surface, so the floor **touches** the molecule (no gap → the reflection stays attached and
+  scales with zoom, and there's no perceived "bounce" as the view rotates; the AABB corners / a
+  conservative sphere overshot, leaving a varying gap that read as bouncing). The floor is drawn
+  **after** the SSAO/shadow pass (so the tilted floor isn't in the depth buffer AO reads — else it
+  self-occludes into horizontal AO bands), depth-tested + depth-writing (the molecule occludes it,
+  OIT composites over it). `MOLAR_VIS_DEBUG_REFLECT`.
 - **Scene graph** — N molecules × M reps. Each rep has a molar **selection string**
   compiled to atom indices (`compile_selection` → `system.select`). Geometry is built
   only for selected atoms (and bonds whose endpoints are both selected).

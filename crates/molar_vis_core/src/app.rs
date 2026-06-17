@@ -900,6 +900,9 @@ fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
     egui::Popup::menu(&header)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
+            // Fixed width so the picker doesn't resize as its contents change.
+            ui.set_min_width(230.0);
+            ui.set_max_width(230.0);
             if egui::color_picker::color_picker_color32(
                 ui,
                 &mut col,
@@ -1649,10 +1652,12 @@ impl App {
                 camera.shadow.strength = s.clamp(0.0, 1.0);
             }
         }
-        // Verification hook: MOLAR_VIS_DEBUG_BG=gradient sets a gradient background.
+        // Verification hook: MOLAR_VIS_DEBUG_BG=gradient|white sets the background.
         if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_BG") {
-            if v.trim().eq_ignore_ascii_case("gradient") {
-                camera.background.kind = crate::camera::BgKind::Gradient;
+            match v.trim().to_ascii_lowercase().as_str() {
+                "gradient" => camera.background.kind = crate::camera::BgKind::Gradient,
+                "white" => camera.background.color = [0.95, 0.95, 0.95, 1.0],
+                _ => {}
             }
         }
         // Verification hook: MOLAR_VIS_DEBUG_REFLECT[=amount] enables the reflective floor.

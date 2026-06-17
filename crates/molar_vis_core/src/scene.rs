@@ -295,6 +295,13 @@ pub struct Molecule {
     pub n_atoms: usize,
     pub bbox_min: Vec3,
     pub bbox_max: Vec3,
+    /// World positions of the molecule's **outermost** atoms (capped), computed
+    /// once at load. The reflective floor sits at the lowest of these in view space
+    /// — i.e. at the molecule's *actual* bottom surface, so it touches the molecule
+    /// (no gap → no perceived "bounce" as the view rotates, and the reflection stays
+    /// attached). Using the real atoms, not the AABB corners (which overshoot) or a
+    /// conservative sphere (which sits far below).
+    pub shell: Vec<Vec3>,
     pub visible: bool,
     pub reps: Vec<Representation>,
     pub selected_rep: Option<usize>,
@@ -343,6 +350,29 @@ pub struct Molecule {
 
 impl Molecule {
     pub fn new(id: MolId, raw: RawMolecule, default_rep: RepKind) -> Self {
+        // Outer-shell atoms for the reflective floor: keep the atoms farthest from
+        // the bbox center (support candidates), capped, so the per-frame floor-height
+        // search is cheap. Computed once here.
+        let center = (raw.bbox_min + raw.bbox_max) * 0.5;
+        let shell = {
+            const CAP: usize = 4096;
+            let all = raw.system.select_all();
+            let mut atoms: Vec<(f32, Vec3)> = raw
+                .system
+                .bind(&all)
+                .iter_particle()
+                .map(|p| {
+                    let w = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
+                    ((w - center).length_squared(), w)
+                })
+                .collect();
+            if atoms.len() > CAP {
+                // Keep the CAP farthest-from-center atoms (the outer surface).
+                atoms.sort_by(|a, b| b.0.total_cmp(&a.0));
+                atoms.truncate(CAP);
+            }
+            atoms.into_iter().map(|(_, w)| w).collect::<Vec<_>>()
+        };
         Self {
             id,
             name: raw.name,
@@ -353,6 +383,7 @@ impl Molecule {
             n_atoms: raw.n_atoms,
             bbox_min: raw.bbox_min,
             bbox_max: raw.bbox_max,
+            shell,
             visible: true,
             reps: vec![Representation::new(default_rep)],
             selected_rep: Some(0),

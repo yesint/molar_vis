@@ -1190,10 +1190,11 @@ impl SceneRenderer {
 
         // Reflective floor: a camera mirrored across the view-space plane `y =
         // floor_y` renders the reflection below; the floor pass then samples it.
-        // `floor_y` is the molecule's *actual* bottom in view space (the lowest
-        // bbox corner over visible molecules, minus a small margin for atom radii) —
-        // not the bounding-sphere bottom, which sits far below and pushed the
-        // reflection off-screen at normal zoom.
+        // `floor_y` = the lowest of the visible molecules' outer-shell atoms in view
+        // space — the molecule's *actual* bottom surface, so the floor touches the
+        // molecule (no gap, reflection stays attached) and tracks the contact point
+        // smoothly as the view rotates (the AABB corners overshot → varying gap that
+        // read as bouncing).
         let radius = ((depth_range[1] - depth_range[0]) * 0.5).max(0.1);
         let floor_y = {
             let mut min_y = f32::INFINITY;
@@ -1201,17 +1202,11 @@ impl SceneRenderer {
                 if !mol.visible {
                     continue;
                 }
-                let (mn, mx) = (mol.bbox_min, mol.bbox_max);
-                for i in 0..8u32 {
-                    let c = Vec3::new(
-                        if i & 1 == 0 { mn.x } else { mx.x },
-                        if i & 2 == 0 { mn.y } else { mx.y },
-                        if i & 4 == 0 { mn.z } else { mx.z },
-                    );
-                    min_y = min_y.min(view.transform_point3(c).y);
+                for &p in &mol.shell {
+                    min_y = min_y.min(view.transform_point3(p).y);
                 }
             }
-            if min_y.is_finite() { min_y - 0.15 } else { -radius }
+            if min_y.is_finite() { min_y - 0.02 } else { -radius }
         };
         let (reflect_idx, floor_uniform) = if reflect_on {
             let m_reflect = Mat4::from_cols(
@@ -1400,39 +1395,6 @@ impl SceneRenderer {
             }
         }
 
-        // Pass 1.2 — reflective floor: draw the floor plane into the main color +
-        // depth, sampling the reflection target. Depth-tested (the molecule occludes
-        // it) and depth-writing, so it also receives the AO / cast-shadow pass below.
-        if let Some(fu) = floor_uniform {
-            rs.queue.write_buffer(&self.floor_buf, 0, bytemuck::bytes_of(&fu));
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("floor-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.color_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.targets.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.floor_pipeline);
-            pass.set_bind_group(0, &self.floor_bind_group, &[]);
-            pass.draw(0..4, 0..1);
-        }
-
         // Pass 1.5 — SSAO + cast shadows: read the opaque depth and multiply-blend a
         // darkening factor (ambient occlusion × cast-shadow term) onto the opaque
         // color, before transparent geometry is composited over it. Skipped when
@@ -1463,6 +1425,41 @@ impl SceneRenderer {
             pass.set_bind_group(0, &self.ssao_bind_group, &[]);
             pass.draw(0..3, 0..1);
             }
+        }
+
+        // Pass 1.7 — reflective floor: draw the floor plane (sampling the reflection
+        // target) into the main color + depth. Drawn **after** the SSAO/shadow pass
+        // so the floor isn't in the depth buffer that AO reads — the tilted floor
+        // would otherwise self-occlude into horizontal AO bands. Depth-tested (the
+        // molecule occludes it) and depth-writing (so OIT composites correctly).
+        if let Some(fu) = floor_uniform {
+            rs.queue.write_buffer(&self.floor_buf, 0, bytemuck::bytes_of(&fu));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("floor-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.targets.color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.targets.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.floor_pipeline);
+            pass.set_bind_group(0, &self.floor_bind_group, &[]);
+            pass.draw(0..4, 0..1);
         }
 
         // Pass 2 — transparent geometry into the weighted-blended OIT targets
