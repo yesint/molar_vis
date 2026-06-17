@@ -5077,14 +5077,15 @@ impl App {
                                     };
                                     mol.hover_grid = Some(grid);
                                 }
-                                // Show the **front-facing residues** under the view line
-                                // (both Cartoon and Surface). The grid seeds mark which
-                                // residues the line passes near — the ribbon backbone for
-                                // Cartoon, the solvent-exposed atoms for Surface; keep only
-                                // the seeds on the near (camera-facing) half along the ray
-                                // (so the far side no longer bleeds through the
-                                // cleared-depth overlay), then expand each to its whole
-                                // residue so complete residues poke through.
+                                // Show the **backbone trace (N–CA–C, no carbonyl O) of the
+                                // front-facing residues** under the view line (both Cartoon
+                                // and Surface). The grid seeds mark which residues the line
+                                // passes near — the ribbon backbone for Cartoon, the
+                                // solvent-exposed atoms for Surface; keep only the seeds on
+                                // the near (camera-facing) half along the ray (so the far
+                                // side no longer bleeds through the cleared-depth overlay),
+                                // resolve each to its residue, and emit just that residue's
+                                // N/CA/C atoms — the chain trace, not the whole residue.
                                 let grid = mol.hover_grid.as_ref().unwrap();
                                 let cand = grid.atoms_near_ray_t(o, d, R, 0.0, t_max);
                                 let atoms: Vec<usize> = if cand.is_empty() {
@@ -5101,12 +5102,21 @@ impl App {
                                         .filter(|&&(_, t)| t <= mid)
                                         .map(|&(id, _)| id as usize)
                                         .collect();
-                                    pick::expand_selection(
+                                    let residues = pick::expand_selection(
                                         &mol.system,
                                         &mol.bonds,
                                         &seeds,
                                         SelectionMode::Residues,
-                                    )
+                                    );
+                                    let topo = mol.system.topology();
+                                    residues
+                                        .into_iter()
+                                        .filter(|&i| {
+                                            topo.get_atom(i).is_some_and(|a| {
+                                                matches!(a.name.as_str(), "N" | "CA" | "C")
+                                            })
+                                        })
+                                        .collect()
                                 };
                                 if !atoms.is_empty()
                                     && best.as_ref().map_or(true, |(_, a)| atoms.len() > a.len())
@@ -5115,11 +5125,9 @@ impl App {
                                 }
                             }
                             if let Some((mi, atoms)) = best {
-                                // The lens now shows whole residues (≈0.8 nm) for both
-                                // Cartoon and Surface, so widen the perpendicular fade past
-                                // the R-tube selection radius or residue side chains would
-                                // fade out.
-                                self.set_hover_detail(mi, atoms, o, d, R * 1.8);
+                                // The lens shows a thin backbone trace, so the tight R-tube
+                                // perpendicular fade is right (no side chains to clip).
+                                self.set_hover_detail(mi, atoms, o, d, R);
                                 lens_shown = true;
                             }
                             self.last_lens_ndc = Some((ndc_x, ndc_y));
