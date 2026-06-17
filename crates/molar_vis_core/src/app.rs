@@ -1619,8 +1619,7 @@ impl App {
         if std::env::var("MOLAR_VIS_DEBUG_PERSP").is_ok() {
             camera.projection = Projection::Perspective;
         }
-        // Verification hook: MOLAR_VIS_DEBUG_ZOOM=<factor> dollies out (factor > 1)
-        // so e.g. the reflective floor below the molecule comes into frame.
+        // Verification hook: MOLAR_VIS_DEBUG_ZOOM=<factor> dollies out (factor > 1).
         if let Ok(f) = std::env::var("MOLAR_VIS_DEBUG_ZOOM") {
             if let Ok(f) = f.parse::<f32>() {
                 camera.distance *= f.max(0.05);
@@ -1659,10 +1658,6 @@ impl App {
                 "white" => camera.background.color = [0.95, 0.95, 0.95, 1.0],
                 _ => {}
             }
-        }
-        // Verification hook: MOLAR_VIS_DEBUG_REFLECT[=amount] enables the reflective floor.
-        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_REFLECT") {
-            camera.reflect = v.trim().parse::<f32>().unwrap_or(0.6).clamp(0.0, 1.0);
         }
         // Verification hook: MOLAR_VIS_DEBUG_FOCUS=<selection> zooms the camera to
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
@@ -2619,7 +2614,7 @@ impl App {
         });
     }
 
-    /// Scene tab: orientation axes, background, reflective ground plane.
+    /// Scene tab: orientation axes + background.
     fn view_tab_scene(&mut self, ui: &mut egui::Ui) {
         let scene_tex = self.renderer.texture_id();
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -2651,16 +2646,6 @@ impl App {
                     });
             });
         });
-        ui.add_space(6.0);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(egui::RichText::new("Reflection").strong());
-            ui.horizontal(|ui| {
-                slider_with_edit(ui, &mut self.camera.reflect, 0.0..=1.0, true);
-            });
-        })
-        .response
-        .on_hover_text("Reflective ground plane below the molecule (0 = off)");
     }
 
     /// Undo/redo buttons, each with a dropdown listing the named actions on the
@@ -4112,7 +4097,6 @@ impl App {
                     self.camera.ao_uniform(),
                     self.camera.shadow_uniform(),
                     self.camera.background,
-                    self.camera.reflect,
                     self.camera.eye_depth_range(),
                     glow_pulse,
                     &self.scene,

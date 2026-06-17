@@ -10,7 +10,6 @@
 mod background;
 mod camera_uniform;
 mod cylinder;
-mod floor;
 mod line;
 mod mesh;
 mod sphere;
@@ -23,7 +22,6 @@ pub use sphere::SphereInstance;
 
 use background::BgUniform;
 use camera_uniform::CameraUniform;
-use floor::FloorUniform;
 use ssao::SsaoUniform;
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
@@ -135,35 +133,6 @@ fn make_ssao_bind_group(
     })
 }
 
-/// (Re)create the floor bind group over the reflection color view + the floor
-/// uniform + a sampler. Recreated whenever the targets (hence the view) change.
-fn make_floor_bind_group(
-    device: &wgpu::Device,
-    bgl: &wgpu::BindGroupLayout,
-    buf: &wgpu::Buffer,
-    reflect_view: &wgpu::TextureView,
-    sampler: &wgpu::Sampler,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("floor-bg"),
-        layout: bgl,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(reflect_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-        ],
-    })
-}
-
 /// Color-target descriptors for the opaque pass: a single alpha-blended target.
 fn opaque_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
     vec![Some(wgpu::ColorTargetState {
@@ -231,14 +200,8 @@ struct Targets {
     accum_view: wgpu::TextureView,
     reveal_view: wgpu::TextureView,
     oit_bind_group: wgpu::BindGroup,
-    /// Reflective-floor reflection target: the scene rendered mirrored across the
-    /// floor plane (color + its own depth), sampled by the floor pass.
-    reflect_color_view: wgpu::TextureView,
-    reflect_depth_view: wgpu::TextureView,
     _color_tex: wgpu::Texture,
     _depth_tex: wgpu::Texture,
-    _reflect_color_tex: wgpu::Texture,
-    _reflect_depth_tex: wgpu::Texture,
 }
 
 impl Targets {
@@ -272,9 +235,6 @@ impl Targets {
         let depth_tex = make("scene-depth", DEPTH_FORMAT, attach_sample);
         let accum_tex = make("oit-accum", ACCUM_FORMAT, attach_sample);
         let reveal_tex = make("oit-reveal", REVEAL_FORMAT, attach_sample);
-        // Reflection target (mirrored scene), sampled by the floor pass.
-        let reflect_color_tex = make("reflect-color", color_format, attach_sample);
-        let reflect_depth_tex = make("reflect-depth", DEPTH_FORMAT, attach_sample);
 
         let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
         let accum_view = view(&accum_tex);
@@ -302,12 +262,8 @@ impl Targets {
             accum_view,
             reveal_view,
             oit_bind_group,
-            reflect_color_view: view(&reflect_color_tex),
-            reflect_depth_view: view(&reflect_depth_tex),
             _color_tex: color_tex,
             _depth_tex: depth_tex,
-            _reflect_color_tex: reflect_color_tex,
-            _reflect_depth_tex: reflect_depth_tex,
         }
     }
 }
@@ -517,13 +473,6 @@ pub struct SceneRenderer {
     bg_buf: wgpu::Buffer,
     bg_pipeline: wgpu::RenderPipeline,
     bg_bind_group: wgpu::BindGroup,
-    /// Reflective ground plane: the floor quad pass that samples the reflection
-    /// target. `floor_bind_group` references the reflection view → recreated on resize.
-    floor_bgl: wgpu::BindGroupLayout,
-    floor_buf: wgpu::Buffer,
-    floor_pipeline: wgpu::RenderPipeline,
-    floor_bind_group: wgpu::BindGroup,
-    floor_sampler: wgpu::Sampler,
     /// Whether the device supports weighted-blended OIT (needs `INDEPENDENT_BLEND`).
     /// False on WebGL2: transparent reps then render with plain alpha blending in the
     /// opaque pass, and the OIT/composite passes are skipped.
@@ -789,23 +738,6 @@ impl SceneRenderer {
             }],
         });
 
-        // Reflective-floor pass: uniform, sampler, pipeline (bind group built below,
-        // once the targets exist).
-        let floor_bgl = floor::bind_group_layout(device);
-        let floor_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("floor-uniform"),
-            size: std::mem::size_of::<FloorUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let floor_pipeline = floor::build_pipeline(device, color_format, DEPTH_FORMAT, &floor_bgl);
-        let floor_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("floor-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
         let targets = Targets::new(device, color_format, &oit_bgl, [1, 1]);
         let ssao_bind_group = make_ssao_bind_group(
             device,
@@ -814,13 +746,6 @@ impl SceneRenderer {
             &ssao_buf,
             &shadow_depth_view,
             &shadow_sampler,
-        );
-        let floor_bind_group = make_floor_bind_group(
-            device,
-            &floor_bgl,
-            &floor_buf,
-            &targets.reflect_color_view,
-            &floor_sampler,
         );
         let egui_texture = rs.renderer.write().register_native_texture(
             device,
@@ -854,11 +779,6 @@ impl SceneRenderer {
             bg_buf,
             bg_pipeline,
             bg_bind_group,
-            floor_bgl,
-            floor_buf,
-            floor_pipeline,
-            floor_bind_group,
-            floor_sampler,
             oit_enabled,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
@@ -1064,16 +984,11 @@ impl SceneRenderer {
         ao: [f32; 4],
         shadow: [f32; 4],
         background: crate::camera::Background,
-        reflect: f32,
         depth_range: [f32; 2],
         glow_pulse: f32,
         scene: &Scene,
     ) -> TextureId {
         let clear = background.clear_color();
-        // A reflective ground plane only reads as a floor under perspective; in
-        // orthographic a horizontal plane is edge-on (a zero-height line), so the
-        // floor is skipped there.
-        let reflect_on = reflect > 0.001 && perspective;
         // Render into SSAA× targets (clamped to the device's max texture size),
         // then let egui's linear filter downsample to the (1×) image rect.
         let max_dim = rs.device.limits().max_texture_dimension_2d;
@@ -1091,13 +1006,6 @@ impl SceneRenderer {
                 &self.ssao_buf,
                 &self.shadow_depth_view,
                 &self.shadow_sampler,
-            );
-            self.floor_bind_group = make_floor_bind_group(
-                &rs.device,
-                &self.floor_bgl,
-                &self.floor_buf,
-                &self.targets.reflect_color_view,
-                &self.floor_sampler,
             );
             rs.renderer.write().update_egui_texture_from_wgpu_texture(
                 &rs.device,
@@ -1188,55 +1096,6 @@ impl SceneRenderer {
             (0, Mat4::IDENTITY)
         };
 
-        // Reflective floor: a camera mirrored across the view-space plane `y =
-        // floor_y` renders the reflection below; the floor pass then samples it.
-        // `floor_y` = the lowest of the visible molecules' outer-shell atoms in view
-        // space — the molecule's *actual* bottom surface, so the floor touches the
-        // molecule (no gap, reflection stays attached) and tracks the contact point
-        // smoothly as the view rotates (the AABB corners overshot → varying gap that
-        // read as bouncing).
-        let radius = ((depth_range[1] - depth_range[0]) * 0.5).max(0.1);
-        let floor_y = {
-            let mut min_y = f32::INFINITY;
-            for mol in &scene.molecules {
-                if !mol.visible {
-                    continue;
-                }
-                for &p in &mol.shell {
-                    min_y = min_y.min(view.transform_point3(p).y);
-                }
-            }
-            if min_y.is_finite() { min_y - 0.02 } else { -radius }
-        };
-        let (reflect_idx, floor_uniform) = if reflect_on {
-            let m_reflect = Mat4::from_cols(
-                glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
-                glam::Vec4::new(0.0, -1.0, 0.0, 0.0),
-                glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
-                glam::Vec4::new(0.0, 2.0 * floor_y, 0.0, 1.0),
-            );
-            cameras.push(make_cam(m_reflect * view));
-            let idx = cameras.len() as u32 - 1;
-            let fade_start = depth_range[1];
-            let fade_end = depth_range[1] + radius * 8.0;
-            let fu = FloorUniform::new(
-                proj,
-                floor_y,
-                radius * 30.0,                       // half extent (very wide)
-                -depth_range[0].max(0.05),           // z_near (scene front)
-                -(depth_range[1] + radius * 12.0),   // z_far (well behind)
-                reflect,
-                fade_start,
-                fade_end,
-                render_size,
-                // Base = background, lifted so the floor reads as a faint surface
-                // even where there's nothing to reflect.
-                [clear[0] + 0.05, clear[1] + 0.05, clear[2] + 0.06, 1.0],
-            );
-            (idx, Some(fu))
-        } else {
-            (0, None)
-        };
 
         // Grow the dynamic camera buffer if needed, then upload all entries
         // (each padded to CAMERA_STRIDE so dynamic offsets stay aligned).
@@ -1305,47 +1164,6 @@ impl SceneRenderer {
                 multiview_mask: None,
             });
             self.draw_shadow_casters(&mut pass, scene, shadow_light_idx);
-        }
-
-        // Pass 0.5 — reflection: render the opaque geometry mirrored across the
-        // floor plane into the reflection target (color + its own depth). The floor
-        // pass below samples it by screen position. Every visible rep is drawn once
-        // at the reflected camera.
-        if reflect_on {
-            let reflect_images: Vec<Vec<Vec<u32>>> = scene
-                .molecules
-                .iter()
-                .map(|mol| mol.reps.iter().map(|_| vec![reflect_idx]).collect())
-                .collect();
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reflection-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.reflect_color_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: clear[0] as f64,
-                            g: clear[1] as f64,
-                            b: clear[2] as f64,
-                            a: clear[3] as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.targets.reflect_depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.draw_reps(&mut pass, scene, false, 0, &reflect_images);
         }
 
         // Pass 1 — opaque geometry into the color + depth targets.
@@ -1425,41 +1243,6 @@ impl SceneRenderer {
             pass.set_bind_group(0, &self.ssao_bind_group, &[]);
             pass.draw(0..3, 0..1);
             }
-        }
-
-        // Pass 1.7 — reflective floor: draw the floor plane (sampling the reflection
-        // target) into the main color + depth. Drawn **after** the SSAO/shadow pass
-        // so the floor isn't in the depth buffer that AO reads — the tilted floor
-        // would otherwise self-occlude into horizontal AO bands. Depth-tested (the
-        // molecule occludes it) and depth-writing (so OIT composites correctly).
-        if let Some(fu) = floor_uniform {
-            rs.queue.write_buffer(&self.floor_buf, 0, bytemuck::bytes_of(&fu));
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("floor-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.color_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.targets.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.floor_pipeline);
-            pass.set_bind_group(0, &self.floor_bind_group, &[]);
-            pass.draw(0..4, 0..1);
         }
 
         // Pass 2 — transparent geometry into the weighted-blended OIT targets

@@ -33,9 +33,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_AO[=strength]` (enable screen-space ambient occlusion),
   `MOLAR_VIS_DEBUG_SHADOW[=strength]` (enable real-time cast shadows),
   `MOLAR_VIS_DEBUG_BG=gradient|white` (set a gradient / white viewport background),
-  `MOLAR_VIS_DEBUG_REFLECT[=amount]` (enable the reflective ground plane — needs perspective),
   `MOLAR_VIS_DEBUG_PERSP=1` (force perspective projection) +
-  `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor` so e.g. the floor comes into frame),
+  `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor`),
   `MOLAR_VIS_DEBUG_VIEWMENU=1` (open the view-settings hamburger window at startup),
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
@@ -102,9 +101,8 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   **and** orthographic projection. `frame_bbox`/`focus_bbox` use `fit_distance` (fit the
   bbox's **longest dimension to ~90%** of the viewport; bounding-sphere radius still drives
   near/far). Also owns the view-state knobs the top-bar menu edits: `depth_cue`/`ao`/`shadow`,
-  `background` (`Background { Solid|Gradient, color/top/bottom }`) and `reflect` (ground-plane
-  strength) — all `serde(default)`, so sessions save/load them for free. `#[derive(PartialEq)]`
-  drives render-skip.
+  `background` (`Background { Solid|Gradient, color/top/bottom }`) — all `serde(default)`, so
+  sessions save/load them for free. `#[derive(PartialEq)]` drives render-skip.
 - `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `Colorizer`.
 - `secstruct.rs` — `SsMap` (molar `Dssp` keyed by `resindex`), `SsClass` (helix/sheet/coil),
   VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme.
@@ -314,21 +312,6 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   behind the geometry without perturbing the depth the SSAO/shadow passes read). Depth-cue fog fades
   geometry toward `background.fog_color()` (the solid color, or the gradient midpoint) — passed to
   `CameraUniform` in place of the old `BG` const. `MOLAR_VIS_DEBUG_BG=gradient`.
-- **Reflective ground plane** — `Camera::reflect` (0 = off, serialized). When on **and perspective**
-  (a horizontal plane is edge-on in orthographic → skipped there), the scene is rendered a second
-  time **mirrored across a view-space plane** `y = floor_y` into a reflection color+depth target
-  (`Targets::reflect_*`, reusing the opaque pipelines via a mirror-matrix camera entry); then a
-  **floor pass** (`render/floor.rs` + `shaders/floor.wgsl`) draws a large view-space quad at `y =
-  floor_y`, sampling the reflection by screen position, mixing `reflectivity·reflection +
-  (1-reflectivity)·base` (base = the background lifted slightly) and fading toward the horizon.
-  **`floor_y` = the lowest of the molecule's outer-shell atoms in view space** (`Molecule::shell`,
-  the ~4096 atoms farthest from the bbox center, precomputed at load) — the molecule's *actual*
-  bottom surface, so the floor **touches** the molecule (no gap → the reflection stays attached and
-  scales with zoom, and there's no perceived "bounce" as the view rotates; the AABB corners / a
-  conservative sphere overshot, leaving a varying gap that read as bouncing). The floor is drawn
-  **after** the SSAO/shadow pass (so the tilted floor isn't in the depth buffer AO reads — else it
-  self-occludes into horizontal AO bands), depth-tested + depth-writing (the molecule occludes it,
-  OIT composites over it). `MOLAR_VIS_DEBUG_REFLECT`.
 - **Scene graph** — N molecules × M reps. Each rep has a molar **selection string**
   compiled to atom indices (`compile_selection` → `system.select`). Geometry is built
   only for selected atoms (and bonds whose endpoints are both selected).
@@ -472,8 +455,7 @@ open (`egui::Popup::is_any_open`) nor when the click is on the hamburger itself.
     corners** = where the gizmo is anchored (`Corner`, drawn onto the 3D image by `draw_axes_overlay`);
     a **Background** group (Solid/Gradient radios + `color_submenu` swatches — a `Button`-swatch that
     **opens on click, downward** a `Popup::menu` (`CloseOnClickOutside`) with an inline
-    `color_picker_color32`, linear↔Color32 via `egui::Rgba` for WYSIWYG; `Camera::background`); a
-    **Reflection** `slider_with_edit` (`Camera::reflect`, the reflective ground plane).
+    `color_picker_color32`, linear↔Color32 via `egui::Rgba` for WYSIWYG; `Camera::background`).
 Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered
 by ink bounds** `Galley::mesh_bounds`, not the font line-box); the **`toolbar_label`** helper draws
 the `Sel. mode`/`Scope` labels with the **same ink-centering** so they line up with the buttons next
@@ -796,18 +778,18 @@ History labels via `describe_change` ("edit selection", "change coloring",
   strength }`, off, serialized) + the shared lighting popup (AO + shadows) + `MOLAR_VIS_DEBUG_SHADOW`.
   Gated to full WebGPU like SSAO. See the *Cast shadows* architecture note. Verified on VDW + surface,
   alone and combined with AO; 30 tests pass.
-- ✅ M20 **View-settings menu revamp + background + reflective floor** — (1) the top toolbar is now
-  **selection controls (left) + a right-aligned hamburger** opening a persistent
-  `CloseOnClickOutside` tabbed menu **Camera / Lighting / Scene** (`ViewTab`) — all the
-  projection/depth-cue/lighting/axes controls moved off the toolbar into it (`view_tab_*`), with the
-  depth cue gaining a *None* option and `slider_with_edit` (slider + numeric edit) rows. (2)
-  **Background** (`Camera::background`): flat color **or** a vertical gradient (a fullscreen pass,
-  `render/background.rs`); fog fades to the background color. (3) **Reflective ground plane**
-  (`Camera::reflect`): the scene mirrored across a view-space floor below the molecule into a
-  reflection target, then a floor-quad pass samples it (`render/floor.rs`); perspective only (a
-  ground plane is edge-on in ortho). All three new settings are serialized (ride `Camera`'s serde for
-  free). See the *Background* / *Reflective ground plane* architecture notes + the *Top view toolbar*
-  UI section. Verified headlessly (gradient bg, floor in perspective, full menu layout); 30 tests pass.
+- ✅ M20 **View-settings menu revamp + background** — (1) the top toolbar is now **selection controls
+  (left) + a right-aligned hamburger** opening a tabbed **Camera / Lighting / Scene** window
+  (`ViewTab`, hosted in a `Window` so nested click-to-open dropdowns/color pickers behave; closed on
+  click-outside via `Popup::is_any_open`) — all the projection/depth-cue/lighting/axes controls moved
+  off the toolbar into it (`view_tab_*`), with the depth cue gaining a *None* option and
+  `slider_with_edit` (slider + numeric edit) rows, the axes a monitor "screen" widget with a live
+  mini-render. (2) **Background** (`Camera::background`): flat color **or** a vertical gradient (a
+  fullscreen pass, `render/background.rs`); fog fades to the background color. Both serialized (ride
+  `Camera`'s serde). See the *Background* note + the *Top view toolbar* UI section. **A reflective
+  ground plane was attempted here and reverted** — a finite floor quad's near edge is pinned to the
+  camera near-clip (`distance − scene_radius`), which recedes on zoom-out (a visible sharp edge); the
+  correct model is an *infinite* plane (screen-space ray-plane intersection, no edges). To be redone.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

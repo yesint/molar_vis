@@ -177,10 +177,6 @@ pub struct Camera {
     /// Viewport background (solid color or gradient).
     #[serde(default)]
     pub background: Background,
-    /// Reflective ground-plane strength (0 = off). Mirrors the scene into a floor
-    /// below the molecule.
-    #[serde(default)]
-    pub reflect: f32,
 }
 
 impl Default for Camera {
@@ -216,7 +212,6 @@ impl Camera {
             ao: Ao::default(),
             shadow: Shadow::default(),
             background: Background::default(),
-            reflect: 0.0,
         }
     }
 

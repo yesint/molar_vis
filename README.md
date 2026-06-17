@@ -94,7 +94,6 @@ the top bar, with **Camera / Lighting / Scene** tabs):
 - **Cast shadows** — real-time directional shadows from a key light (shadow mapping), applied
   deferred so they cost one extra geometry pass.
 - **Background** — a flat color or a vertical **gradient** (top / bottom color pickers).
-- **Reflective ground plane** — the molecule mirrored into a floor below it (perspective only).
 - **Orientation axes** gizmo (VMD-style), in any viewport corner.
 - **Anti-aliasing** — 2× supersampling (smooths the ray-cast impostor silhouettes that MSAA
   can't touch), with idle frames costing **zero GPU**.
