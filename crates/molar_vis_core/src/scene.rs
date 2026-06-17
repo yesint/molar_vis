@@ -201,6 +201,29 @@ impl Representation {
         )
     }
 
+    /// Build a fresh representation from the program's [`RepDefaults`] (initial rep
+    /// of a loaded molecule, the "add representation" button) — applying the default
+    /// style, color, material, and selection (and the default Surface quality).
+    pub fn from_defaults(d: &crate::settings::RepDefaults) -> Self {
+        let mut params = RepParams::for_kind(d.kind);
+        if let RepParams::Surface { quality, .. } = &mut params {
+            *quality = d.surface_quality;
+        }
+        Self::restore(
+            d.kind,
+            params,
+            d.color,
+            SsAlgorithm::default(),
+            d.selection.clone(),
+            true,
+            false,
+            false,
+            d.material,
+            PeriodicParams::default(),
+            1,
+        )
+    }
+
     /// Reconstruct a representation from saved editable fields (used by undo/redo).
     /// Starts dirty so its selection recompiles and geometry rebuilds next frame.
     #[allow(clippy::too_many_arguments)]
@@ -362,7 +385,7 @@ pub struct Molecule {
 }
 
 impl Molecule {
-    pub fn new(id: MolId, raw: RawMolecule, default_rep: RepKind) -> Self {
+    pub fn new(id: MolId, raw: RawMolecule, rep_defaults: &crate::settings::RepDefaults) -> Self {
         Self {
             id,
             name: raw.name,
@@ -374,7 +397,7 @@ impl Molecule {
             bbox_min: raw.bbox_min,
             bbox_max: raw.bbox_max,
             visible: true,
-            reps: vec![Representation::new(default_rep)],
+            reps: vec![Representation::from_defaults(rep_defaults)],
             selected_rep: Some(0),
             reps_open: true,
             trajectory: Trajectory::default(),
@@ -541,10 +564,10 @@ pub struct Scene {
 
 impl Scene {
     /// Load a molecule into the scene, assigning it a fresh [`MolId`].
-    pub fn add(&mut self, raw: RawMolecule, default_rep: RepKind) -> MolId {
+    pub fn add(&mut self, raw: RawMolecule, rep_defaults: &crate::settings::RepDefaults) -> MolId {
         let id = MolId(self.next_id);
         self.next_id += 1;
-        self.molecules.push(Molecule::new(id, raw, default_rep));
+        self.molecules.push(Molecule::new(id, raw, rep_defaults));
         id
     }
 

@@ -526,7 +526,7 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
         let raw = crate::data::load(std::path::Path::new(path)).expect("load 2lao.pdb");
         let mut scene = Scene::default();
-        scene.add(raw, kind);
+        scene.add(raw, &crate::settings::RepDefaults { kind, ..Default::default() });
         let mol = &mut scene.molecules[0];
         let rep = &mut mol.reps[0];
         rep.kind = kind;
@@ -552,7 +552,7 @@ mod tests {
     fn lasso_full_screen_selects_all_for_vdw() {
         let scene = scene_with_rep(RepKind::Vdw, "all");
         let mol = &scene.molecules[0];
-        let cam = Camera::frame_bbox(mol.bbox_min, mol.bbox_max);
+        let cam = Camera::frame_bbox(mol.bbox_min, mol.bbox_max, 0.9);
         let hits = lasso_select(&scene, cam.view(), cam.proj(1.0), &full_screen_polygon());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].mol, 0);
@@ -567,7 +567,7 @@ mod tests {
         let mut scene = scene_with_rep(RepKind::Vdw, "all");
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
         let raw = crate::data::load(std::path::Path::new(path)).expect("load 2lao.pdb");
-        scene.add(raw, RepKind::Vdw);
+        scene.add(raw, &crate::settings::RepDefaults { kind: RepKind::Vdw, ..Default::default() });
         // Evaluate the second molecule's default rep so it has an atom set too.
         {
             let mol = &mut scene.molecules[1];
@@ -578,7 +578,7 @@ mod tests {
             mol.reps[0].sel = Some(sel);
         }
         let (min, max) = scene.bbox().unwrap();
-        let cam = Camera::frame_bbox(min, max);
+        let cam = Camera::frame_bbox(min, max, 0.9);
         let hits = lasso_select(&scene, cam.view(), cam.proj(1.0), &full_screen_polygon());
         assert_eq!(hits.len(), 2, "lasso should hit both visible molecules");
         assert_eq!(hits[0].mol, 0);
@@ -611,7 +611,7 @@ mod tests {
             n_protein = mol.system.bind(sel).iter_particle().count();
         }
 
-        let cam = Camera::frame_bbox(mol.bbox_min, mol.bbox_max);
+        let cam = Camera::frame_bbox(mol.bbox_min, mol.bbox_max, 0.9);
         let hits = lasso_select(&scene, cam.view(), cam.proj(1.0), &full_screen_polygon());
         assert_eq!(hits.len(), 1);
         let atoms = &hits[0].atoms;

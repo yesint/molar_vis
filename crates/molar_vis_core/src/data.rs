@@ -12,6 +12,11 @@ pub mod traj_loader;
 #[cfg(target_arch = "wasm32")]
 pub mod traj_wasm;
 
-pub use loader::{load, RawMolecule};
+pub use bonds::BondParams;
+pub use loader::{load_with, RawMolecule};
+// `load` (default bond params) is only used by unit tests now that production code
+// threads the settings-derived `BondParams` through `load_with`.
+#[cfg(test)]
+pub use loader::load;
 #[cfg(target_arch = "wasm32")]
 pub use loader::load_from_bytes;

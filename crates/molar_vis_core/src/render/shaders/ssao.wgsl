@@ -35,7 +35,7 @@ fn shadow_factor(p_view: vec3<f32>) -> f32 {
     }
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let z_ref = ndc.z - u.shadow_params.y;
-    let texel = 1.0 / 2048.0; // shadow map is 2048²
+    let texel = u.misc.z; // 1/shadow_res (PCF step), from the settings
     var lit = 0.0;
     for (var j = -1; j <= 1; j = j + 1) {
         for (var i = -1; i <= 1; i = i + 1) {

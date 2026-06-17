@@ -349,7 +349,7 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
         let raw = crate::data::load(Path::new(path)).expect("load 2lao.pdb");
         let mut scene = Scene::default();
-        scene.add(raw, RepKind::Lines);
+        scene.add(raw, &crate::settings::RepDefaults::default());
         scene
     }
 
@@ -393,7 +393,10 @@ mod tests {
     fn undo_restores_deleted_molecule() {
         let mut scene = load_scene();
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
-        scene.add(crate::data::load(Path::new(path)).unwrap(), RepKind::Lines);
+        scene.add(
+            crate::data::load(Path::new(path)).unwrap(),
+            &crate::settings::RepDefaults::default(),
+        );
         let mut hist = History::new(EditState::capture(&scene));
 
         let m = scene.molecules.remove(0);

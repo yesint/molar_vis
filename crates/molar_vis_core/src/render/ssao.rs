@@ -15,7 +15,8 @@ pub struct SsaoUniform {
     pub shadow_matrix: [[f32; 4]; 4],
     /// `[radius, bias, strength, perspective(1/0)]`.
     pub params: [f32; 4],
-    /// `[render_w, render_h, _, _]` (the SSAA target size in pixels).
+    /// `[render_w, render_h, shadow_texel, _]` (SSAA target size in pixels; the
+    /// `1/shadow_res` PCF texel step for the cast-shadow lookup).
     pub misc: [f32; 4],
     /// `[strength, bias, enabled, _]` for the cast-shadow test.
     pub shadow_params: [f32; 4],
@@ -31,13 +32,14 @@ impl SsaoUniform {
         shadow_matrix: Mat4,
         shadow: [f32; 4],
         render_size: [u32; 2],
+        shadow_texel: f32,
     ) -> Self {
         Self {
             proj: proj.to_cols_array_2d(),
             inv_proj: proj.inverse().to_cols_array_2d(),
             shadow_matrix: shadow_matrix.to_cols_array_2d(),
             params: [ao[0], ao[1], ao[2], if perspective { 1.0 } else { 0.0 }],
-            misc: [render_size[0] as f32, render_size[1] as f32, 0.0, 0.0],
+            misc: [render_size[0] as f32, render_size[1] as f32, shadow_texel, 0.0],
             shadow_params: shadow,
         }
     }

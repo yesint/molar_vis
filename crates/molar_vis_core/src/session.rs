@@ -183,7 +183,7 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
         let raw = crate::data::load(Path::new(path)).expect("load 2lao.pdb");
         let mut scene = Scene::default();
-        scene.add(raw, RepKind::Lines);
+        scene.add(raw, &crate::settings::RepDefaults::default());
         scene
     }
 
@@ -229,9 +229,9 @@ mod tests {
         let mut view = ViewState::default();
         let mut cam = scene
             .bbox()
-            .map(|(lo, hi)| crate::camera::Camera::frame_bbox(lo, hi))
+            .map(|(lo, hi)| crate::camera::Camera::frame_bbox(lo, hi, 0.9))
             .unwrap();
-        cam.orbit(40.0, 15.0);
+        cam.orbit(40.0, 15.0, 1.0);
         view.camera = Some(cam);
         view.pick_mode = PickMode::Lasso;
 

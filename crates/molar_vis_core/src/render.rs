@@ -54,18 +54,17 @@ const BG: [f32; 4] = [0.02, 0.02, 0.05, 1.0];
 /// satisfies `min_uniform_buffer_offset_alignment` on every target.
 const CAMERA_STRIDE: u64 = 256;
 
-/// Supersampling factor: the offscreen targets are rendered at `SSAA×` the
-/// viewport resolution, then egui's linear filter downsamples them into the
-/// (1×) image rect — a 2×2 box average that anti-aliases **everything**, including
-/// the ray-cast impostor silhouettes (which are decided per-pixel by `discard`,
-/// so MSAA can't touch them). The camera's viewport param stays at the *logical*
-/// size so fat-line pixel widths come out correct after the downsample.
-const SSAA: u32 = 2;
-
-/// Resolution of the cast-shadow depth map (square). Fixed (light-space), so it
-/// doesn't track the viewport; 2048² is ample for the molecular scale and the 3×3
-/// PCF. Must match the `texel = 1/2048` in `ssao.wgsl`.
-const SHADOW_RES: u32 = 2048;
+// Supersampling factor (`SceneRenderer::ssaa`, from the program settings): the
+// offscreen targets are rendered at `ssaa×` the viewport resolution, then egui's
+// linear filter downsamples them into the (1×) image rect — a 2×2 box average that
+// anti-aliases **everything**, including the ray-cast impostor silhouettes (decided
+// per-pixel by `discard`, so MSAA can't touch them). The camera's viewport param
+// stays at the *logical* size so fat-line pixel widths come out correct.
+//
+// Cast-shadow depth-map resolution (`SceneRenderer::shadow_res`, from the settings):
+// square, light-space (doesn't track the viewport); 2048² is ample for the molecular
+// scale + the 3×3 PCF. The PCF texel size is fed to `ssao.wgsl` via the SSAO uniform's
+// `misc.z`, so it stays correct at any resolution.
 
 /// View-space direction **toward** the key light used for cast shadows. Off the
 /// view axis (upper-right, moderately toward the camera) so shadows fall on
@@ -430,6 +429,11 @@ pub struct SceneRenderer {
     color_format: wgpu::TextureFormat,
     targets: Targets,
     egui_texture: TextureId,
+    /// Supersampling factor (1 = off). From the program settings; `reconfigure`
+    /// changes it live and the next render recreates the targets at the new size.
+    ssaa: u32,
+    /// Cast-shadow depth-map resolution (square). From the program settings.
+    shadow_res: u32,
 
     camera_bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
@@ -542,9 +546,12 @@ fn make_pick_targets(
 }
 
 impl SceneRenderer {
-    pub fn new(rs: &RenderState) -> Self {
+    pub fn new(rs: &RenderState, settings: &crate::settings::RenderingSettings) -> Self {
         let device = &rs.device;
         let color_format = rs.target_format;
+        let settings = settings.sanitized();
+        let ssaa = settings.ssaa;
+        let shadow_res = settings.shadow_res;
 
         // Camera uniform = bind group 0, shared by every pipeline. It's a
         // **dynamic-offset** buffer: a base camera at entry 0 plus one entry per
@@ -684,8 +691,8 @@ impl SceneRenderer {
         // plus a throwaway color target (so the opaque pipelines, which output color,
         // can be reused to fill it) and a comparison sampler for the PCF lookup.
         let shadow_extent = wgpu::Extent3d {
-            width: SHADOW_RES,
-            height: SHADOW_RES,
+            width: shadow_res,
+            height: shadow_res,
             depth_or_array_layers: 1,
         };
         let _shadow_depth_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -757,6 +764,8 @@ impl SceneRenderer {
             color_format,
             targets,
             egui_texture,
+            ssaa,
+            shadow_res,
             camera_bgl,
             camera_buf,
             camera_bind_group,
@@ -794,6 +803,60 @@ impl SceneRenderer {
             pick_readback,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pending: None,
+        }
+    }
+
+    /// Apply changed render settings live (from the settings dialog). SSAA just
+    /// updates the field — the next `render_scene` recreates the offscreen targets
+    /// when the computed size differs. A shadow-map-resolution change recreates the
+    /// shadow textures + the SSAO bind group that samples them (the PCF texel is fed
+    /// to the shader via the uniform, so it stays correct). The caller should force a
+    /// re-render afterward (e.g. clear `last_render_camera`).
+    pub fn reconfigure(&mut self, rs: &RenderState, settings: &crate::settings::RenderingSettings) {
+        let settings = settings.sanitized();
+        self.ssaa = settings.ssaa;
+        if settings.shadow_res != self.shadow_res {
+            self.shadow_res = settings.shadow_res;
+            let device = &rs.device;
+            let extent = wgpu::Extent3d {
+                width: self.shadow_res,
+                height: self.shadow_res,
+                depth_or_array_layers: 1,
+            };
+            let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("shadow-depth"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("shadow-color-throwaway"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.color_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.shadow_depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.shadow_color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self._shadow_depth_tex = depth_tex;
+            self._shadow_color_tex = color_tex;
+            // The SSAO bind group references the (new) shadow depth view → rebuild.
+            self.ssao_bind_group = make_ssao_bind_group(
+                device,
+                &self.ssao_bgl,
+                &self.targets.depth_view,
+                &self.ssao_buf,
+                &self.shadow_depth_view,
+                &self.shadow_sampler,
+            );
         }
     }
 
@@ -993,8 +1056,8 @@ impl SceneRenderer {
         // then let egui's linear filter downsample to the (1×) image rect.
         let max_dim = rs.device.limits().max_texture_dimension_2d;
         let render_size = [
-            (size_px[0] * SSAA).clamp(1, max_dim),
-            (size_px[1] * SSAA).clamp(1, max_dim),
+            (size_px[0] * self.ssaa).clamp(1, max_dim),
+            (size_px[1] * self.ssaa).clamp(1, max_dim),
         ];
         if render_size != self.targets.size {
             self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
@@ -1221,7 +1284,15 @@ impl SceneRenderer {
         if ao[3] > 0.5 || shadow_on {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
             let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };
-            let su = SsaoUniform::new(proj, perspective, ao_eff, shadow_matrix, shadow, render_size);
+            let su = SsaoUniform::new(
+                proj,
+                perspective,
+                ao_eff,
+                shadow_matrix,
+                shadow,
+                render_size,
+                1.0 / self.shadow_res as f32,
+            );
             rs.queue.write_buffer(&self.ssao_buf, 0, bytemuck::bytes_of(&su));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssao-pass"),

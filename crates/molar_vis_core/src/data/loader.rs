@@ -11,7 +11,7 @@ use std::path::Path;
 use glam::Vec3;
 use molar::prelude::*;
 
-use crate::data::bonds;
+use crate::data::bonds::{self, BondParams};
 use crate::scene::MoleculeSource;
 
 // We read molar positions (Point3<Float>) as f32 into GPU buffers, which is only
@@ -33,22 +33,31 @@ pub struct RawMolecule {
     pub bbox_max: Vec3,
 }
 
-/// Load `path` (PDB/GRO/… anything molar reads) and guess bonds.
+/// Load `path` (PDB/GRO/… anything molar reads) and guess bonds with the default
+/// thresholds. Convenience wrapper over [`load_with`]; production code threads the
+/// settings-derived params through `load_with`, so this is currently test-only.
+#[cfg(test)]
 pub fn load(path: &Path) -> Result<RawMolecule, String> {
+    load_with(path, &BondParams::default())
+}
+
+/// Like [`load`] but with caller-supplied bond-guessing thresholds (from the
+/// program settings).
+pub fn load_with(path: &Path, bonds: &BondParams) -> Result<RawMolecule, String> {
     let system = System::from_file(path)
         .map_err(|e| format!("failed to load {}: {e}", path.display()))?;
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "molecule".to_string());
-    Ok(assemble(system, name, MoleculeSource::File(path.to_path_buf())))
+    Ok(assemble(system, name, MoleculeSource::File(path.to_path_buf()), bonds))
 }
 
 /// Load a structure from in-memory bytes (the browser path: the file picker reads
 /// a `File`/`Blob` into a `Vec<u8>`). The format is taken from `name`'s extension.
 /// Uses molar's `FileHandler::from_reader`, so no filesystem access is needed.
 #[cfg(target_arch = "wasm32")]
-pub fn load_from_bytes(name: &str, bytes: Vec<u8>) -> Result<RawMolecule, String> {
+pub fn load_from_bytes(name: &str, bytes: Vec<u8>, bonds: &BondParams) -> Result<RawMolecule, String> {
     let ext = name
         .rsplit('.')
         .next()
@@ -64,13 +73,19 @@ pub fn load_from_bytes(name: &str, bytes: Vec<u8>) -> Result<RawMolecule, String
         system,
         name.to_string(),
         MoleculeSource::Bytes { name: name.to_string() },
+        bonds,
     ))
 }
 
 /// Shared tail of [`load`]/[`load_from_bytes`]: guess bonds and the bounding box
 /// from the freshly loaded `system`, using only transient arrays (positions/radii)
 /// that are dropped here — the `System` stays the single source of coordinates.
-fn assemble(system: System, name: String, source: MoleculeSource) -> RawMolecule {
+fn assemble(
+    system: System,
+    name: String,
+    source: MoleculeSource,
+    bond_params: &BondParams,
+) -> RawMolecule {
     let (bonds, bbox_min, bbox_max, n) = {
         let all = system.select_all_bound();
         let (min, max) = all.min_max();
@@ -85,7 +100,7 @@ fn assemble(system: System, name: String, source: MoleculeSource) -> RawMolecule
         // PBC-aware bond guessing when the structure has a box (finds bonds that
         // cross a box face in a wrapped structure; rendered as dashed half-bonds).
         let pbox = system.state().pbox.clone();
-        let bonds = bonds::guess(&all, &positions, &vdw, pbox.as_ref());
+        let bonds = bonds::guess(&all, &positions, &vdw, pbox.as_ref(), bond_params);
         (
             bonds,
             Vec3::new(min.x, min.y, min.z),

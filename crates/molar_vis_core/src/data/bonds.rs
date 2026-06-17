@@ -4,12 +4,24 @@
 
 use molar::prelude::*;
 
-/// Distance-search cutoff (nm): an upper bound on any plausible covalent bond.
-const SEARCH_CUTOFF: f32 = 0.25;
-/// A pair is bonded if `dist < BOND_FACTOR * (vdw_i + vdw_j)`.
-const BOND_FACTOR: f32 = 0.6;
-/// Reject coincident atoms / duplicate sites below this distance (nm).
-const MIN_DIST: f32 = 0.04;
+/// Tunable thresholds for bond guessing, surfaced in the program settings so the
+/// user can loosen/tighten connectivity inference. The defaults reproduce the
+/// previous hardcoded constants exactly.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BondParams {
+    /// A pair is bonded if `dist < factor * (vdw_i + vdw_j)`.
+    pub factor: f32,
+    /// Distance-search cutoff (nm): an upper bound on any plausible covalent bond.
+    pub search_cutoff: f32,
+    /// Reject coincident atoms / duplicate sites below this distance (nm).
+    pub min_dist: f32,
+}
+
+impl Default for BondParams {
+    fn default() -> Self {
+        Self { factor: 0.6, search_cutoff: 0.25, min_dist: 0.04 }
+    }
+}
 
 /// Guess bonds for all atoms. `sel` is the bound all-selection (the position
 /// source for the grid search); `positions`/`vdw` are the extracted per-atom
@@ -22,6 +34,7 @@ pub fn guess(
     positions: &[[f32; 3]],
     vdw: &[f32],
     pbox: Option<&PeriodicBox>,
+    params: &BondParams,
 ) -> Vec<[usize; 2]> {
     let n = positions.len();
     if n < 2 {
@@ -30,16 +43,16 @@ pub fn guess(
 
     let candidates: Vec<(usize, usize)> = match pbox {
         Some(b) => distance_search_single_pbc::<(usize, usize), Vec<_>>(
-            SEARCH_CUTOFF,
+            params.search_cutoff,
             sel.iter_pos(),
             0..n,
             b,
             PBC_FULL,
         ),
-        None => distance_search_single::<(usize, usize), Vec<_>>(SEARCH_CUTOFF, sel, 0..n),
+        None => distance_search_single::<(usize, usize), Vec<_>>(params.search_cutoff, sel, 0..n),
     };
 
-    let min2 = MIN_DIST * MIN_DIST;
+    let min2 = params.min_dist * params.min_dist;
     let mut bonds: Vec<[usize; 2]> = Vec::new();
     for (i, j) in candidates {
         if i == j {
@@ -62,7 +75,7 @@ pub fn guess(
                 dx * dx + dy * dy + dz * dz
             }
         };
-        let thresh = BOND_FACTOR * (vdw[a] + vdw[b]);
+        let thresh = params.factor * (vdw[a] + vdw[b]);
         if d2 > min2 && d2 < thresh * thresh {
             bonds.push([a, b]);
         }

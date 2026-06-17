@@ -177,11 +177,20 @@ pub struct Camera {
     /// Viewport background (solid color or gradient).
     #[serde(default)]
     pub background: Background,
+    /// Fraction of the viewport the framed object fills along its longest
+    /// dimension (was the `FILL` constant). Seeded from the program settings;
+    /// `#[serde(default)]` so older sessions still load.
+    #[serde(default = "default_fill")]
+    pub fill: f32,
+}
+
+fn default_fill() -> f32 {
+    0.9
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Self::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0))
+        Self::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), default_fill())
     }
 }
 
@@ -190,21 +199,21 @@ impl Default for Camera {
 /// not lost inside its bounding-sphere diagonal). Works for both perspective and
 /// orthographic (same small-angle relation). `scene_radius` (the bounding-sphere
 /// radius) handles near/far separately, so this can be tight without clipping.
-fn fit_distance(half: Vec3, fov_y: f32) -> f32 {
-    const FILL: f32 = 0.9;
+fn fit_distance(half: Vec3, fov_y: f32, fill: f32) -> f32 {
     let fit_r = half.max_element().max(1e-3);
-    fit_r / (FILL * (fov_y * 0.5).tan())
+    fit_r / (fill.clamp(0.1, 1.0) * (fov_y * 0.5).tan())
 }
 
 impl Camera {
-    /// Position the camera to frame a bounding box.
-    pub fn frame_bbox(min: Vec3, max: Vec3) -> Self {
+    /// Position the camera to frame a bounding box, filling `fill` of the viewport
+    /// along the box's longest dimension.
+    pub fn frame_bbox(min: Vec3, max: Vec3, fill: f32) -> Self {
         let fov_y = 45_f32.to_radians();
         let half = (max - min) * 0.5;
         Self {
             target: (min + max) * 0.5,
             orientation: Quat::IDENTITY,
-            distance: fit_distance(half, fov_y),
+            distance: fit_distance(half, fov_y, fill),
             scene_radius: half.length().max(1e-3),
             fov_y,
             projection: Projection::Orthographic,
@@ -212,6 +221,7 @@ impl Camera {
             ao: Ao::default(),
             shadow: Shadow::default(),
             background: Background::default(),
+            fill,
         }
     }
 
@@ -224,7 +234,7 @@ impl Camera {
         let half = (max - min) * 0.5;
         self.target = (min + max) * 0.5;
         self.scene_radius = half.length().max(1e-3);
-        self.distance = fit_distance(half, self.fov_y);
+        self.distance = fit_distance(half, self.fov_y, self.fill);
     }
 
     pub fn is_perspective(&self) -> bool {
@@ -312,20 +322,21 @@ impl Camera {
     /// Orbit (left-drag). `dx`/`dy` are pointer deltas in points. Builds the
     /// rotation from the *current* camera axes, giving free trackball rotation
     /// with no gimbal lock.
-    pub fn orbit(&mut self, dx: f32, dy: f32) {
+    pub fn orbit(&mut self, dx: f32, dy: f32, sensitivity: f32) {
         const K: f32 = 0.006;
-        let q = Quat::from_axis_angle(self.up(), -dx * K)
-            * Quat::from_axis_angle(self.right(), -dy * K);
+        let k = K * sensitivity;
+        let q = Quat::from_axis_angle(self.up(), -dx * k)
+            * Quat::from_axis_angle(self.right(), -dy * k);
         self.orientation = (q * self.orientation).normalize();
     }
 
     /// Roll (shift+left-drag): rotate within the screen plane, about the view
-    /// axis. Horizontal drag drives the angle.
-    pub fn roll(&mut self, dx: f32) {
+    /// axis. Horizontal drag drives the angle. `sensitivity` scales the rate.
+    pub fn roll(&mut self, dx: f32, sensitivity: f32) {
         const K: f32 = 0.01;
         // View axis (screen normal, toward the eye) = orientation·Z.
         let axis = self.orientation * Vec3::Z;
-        let q = Quat::from_axis_angle(axis, dx * K);
+        let q = Quat::from_axis_angle(axis, dx * K * sensitivity);
         self.orientation = (q * self.orientation).normalize();
     }
 
@@ -368,7 +379,7 @@ mod tests {
 
     #[test]
     fn frame_bbox_centers_and_fits() {
-        let cam = Camera::frame_bbox(Vec3::new(-2.0, 0.0, 1.0), Vec3::new(4.0, 6.0, 3.0));
+        let cam = Camera::frame_bbox(Vec3::new(-2.0, 0.0, 1.0), Vec3::new(4.0, 6.0, 3.0), 0.9);
         assert!((cam.target - Vec3::new(1.0, 3.0, 2.0)).length() < 1e-5);
         // Eye sits `distance` away from the target.
         assert!(((cam.eye() - cam.target).length() - cam.distance).abs() < 1e-4);
@@ -377,10 +388,10 @@ mod tests {
 
     #[test]
     fn orbit_preserves_distance_and_moves_eye() {
-        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
         let eye0 = cam.eye();
         let d0 = cam.distance;
-        cam.orbit(60.0, 25.0);
+        cam.orbit(60.0, 25.0, 1.0);
         assert!((cam.distance - d0).abs() < 1e-6, "orbit must not change zoom");
         assert!((cam.eye() - cam.target).length() > 0.0);
         assert!((cam.eye() - eye0).length() > 1e-3, "eye should move when orbiting");
@@ -388,7 +399,7 @@ mod tests {
 
     #[test]
     fn scroll_zooms_in_and_clamps() {
-        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
         let d0 = cam.distance;
         cam.zoom_scroll(100.0, Vec2::ZERO, 1.0); // wheel up = zoom in = smaller distance
         assert!(cam.distance < d0);
@@ -400,7 +411,7 @@ mod tests {
 
     #[test]
     fn pan_moves_target() {
-        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0));
+        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
         let t0 = cam.target;
         cam.pan(50.0, -30.0, 800.0);
         assert!((cam.target - t0).length() > 1e-4);
@@ -414,7 +425,7 @@ mod tests {
         let aspect = 1.6_f32;
         let ndc = Vec2::new(0.7, -0.4);
         for proj in [Projection::Perspective, Projection::Orthographic] {
-            let mut cam = Camera::frame_bbox(Vec3::splat(-2.0), Vec3::splat(2.0));
+            let mut cam = Camera::frame_bbox(Vec3::splat(-2.0), Vec3::splat(2.0), 0.9);
             cam.orientation = Quat::from_rotation_y(0.6) * Quat::from_rotation_x(0.3);
             cam.projection = proj;
             // World point on the focal (target) plane under the cursor, pre-zoom.

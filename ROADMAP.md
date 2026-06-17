@@ -10,8 +10,8 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - ~~Saving / loading visualization state~~ — **shipped** (M13; see CLAUDE.md *Milestone status*)
 
 ## App & UI
-- App settings
-- Background color selection
+- ~~App settings~~ — **shipped** (M21; settings dialog + persisted config in the platform config dir)
+- ~~Background color selection~~ — **shipped** (M20; solid color or gradient)
 - ~~Selection input improvements~~ — **shipped** (M14; see CLAUDE.md *Milestone status*):
   - ~~Visual errors~~ — erroring span highlighted red in the field (molar caret) + message
   - ~~Suggestions of available chains, residue and index ranges~~ — hint under the field per keyword

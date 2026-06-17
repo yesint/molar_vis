@@ -13,7 +13,7 @@
 use molar::prelude::{Pos, State};
 
 /// How playback behaves at the ends of the trajectory.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum LoopMode {
     /// Stop when an end is reached.
     Once,

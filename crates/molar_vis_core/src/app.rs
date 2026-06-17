@@ -25,6 +25,7 @@ use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::session::{Session, ViewState};
+use crate::settings::{RepDefaults, Settings, ThemeMode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::scene::{MoleculeSource, TrajLoad};
 use crate::suggest::SelHints;
@@ -1067,6 +1068,313 @@ fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
         });
 }
 
+// --- Program-settings dialog: one function per tab (see `App::draw_settings_dialog`). ---
+
+/// Appearance tab: theme mode, UI font scale, accent color.
+fn settings_page_appearance(ui: &mut egui::Ui, s: &mut Settings) {
+    let a = &mut s.appearance;
+    egui::Grid::new("set_appearance")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Theme");
+            egui::ComboBox::from_id_salt("set_theme")
+                .selected_text(a.theme.label())
+                .show_ui(ui, |ui| {
+                    for t in ThemeMode::ALL {
+                        ui.selectable_value(&mut a.theme, t, t.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("UI font scale");
+            slider_with_edit(ui, &mut a.font_scale, 0.7..=1.6, true);
+            ui.end_row();
+
+            ui.label("Accent color");
+            color_submenu(ui, "set_accent", &mut a.accent);
+            ui.end_row();
+        });
+    ui.add_space(4.0);
+    ui.weak("Theme and font scale apply immediately when you press Save.");
+}
+
+/// Rendering tab: anti-aliasing (SSAA) and shadow-map resolution.
+fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
+    let r = &mut s.rendering;
+    let ssaa_label = |n: u32| match n {
+        1 => "Off (1×)",
+        2 => "2× (default)",
+        3 => "3×",
+        4 => "4×",
+        _ => "?",
+    };
+    egui::Grid::new("set_rendering")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Anti-aliasing");
+            egui::ComboBox::from_id_salt("set_ssaa")
+                .selected_text(ssaa_label(r.ssaa))
+                .show_ui(ui, |ui| {
+                    for n in [1u32, 2, 3, 4] {
+                        ui.selectable_value(&mut r.ssaa, n, ssaa_label(n));
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Shadow-map resolution");
+            egui::ComboBox::from_id_salt("set_shadow_res")
+                .selected_text(format!("{}²", r.shadow_res))
+                .show_ui(ui, |ui| {
+                    for n in [1024u32, 2048, 4096] {
+                        ui.selectable_value(&mut r.shadow_res, n, format!("{n}²"));
+                    }
+                });
+            ui.end_row();
+        });
+    ui.add_space(4.0);
+    ui.weak("Supersampling smooths everything but costs ~ssaa² more fragments. The");
+    ui.weak("shadow map only matters when cast shadows are on. Both apply on Save.");
+}
+
+/// View tab: defaults seeded onto a **new** scene's camera (projection, background,
+/// depth cue, AO, shadows). Returns true if "Apply to current view" was clicked.
+fn settings_page_view(ui: &mut egui::Ui, s: &mut Settings) -> bool {
+    let v = &mut s.view;
+    let proj_label = |p: Projection| match p {
+        Projection::Perspective => "Perspective",
+        Projection::Orthographic => "Orthographic",
+    };
+    egui::Grid::new("set_view")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Projection");
+            egui::ComboBox::from_id_salt("set_proj")
+                .selected_text(proj_label(v.projection))
+                .show_ui(ui, |ui| {
+                    for p in [Projection::Orthographic, Projection::Perspective] {
+                        ui.selectable_value(&mut v.projection, p, proj_label(p));
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Frame fill");
+            slider_with_edit(ui, &mut v.fill, 0.5..=1.0, true);
+            ui.end_row();
+        });
+
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Background");
+        ui.radio_value(&mut v.background.kind, BgKind::Solid, "Solid");
+        ui.radio_value(&mut v.background.kind, BgKind::Gradient, "Gradient");
+    });
+    ui.horizontal(|ui| match v.background.kind {
+        BgKind::Solid => {
+            ui.label("Color");
+            color_submenu(ui, "set_bg", &mut v.background.color);
+        }
+        BgKind::Gradient => {
+            ui.label("Top");
+            color_submenu(ui, "set_bg_top", &mut v.background.top);
+            ui.label("Bottom");
+            color_submenu(ui, "set_bg_bot", &mut v.background.bottom);
+        }
+    });
+
+    ui.separator();
+    ui.checkbox(&mut v.depth_cue.enabled, "Depth cue (fog)");
+    let cue_on = v.depth_cue.enabled;
+    egui::Grid::new("set_cue")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.add_enabled(cue_on, egui::Label::new("Falloff"));
+            ui.add_enabled_ui(cue_on, |ui| {
+                egui::ComboBox::from_id_salt("set_cue_mode")
+                    .selected_text(v.depth_cue.mode.label())
+                    .show_ui(ui, |ui| {
+                        for m in CueMode::ALL {
+                            ui.selectable_value(&mut v.depth_cue.mode, m, m.label());
+                        }
+                    });
+            });
+            ui.end_row();
+            ui.add_enabled(cue_on, egui::Label::new("Strength"));
+            slider_with_edit(ui, &mut v.depth_cue.strength, 0.0..=1.0, cue_on);
+            ui.end_row();
+            ui.add_enabled(cue_on, egui::Label::new("Start"));
+            slider_with_edit(ui, &mut v.depth_cue.start, 0.0..=1.0, cue_on);
+            ui.end_row();
+        });
+
+    ui.separator();
+    ui.checkbox(&mut v.ao.enabled, "Ambient occlusion");
+    let ao_on = v.ao.enabled;
+    egui::Grid::new("set_ao")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.add_enabled(ao_on, egui::Label::new("Strength"));
+            slider_with_edit(ui, &mut v.ao.strength, 0.0..=1.0, ao_on);
+            ui.end_row();
+            ui.add_enabled(ao_on, egui::Label::new("Radius (nm)"));
+            slider_with_edit(ui, &mut v.ao.radius, 0.05..=1.5, ao_on);
+            ui.end_row();
+        });
+
+    ui.separator();
+    ui.checkbox(&mut v.shadow.enabled, "Cast shadows");
+    let sh_on = v.shadow.enabled;
+    egui::Grid::new("set_shadow")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.add_enabled(sh_on, egui::Label::new("Strength"));
+            slider_with_edit(ui, &mut v.shadow.strength, 0.0..=1.0, sh_on);
+            ui.end_row();
+        });
+
+    ui.separator();
+    let apply = ui
+        .button("Apply to current view")
+        .on_hover_text("Push these view defaults onto the open scene now (without saving)")
+        .clicked();
+    ui.weak("These seed new scenes; a loaded session keeps its own saved view.");
+    apply
+}
+
+/// Representations tab: the defaults for each newly created representation.
+fn settings_page_reps(ui: &mut egui::Ui, s: &mut Settings) {
+    let r = &mut s.reps;
+    egui::Grid::new("set_reps")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Style");
+            egui::ComboBox::from_id_salt("set_rep_kind")
+                .selected_text(r.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in RepKind::ALL {
+                        ui.selectable_value(&mut r.kind, k, k.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Color");
+            egui::ComboBox::from_id_salt("set_rep_color")
+                .selected_text(r.color.label())
+                .show_ui(ui, |ui| {
+                    for c in ColorMethod::ALL {
+                        ui.selectable_value(&mut r.color, c, c.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Material");
+            egui::ComboBox::from_id_salt("set_rep_material")
+                .selected_text(r.material.label())
+                .show_ui(ui, |ui| {
+                    for m in Material::ALL {
+                        ui.selectable_value(&mut r.material, m, m.label());
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Surface quality");
+            ui.add(egui::DragValue::new(&mut r.surface_quality).range(0..=4));
+            ui.end_row();
+
+            ui.label("Default selection");
+            ui.add(egui::TextEdit::singleline(&mut r.selection).desired_width(220.0));
+            ui.end_row();
+        });
+    ui.add_space(4.0);
+    ui.weak("Used for the first representation of a newly loaded molecule and the");
+    ui.weak("“+ rep” button.");
+}
+
+/// Behavior tab: mouse sensitivity, default pick/selection modes, trajectory
+/// playback, and bond-guessing thresholds.
+fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
+    let b = &mut s.behavior;
+    egui::Grid::new("set_behavior_mouse")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Orbit sensitivity");
+            slider_with_edit(ui, &mut b.orbit_sensitivity, 0.2..=3.0, true);
+            ui.end_row();
+            ui.label("Roll sensitivity");
+            slider_with_edit(ui, &mut b.roll_sensitivity, 0.2..=3.0, true);
+            ui.end_row();
+        });
+
+    ui.separator();
+    egui::Grid::new("set_behavior_pick")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Default pick mode");
+            egui::ComboBox::from_id_salt("set_pick_mode")
+                .selected_text(b.pick_mode.label())
+                .show_ui(ui, |ui| {
+                    for m in [PickMode::Off, PickMode::HoverInfo, PickMode::Lasso] {
+                        ui.selectable_value(&mut b.pick_mode, m, m.label());
+                    }
+                });
+            ui.end_row();
+            ui.label("Default selection scope");
+            egui::ComboBox::from_id_salt("set_sel_mode")
+                .selected_text(b.selection_mode.label())
+                .show_ui(ui, |ui| {
+                    for m in [
+                        SelectionMode::Atoms,
+                        SelectionMode::Residues,
+                        SelectionMode::BoundH,
+                    ] {
+                        ui.selectable_value(&mut b.selection_mode, m, m.label());
+                    }
+                });
+            ui.end_row();
+        });
+
+    ui.separator();
+    egui::Grid::new("set_behavior_traj")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Trajectory FPS");
+            slider_with_edit(ui, &mut b.traj_fps, 1.0..=60.0, true);
+            ui.end_row();
+            ui.label("Loop playback");
+            let mut looping = b.loop_mode == LoopMode::Loop;
+            if ui.checkbox(&mut looping, "").changed() {
+                b.loop_mode = if looping { LoopMode::Loop } else { LoopMode::Once };
+            }
+            ui.end_row();
+        });
+
+    ui.separator();
+    ui.label("Bond detection (next structure loaded)");
+    egui::Grid::new("set_behavior_bonds")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("VDW factor");
+            slider_with_edit(ui, &mut b.bond_factor, 0.3..=1.0, true);
+            ui.end_row();
+            ui.label("Search cutoff (nm)");
+            slider_with_edit(ui, &mut b.bond_search_cutoff, 0.1..=0.5, true);
+            ui.end_row();
+            ui.label("Min distance (nm)");
+            slider_with_edit(ui, &mut b.bond_min_dist, 0.0..=0.1, true);
+            ui.end_row();
+        });
+}
+
 /// The orientation-axes "screen" widget: a monitor-like rectangle showing a mini
 /// downsampled render of the scene, an on/off checkbox in its center, and a corner
 /// radio **outside** each of the four corners (where the gizmo is anchored):
@@ -1427,8 +1735,19 @@ pub struct App {
     renderer: SceneRenderer,
     camera: Camera,
     scene: Scene,
-    /// Style used for the initial representation of each loaded molecule.
-    default_rep: RepKind,
+    /// Persisted program settings (theme, render quality, new-document defaults,
+    /// behavior). Loaded on launch from the platform config dir; edited via the
+    /// settings dialog (see `settings_draft`).
+    settings: Settings,
+    /// Effective defaults for a new representation = `settings.reps`, with the kind
+    /// overridden by the `MOLAR_VIS_DEBUG_REP` env hook. Recomputed when settings
+    /// change. Used for the initial rep of each loaded molecule + the add-rep button.
+    rep_defaults: RepDefaults,
+    /// Working copy of the settings while the settings dialog is open (edit-then-
+    /// apply); `None` when the dialog is closed.
+    settings_draft: Option<Settings>,
+    /// Active tab in the settings dialog.
+    settings_tab: SettingsPage,
     /// Camera at the last 3D render; `None` forces a render.
     last_render_camera: Option<Camera>,
     last_size: [u32; 2],
@@ -1487,6 +1806,12 @@ pub struct App {
     /// than a `Popup` so nested click-to-open dropdowns / color pickers work; closed
     /// manually on a click outside it (see `view_settings_window`).
     view_menu_open: bool,
+    /// The view-settings window's rect **as drawn last frame** — the geometry the user
+    /// actually clicked on. The close-on-click-outside test must use this, not the
+    /// current frame's rect: switching tabs re-lays-out the (right-pivoted) window in
+    /// the *same* frame, so the freshly-narrowed rect no longer covers the leftmost
+    /// tab the click landed on (see `view_settings_window`).
+    view_menu_rect: Option<egui::Rect>,
     /// Browser file-open channel: the async `<input type=file>` picker reads the
     /// chosen file and sends `(filename, bytes)` here; `ui()` drains it and loads
     /// the structure. Cloned per pick; the receiver is polled each frame. Wasm only.
@@ -1513,6 +1838,17 @@ enum ViewTab {
     Camera,
     Lighting,
     Scene,
+}
+
+/// Tabs in the program-settings dialog (the cogwheel modal).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum SettingsPage {
+    #[default]
+    Appearance,
+    Rendering,
+    View,
+    Representations,
+    Behavior,
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
@@ -1589,27 +1925,49 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         launch: AppLaunch,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        crate::theme::apply(&cc.egui_ctx);
+        // Program settings: load from the platform config dir (created with defaults
+        // on first launch). `MOLAR_VIS_DEBUG_DEFAULTS=1` forces built-in defaults
+        // (no file IO) so headless verification is reproducible and never depends on
+        // the dev's saved config. WASM has no filesystem, so it always uses defaults.
+        let settings = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if std::env::var("MOLAR_VIS_DEBUG_DEFAULTS").is_ok() {
+                    Settings::default()
+                } else {
+                    Settings::load_or_create()
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Settings::default()
+            }
+        };
+
+        crate::theme::apply(&cc.egui_ctx, &settings.appearance);
 
         let render_state = cc
             .wgpu_render_state
             .as_ref()
             .ok_or("wgpu render state unavailable (eframe must use the wgpu backend)")?;
-        let renderer = SceneRenderer::new(render_state);
+        let renderer = SceneRenderer::new(render_state, &settings.rendering);
 
-        // VMD's default style for a new molecule is Lines; override for headless
-        // checks with MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines.
-        let default_rep = std::env::var("MOLAR_VIS_DEBUG_REP")
-            .ok()
-            .and_then(|s| RepKind::from_name(&s))
-            .unwrap_or(RepKind::Lines);
+        // New-representation defaults come from the settings; VMD's default style is
+        // Lines. MOLAR_VIS_DEBUG_REP=vdw|licorice|… still overrides the kind for
+        // headless checks.
+        let rep_defaults = Self::effective_rep_defaults(&settings);
+        let bond_params = settings.behavior.bond_params();
 
         let mut scene = Scene::default();
         let mut status = String::new();
         for path in &launch.files {
-            match data::load(path) {
+            match data::load_with(path, &bond_params) {
                 Ok(raw) => {
-                    scene.add(raw, default_rep);
+                    scene.add(raw, &rep_defaults);
+                    if let Some(mol) = scene.molecules.last_mut() {
+                        mol.trajectory.speed_fps = settings.behavior.traj_fps;
+                        mol.trajectory.loop_mode = settings.behavior.loop_mode;
+                    }
                 }
                 Err(e) => {
                     log::error!("{e}");
@@ -1761,12 +2119,15 @@ impl App {
         }
 
         let mut camera = match scene.bbox() {
-            Some((min, max)) => Camera::frame_bbox(min, max),
+            Some((min, max)) => Camera::frame_bbox(min, max, settings.view.fill),
             None => Camera::default(),
         };
+        // Seed the fresh camera with the user's default view (projection, depth-cue,
+        // AO, shadows, background). The debug hooks below override specific fields.
+        settings.view.seed_camera(&mut camera);
         if let Ok(deg) = std::env::var("MOLAR_VIS_DEBUG_ORBIT") {
             if let Ok(d) = deg.parse::<f32>() {
-                camera.orbit(d, d * 0.4);
+                camera.orbit(d, d * 0.4, 1.0);
             }
         }
         if std::env::var("MOLAR_VIS_DEBUG_ORTHO").is_ok() {
@@ -1863,12 +2224,27 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (traj_tx, traj_rx) = std::sync::mpsc::channel::<(MolId, String, Vec<u8>)>();
 
+        // Compute these before the struct init moves `settings` in.
+        let pick_mode = if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
+            PickMode::HoverInfo
+        } else {
+            settings.behavior.pick_mode
+        };
+        let selection_mode = match std::env::var("MOLAR_VIS_DEBUG_SELMODE").as_deref() {
+            Ok("residues") => SelectionMode::Residues,
+            Ok("boundh") => SelectionMode::BoundH,
+            _ => settings.behavior.selection_mode,
+        };
+
         #[allow(unused_mut)]
         let mut app = Self {
             renderer,
             camera,
             scene,
-            default_rep,
+            settings,
+            rep_defaults,
+            settings_draft: None,
+            settings_tab: SettingsPage::default(),
             last_render_camera: None,
             last_size: [0, 0],
             view_dirty: true,
@@ -1881,18 +2257,8 @@ impl App {
             load_dialog: None,
             delete_frames_dialog: None,
             loaders: HashMap::new(),
-            // MOLAR_VIS_DEBUG_PICK forces hover-info on (and picks at the viewport
-            // center each frame; see draw_viewport) for headless verification.
-            pick_mode: if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
-                PickMode::HoverInfo
-            } else {
-                PickMode::default()
-            },
-            selection_mode: match std::env::var("MOLAR_VIS_DEBUG_SELMODE").as_deref() {
-                Ok("residues") => SelectionMode::Residues,
-                Ok("boundh") => SelectionMode::BoundH,
-                _ => SelectionMode::default(),
-            },
+            pick_mode,
+            selection_mode,
             lasso_path: Vec::new(),
             last_lens_ndc: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1903,6 +2269,7 @@ impl App {
             axes_corner: Corner::BottomRight,
             view_tab: ViewTab::default(),
             view_menu_open: std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok(),
+            view_menu_rect: None,
             #[cfg(target_arch = "wasm32")]
             file_tx,
             #[cfg(target_arch = "wasm32")]
@@ -1937,6 +2304,22 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_SETTINGS=1 (or =appearance|rendering|
+        // view|reps|behavior) opens the program-settings modal at the given tab at
+        // startup (it can't be driven by a mouse in a headless run), so each tab can
+        // be screenshot. Pair with MOLAR_VIS_DEBUG_DEFAULTS=1 to keep the shown values
+        // reproducible regardless of the saved config.
+        if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_SETTINGS") {
+            app.settings_draft = Some(app.settings.clone());
+            app.settings_tab = match tab.to_ascii_lowercase().as_str() {
+                "rendering" => SettingsPage::Rendering,
+                "view" => SettingsPage::View,
+                "reps" | "representations" => SettingsPage::Representations,
+                "behavior" => SettingsPage::Behavior,
+                _ => SettingsPage::Appearance,
+            };
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DELFRAMES=1 opens the delete-frames
@@ -2480,7 +2863,7 @@ impl eframe::App for App {
         // delivered (see `pick_file`) as a new molecule.
         #[cfg(target_arch = "wasm32")]
         while let Ok((name, bytes)) = self.file_rx.try_recv() {
-            match data::load_from_bytes(&name, bytes) {
+            match data::load_from_bytes(&name, bytes, &self.settings.behavior.bond_params()) {
                 Ok(raw) => self.add_loaded(raw),
                 Err(e) => {
                     log::error!("{e}");
@@ -2540,6 +2923,7 @@ impl eframe::App for App {
         // The "Load trajectory" / "Delete frames" modals float above everything.
         self.draw_load_dialog(&ctx);
         self.draw_delete_frames_dialog(&ctx);
+        self.draw_settings_dialog(&ctx, frame);
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
         let applied = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {
@@ -2716,6 +3100,7 @@ impl App {
     /// hamburger button itself (`anchor`).
     fn view_settings_window(&mut self, ctx: &egui::Context, anchor: egui::Rect) {
         if !self.view_menu_open {
+            self.view_menu_rect = None;
             return;
         }
         let inner = egui::Window::new("view_settings")
@@ -2725,6 +3110,12 @@ impl App {
             .pivot(egui::Align2::RIGHT_TOP)
             .fixed_pos(anchor.right_bottom() + egui::vec2(0.0, 4.0))
             .show(ctx, |ui| {
+                // A non-resizable window sizes to its content's `min_rect`, so it stays
+                // snug — *provided the content has no width-filling widget*. (A bare
+                // `ui.separator()` fills the available width, which becomes the content
+                // size and made the menu balloon to the screen edge; the tabs use
+                // `Frame::group`s instead, which size to content.) `min_width` is just a
+                // sensible floor so the menu isn't too narrow / jittery across tabs.
                 ui.set_min_width(248.0);
                 tab_bar(
                     ui,
@@ -2742,22 +3133,26 @@ impl App {
                     ViewTab::Scene => self.view_tab_scene(ui),
                 }
             });
-        // Close on a click outside the window — detected by **layer**, not by the
-        // window's `rect` (with `title_bar(false)` that rect doesn't reliably cover
-        // the content, so an in-window click — e.g. switching tabs — read as
-        // "outside" and closed the menu). A click whose top layer is the window's own
-        // layer is inside; a child popup (dropdown / color picker) keeps it open via
-        // `Popup::is_any_open`; clicks on the hamburger (`anchor`) are its own toggle.
+        // Close on a click outside the window. **Test against the rect drawn _last_
+        // frame** (`view_menu_rect`), not this frame's: clicking a tab switches
+        // `view_tab` and `Window::show` immediately re-lays-out the (right-pivoted)
+        // window for the new tab — a narrower tab moves the left edge right, so the
+        // freshly-updated rect (and `layer_id_at`, which reads the same just-updated
+        // area state) no longer covers the leftmost tab the click actually landed on,
+        // and the menu wrongly closed. The previous frame's rect is the geometry the
+        // user saw and clicked. A child popup (dropdown / color picker) keeps it open
+        // via `Popup::is_any_open`; clicks on the hamburger (`anchor`) are its toggle.
         if let Some(inner) = inner {
+            let hit_rect = self.view_menu_rect.unwrap_or(inner.response.rect);
             let clicked = ctx.input(|i| i.pointer.any_click());
             if clicked && !egui::Popup::is_any_open(ctx) {
                 if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
-                    let over_menu = ctx.layer_id_at(p) == Some(inner.response.layer_id);
-                    if !over_menu && !anchor.contains(p) {
+                    if !hit_rect.contains(p) && !anchor.contains(p) {
                         self.view_menu_open = false;
                     }
                 }
             }
+            self.view_menu_rect = Some(inner.response.rect);
         }
     }
 
@@ -2823,36 +3218,42 @@ impl App {
     }
 
     /// Lighting tab: ambient occlusion + cast shadows (both screen-space darkening).
+    /// Each is a `Frame::group` (like the Camera/Scene tabs) — content-sized, so the
+    /// window stays snug; a width-filling `ui.separator()` between them would balloon it.
     fn view_tab_lighting(&mut self, ui: &mut egui::Ui) {
-        let ao = &mut self.camera.ao;
-        ui.checkbox(&mut ao.enabled, "Ambient occlusion")
-            .on_hover_text("Darken creases and contact points (screen-space AO)");
-        ui.add_enabled_ui(ao.enabled, |ui| {
-            egui::Grid::new("ao_opts")
-                .num_columns(2)
-                .spacing(egui::vec2(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.label("Strength");
-                    slider_with_edit(ui, &mut ao.strength, 0.0..=1.0, ao.enabled);
-                    ui.end_row();
-                    ui.label("Radius");
-                    slider_with_edit(ui, &mut ao.radius, 0.1..=1.0, ao.enabled);
-                    ui.end_row();
-                });
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            let ao = &mut self.camera.ao;
+            ui.checkbox(&mut ao.enabled, "Ambient occlusion")
+                .on_hover_text("Darken creases and contact points (screen-space AO)");
+            ui.add_enabled_ui(ao.enabled, |ui| {
+                egui::Grid::new("ao_opts")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label("Strength");
+                        slider_with_edit(ui, &mut ao.strength, 0.0..=1.0, ao.enabled);
+                        ui.end_row();
+                        ui.label("Radius");
+                        slider_with_edit(ui, &mut ao.radius, 0.1..=1.0, ao.enabled);
+                        ui.end_row();
+                    });
+            });
         });
-        ui.separator();
-        let sh = &mut self.camera.shadow;
-        ui.checkbox(&mut sh.enabled, "Cast shadows")
-            .on_hover_text("Real-time directional shadows from a key light (shadow map)");
-        ui.add_enabled_ui(sh.enabled, |ui| {
-            egui::Grid::new("shadow_opts")
-                .num_columns(2)
-                .spacing(egui::vec2(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.label("Strength");
-                    slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
-                    ui.end_row();
-                });
+        ui.add_space(6.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            let sh = &mut self.camera.shadow;
+            ui.checkbox(&mut sh.enabled, "Cast shadows")
+                .on_hover_text("Real-time directional shadows from a key light (shadow map)");
+            ui.add_enabled_ui(sh.enabled, |ui| {
+                egui::Grid::new("shadow_opts")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label("Strength");
+                        slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
+                        ui.end_row();
+                    });
+            });
         });
     }
 
@@ -2981,7 +3382,149 @@ impl App {
             } else {
                 ui.add_enabled(false, egui::Button::new(icon::CARET_DOWN));
             }
+
+            ui.add_space(8.0);
+            ui.separator();
+            // Program settings (cogwheel): open the modal editing a working copy.
+            if ui
+                .button(icon::GEAR_SIX)
+                .on_hover_text("Program settings")
+                .clicked()
+                && self.settings_draft.is_none()
+            {
+                self.settings_draft = Some(self.settings.clone());
+            }
         });
+    }
+
+    /// Effective new-rep defaults: the settings' `reps`, with the kind overridden by
+    /// the `MOLAR_VIS_DEBUG_REP` env hook (headless verification). Recomputed when
+    /// settings change.
+    fn effective_rep_defaults(settings: &Settings) -> RepDefaults {
+        let mut d = settings.reps.clone();
+        if let Some(kind) = std::env::var("MOLAR_VIS_DEBUG_REP")
+            .ok()
+            .and_then(|s| RepKind::from_name(&s))
+        {
+            d.kind = kind;
+        }
+        d
+    }
+
+    /// The program-settings dialog (opened by the toolbar cogwheel). A **free,
+    /// movable `Window`** rather than a centered `Modal`: a Modal re-centers itself
+    /// every frame, so its top edge jumps up/down as the per-tab content height
+    /// changes; a Window keeps its position, and with a **fixed width** it can only
+    /// grow/shrink at the **bottom** (top stays put). Edits a working copy
+    /// (`settings_draft`); **Save** commits + applies + persists, **Cancel** / Escape
+    /// discards. The View tab can push its defaults onto the current camera ("Apply to
+    /// current view") without saving.
+    fn draw_settings_dialog(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let Some(mut draft) = self.settings_draft.take() else {
+            return;
+        };
+        let mut tab = self.settings_tab;
+        let mut save = false;
+        let mut cancel = false;
+        let mut apply_view = false;
+
+        // Open centered horizontally near the top the first time, then keep position
+        // (egui stores it by id). Pivot CENTER_TOP + fixed width ⇒ the top edge is
+        // anchored and tab switches only resize the bottom.
+        let screen = ctx.content_rect();
+        egui::Window::new(format!("{}  Settings", icon::GEAR_SIX))
+            .id(egui::Id::new("settings_window"))
+            .collapsible(false)
+            .resizable(false)
+            .movable(true)
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(egui::pos2(screen.center().x, screen.top() + 48.0))
+            .show(ctx, |ui| {
+                ui.set_width(540.0);
+                tab_bar(
+                    ui,
+                    &mut tab,
+                    &[
+                        (SettingsPage::Appearance, "Appearance"),
+                        (SettingsPage::Rendering, "Rendering"),
+                        (SettingsPage::View, "View"),
+                        (SettingsPage::Representations, "Representations"),
+                        (SettingsPage::Behavior, "Behavior"),
+                    ],
+                );
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(440.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| match tab {
+                        SettingsPage::Appearance => settings_page_appearance(ui, &mut draft),
+                        SettingsPage::Rendering => settings_page_rendering(ui, &mut draft),
+                        SettingsPage::View => apply_view = settings_page_view(ui, &mut draft),
+                        SettingsPage::Representations => settings_page_reps(ui, &mut draft),
+                        SettingsPage::Behavior => settings_page_behavior(ui, &mut draft),
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Restore defaults")
+                        .on_hover_text("Reset every setting to its built-in default (not saved until you press Save)")
+                        .clicked()
+                    {
+                        draft = Settings::default();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Save").clicked() {
+                            save = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            });
+
+        self.settings_tab = tab;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+
+        if save {
+            self.settings = draft;
+            self.apply_settings(ctx, frame);
+        } else if cancel {
+            // Discard the working copy.
+        } else {
+            if apply_view {
+                draft.view.seed_camera(&mut self.camera);
+                self.last_render_camera = None;
+                ctx.request_repaint();
+            }
+            self.settings_draft = Some(draft);
+        }
+    }
+
+    /// Commit `self.settings` to the running app: re-theme, reconfigure the renderer
+    /// (SSAA / shadow map), refresh the new-rep defaults, force a re-render, and
+    /// persist to disk (native). View / representation / behavior defaults are read
+    /// when the next scene/molecule is created, so they need no live action here.
+    fn apply_settings(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::theme::apply(ctx, &self.settings.appearance);
+        if let Some(rs) = frame.wgpu_render_state() {
+            self.renderer.reconfigure(rs, &self.settings.rendering);
+        }
+        self.rep_defaults = Self::effective_rep_defaults(&self.settings);
+        self.last_render_camera = None; // force a re-render at the new quality
+        self.view_dirty = true;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        match self.settings.save() {
+            Ok(()) => self.status = "Settings saved".to_string(),
+            Err(e) => {
+                log::warn!("couldn't save settings: {e}");
+                self.status = format!("Settings applied; save failed: {e}");
+            }
+        }
+        ctx.request_repaint();
     }
 
     /// Loaded molecules. Each is a foldable block: a header row (fold caret, name,
@@ -2992,7 +3535,7 @@ impl App {
             ui.weak(&self.status);
             return false;
         }
-        let default_rep = self.default_rep;
+        let rep_defaults = self.rep_defaults.clone();
         let mut view_dirty = false;
         let mut delete: Option<usize> = None;
         let mut open_load: Option<MolId> = None;
@@ -3085,7 +3628,7 @@ impl App {
                             .on_hover_text("Add representation")
                             .clicked()
                         {
-                            mol.reps.push(Representation::new(default_rep));
+                            mol.reps.push(Representation::from_defaults(&rep_defaults));
                             mol.selected_rep = Some(mol.reps.len() - 1);
                             mol.reps_open = true;
                             view_dirty = true;
@@ -3178,7 +3721,7 @@ impl App {
             else {
                 return;
             };
-            match data::load(&path) {
+            match data::load_with(&path, &self.settings.behavior.bond_params()) {
                 Ok(raw) => self.add_loaded(raw),
                 Err(e) => {
                     log::error!("{e}");
@@ -3204,13 +3747,19 @@ impl App {
     /// picker and the browser byte-loader.
     fn add_loaded(&mut self, raw: data::RawMolecule) {
         let was_empty = self.scene.molecules.is_empty();
-        self.scene.add(raw, self.default_rep);
+        let rep_defaults = self.rep_defaults.clone();
+        self.scene.add(raw, &rep_defaults);
         self.scene.selected_mol = Some(self.scene.molecules.len() - 1);
+        if let Some(mol) = self.scene.molecules.last_mut() {
+            mol.trajectory.speed_fps = self.settings.behavior.traj_fps;
+            mol.trajectory.loop_mode = self.settings.behavior.loop_mode;
+        }
         if was_empty {
+            // First molecule into an empty scene: frame it and seed the user's
+            // default view (projection / background / depth-cue / …).
             if let Some((min, max)) = self.scene.bbox() {
-                let proj = self.camera.projection;
-                self.camera = Camera::frame_bbox(min, max);
-                self.camera.projection = proj;
+                self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
+                self.settings.view.seed_camera(&mut self.camera);
             }
         }
         self.status = format!("{} molecule(s) loaded", self.scene.molecules.len());
@@ -3239,6 +3788,7 @@ impl App {
         self.scene.selected_mol = None;
         self.scene.clamp_selection();
         self.camera = Camera::default();
+        self.settings.view.seed_camera(&mut self.camera);
         self.last_render_camera = None;
         self.history = History::new(EditState::capture(&self.scene));
         self.view_dirty = true;
@@ -3402,19 +3952,19 @@ impl App {
                 ));
                 continue;
             };
-            let raw = match data::load(path) {
+            let raw = match data::load_with(path, &self.settings.behavior.bond_params()) {
                 Ok(r) => r,
                 Err(e) => {
                     errors.push(e);
                     continue;
                 }
             };
-            self.scene.add(raw, self.default_rep);
+            self.scene.add(raw, &self.rep_defaults);
             let mol = self.scene.molecules.last_mut().unwrap();
             mol.visible = ms.visible;
             mol.show_box = ms.show_box;
             mol.box_dirty = true;
-            mol.reps = ms.build_reps(self.default_rep);
+            mol.reps = ms.build_reps(self.rep_defaults.kind);
             mol.selected_rep = (!mol.reps.is_empty()).then_some(0);
 
             // Replay trajectory loads (synchronous: a session load is a discrete
@@ -3466,7 +4016,11 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     pub fn load_demo(&mut self) {
         const DEMO_PDB: &[u8] = include_bytes!("../../../tests/2lao.pdb");
-        match data::load_from_bytes("2lao.pdb", DEMO_PDB.to_vec()) {
+        match data::load_from_bytes(
+            "2lao.pdb",
+            DEMO_PDB.to_vec(),
+            &self.settings.behavior.bond_params(),
+        ) {
             Ok(raw) => self.add_loaded(raw),
             Err(e) => log::error!("demo load failed: {e}"),
         }
@@ -4267,10 +4821,11 @@ impl App {
                         }
                     }
                 } else if shift && !lasso_mode {
-                    self.camera.roll(delta.x);
+                    self.camera.roll(delta.x, self.settings.behavior.roll_sensitivity);
                 } else {
                     // Non-lasso LMB, or Alt+LMB in lasso mode → free orbit.
-                    self.camera.orbit(delta.x, delta.y);
+                    self.camera
+                        .orbit(delta.x, delta.y, self.settings.behavior.orbit_sensitivity);
                 }
             } else if response.dragged_by(egui::PointerButton::Secondary) {
                 if shift {

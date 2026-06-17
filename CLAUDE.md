@@ -65,8 +65,14 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_SAVE_MOL=<path>` (write mol 0 to a structure file at startup — exercises the
   molar `FileHandler` write + displayed-frame swap path headlessly) +
   `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
-  `MOLAR_VIS_DEBUG_TRAJ`). Generate a quick test
-  trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not in git**).
+  `MOLAR_VIS_DEBUG_TRAJ`) +
+  `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|reps|behavior]` (open the program-settings
+  modal at that tab — `=1`/empty = Appearance — so each tab can be screenshot; the dialog can't be
+  mouse-driven headlessly) +
+  `MOLAR_VIS_DEBUG_DEFAULTS=1` (use built-in `Settings::default()` and skip the config-file
+  read/write, so headless runs are reproducible and never touch the dev's saved config). Generate a
+  quick test trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not
+  in git**).
 
 ## Tech stack (working versions)
 
@@ -91,7 +97,9 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 - `app.rs` — `eframe::App`; owns `SceneRenderer`, `Camera`, `Scene`; left panel
   (Scene/Molecules/Representations/Controls) + central viewport; `rebuild_dirty()`
   and the render-skip logic. Holds the `MOLAR_VIS_DEBUG_*` hooks.
-- `theme.rs` — installs the Phosphor icon font + a high-contrast dark style, larger fonts.
+- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font, configures both
+  the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
+  `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
   `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
@@ -173,6 +181,27 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   New) = opening a document, not an undo step.
   `SsAlgorithm` (foreign, no serde) rides a `#[serde(remote)]` shim in `history.rs`; `Camera`
   derives serde via glam's `serde` feature.
+- `settings.rs` — **persistent program settings** (M21). `Settings { format, version, appearance,
+  rendering, view, reps, behavior }`, serialized to JSON in the platform config dir
+  (`directories::ProjectDirs::from("","","molar_vis")` → `~/.config/molar_vis/settings.json` on
+  Linux). These are the launch-time defaults that used to be hardcoded: `AppearanceSettings`
+  (theme mode / font scale / accent — `theme.rs`), `RenderingSettings` (SSAA / shadow-map res —
+  `render.rs`), `ViewDefaults` (projection / depth-cue / AO / shadow / background / fit-fraction,
+  seeded onto a **new** scene's camera via `ViewDefaults::seed_camera`), `RepDefaults` (new-rep
+  style / color / material / selection / surface-quality — `Representation::from_defaults`),
+  `BehaviorSettings` (mouse sensitivity, default pick/selection mode, trajectory fps/loop,
+  bond-guessing thresholds → `data::BondParams`). Same design as `session.rs`: pure data + serde,
+  WASM-safe, every field `#[serde(default)]` with `Default` impls reproducing the **exact** old
+  constants (a fresh config = old behavior); forward/back-compatible. Native IO
+  (`load_or_create`/`save`/`config_path`, `#[cfg(not(wasm))]`) creates the file with defaults on
+  first launch, and on a parse error backs the bad file up to `*.bak` and resets. The browser keeps
+  settings in memory (no filesystem). The dialog UI + apply logic live in `app.rs` (cogwheel
+  button → `draw_settings_dialog`; `apply_settings`); the **app-global** knobs (theme, SSAA, shadow
+  map) apply live on Save, the **new-document defaults** (view/rep/behavior) are read when the next
+  scene/molecule is created and never mutate the open document. The dialog is a **free, movable
+  `egui::Window`** (not a centered `Modal` — a Modal re-centers each frame so its top jumps as the
+  per-tab content height changes; a top-anchored fixed-width Window grows/shrinks only at the
+  **bottom**), closed via Save / Cancel / Escape. 4 round-trip/default/compat tests.
 - `suggest.rs` — **selection-input assistance** for the rep selection field (M14). `SelHints`
   (distinct chains / resnames / names + resid/resindex/index ranges, computed once from the
   static topology and cached per molecule on `App::sel_hints`); `SelHints::hint_for(text)` finds
@@ -435,7 +464,8 @@ sources from) with **New** (`App::new_session` — drop all molecules + reset ca
 empty document), **Save…** (`App::save_session`), **Load…** (`App::load_session`), saving/loading
 the whole visualization state as a JSON session (see `session.rs`) · then
 undo/redo buttons, each with a `▼` dropdown for **cumulative** undo/redo (also Ctrl+Z /
-Ctrl+Shift+Z / Ctrl+Y). Then one **molecule row** each: expand-caret + name + atom count +
+Ctrl+Shift+Z / Ctrl+Y) · then a **settings cogwheel** (`GEAR_SIX`) opening the program-settings
+window (`App::draw_settings_dialog`; see `settings.rs` / M21). Then one **molecule row** each: expand-caret + name + atom count +
 **Load-trajectory** (`FOLDER_OPEN`, left of the name), right-justified **add-rep** ·
 **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` → `Camera::focus_bbox`) · eye · a **per-molecule
 menu** (`LIST` hamburger, replacing the old standalone trash/box buttons): **Save molecule…**
@@ -461,11 +491,15 @@ release `finish_lasso` stages the enclosed atoms as each molecule's **active (pe
 **view-settings hamburger** (`LIST`, right-aligned) — toggles a **`Window`** (`App::view_menu_open`,
 `view_settings_window`; **not** a `Popup` — a Popup's `CloseOnClickOutside` fights the nested
 click-to-open dropdowns/color pickers below, which was the bug), positioned under the button
-(`Align2::RIGHT_TOP` pivot). It **closes on a click outside it** — detected by **layer**
-(`ctx.layer_id_at(p) == inner.response.layer_id`), *not* the window's `rect` (with `title_bar(false)`
-that rect doesn't cover the content, so in-window clicks like switching tabs read as "outside" and
-closed it) — but *not* while a child popup is open (`egui::Popup::is_any_open`) nor when the click is
-on the hamburger itself. Tabs via the shared
+(`Align2::RIGHT_TOP` pivot). It **closes on a click outside it** — tested against the window's rect
+**as drawn the _previous_ frame** (`App::view_menu_rect`), **not** this frame's rect (nor
+`ctx.layer_id_at`, which reads the same just-updated area state). The window is right-pivoted, so
+clicking a tab switches `view_tab` and `Window::show` *immediately* re-lays-out for the new tab in the
+same frame; a narrower tab moves the left edge right, so the freshly-updated rect no longer covers the
+leftmost tab the click landed on → the menu wrongly closed (this fooled an earlier "fix" that swapped
+`rect` for `layer_id_at` — both reflect the post-relayout geometry; the real fix is to test against
+the geometry the user actually clicked, i.e. last frame's rect). Still kept open while a child popup
+is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anchor`). Tabs via the shared
 `tab_bar`: **Camera / Lighting / Scene** (`App::view_tab: ViewTab`), each rendered by
 `view_tab_camera/lighting/scene`:
   - **Camera**: **Projection** two **icon-only** `selectable_label`s (Persp/Ortho glyphs, tooltips;
@@ -822,6 +856,27 @@ History labels via `describe_change` ("edit selection", "change coloring",
   ground plane was attempted here and reverted** — a finite floor quad's near edge is pinned to the
   camera near-clip (`distance − scene_radius`), which recedes on zoom-out (a visible sharp edge); the
   correct model is an *infinite* plane (screen-space ray-plane intersection, no edges). To be redone.
+- ✅ M21 **Program settings + persisted config** — a **settings dialog** (toolbar cogwheel
+  after undo/redo) exposing every knob that used to be hardcoded at launch, persisted to a JSON
+  file in the platform config dir (created with defaults on first launch). `settings.rs` (`Settings`
+  + `AppearanceSettings`/`RenderingSettings`/`ViewDefaults`/`RepDefaults`/`BehaviorSettings`,
+  `ThemeMode`; pure data + serde, WASM-safe, all `#[serde(default)]` — see the module bullet) +
+  `directories` (native-only dep). The five tabs are **Appearance** (theme/font scale/accent),
+  **Rendering** (SSAA / shadow-map res), **View** (projection / background / depth-cue / AO /
+  shadows / fit — *new-scene defaults*, with **Apply to current view**), **Representations**
+  (default style/color/material/selection/surface-quality), **Behavior** (mouse sensitivity /
+  default pick+selection mode / trajectory fps+loop / bond-guessing thresholds). Wiring: the old
+  constants became settings-fed parameters — `theme::apply(&AppearanceSettings)`,
+  `SceneRenderer::new(&RenderingSettings)` + `reconfigure` (SSAA/`shadow_res` are now fields; the
+  shadow PCF texel rides the SSAO uniform's `misc.z`), `Camera` gained a `fill` field +
+  sensitivity-scaled `orbit`/`roll`, `data::load_with(&BondParams)`, `Scene::add(&RepDefaults)` /
+  `Representation::from_defaults`, `Molecule` trajectory fps/loop seeded on load. App-global knobs
+  (theme/AA) apply **live** on Save; new-document defaults are read when the next scene/molecule is
+  created (never mutating the open doc — the View tab's "Apply to current view" is the explicit
+  push). `MOLAR_VIS_DEBUG_SETTINGS=[tab]` opens it headlessly, `MOLAR_VIS_DEBUG_DEFAULTS=1` skips
+  the config file. Existing `MOLAR_VIS_DEBUG_REP/SEL/COLOR/MATERIAL/PICK/SELMODE` still override the
+  settings. Verified: 4 new unit tests (41 total), native+wasm build green, headless screenshots of
+  every tab, and a load→apply round-trip (edited config → Light theme + VDW/Chain default rep).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed
