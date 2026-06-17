@@ -36,6 +36,7 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_REFLECT[=amount]` (enable the reflective ground plane — needs perspective),
   `MOLAR_VIS_DEBUG_PERSP=1` (force perspective projection) +
   `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor` so e.g. the floor comes into frame),
+  `MOLAR_VIS_DEBUG_VIEWMENU=1` (open the view-settings hamburger window at startup),
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
@@ -444,14 +445,16 @@ release `finish_lasso` stages the enclosed atoms as each molecule's **active (pe
 `Off`** — a **`Scope` dropdown** (`Atoms`/`Residues`/`Bound H` — how a hit expands;
 `App::selection_mode`, see `pick::expand_selection`). In Lasso mode the trailing **modifier hint**
 (rotate/add/subtract) follows.
-**view-settings hamburger** (`LIST`, right-aligned) — a **persistent `CloseOnClickOutside` popup**
-(so adjusting sliders/pickers keeps it open) with the shared `tab_bar` tabs **Camera / Lighting /
-Scene** (`App::view_tab: ViewTab`), each rendered by `view_tab_camera/lighting/scene`:
+**view-settings hamburger** (`LIST`, right-aligned) — toggles a **`Window`** (`App::view_menu_open`,
+`view_settings_window`; **not** a `Popup` — a Popup's `CloseOnClickOutside` fights the nested
+click-to-open dropdowns/color pickers below, which was the bug), positioned under the button
+(`Align2::RIGHT_TOP` pivot). It **closes on a click outside it**, but *not* while a child popup is
+open (`egui::Popup::is_any_open`) nor when the click is on the hamburger itself. Tabs via the shared
+`tab_bar`: **Camera / Lighting / Scene** (`App::view_tab: ViewTab`), each rendered by
+`view_tab_camera/lighting/scene`:
   - **Camera**: **Projection** two **icon-only** `selectable_label`s (Persp/Ortho glyphs, tooltips;
     orthographic is the default) + a **Depth cue** group (`egui::Frame::group`): a **Type** dropdown
-    (None / Linear / Exp / Exp²) that **opens on click, downward** — a nested `egui::Popup::menu`
-    (which stays within the parent `CloseOnClickOutside` menu's hierarchy: egui's `is_any_submenu_open`
-    suppresses the parent's close-on-click while a child popup is the deepest-open menu; None ⇄
+    (None / Linear / Exp / Exp²) that **opens on click, downward** (an `egui::Popup::menu`; None ⇄
     `enabled=false`) + **Strength** / **Start** rows, each a `slider_with_edit` (a `Slider` + a
     `DragValue` edit box).
   - **Lighting**: **Ambient occlusion** (enable + Strength/Radius; `Camera::ao`) + **Cast shadows**
@@ -462,7 +465,7 @@ Scene** (`App::view_tab: ViewTab`), each rendered by `view_tab_camera/lighting/s
     translucent backing so it reads over the render), and a corner **radio outside each of the four
     corners** = where the gizmo is anchored (`Corner`, drawn onto the 3D image by `draw_axes_overlay`);
     a **Background** group (Solid/Gradient radios + `color_submenu` swatches — a `Button`-swatch that
-    **opens on click, downward** a nested `Popup::menu` (`CloseOnClickOutside`) with an inline
+    **opens on click, downward** a `Popup::menu` (`CloseOnClickOutside`) with an inline
     `color_picker_color32`, linear↔Color32 via `egui::Rgba` for WYSIWYG; `Camera::background`); a
     **Reflection** `slider_with_edit` (`Camera::reflect`, the reflective ground plane).
 Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered

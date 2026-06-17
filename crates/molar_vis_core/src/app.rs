@@ -1324,6 +1324,10 @@ pub struct App {
     axes_corner: Corner,
     /// Active tab in the top-bar "view settings" (hamburger) menu.
     view_tab: ViewTab,
+    /// Whether the view-settings (hamburger) window is open. A real `Window` rather
+    /// than a `Popup` so nested click-to-open dropdowns / color pickers work; closed
+    /// manually on a click outside it (see `view_settings_window`).
+    view_menu_open: bool,
     /// Browser file-open channel: the async `<input type=file>` picker reads the
     /// chosen file and sends `(filename, bytes)` here; `ui()` drains it and loads
     /// the structure. Cloned per pick; the receiver is polled each frame. Wasm only.
@@ -1741,6 +1745,7 @@ impl App {
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
             axes_corner: Corner::BottomRight,
             view_tab: ViewTab::default(),
+            view_menu_open: std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok(),
             #[cfg(target_arch = "wasm32")]
             file_tx,
             #[cfg(target_arch = "wasm32")]
@@ -2450,35 +2455,68 @@ impl App {
                         }
                     }
 
-                    // — View-settings hamburger (right-aligned) — a persistent tabbed
-                    // menu (Camera / Lighting / Scene) that closes only on a click
-                    // outside, so adjusting sliders / pickers keeps it open.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let resp = overlay_button(ui, icon::LIST, false)
-                            .on_hover_text("View settings (camera, lighting, scene)");
-                        egui::Popup::menu(&resp)
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                            .show(|ui| {
-                                ui.set_min_width(252.0);
-                                tab_bar(
-                                    ui,
-                                    &mut self.view_tab,
-                                    &[
-                                        (ViewTab::Camera, "Camera"),
-                                        (ViewTab::Lighting, "Lighting"),
-                                        (ViewTab::Scene, "Scene"),
-                                    ],
-                                );
-                                ui.add_space(6.0);
-                                match self.view_tab {
-                                    ViewTab::Camera => self.view_tab_camera(ui),
-                                    ViewTab::Lighting => self.view_tab_lighting(ui),
-                                    ViewTab::Scene => self.view_tab_scene(ui),
-                                }
-                            });
-                    });
+                    // — View-settings hamburger (right-aligned) — toggles a tabbed
+                    // Window (Camera / Lighting / Scene). A Window (not a Popup) so
+                    // the nested click-to-open dropdowns / color pickers work; it
+                    // closes on a click outside it (see `view_settings_window`).
+                    let anchor = ui
+                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let resp = overlay_button(ui, icon::LIST, self.view_menu_open)
+                                .on_hover_text("View settings (camera, lighting, scene)");
+                            if resp.clicked() {
+                                self.view_menu_open = !self.view_menu_open;
+                            }
+                            resp.rect
+                        })
+                        .inner;
+                    self.view_settings_window(ui.ctx(), anchor);
                 });
             });
+    }
+
+    /// The view-settings window (Camera / Lighting / Scene tabs), opened from the
+    /// toolbar hamburger. Hosted in a `Window` so nested click-downward dropdowns
+    /// and color pickers behave; closed on a click outside it — but **not** while a
+    /// child popup (a dropdown / color picker) is open, nor when the click is on the
+    /// hamburger button itself (`anchor`).
+    fn view_settings_window(&mut self, ctx: &egui::Context, anchor: egui::Rect) {
+        if !self.view_menu_open {
+            return;
+        }
+        let inner = egui::Window::new("view_settings")
+            .title_bar(false)
+            .resizable(false)
+            .movable(false)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(anchor.right_bottom() + egui::vec2(0.0, 4.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(248.0);
+                tab_bar(
+                    ui,
+                    &mut self.view_tab,
+                    &[
+                        (ViewTab::Camera, "Camera"),
+                        (ViewTab::Lighting, "Lighting"),
+                        (ViewTab::Scene, "Scene"),
+                    ],
+                );
+                ui.add_space(6.0);
+                match self.view_tab {
+                    ViewTab::Camera => self.view_tab_camera(ui),
+                    ViewTab::Lighting => self.view_tab_lighting(ui),
+                    ViewTab::Scene => self.view_tab_scene(ui),
+                }
+            });
+        if let Some(inner) = inner {
+            let clicked = ctx.input(|i| i.pointer.any_click());
+            if clicked && !egui::Popup::is_any_open(ctx) {
+                if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                    if !inner.response.rect.contains(p) && !anchor.contains(p) {
+                        self.view_menu_open = false;
+                    }
+                }
+            }
+        }
     }
 
     /// Camera tab of the view-settings menu: projection + depth cue.
