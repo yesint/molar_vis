@@ -5014,7 +5014,7 @@ impl App {
                             (lx - ndc_x).abs() > 0.004 || (ly - ndc_y).abs() > 0.004
                         });
                         if moved {
-                            const R: f32 = 0.7; // lens radius (nm)
+                            const R: f32 = 0.35; // lens radius (nm)
                             let view = self.camera.view();
                             let proj = self.camera.proj(aspect);
                             let (o, d) = pick::cursor_ray(view, proj, ndc_x, ndc_y);
