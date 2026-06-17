@@ -447,22 +447,28 @@ release `finish_lasso` stages the enclosed atoms as each molecule's **active (pe
 **view-settings hamburger** (`LIST`, right-aligned) — a **persistent `CloseOnClickOutside` popup**
 (so adjusting sliders/pickers keeps it open) with the shared `tab_bar` tabs **Camera / Lighting /
 Scene** (`App::view_tab: ViewTab`), each rendered by `view_tab_camera/lighting/scene`:
-  - **Camera**: **Projection** two `selectable_label`s (Persp/Ortho; orthographic is the default) +
-    a **Depth cue** group (`egui::Frame::group`): a **Type** *dropdown* (None / Linear / Exp / Exp²,
-    a `SubMenu` — robust inside the `CloseOnClickOutside` parent where a bare ComboBox popup would
-    read as an outside-click; None ⇄ `enabled=false`) + **Strength** / **Start** rows, each a
-    `slider_with_edit` (a `Slider` + a `DragValue` edit box).
+  - **Camera**: **Projection** two **icon-only** `selectable_label`s (Persp/Ortho glyphs, tooltips;
+    orthographic is the default) + a **Depth cue** group (`egui::Frame::group`): a **Type** dropdown
+    (None / Linear / Exp / Exp²) that **opens on click, downward** — a nested `egui::Popup::menu`
+    (which stays within the parent `CloseOnClickOutside` menu's hierarchy: egui's `is_any_submenu_open`
+    suppresses the parent's close-on-click while a child popup is the deepest-open menu; None ⇄
+    `enabled=false`) + **Strength** / **Start** rows, each a `slider_with_edit` (a `Slider` + a
+    `DragValue` edit box).
   - **Lighting**: **Ambient occlusion** (enable + Strength/Radius; `Camera::ao`) + **Cast shadows**
     (enable + Strength; `Camera::shadow`).
-  - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`: a framed
-    box, center on/off checkbox, a corner radio in each corner — `Corner`, drawn onto the 3D image by
-    `draw_axes_overlay`); a **Background** group (Solid/Gradient radios + `color_submenu` swatches —
-    a `Button`-swatch opening a `SubMenu` with an inline `color_picker_color32`, linear↔Color32 via
-    `egui::Rgba` for WYSIWYG; `Camera::background`); a **Reflection** `slider_with_edit`
-    (`Camera::reflect`, the reflective ground plane).
-All toolbar buttons use the **same `overlay_button` helper** — a fixed-height framed button whose
-glyph/label is **centered by its ink bounds** (`Galley::mesh_bounds`), not the font line-box, so
-Phosphor glyphs with different metrics line up; dropdowns hang off `egui::Popup::menu(&resp)`.
+  - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`,
+    hand-laid-out: a rectangle showing a **live mini downsampled render of the scene** (the
+    `renderer.texture_id()` painted into the rect), an on/off **checkbox in its center** (on a
+    translucent backing so it reads over the render), and a corner **radio outside each of the four
+    corners** = where the gizmo is anchored (`Corner`, drawn onto the 3D image by `draw_axes_overlay`);
+    a **Background** group (Solid/Gradient radios + `color_submenu` swatches — a `Button`-swatch that
+    **opens on click, downward** a nested `Popup::menu` (`CloseOnClickOutside`) with an inline
+    `color_picker_color32`, linear↔Color32 via `egui::Rgba` for WYSIWYG; `Camera::background`); a
+    **Reflection** `slider_with_edit` (`Camera::reflect`, the reflective ground plane).
+Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered
+by ink bounds** `Galley::mesh_bounds`, not the font line-box); the **`toolbar_label`** helper draws
+the `Sel. mode`/`Scope` labels with the **same ink-centering** so they line up with the buttons next
+to them. Dropdowns hang off `egui::Popup::menu(&resp)`.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):

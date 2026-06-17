@@ -464,6 +464,20 @@ fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> egui::Respo
     resp
 }
 
+/// A plain text label vertically centered the same way `overlay_button` centers its
+/// glyph (by ink bounds, at the toolbar button height) — so a label sitting next to
+/// `overlay_button` dropdowns lines up with them instead of riding high/low.
+fn toolbar_label(ui: &mut egui::Ui, text: &str) {
+    const H: f32 = 26.0;
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let col = ui.visuals().text_color();
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, col);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(galley.size().x, H), egui::Sense::hover());
+    let ink = galley.mesh_bounds;
+    ui.painter()
+        .galley(rect.center() - ink.center().to_vec2(), galley, col);
+}
+
 /// A drawn style-icon + label button that opens a dropdown of style options.
 fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     let color = ui.visuals().text_color();
@@ -874,18 +888,18 @@ fn slider_with_edit(
     });
 }
 
-/// A color "selector": a swatch button that opens a submenu holding a full color
-/// picker. Works inside a `CloseOnClickOutside` menu (a bare popup would read as an
-/// outside click). `c` is linear RGBA 0..1; the picker works in sRGB `Color32`,
-/// converted through `egui::Rgba` so the swatch is WYSIWYG against the rendered bg.
+/// A color "selector": a swatch button that opens (on click, downward) a popup
+/// holding a full color picker. A nested `Popup::menu` so it stays within the parent
+/// `CloseOnClickOutside` menu's hierarchy, and `CloseOnClickOutside` itself so
+/// dragging the picker doesn't dismiss it. `c` is linear RGBA 0..1; the picker works
+/// in sRGB `Color32`, converted through `egui::Rgba` so the swatch is WYSIWYG.
 fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
-    use egui::containers::menu::{MenuConfig, SubMenu};
     let mut col: egui::Color32 =
         egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], 1.0).into();
     let header = ui.add(egui::Button::new("").fill(col).min_size(egui::vec2(30.0, 16.0)));
-    SubMenu::new()
-        .config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
-        .show(ui, &header, |ui| {
+    egui::Popup::menu(&header)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
             if egui::color_picker::color_picker_color32(
                 ui,
                 &mut col,
@@ -897,39 +911,70 @@ fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
         });
 }
 
-/// The orientation-axes "screen" widget: a monitor-like framed box with an on/off
-/// checkbox in the center and a corner radio in each corner (where the gizmo sits).
-fn draw_axes_widget(ui: &mut egui::Ui, on: &mut bool, corner: &mut Corner) {
-    egui::Frame::group(ui.style())
-        .fill(ui.visuals().extreme_bg_color)
-        .show(ui, |ui| {
-            egui::Grid::new("axes_widget_grid")
-                .num_columns(3)
-                .spacing(egui::vec2(26.0, 14.0))
-                .show(ui, |ui| {
-                    let radio = |ui: &mut egui::Ui, c: Corner, enabled: bool, corner: &mut Corner| {
-                        if ui
-                            .add_enabled(enabled, egui::RadioButton::new(*corner == c, ""))
-                            .clicked()
-                        {
-                            *corner = c;
-                        }
-                    };
-                    let en = *on;
-                    radio(ui, Corner::TopLeft, en, corner);
-                    ui.label("");
-                    radio(ui, Corner::TopRight, en, corner);
-                    ui.end_row();
-                    ui.label("");
-                    ui.checkbox(on, "").on_hover_text("Show orientation axes");
-                    ui.label("");
-                    ui.end_row();
-                    radio(ui, Corner::BottomLeft, en, corner);
-                    ui.label("");
-                    radio(ui, Corner::BottomRight, en, corner);
-                    ui.end_row();
-                });
-        });
+/// The orientation-axes "screen" widget: a monitor-like rectangle showing a mini
+/// downsampled render of the scene, an on/off checkbox in its center, and a corner
+/// radio **outside** each of the four corners (where the gizmo is anchored):
+/// ```text
+///   (o)          (o)
+///      +--------+
+///      |  [v]   |
+///      +--------+
+///   (o)          (o)
+/// ```
+fn draw_axes_widget(
+    ui: &mut egui::Ui,
+    on: &mut bool,
+    corner: &mut Corner,
+    scene_tex: Option<egui::TextureId>,
+) {
+    let radio = 18.0;
+    let margin = 22.0;
+    let screen = egui::vec2(128.0, 82.0);
+    let total = egui::vec2(screen.x + 2.0 * margin, screen.y + 2.0 * margin);
+    let (rect, _) = ui.allocate_exact_size(total, egui::Sense::hover());
+    let screen_rect = egui::Rect::from_center_size(rect.center(), screen);
+
+    // The "screen": a mini downsampled render of the scene (last frame), or a dark
+    // fill if no texture is available yet.
+    let painter = ui.painter();
+    painter.rect_filled(screen_rect, 4.0, ui.visuals().extreme_bg_color);
+    if let Some(tex) = scene_tex {
+        painter.image(
+            tex,
+            screen_rect.shrink(2.0),
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+    painter.rect_stroke(
+        screen_rect,
+        4.0,
+        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.fg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+
+    // Corner radios at the widget's four outer corners (outside the screen rect).
+    let h = radio * 0.5;
+    let spots = [
+        (Corner::TopLeft, egui::pos2(rect.left() + h, rect.top() + h)),
+        (Corner::TopRight, egui::pos2(rect.right() - h, rect.top() + h)),
+        (Corner::BottomLeft, egui::pos2(rect.left() + h, rect.bottom() - h)),
+        (Corner::BottomRight, egui::pos2(rect.right() - h, rect.bottom() - h)),
+    ];
+    for (c, pos) in spots {
+        let r = egui::Rect::from_center_size(pos, egui::vec2(radio, radio));
+        if ui.put(r, egui::RadioButton::new(*corner == c, "")).clicked() {
+            *corner = c;
+        }
+    }
+
+    // On/off checkbox in the center of the screen, on a translucent backing so it
+    // stays legible over the mini render.
+    let cb = egui::Rect::from_center_size(screen_rect.center(), egui::vec2(26.0, 24.0));
+    ui.painter()
+        .rect_filled(cb.expand(3.0), 5.0, egui::Color32::from_black_alpha(170));
+    ui.put(cb, egui::Checkbox::new(on, ""))
+        .on_hover_text("Show orientation axes");
 }
 
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -> bool {
@@ -2347,7 +2392,7 @@ impl App {
 
                     // — Selection controls (left) —
                     // Pick/selection-mode dropdown (label + caret). Off by default.
-                    ui.label("Sel. mode");
+                    toolbar_label(ui, "Sel. mode");
                     let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
                     let resp =
                         overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
@@ -2370,7 +2415,7 @@ impl App {
                         } else {
                             &[SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH]
                         };
-                        ui.label("Scope");
+                        toolbar_label(ui, "Scope");
                         let sel_label =
                             format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
                         let resp = overlay_button(ui, &sel_label, false).on_hover_text(
@@ -2442,13 +2487,15 @@ impl App {
         ui.horizontal(|ui| {
             let persp = self.camera.is_perspective();
             if ui
-                .selectable_label(persp, format!("{}  Persp", icon::PERSPECTIVE))
+                .selectable_label(persp, egui::RichText::new(icon::PERSPECTIVE).size(18.0))
+                .on_hover_text("Perspective")
                 .clicked()
             {
                 self.camera.projection = Projection::Perspective;
             }
             if ui
-                .selectable_label(!persp, format!("{}  Ortho", icon::CUBE))
+                .selectable_label(!persp, egui::RichText::new(icon::CUBE).size(18.0))
+                .on_hover_text("Orthographic")
                 .clicked()
             {
                 self.camera.projection = Projection::Orthographic;
@@ -2464,28 +2511,24 @@ impl App {
                 .spacing(egui::vec2(8.0, 6.0))
                 .show(ui, |ui| {
                     ui.label("Type");
-                    // A submenu-based dropdown (None / Linear / Exp / Exp²): robust
-                    // inside the CloseOnClickOutside menu, where a bare ComboBox popup
-                    // would read as an outside click and dismiss the menu.
-                    {
-                        use egui::containers::menu::SubMenu;
-                        let cur = if cue.enabled { cue.mode.label() } else { "None" };
-                        let header = ui.button(format!("{}  {}", cur, icon::CARET_DOWN));
-                        SubMenu::new().show(ui, &header, |ui| {
-                            if ui.selectable_label(!cue.enabled, "None").clicked() {
-                                cue.enabled = false;
+                    // Click-to-open dropdown (opens downward), as a nested menu so it
+                    // stays within the parent CloseOnClickOutside menu's hierarchy.
+                    let cur = if cue.enabled { cue.mode.label() } else { "None" };
+                    let header = ui.button(format!("{}  {}", cur, icon::CARET_DOWN));
+                    egui::Popup::menu(&header).show(|ui| {
+                        if ui.selectable_label(!cue.enabled, "None").clicked() {
+                            cue.enabled = false;
+                            ui.close();
+                        }
+                        for m in CueMode::ALL {
+                            let sel = cue.enabled && cue.mode == m;
+                            if ui.selectable_label(sel, m.label()).clicked() {
+                                cue.enabled = true;
+                                cue.mode = m;
                                 ui.close();
                             }
-                            for m in CueMode::ALL {
-                                let sel = cue.enabled && cue.mode == m;
-                                if ui.selectable_label(sel, m.label()).clicked() {
-                                    cue.enabled = true;
-                                    cue.mode = m;
-                                    ui.close();
-                                }
-                            }
-                        });
-                    }
+                        }
+                    });
                     ui.end_row();
 
                     ui.label("Strength");
@@ -2535,9 +2578,10 @@ impl App {
 
     /// Scene tab: orientation axes, background, reflective ground plane.
     fn view_tab_scene(&mut self, ui: &mut egui::Ui) {
+        let scene_tex = self.renderer.texture_id();
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(egui::RichText::new("Axes").strong());
-            draw_axes_widget(ui, &mut self.axes_on, &mut self.axes_corner);
+            draw_axes_widget(ui, &mut self.axes_on, &mut self.axes_corner, Some(scene_tex));
         });
         ui.add_space(6.0);
 

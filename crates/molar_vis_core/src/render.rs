@@ -1189,10 +1189,30 @@ impl SceneRenderer {
         };
 
         // Reflective floor: a camera mirrored across the view-space plane `y =
-        // floor_y` (the bottom of the molecule) renders the reflection below; the
-        // floor pass then samples it. `floor_y`/`radius` come from `depth_range`.
+        // floor_y` renders the reflection below; the floor pass then samples it.
+        // `floor_y` is the molecule's *actual* bottom in view space (the lowest
+        // bbox corner over visible molecules, minus a small margin for atom radii) —
+        // not the bounding-sphere bottom, which sits far below and pushed the
+        // reflection off-screen at normal zoom.
         let radius = ((depth_range[1] - depth_range[0]) * 0.5).max(0.1);
-        let floor_y = -radius;
+        let floor_y = {
+            let mut min_y = f32::INFINITY;
+            for mol in &scene.molecules {
+                if !mol.visible {
+                    continue;
+                }
+                let (mn, mx) = (mol.bbox_min, mol.bbox_max);
+                for i in 0..8u32 {
+                    let c = Vec3::new(
+                        if i & 1 == 0 { mn.x } else { mx.x },
+                        if i & 2 == 0 { mn.y } else { mx.y },
+                        if i & 4 == 0 { mn.z } else { mx.z },
+                    );
+                    min_y = min_y.min(view.transform_point3(c).y);
+                }
+            }
+            if min_y.is_finite() { min_y - 0.15 } else { -radius }
+        };
         let (reflect_idx, floor_uniform) = if reflect_on {
             let m_reflect = Mat4::from_cols(
                 glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
