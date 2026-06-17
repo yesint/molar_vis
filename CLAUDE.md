@@ -273,16 +273,16 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   in the viewport, picking the molecule with the most atoms in the tube), so it appears **between**
   atoms / in surface dimples too — that's the whole point. A lazily-built, frame/geom-invalidated
   `Molecule::hover_grid` (`AtomGrid`) holds the lens **seed** atoms (which residues the line passes
-  near): **Cartoon → the N–CA–C chain trace** (what the ribbon traces); **Surface → solvent-exposed
-  only** (per-atom SASA `bound.sasa().areas() > 0.01 nm²`, not deep-buried atoms). The query
-  (`AtomGrid::atoms_near_ray_t`, which returns each hit's signed `t` along the ray) keeps only the
-  seeds on the **near (camera-facing) half** along the ray (`t ≤ midpoint` of the hit `t`-range — so
-  the far side no longer bleeds through the cleared-depth overlay), resolves each seed to its residue
-  (`pick::expand_selection` Residues), and emits just that residue's **backbone trace — the N/CA/C
-  atoms, no carbonyl O, no side chains** (so a Surface seed on a side chain still yields its residue's
-  backbone). `build_hover_detail` builds Ball-and-Stick (Element color) and `fade_by_ray` sets each
-  element's alpha by perpendicular distance to the ray (opaque on-axis → 0 at the R-tube radius — the
-  thin trace needs no widening). Stored in `Molecule::hover_detail` / `hover_detail_gpu` (rebuilt in `rebuild_dirty` when
+  near): **Cartoon → the N–CA–C chain trace** (no carbonyl/terminal backbone oxygens — what the ribbon
+  traces); **Surface → solvent-exposed only** (per-atom SASA `bound.sasa().areas() > 0.01 nm²`, not
+  deep-buried atoms). The query (`AtomGrid::atoms_near_ray_t`, which returns each hit's signed `t`
+  along the ray) keeps only the seeds on the **near (camera-facing) half** along the ray (`t ≤
+  midpoint` of the hit `t`-range — so the far side no longer bleeds through the cleared-depth overlay)
+  and **expands them to whole residues** (`pick::expand_selection` Residues), so complete front
+  residues poke through. `build_hover_detail` builds Ball-and-Stick (Element color) and `fade_by_ray`
+  sets each element's alpha by perpendicular distance to the ray (opaque on-axis → 0 at the fade
+  radius, **R·1.8** — widened past the R-tube selection radius so whole residues' side chains stay
+  visible). Stored in `Molecule::hover_detail` / `hover_detail_gpu` (rebuilt in `rebuild_dirty` when
   the cursor moves), drawn last (`draw_hover_detail`, render pass 5) with the opaque pipelines over the
   composite with a **freshly cleared depth** — so it reveals the atoms *over* the ribbon/surface
   (depth-testing the scene would let the opaque geometry occlude the very atoms being exposed) while
