@@ -12,7 +12,7 @@ use molar::prelude::{AtomProvider, ParticleIterProvider, SsAlgorithm, State};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
-use crate::camera::{Camera, CueMode, Projection};
+use crate::camera::{BgKind, Camera, CueMode, Projection};
 use crate::color::ColorMethod;
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
@@ -854,6 +854,84 @@ fn tab_bar<T: Copy + PartialEq>(ui: &mut egui::Ui, current: &mut T, tabs: &[(T, 
     changed
 }
 
+/// A value slider with a numeric edit box beside it (the "[slider] [edit]"
+/// pattern), both bound to the same value; `enabled` greys both out.
+fn slider_with_edit(
+    ui: &mut egui::Ui,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    enabled: bool,
+) {
+    ui.horizontal(|ui| {
+        ui.add_enabled(
+            enabled,
+            egui::Slider::new(v, range.clone()).show_value(false),
+        );
+        ui.add_enabled(
+            enabled,
+            egui::DragValue::new(v).speed(0.01).range(range).fixed_decimals(2),
+        );
+    });
+}
+
+/// A color "selector": a swatch button that opens a submenu holding a full color
+/// picker. Works inside a `CloseOnClickOutside` menu (a bare popup would read as an
+/// outside click). `c` is linear RGBA 0..1; the picker works in sRGB `Color32`,
+/// converted through `egui::Rgba` so the swatch is WYSIWYG against the rendered bg.
+fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
+    use egui::containers::menu::{MenuConfig, SubMenu};
+    let mut col: egui::Color32 =
+        egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], 1.0).into();
+    let header = ui.add(egui::Button::new("").fill(col).min_size(egui::vec2(30.0, 16.0)));
+    SubMenu::new()
+        .config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+        .show(ui, &header, |ui| {
+            if egui::color_picker::color_picker_color32(
+                ui,
+                &mut col,
+                egui::color_picker::Alpha::Opaque,
+            ) {
+                let lin = egui::Rgba::from(col);
+                *c = [lin.r(), lin.g(), lin.b(), 1.0];
+            }
+        });
+}
+
+/// The orientation-axes "screen" widget: a monitor-like framed box with an on/off
+/// checkbox in the center and a corner radio in each corner (where the gizmo sits).
+fn draw_axes_widget(ui: &mut egui::Ui, on: &mut bool, corner: &mut Corner) {
+    egui::Frame::group(ui.style())
+        .fill(ui.visuals().extreme_bg_color)
+        .show(ui, |ui| {
+            egui::Grid::new("axes_widget_grid")
+                .num_columns(3)
+                .spacing(egui::vec2(26.0, 14.0))
+                .show(ui, |ui| {
+                    let radio = |ui: &mut egui::Ui, c: Corner, enabled: bool, corner: &mut Corner| {
+                        if ui
+                            .add_enabled(enabled, egui::RadioButton::new(*corner == c, ""))
+                            .clicked()
+                        {
+                            *corner = c;
+                        }
+                    };
+                    let en = *on;
+                    radio(ui, Corner::TopLeft, en, corner);
+                    ui.label("");
+                    radio(ui, Corner::TopRight, en, corner);
+                    ui.end_row();
+                    ui.label("");
+                    ui.checkbox(on, "").on_hover_text("Show orientation axes");
+                    ui.label("");
+                    ui.end_row();
+                    radio(ui, Corner::BottomLeft, en, corner);
+                    ui.label("");
+                    radio(ui, Corner::BottomRight, en, corner);
+                    ui.end_row();
+                });
+        });
+}
+
 fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -> bool {
     let mut view_dirty = false;
     // The Periodic tab only exists when the molecule has a box; if it was the
@@ -1199,6 +1277,8 @@ pub struct App {
     axes_on: bool,
     /// Which viewport corner the axes gizmo is anchored to.
     axes_corner: Corner,
+    /// Active tab in the top-bar "view settings" (hamburger) menu.
+    view_tab: ViewTab,
     /// Browser file-open channel: the async `<input type=file>` picker reads the
     /// chosen file and sends `(filename, bytes)` here; `ui()` drains it and loads
     /// the structure. Cloned per pick; the receiver is polled each frame. Wasm only.
@@ -1216,6 +1296,15 @@ pub struct App {
     traj_rx: std::sync::mpsc::Receiver<(MolId, String, Vec<u8>)>,
     #[cfg(target_arch = "wasm32")]
     wasm_loaders: HashMap<MolId, data::traj_wasm::TrajStream>,
+}
+
+/// Tabs in the top-bar "view settings" (hamburger) menu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum ViewTab {
+    #[default]
+    Camera,
+    Lighting,
+    Scene,
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
@@ -1475,6 +1564,16 @@ impl App {
         if std::env::var("MOLAR_VIS_DEBUG_ORTHO").is_ok() {
             camera.projection = Projection::Orthographic;
         }
+        if std::env::var("MOLAR_VIS_DEBUG_PERSP").is_ok() {
+            camera.projection = Projection::Perspective;
+        }
+        // Verification hook: MOLAR_VIS_DEBUG_ZOOM=<factor> dollies out (factor > 1)
+        // so e.g. the reflective floor below the molecule comes into frame.
+        if let Ok(f) = std::env::var("MOLAR_VIS_DEBUG_ZOOM") {
+            if let Ok(f) = f.parse::<f32>() {
+                camera.distance *= f.max(0.05);
+            }
+        }
         // Verification hook: MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2 sets the depth-
         // cue falloff curve (and bumps strength so it's visible in a screenshot).
         if let Ok(m) = std::env::var("MOLAR_VIS_DEBUG_CUEMODE") {
@@ -1500,6 +1599,16 @@ impl App {
             if let Ok(s) = v.trim().parse::<f32>() {
                 camera.shadow.strength = s.clamp(0.0, 1.0);
             }
+        }
+        // Verification hook: MOLAR_VIS_DEBUG_BG=gradient sets a gradient background.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_BG") {
+            if v.trim().eq_ignore_ascii_case("gradient") {
+                camera.background.kind = crate::camera::BgKind::Gradient;
+            }
+        }
+        // Verification hook: MOLAR_VIS_DEBUG_REFLECT[=amount] enables the reflective floor.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_REFLECT") {
+            camera.reflect = v.trim().parse::<f32>().unwrap_or(0.6).clamp(0.0, 1.0);
         }
         // Verification hook: MOLAR_VIS_DEBUG_FOCUS=<selection> zooms the camera to
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
@@ -1586,6 +1695,7 @@ impl App {
             last_pick_px: None,
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
             axes_corner: Corner::BottomRight,
+            view_tab: ViewTab::default(),
             #[cfg(target_arch = "wasm32")]
             file_tx,
             #[cfg(target_arch = "wasm32")]
@@ -2235,146 +2345,21 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
 
-                    // — View controls —
-                    // Projection toggle (perspective ↔ orthographic).
-                    let persp = self.camera.is_perspective();
-                    let (glyph, tip) = if persp {
-                        (icon::PERSPECTIVE, "Perspective — click for orthographic")
-                    } else {
-                        (icon::CUBE, "Orthographic — click for perspective")
-                    };
-                    if overlay_button(ui, glyph, false).on_hover_text(tip).clicked() {
-                        self.camera.projection = if persp {
-                            Projection::Orthographic
-                        } else {
-                            Projection::Perspective
-                        };
-                    }
-                    // Depth-cue popup (button filled when the cue is enabled). The
-                    // panel is a popup so the toolbar keeps a fixed height.
-                    let cue_on = self.camera.depth_cue.enabled;
-                    let resp = overlay_button(ui, icon::GRADIENT, cue_on).on_hover_text("Depth cue");
-                    // Stay open while adjusting the controls / switching the mode;
-                    // close only on a click outside (or on the button again).
-                    egui::Popup::menu(&resp)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show(|ui| {
-                            let cue = &mut self.camera.depth_cue;
-                            ui.checkbox(&mut cue.enabled, "Depth cue").on_hover_text(
-                                "Fade distant geometry toward the background for depth perception",
-                            );
-                            ui.add_enabled_ui(cue.enabled, |ui| {
-                                // Falloff curve (VMD cuemode), the app's standard tabs.
-                                tab_bar(ui, &mut cue.mode, &CueMode::ALL.map(|m| (m, m.label())));
-                                ui.add_space(2.0);
-                                egui::Grid::new("depth_cue")
-                                    .num_columns(2)
-                                    .spacing(egui::vec2(8.0, 4.0))
-                                    .show(ui, |ui| {
-                                        ui.label("Strength");
-                                        ui.add(
-                                            egui::Slider::new(&mut cue.strength, 0.0..=1.0)
-                                                .fixed_decimals(2),
-                                        );
-                                        ui.end_row();
-                                        ui.label("Start");
-                                        ui.add(
-                                            egui::Slider::new(&mut cue.start, 0.0..=1.0)
-                                                .fixed_decimals(2),
-                                        );
-                                        ui.end_row();
-                                    });
-                            });
-                        });
-                    // Lighting popup (button filled when AO or shadows are on):
-                    // ambient occlusion + cast shadows, both screen-space darkening
-                    // cues. Like the cue popup, stays open while adjusting.
-                    let lighting_on = self.camera.ao.enabled || self.camera.shadow.enabled;
-                    let resp = overlay_button(ui, icon::CIRCLE_HALF, lighting_on)
-                        .on_hover_text("Ambient occlusion & shadows");
-                    egui::Popup::menu(&resp)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show(|ui| {
-                            let ao = &mut self.camera.ao;
-                            ui.checkbox(&mut ao.enabled, "Ambient occlusion").on_hover_text(
-                                "Darken creases and contact points (screen-space AO)",
-                            );
-                            ui.add_enabled_ui(ao.enabled, |ui| {
-                                egui::Grid::new("ao_opts")
-                                    .num_columns(2)
-                                    .spacing(egui::vec2(8.0, 4.0))
-                                    .show(ui, |ui| {
-                                        ui.label("Strength");
-                                        ui.add(
-                                            egui::Slider::new(&mut ao.strength, 0.0..=1.0)
-                                                .fixed_decimals(2),
-                                        );
-                                        ui.end_row();
-                                        ui.label("Radius");
-                                        ui.add(
-                                            egui::Slider::new(&mut ao.radius, 0.1..=1.0)
-                                                .suffix(" nm")
-                                                .fixed_decimals(2),
-                                        );
-                                        ui.end_row();
-                                    });
-                            });
-                            ui.separator();
-                            let sh = &mut self.camera.shadow;
-                            ui.checkbox(&mut sh.enabled, "Cast shadows").on_hover_text(
-                                "Real-time directional shadows from a key light (shadow map)",
-                            );
-                            ui.add_enabled_ui(sh.enabled, |ui| {
-                                egui::Grid::new("shadow_opts")
-                                    .num_columns(2)
-                                    .spacing(egui::vec2(8.0, 4.0))
-                                    .show(ui, |ui| {
-                                        ui.label("Strength");
-                                        ui.add(
-                                            egui::Slider::new(&mut sh.strength, 0.0..=1.0)
-                                                .fixed_decimals(2),
-                                        );
-                                        ui.end_row();
-                                    });
-                            });
-                        });
-                    // Orientation-axes dropdown: on/off + which corner.
-                    let resp = overlay_button(ui, icon::ARROWS_OUT_CARDINAL, self.axes_on)
-                        .on_hover_text("Orientation axes");
-                    egui::Popup::menu(&resp).show(|ui| {
-                        ui.checkbox(&mut self.axes_on, "On");
-                        ui.add_enabled_ui(self.axes_on, |ui| {
-                            ui.add_space(2.0);
-                            // 2×2 of corner radio buttons (top row, bottom row).
-                            egui::Grid::new("axes_corner")
-                                .spacing(egui::vec2(18.0, 6.0))
-                                .show(ui, |ui| {
-                                    ui.radio_value(&mut self.axes_corner, Corner::TopLeft, "");
-                                    ui.radio_value(&mut self.axes_corner, Corner::TopRight, "");
-                                    ui.end_row();
-                                    ui.radio_value(&mut self.axes_corner, Corner::BottomLeft, "");
-                                    ui.radio_value(&mut self.axes_corner, Corner::BottomRight, "");
-                                    ui.end_row();
-                                });
-                        });
-                    });
-
-                    ui.separator();
-
-                    // — Selection controls —
+                    // — Selection controls (left) —
                     // Pick/selection-mode dropdown (label + caret). Off by default.
                     ui.label("Sel. mode");
                     let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
-                    let resp = overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
+                    let resp =
+                        overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
                     egui::Popup::menu(&resp).show(|ui| {
                         for m in [PickMode::Off, PickMode::HoverInfo, PickMode::Lasso] {
                             ui.selectable_value(&mut self.pick_mode, m, m.label());
                         }
                     });
-                    // Expand-mode dropdown (how a hit expands: Atoms / Residues / Bound H).
-                    // Only relevant when picking is on, so it's hidden while pick mode is
-                    // Off. `Bound H` is meaningless for single-atom hover, so it's hidden
-                    // in HoverInfo (and a stale value snaps back to Atoms).
+                    // Scope dropdown (how a hit expands: Atoms / Residues / Bound H).
+                    // Only relevant when picking is on, so hidden while pick mode is Off.
+                    // `Bound H` is meaningless for single-atom hover, so hidden in
+                    // HoverInfo (and a stale value snaps back to Atoms).
                     if self.pick_mode != PickMode::Off {
                         let hover = self.pick_mode == PickMode::HoverInfo;
                         if hover && self.selection_mode == SelectionMode::BoundH {
@@ -2385,10 +2370,11 @@ impl App {
                         } else {
                             &[SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH]
                         };
+                        ui.label("Scope");
                         let sel_label =
                             format!("{}  {}", self.selection_mode.label(), icon::CARET_DOWN);
                         let resp = overlay_button(ui, &sel_label, false).on_hover_text(
-                            "Expand mode — how a hit expands:\n\
+                            "Scope — how a hit expands:\n\
                              Atoms (exact) · Residues (whole) · Bound H (heavy + bonded H, lasso only)",
                         );
                         egui::Popup::menu(&resp).show(|ui| {
@@ -2399,8 +2385,8 @@ impl App {
                     }
 
                     // In Lasso mode, a held modifier changes the set operation (or, for
-                    // Alt, orbits the view) — trail the hint on the right (matches
-                    // `finish_lasso`'s `LassoOp` and `draw_viewport`'s Alt orbit).
+                    // Alt, orbits the view) — trail the hint (matches `finish_lasso`'s
+                    // `LassoOp` and `draw_viewport`'s Alt orbit).
                     if self.pick_mode == PickMode::Lasso {
                         let m = ui.input(|i| i.modifiers);
                         let hint = if m.alt {
@@ -2418,8 +2404,176 @@ impl App {
                             ui.colored_label(color, text);
                         }
                     }
+
+                    // — View-settings hamburger (right-aligned) — a persistent tabbed
+                    // menu (Camera / Lighting / Scene) that closes only on a click
+                    // outside, so adjusting sliders / pickers keeps it open.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let resp = overlay_button(ui, icon::LIST, false)
+                            .on_hover_text("View settings (camera, lighting, scene)");
+                        egui::Popup::menu(&resp)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                ui.set_min_width(252.0);
+                                tab_bar(
+                                    ui,
+                                    &mut self.view_tab,
+                                    &[
+                                        (ViewTab::Camera, "Camera"),
+                                        (ViewTab::Lighting, "Lighting"),
+                                        (ViewTab::Scene, "Scene"),
+                                    ],
+                                );
+                                ui.add_space(6.0);
+                                match self.view_tab {
+                                    ViewTab::Camera => self.view_tab_camera(ui),
+                                    ViewTab::Lighting => self.view_tab_lighting(ui),
+                                    ViewTab::Scene => self.view_tab_scene(ui),
+                                }
+                            });
+                    });
                 });
             });
+    }
+
+    /// Camera tab of the view-settings menu: projection + depth cue.
+    fn view_tab_camera(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Projection").strong());
+        ui.horizontal(|ui| {
+            let persp = self.camera.is_perspective();
+            if ui
+                .selectable_label(persp, format!("{}  Persp", icon::PERSPECTIVE))
+                .clicked()
+            {
+                self.camera.projection = Projection::Perspective;
+            }
+            if ui
+                .selectable_label(!persp, format!("{}  Ortho", icon::CUBE))
+                .clicked()
+            {
+                self.camera.projection = Projection::Orthographic;
+            }
+        });
+        ui.add_space(6.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(egui::RichText::new("Depth cue").strong());
+            let cue = &mut self.camera.depth_cue;
+            egui::Grid::new("cue_grid")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label("Type");
+                    // A submenu-based dropdown (None / Linear / Exp / Exp²): robust
+                    // inside the CloseOnClickOutside menu, where a bare ComboBox popup
+                    // would read as an outside click and dismiss the menu.
+                    {
+                        use egui::containers::menu::SubMenu;
+                        let cur = if cue.enabled { cue.mode.label() } else { "None" };
+                        let header = ui.button(format!("{}  {}", cur, icon::CARET_DOWN));
+                        SubMenu::new().show(ui, &header, |ui| {
+                            if ui.selectable_label(!cue.enabled, "None").clicked() {
+                                cue.enabled = false;
+                                ui.close();
+                            }
+                            for m in CueMode::ALL {
+                                let sel = cue.enabled && cue.mode == m;
+                                if ui.selectable_label(sel, m.label()).clicked() {
+                                    cue.enabled = true;
+                                    cue.mode = m;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    ui.end_row();
+
+                    ui.label("Strength");
+                    slider_with_edit(ui, &mut cue.strength, 0.0..=1.0, cue.enabled);
+                    ui.end_row();
+
+                    ui.label("Start");
+                    slider_with_edit(ui, &mut cue.start, 0.0..=1.0, cue.enabled);
+                    ui.end_row();
+                });
+        });
+    }
+
+    /// Lighting tab: ambient occlusion + cast shadows (both screen-space darkening).
+    fn view_tab_lighting(&mut self, ui: &mut egui::Ui) {
+        let ao = &mut self.camera.ao;
+        ui.checkbox(&mut ao.enabled, "Ambient occlusion")
+            .on_hover_text("Darken creases and contact points (screen-space AO)");
+        ui.add_enabled_ui(ao.enabled, |ui| {
+            egui::Grid::new("ao_opts")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.label("Strength");
+                    slider_with_edit(ui, &mut ao.strength, 0.0..=1.0, ao.enabled);
+                    ui.end_row();
+                    ui.label("Radius");
+                    slider_with_edit(ui, &mut ao.radius, 0.1..=1.0, ao.enabled);
+                    ui.end_row();
+                });
+        });
+        ui.separator();
+        let sh = &mut self.camera.shadow;
+        ui.checkbox(&mut sh.enabled, "Cast shadows")
+            .on_hover_text("Real-time directional shadows from a key light (shadow map)");
+        ui.add_enabled_ui(sh.enabled, |ui| {
+            egui::Grid::new("shadow_opts")
+                .num_columns(2)
+                .spacing(egui::vec2(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.label("Strength");
+                    slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
+                    ui.end_row();
+                });
+        });
+    }
+
+    /// Scene tab: orientation axes, background, reflective ground plane.
+    fn view_tab_scene(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(egui::RichText::new("Axes").strong());
+            draw_axes_widget(ui, &mut self.axes_on, &mut self.axes_corner);
+        });
+        ui.add_space(6.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(egui::RichText::new("Background").strong());
+            let bg = &mut self.camera.background;
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut bg.kind, BgKind::Solid, "Solid color");
+                color_submenu(ui, "bg_solid", &mut bg.color);
+            });
+            ui.radio_value(&mut bg.kind, BgKind::Gradient, "Gradient");
+            let grad = bg.kind == BgKind::Gradient;
+            ui.add_enabled_ui(grad, |ui| {
+                egui::Grid::new("bg_grad")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label("Top");
+                        color_submenu(ui, "bg_top", &mut bg.top);
+                        ui.end_row();
+                        ui.label("Bottom");
+                        color_submenu(ui, "bg_bottom", &mut bg.bottom);
+                        ui.end_row();
+                    });
+            });
+        });
+        ui.add_space(6.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.label(egui::RichText::new("Reflection").strong());
+            ui.horizontal(|ui| {
+                slider_with_edit(ui, &mut self.camera.reflect, 0.0..=1.0, true);
+            });
+        })
+        .response
+        .on_hover_text("Reflective ground plane below the molecule (0 = off)");
     }
 
     /// Undo/redo buttons, each with a dropdown listing the named actions on the
@@ -3870,6 +4024,8 @@ impl App {
                     self.camera.cue_uniform(),
                     self.camera.ao_uniform(),
                     self.camera.shadow_uniform(),
+                    self.camera.background,
+                    self.camera.reflect,
                     self.camera.eye_depth_range(),
                     glow_pulse,
                     &self.scene,

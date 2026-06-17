@@ -95,6 +95,65 @@ impl Default for Shadow {
     }
 }
 
+/// Viewport background: a flat color or a vertical (top→bottom) gradient. Drives
+/// the clear color, the gradient pass, and the depth-cue fog target (geometry
+/// fades toward the background as it recedes).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BgKind {
+    Solid,
+    Gradient,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Background {
+    pub kind: BgKind,
+    /// Solid color (the gradient is ignored when `kind == Solid`).
+    pub color: [f32; 4],
+    /// Gradient endpoints (screen top / bottom).
+    pub top: [f32; 4],
+    pub bottom: [f32; 4],
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        // The previous hardcoded near-black `BG`, plus a subtle blue gradient preset.
+        Self {
+            kind: BgKind::Solid,
+            color: [0.02, 0.02, 0.05, 1.0],
+            top: [0.11, 0.13, 0.20, 1.0],
+            bottom: [0.01, 0.01, 0.02, 1.0],
+        }
+    }
+}
+
+impl Background {
+    /// Color depth-cue fog fades geometry toward (the solid color, or the
+    /// gradient's midpoint).
+    pub fn fog_color(&self) -> [f32; 4] {
+        match self.kind {
+            BgKind::Solid => self.color,
+            BgKind::Gradient => [
+                (self.top[0] + self.bottom[0]) * 0.5,
+                (self.top[1] + self.bottom[1]) * 0.5,
+                (self.top[2] + self.bottom[2]) * 0.5,
+                1.0,
+            ],
+        }
+    }
+
+    /// Clear color for the color target (the gradient pass overwrites it when on).
+    pub fn clear_color(&self) -> [f32; 4] {
+        match self.kind {
+            BgKind::Solid => self.color,
+            BgKind::Gradient => self.bottom,
+        }
+    }
+
+    pub fn is_gradient(&self) -> bool {
+        matches!(self.kind, BgKind::Gradient)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     /// Point the camera looks at (pannable).
@@ -115,6 +174,13 @@ pub struct Camera {
     /// Real-time cast shadows (shadow mapping).
     #[serde(default)]
     pub shadow: Shadow,
+    /// Viewport background (solid color or gradient).
+    #[serde(default)]
+    pub background: Background,
+    /// Reflective ground-plane strength (0 = off). Mirrors the scene into a floor
+    /// below the molecule.
+    #[serde(default)]
+    pub reflect: f32,
 }
 
 impl Default for Camera {
@@ -149,6 +215,8 @@ impl Camera {
             depth_cue: DepthCue::default(),
             ao: Ao::default(),
             shadow: Shadow::default(),
+            background: Background::default(),
+            reflect: 0.0,
         }
     }
 

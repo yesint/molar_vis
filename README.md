@@ -66,10 +66,11 @@ with **Surface Nets** for a watertight, smooth mesh — no fragile analytic patc
 Per-rep **probe radius**, **grid resolution** and **smoothing** controls; scales to 100k+
 atoms. (molar's PowerSASA backend also exposes exact SASA areas + analytic SAS/SES meshes.)
 
-**Materials** — eight VMD-style presets (Opaque, Transparent, Glass, Translucent, Ghost,
-Glossy, Diffuse, Metal): per-rep ambient/diffuse/specular/shininess (Blinn-Phong) plus
-**opacity**, with **order-independent transparency** (weighted-blended OIT) so overlapping
-translucent surfaces blend correctly without sorting.
+**Materials** — eleven VMD-style presets (Opaque, Transparent, Glass, Translucent, Ghost,
+Glossy, Diffuse, Metal, and the ambient-occlusion trio AOChalky / AOShiny / AOEdgy): per-rep
+ambient / diffuse / specular / shininess (Blinn-Phong) plus **opacity** and a silhouette
+**outline** (AOEdgy), with **order-independent transparency** (weighted-blended OIT) so
+overlapping translucent surfaces blend correctly without sorting.
 
 **Trajectories** (native) — load multi-frame trajectories (xtc/trr/dcd/gro/multi-MODEL pdb)
 into a molecule with a VMD-style playback bar (first / step / play-pause / step / last,
@@ -84,10 +85,22 @@ icon in the picker.
 `water`, `name CA`, `resid 1:50`, `chain A`, `within 5.0 of ...`, and much more.
 Selections are compiled once and re-evaluated only when needed.
 
+**Rendering options** — collected in the **view-settings menu** (the hamburger on the right of
+the top bar, with **Camera / Lighting / Scene** tabs):
+- **Projection** — perspective or orthographic (orthographic is the default).
+- **Depth cueing** (fog) — fades distant geometry toward the background, with three VMD-style
+  falloff curves: **Linear**, **Exp**, **Exp²** (plus *None*), and Strength / Start controls.
+- **Ambient occlusion** (SSAO) — a screen-space pass that darkens creases and contact points.
+- **Cast shadows** — real-time directional shadows from a key light (shadow mapping), applied
+  deferred so they cost one extra geometry pass.
+- **Background** — a flat color or a vertical **gradient** (top / bottom color pickers).
+- **Reflective ground plane** — the molecule mirrored into a floor below it (perspective only).
+- **Orientation axes** gizmo (VMD-style), in any viewport corner.
+- **Anti-aliasing** — 2× supersampling (smooths the ray-cast impostor silhouettes that MSAA
+  can't touch), with idle frames costing **zero GPU**.
+
 **Camera & display**
-- Quaternion arcball camera with VMD mouse mapping (rotate / roll / pan / dolly / zoom).
-- **Perspective and orthographic** projection (orthographic is the default), and adjustable
-  **depth cueing** (linear fog) — both in a small overlay panel over the viewport.
+- Quaternion arcball camera with VMD mouse mapping (rotate / roll / pan / dolly / zoom-to-cursor).
 - Zoom-to-selection and zoom-to-molecule; per-molecule periodic-box wireframe.
 
 **Scene**
