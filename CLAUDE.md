@@ -30,6 +30,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`,
   `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2` (set the depth-cue falloff curve + bump strength so it
   shows in a screenshot),
+  `MOLAR_VIS_DEBUG_AO[=strength]` (enable screen-space ambient occlusion),
+  `MOLAR_VIS_DEBUG_SHADOW[=strength]` (enable real-time cast shadows),
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
@@ -275,6 +277,28 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   WebGPU** (`ssao_pipeline: Option`, built only when `oit_enabled`): WebGL2 can't reliably sample
   the depth texture, so it skips SSAO rather than risk a startup shader-compile failure. Works on
   both impostors (VDW) and meshes (surface/cartoon). `MOLAR_VIS_DEBUG_AO[=strength]` enables it.
+- **Cast shadows (real-time shadow mapping, deferred)** — VMD's ray-traced shadows, but real-time.
+  An extra **shadow pass** (pass 0, before opaque, only when `Camera::shadow.enabled`) renders the
+  opaque geometry from a **key light** into a fixed `2048²` `Depth32Float` shadow map
+  (`shadow_depth_view`); a throwaway color target (`shadow_color_view`) lets us **reuse the existing
+  opaque pipelines** for the depth fill (impostors compute correct light-space analytic `frag_depth`
+  because the light camera is just another `CameraUniform` entry — ortho, `perspective=false` — so
+  **no depth-only pipeline variants are needed**; `draw_shadow_casters` draws spheres/cylinders/mesh
+  only — lines/box don't cast). The light is directional (`SHADOW_LIGHT_DIR_VIEW`, a view-space
+  upper-right key off the view axis so shadows fall on camera-visible surfaces — a near-camera
+  headlight would hide them); its **orthographic frustum is fit to the scene's bounding sphere**,
+  recovered from `view` + `depth_range`. The shadow is then applied **deferred in the AO pass**: the
+  SSAO shader already reconstructs each pixel's view-space position, so it also projects it to the
+  light's clip space (`shadow_matrix = light_proj·light_view·inv_view`, carried in `SsaoUniform`),
+  does a 3×3 PCF `textureSampleCompareLevel` against the shadow map, and folds the result into the
+  same multiply-blend (`output = ao × shadow_factor`). So **no lit-shader changes and no new
+  pipelines** — one extra geometry pass + a shadow sample in the existing fullscreen pass. The AO
+  pass now runs when *either* AO or shadows are on (AO strength 0 when AO is off). `Camera::shadow`
+  (`Shadow { enabled, strength }`, off by default, serialized) → `shadow_uniform` = `[strength,
+  bias, enabled, _]`. **Gated to full WebGPU** like SSAO (shares `ssao_pipeline`; WebGL2 skips it).
+  Periodic images aren't baked into the shadow map (rare combo), so they may be mis-shadowed.
+  `MOLAR_VIS_DEBUG_SHADOW[=strength]` enables it. Verified on VDW (impostors) + surface (mesh),
+  alone and combined with AO.
 - **Scene graph** — N molecules × M reps. Each rep has a molar **selection string**
   compiled to atom indices (`compile_selection` → `system.select`). Geometry is built
   only for selected atoms (and bonds whose endpoints are both selected).
@@ -392,8 +416,9 @@ Two groups split by a `ui.separator()`:
 is enabled) opening a `Popup::menu` cue panel (enabled + **mode tabs** Linear/Exp/Exp² via the
 shared `tab_bar` + Strength/Start sliders — a popup, so the toolbar stays fixed-height; the popup
 is **`CloseOnClickOutside`** so adjusting sliders / switching mode keeps it open), an
-**ambient-occlusion** button (`CIRCLE_HALF`, filled when AO is on) opening a `CloseOnClickOutside`
-popup (enable + Strength/Radius sliders; `Camera::ao`), and an
+**lighting** button (`CIRCLE_HALF`, filled when AO **or** shadows are on) opening a
+`CloseOnClickOutside` popup with two separator-split sections — **Ambient occlusion** (enable +
+Strength/Radius; `Camera::ao`) and **Cast shadows** (enable + Strength; `Camera::shadow`), and an
 **axes-gizmo dropdown** (`ARROWS_OUT_CARDINAL`: an *On*
 checkbox + a 2×2 corner-radio grid `Corner {TopLeft,TopRight,BottomLeft,BottomRight}`, default
 BottomRight — VMD-style orientation axes drawn onto the 3D image by `draw_axes_overlay`;
@@ -720,6 +745,16 @@ History labels via `describe_change` ("edit selection", "change coloring",
   target; `Camera::ao` settings + a top-toolbar AO popup; gated to full WebGPU (skipped on WebGL2).
   See the *Ambient occlusion (SSAO)* architecture note. Verified: WGSL compiles, crevices darken on
   VDW (impostors) and surface (mesh), no startup regression. 30 tests pass.
+- ✅ M19 **Real-time cast shadows (shadow mapping)** — VMD has ray-traced shadows; this is the
+  cheap real-time equivalent, done **deferred** so it costs one extra geometry pass and **no
+  lit-shader changes / no new pipelines**. A shadow pass renders the opaque geometry from a
+  directional key light into a `2048²` depth map (reusing the opaque pipelines via a light-space
+  `CameraUniform` entry — impostors self-compute light-space depth); the SSAO pass then projects
+  each pixel into light space (`shadow_matrix` in `SsaoUniform`) and PCF-samples the map, folding
+  the shadow into its multiply blend (`ao × shadow`). `Camera::shadow` (`Shadow { enabled,
+  strength }`, off, serialized) + the shared lighting popup (AO + shadows) + `MOLAR_VIS_DEBUG_SHADOW`.
+  Gated to full WebGPU like SSAO. See the *Cast shadows* architecture note. Verified on VDW + surface,
+  alone and combined with AO; 30 tests pass.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

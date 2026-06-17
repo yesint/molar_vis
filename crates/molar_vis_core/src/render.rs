@@ -60,6 +60,18 @@ const CAMERA_STRIDE: u64 = 256;
 /// size so fat-line pixel widths come out correct after the downsample.
 const SSAA: u32 = 2;
 
+/// Resolution of the cast-shadow depth map (square). Fixed (light-space), so it
+/// doesn't track the viewport; 2048² is ample for the molecular scale and the 3×3
+/// PCF. Must match the `texel = 1/2048` in `ssao.wgsl`.
+const SHADOW_RES: u32 = 2048;
+
+/// View-space direction **toward** the key light used for cast shadows. Off the
+/// view axis (upper-right, moderately toward the camera) so shadows fall on
+/// surfaces the camera can see — a near-camera headlight would hide them behind
+/// the geometry that casts them. (The diffuse headlight in the lit shaders is a
+/// separate, flatter fill; this is the shadow-casting key.)
+const SHADOW_LIGHT_DIR_VIEW: glam::Vec3 = glam::Vec3::new(0.45, 0.78, 0.45);
+
 /// Bind-group binding size for one camera entry (the actual `CameraUniform`).
 fn camera_binding_size() -> Option<std::num::NonZeroU64> {
     std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
@@ -92,6 +104,8 @@ fn make_ssao_bind_group(
     bgl: &wgpu::BindGroupLayout,
     depth_view: &wgpu::TextureView,
     buf: &wgpu::Buffer,
+    shadow_view: &wgpu::TextureView,
+    shadow_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ssao-bg"),
@@ -104,6 +118,14 @@ fn make_ssao_bind_group(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(shadow_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(shadow_sampler),
             },
         ],
     })
@@ -434,6 +456,16 @@ pub struct SceneRenderer {
     /// depth texture isn't reliable there); the pass is then skipped.
     ssao_pipeline: Option<wgpu::RenderPipeline>,
     ssao_bind_group: wgpu::BindGroup,
+    /// Cast-shadow mapping (deferred): the scene is rendered from a key light into
+    /// `shadow_depth_view` (a fixed-resolution depth map; `shadow_color_view` is a
+    /// throwaway color target so the existing opaque pipelines can be reused for the
+    /// depth-only render), then the AO pass samples it with `shadow_sampler` (a
+    /// comparison sampler) to darken shadowed pixels. Gated to full WebGPU like SSAO.
+    shadow_depth_view: wgpu::TextureView,
+    shadow_color_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    _shadow_depth_tex: wgpu::Texture,
+    _shadow_color_tex: wgpu::Texture,
     /// Whether the device supports weighted-blended OIT (needs `INDEPENDENT_BLEND`).
     /// False on WebGL2: transparent reps then render with plain alpha blending in the
     /// opaque pass, and the OIT/composite passes are skipped.
@@ -641,9 +673,55 @@ impl SceneRenderer {
             mapped_at_creation: false,
         });
 
+        // Cast-shadow map: a fixed-resolution depth target rendered from the light,
+        // plus a throwaway color target (so the opaque pipelines, which output color,
+        // can be reused to fill it) and a comparison sampler for the PCF lookup.
+        let shadow_extent = wgpu::Extent3d {
+            width: SHADOW_RES,
+            height: SHADOW_RES,
+            depth_or_array_layers: 1,
+        };
+        let _shadow_depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow-depth"),
+            size: shadow_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let _shadow_color_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow-color-throwaway"),
+            size: shadow_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let shadow_depth_view =
+            _shadow_depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_color_view =
+            _shadow_color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow-cmp-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
         let targets = Targets::new(device, color_format, &oit_bgl, [1, 1]);
-        let ssao_bind_group =
-            make_ssao_bind_group(device, &ssao_bgl, &targets.depth_view, &ssao_buf);
+        let ssao_bind_group = make_ssao_bind_group(
+            device,
+            &ssao_bgl,
+            &targets.depth_view,
+            &ssao_buf,
+            &shadow_depth_view,
+            &shadow_sampler,
+        );
         let egui_texture = rs.renderer.write().register_native_texture(
             device,
             &targets.color_view,
@@ -668,6 +746,11 @@ impl SceneRenderer {
             ssao_buf,
             ssao_pipeline,
             ssao_bind_group,
+            shadow_depth_view,
+            shadow_color_view,
+            shadow_sampler,
+            _shadow_depth_tex,
+            _shadow_color_tex,
             oit_enabled,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
@@ -871,6 +954,7 @@ impl SceneRenderer {
         perspective: bool,
         cue: [f32; 4],
         ao: [f32; 4],
+        shadow: [f32; 4],
         depth_range: [f32; 2],
         glow_pulse: f32,
         scene: &Scene,
@@ -890,6 +974,8 @@ impl SceneRenderer {
                 &self.ssao_bgl,
                 &self.targets.depth_view,
                 &self.ssao_buf,
+                &self.shadow_depth_view,
+                &self.shadow_sampler,
             );
             rs.renderer.write().update_egui_texture_from_wgpu_texture(
                 &rs.device,
@@ -950,6 +1036,34 @@ impl SceneRenderer {
             images.push(mol_imgs);
         }
 
+        // Cast-shadow map: add a light-space camera entry (rendered into the shadow
+        // depth target below) and compute `shadow_matrix`, which maps any image's
+        // view space → the light's clip space for the deferred shadow test. The
+        // light is a directional key; we fit an orthographic frustum to the scene's
+        // bounding sphere (center/radius recovered from the view + `depth_range`).
+        let shadow_on = shadow[2] > 0.5 && self.ssao_pipeline.is_some();
+        let (shadow_light_idx, shadow_matrix) = if shadow_on {
+            let inv_view = view.inverse();
+            let eye = inv_view.transform_point3(Vec3::ZERO);
+            let fwd = inv_view.transform_vector3(Vec3::NEG_Z).normalize();
+            let center = eye + fwd * ((depth_range[0] + depth_range[1]) * 0.5);
+            let radius = ((depth_range[1] - depth_range[0]) * 0.5).max(0.1);
+            let light_world = inv_view.transform_vector3(SHADOW_LIGHT_DIR_VIEW).normalize();
+            let light_eye = center + light_world * (radius * 2.0);
+            let up = if light_world.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+            let light_view = Mat4::look_at_rh(light_eye, center, up);
+            let light_proj =
+                Mat4::orthographic_rh(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5);
+            // Ortho (perspective = false) so the impostors ray-cast with parallel
+            // rays in light space when filling the depth map.
+            cameras.push(CameraUniform::new(
+                light_view, light_proj, false, viewport, cue, BG, depth_range, 1.0,
+            ));
+            (cameras.len() as u32 - 1, light_proj * light_view * inv_view)
+        } else {
+            (0, Mat4::IDENTITY)
+        };
+
         // Grow the dynamic camera buffer if needed, then upload all entries
         // (each padded to CAMERA_STRIDE so dynamic offsets stay aligned).
         if cameras.len() as u32 > self.camera_capacity {
@@ -988,6 +1102,36 @@ impl SceneRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("scene-encoder"),
             });
+
+        // Pass 0 — cast-shadow map: render opaque geometry from the light into the
+        // shadow depth target (front-most wins). The throwaway color target lets us
+        // reuse the existing opaque pipelines, so no depth-only variants are needed.
+        if shadow_on {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.shadow_color_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.draw_shadow_casters(&mut pass, scene, shadow_light_idx);
+        }
 
         // Pass 1 — opaque geometry into the color + depth targets.
         {
@@ -1028,12 +1172,15 @@ impl SceneRenderer {
             }
         }
 
-        // Pass 1.5 — SSAO: read the opaque depth and multiply-blend an occlusion
-        // factor onto the opaque color (darkening crevices), before transparent
-        // geometry is composited over it. Skipped when AO is disabled.
-        if ao[3] > 0.5 {
+        // Pass 1.5 — SSAO + cast shadows: read the opaque depth and multiply-blend a
+        // darkening factor (ambient occlusion × cast-shadow term) onto the opaque
+        // color, before transparent geometry is composited over it. Skipped when
+        // both AO and shadows are off. AO with strength 0 (when disabled) is a no-op
+        // so the pass can run for shadows alone.
+        if ao[3] > 0.5 || shadow_on {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
-            let su = SsaoUniform::new(proj, perspective, ao, render_size);
+            let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };
+            let su = SsaoUniform::new(proj, perspective, ao_eff, shadow_matrix, shadow, render_size);
             rs.queue.write_buffer(&self.ssao_buf, 0, bytemuck::bytes_of(&su));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssao-pass"),
@@ -1160,6 +1307,41 @@ impl SceneRenderer {
         rs.queue.submit(std::iter::once(encoder.finish()));
 
         self.egui_texture
+    }
+
+    /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /
+    /// mesh once, from the light camera (`light_idx`), into the shadow depth map.
+    /// Reuses the opaque pipelines (index 0); lines and the box wireframe don't cast
+    /// (too thin to read as shadows). Transparent reps are skipped.
+    fn draw_shadow_casters(&self, pass: &mut wgpu::RenderPass, scene: &Scene, light_idx: u32) {
+        let off = light_idx * CAMERA_STRIDE as u32;
+        pass.set_bind_group(0, &self.camera_bind_group, &[off]);
+        for mol in &scene.molecules {
+            if !mol.visible {
+                continue;
+            }
+            for rep in &mol.reps {
+                if !rep.visible || rep.material.is_transparent() {
+                    continue;
+                }
+                if let Some(s) = &rep.gpu.spheres {
+                    pass.set_pipeline(&self.sphere_pipeline[0]);
+                    pass.set_vertex_buffer(0, s.buffer.slice(..));
+                    pass.draw(0..4, 0..s.count);
+                }
+                if let Some(c) = &rep.gpu.cylinders {
+                    pass.set_pipeline(&self.cylinder_pipeline[0]);
+                    pass.set_vertex_buffer(0, c.buffer.slice(..));
+                    pass.draw(0..4, 0..c.count);
+                }
+                if let Some(m) = &rep.gpu.mesh {
+                    pass.set_pipeline(&self.mesh_pipeline[0]);
+                    pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                }
+            }
+        }
     }
 
     /// Draw the additive selection glows at the central image: each molecule's

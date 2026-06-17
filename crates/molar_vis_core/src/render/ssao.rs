@@ -10,25 +10,41 @@ use glam::Mat4;
 pub struct SsaoUniform {
     pub proj: [[f32; 4]; 4],
     pub inv_proj: [[f32; 4]; 4],
+    /// View space → light clip space (`light_proj · light_view · inv_view`), for
+    /// the deferred shadow test.
+    pub shadow_matrix: [[f32; 4]; 4],
     /// `[radius, bias, strength, perspective(1/0)]`.
     pub params: [f32; 4],
     /// `[render_w, render_h, _, _]` (the SSAA target size in pixels).
     pub misc: [f32; 4],
+    /// `[strength, bias, enabled, _]` for the cast-shadow test.
+    pub shadow_params: [f32; 4],
 }
 
 impl SsaoUniform {
-    /// `ao` is `[radius, bias, strength, enabled]` (enabled handled by the caller).
-    pub fn new(proj: Mat4, perspective: bool, ao: [f32; 4], render_size: [u32; 2]) -> Self {
+    /// `ao` is `[radius, bias, strength, enabled]`, `shadow` is `[strength, bias,
+    /// enabled, _]` (enables handled by the caller / shader).
+    pub fn new(
+        proj: Mat4,
+        perspective: bool,
+        ao: [f32; 4],
+        shadow_matrix: Mat4,
+        shadow: [f32; 4],
+        render_size: [u32; 2],
+    ) -> Self {
         Self {
             proj: proj.to_cols_array_2d(),
             inv_proj: proj.inverse().to_cols_array_2d(),
+            shadow_matrix: shadow_matrix.to_cols_array_2d(),
             params: [ao[0], ao[1], ao[2], if perspective { 1.0 } else { 0.0 }],
             misc: [render_size[0] as f32, render_size[1] as f32, 0.0, 0.0],
+            shadow_params: shadow,
         }
     }
 }
 
-/// Bind group 0: the (sampleable) scene depth texture + the SSAO uniform.
+/// Bind group 0: the scene depth texture + the SSAO uniform + the shadow map
+/// (depth) and its comparison sampler.
 pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("ssao-bgl"),
@@ -51,6 +67,23 @@ pub fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
+                count: None,
+            },
+            // Shadow map (depth) + comparison sampler.
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                 count: None,
             },
         ],

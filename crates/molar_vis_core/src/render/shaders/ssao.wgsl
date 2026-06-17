@@ -9,12 +9,43 @@
 struct Ssao {
     proj: mat4x4<f32>,
     inv_proj: mat4x4<f32>,
-    params: vec4<f32>, // radius, bias, strength, perspective(1/0)
-    misc: vec4<f32>,   // render_w, render_h, _, _
+    shadow_matrix: mat4x4<f32>, // view space -> light clip space
+    params: vec4<f32>,          // radius, bias, strength, perspective(1/0)
+    misc: vec4<f32>,            // render_w, render_h, _, _
+    shadow_params: vec4<f32>,   // strength, bias, enabled, _
 };
 
 @group(0) @binding(0) var depth_tex: texture_depth_2d;
 @group(0) @binding(1) var<uniform> u: Ssao;
+@group(0) @binding(2) var shadow_map: texture_depth_2d;
+@group(0) @binding(3) var shadow_samp: sampler_comparison;
+
+// Cast-shadow test: project the view-space point into the light's clip space and
+// compare against the shadow map (3×3 PCF). Returns 1 (lit) … `1-strength`
+// (fully shadowed). `textureSampleCompareLevel` (no derivatives) is used so it's
+// valid in the per-pixel control flow below.
+fn shadow_factor(p_view: vec3<f32>) -> f32 {
+    if (u.shadow_params.z < 0.5) {
+        return 1.0; // disabled
+    }
+    let lc = u.shadow_matrix * vec4<f32>(p_view, 1.0);
+    let ndc = lc.xyz / lc.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0; // outside the light frustum → treat as lit
+    }
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let z_ref = ndc.z - u.shadow_params.y;
+    let texel = 1.0 / 2048.0; // shadow map is 2048²
+    var lit = 0.0;
+    for (var j = -1; j <= 1; j = j + 1) {
+        for (var i = -1; i <= 1; i = i + 1) {
+            let o = vec2<f32>(f32(i), f32(j)) * texel;
+            lit += textureSampleCompareLevel(shadow_map, shadow_samp, uv + o, z_ref);
+        }
+    }
+    lit /= 9.0;
+    return mix(1.0, lit, u.shadow_params.x);
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -84,5 +115,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         occ += select(0.0, range, dz > bias);
     }
     let ao = clamp(1.0 - (occ / f32(N)) * strength, 0.0, 1.0);
-    return vec4<f32>(ao, ao, ao, 1.0);
+    // Combine with the cast-shadow factor; both darken the color via multiply blend.
+    let f = ao * shadow_factor(p);
+    return vec4<f32>(f, f, f, 1.0);
 }

@@ -1494,6 +1494,13 @@ impl App {
                 camera.ao.strength = s.clamp(0.0, 1.0);
             }
         }
+        // Verification hook: MOLAR_VIS_DEBUG_SHADOW[=strength] enables cast shadows.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_SHADOW") {
+            camera.shadow.enabled = true;
+            if let Ok(s) = v.trim().parse::<f32>() {
+                camera.shadow.strength = s.clamp(0.0, 1.0);
+            }
+        }
         // Verification hook: MOLAR_VIS_DEBUG_FOCUS=<selection> zooms the camera to
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
@@ -2279,11 +2286,12 @@ impl App {
                                     });
                             });
                         });
-                    // Ambient-occlusion popup (button filled when AO is on): enable +
-                    // Strength / Radius. Like the cue popup, stays open while adjusting.
-                    let ao_on = self.camera.ao.enabled;
-                    let resp = overlay_button(ui, icon::CIRCLE_HALF, ao_on)
-                        .on_hover_text("Ambient occlusion");
+                    // Lighting popup (button filled when AO or shadows are on):
+                    // ambient occlusion + cast shadows, both screen-space darkening
+                    // cues. Like the cue popup, stays open while adjusting.
+                    let lighting_on = self.camera.ao.enabled || self.camera.shadow.enabled;
+                    let resp = overlay_button(ui, icon::CIRCLE_HALF, lighting_on)
+                        .on_hover_text("Ambient occlusion & shadows");
                     egui::Popup::menu(&resp)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show(|ui| {
@@ -2306,6 +2314,24 @@ impl App {
                                         ui.add(
                                             egui::Slider::new(&mut ao.radius, 0.1..=1.0)
                                                 .suffix(" nm")
+                                                .fixed_decimals(2),
+                                        );
+                                        ui.end_row();
+                                    });
+                            });
+                            ui.separator();
+                            let sh = &mut self.camera.shadow;
+                            ui.checkbox(&mut sh.enabled, "Cast shadows").on_hover_text(
+                                "Real-time directional shadows from a key light (shadow map)",
+                            );
+                            ui.add_enabled_ui(sh.enabled, |ui| {
+                                egui::Grid::new("shadow_opts")
+                                    .num_columns(2)
+                                    .spacing(egui::vec2(8.0, 4.0))
+                                    .show(ui, |ui| {
+                                        ui.label("Strength");
+                                        ui.add(
+                                            egui::Slider::new(&mut sh.strength, 0.0..=1.0)
                                                 .fixed_decimals(2),
                                         );
                                         ui.end_row();
@@ -3843,6 +3869,7 @@ impl App {
                     self.camera.is_perspective(),
                     self.camera.cue_uniform(),
                     self.camera.ao_uniform(),
+                    self.camera.shadow_uniform(),
                     self.camera.eye_depth_range(),
                     glow_pulse,
                     &self.scene,

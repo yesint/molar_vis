@@ -80,6 +80,21 @@ impl Default for Ao {
     }
 }
 
+/// Real-time cast shadows (shadow mapping): the scene is rendered from a key light
+/// into a depth map, then the shadow is applied deferred in the AO pass. Off by
+/// default; `strength` scales how dark the shadowed areas get.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Shadow {
+    pub enabled: bool,
+    pub strength: f32,
+}
+
+impl Default for Shadow {
+    fn default() -> Self {
+        Self { enabled: false, strength: 0.6 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Camera {
     /// Point the camera looks at (pannable).
@@ -97,6 +112,9 @@ pub struct Camera {
     /// before this field existed still load.
     #[serde(default)]
     pub ao: Ao,
+    /// Real-time cast shadows (shadow mapping).
+    #[serde(default)]
+    pub shadow: Shadow,
 }
 
 impl Default for Camera {
@@ -130,6 +148,7 @@ impl Camera {
             projection: Projection::Orthographic,
             depth_cue: DepthCue::default(),
             ao: Ao::default(),
+            shadow: Shadow::default(),
         }
     }
 
@@ -171,6 +190,13 @@ impl Camera {
     pub fn ao_uniform(&self) -> [f32; 4] {
         let enabled = if self.ao.enabled { 1.0 } else { 0.0 };
         [self.ao.radius.max(1e-3), 0.015, self.ao.strength, enabled]
+    }
+
+    /// Shadow parameters for the renderer: `[strength, bias, enabled, _]`
+    /// (`enabled == 0` skips the shadow map + test).
+    pub fn shadow_uniform(&self) -> [f32; 4] {
+        let enabled = if self.shadow.enabled { 1.0 } else { 0.0 };
+        [self.shadow.strength, 0.0025, enabled, 0.0]
     }
 
     /// Eye-space distance range `[front, back]` (positive, away from the camera)
