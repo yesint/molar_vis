@@ -200,6 +200,14 @@ pub struct BehaviorSettings {
     pub bond_factor: f32,
     pub bond_search_cutoff: f32,
     pub bond_min_dist: f32,
+    /// **Periodic bond search**: find covalent bonds crossing a box face in a
+    /// wrapped structure (minimum-image search). Off by default — the periodic
+    /// search is much slower on large structures. Affects the next structure loaded.
+    pub bond_search_periodic: bool,
+    /// Draw bonds that wrap across a box face as **dashed minimum-image half-bonds**
+    /// (and split cartoon ribbons at the boundary). Off → such bonds draw as plain
+    /// solid half-bonds (a long line across the box). A render setting (applies live).
+    pub dashed_pbc_bonds: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -215,6 +223,8 @@ impl Default for BehaviorSettings {
             bond_factor: b.factor,
             bond_search_cutoff: b.search_cutoff,
             bond_min_dist: b.min_dist,
+            bond_search_periodic: b.periodic,
+            dashed_pbc_bonds: true,
         }
     }
 }
@@ -226,6 +236,7 @@ impl BehaviorSettings {
             factor: self.bond_factor,
             search_cutoff: self.bond_search_cutoff,
             min_dist: self.bond_min_dist,
+            periodic: self.bond_search_periodic,
         }
     }
 }

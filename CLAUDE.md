@@ -118,13 +118,17 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `build(system, sel, bonds, params, color)` binds the `Sel` (`system.bind`), reads
   positions/atoms via `iter_particle` (nothing cached), and dispatches on `params`. Spheres
   come from the selected atoms; bonds are half-bond split, colored by each atom. Computes a
-  `SsMap` once when the rep is Cartoon or colored by SecStruct. **PBC dashed half-bonds**: when
-  the bound has a box (`BoxProvider::get_box`), each bond's two ends are the **minimum-image**
-  half-bonds (`half_bond_ends`, via `PeriodicBox::closest_image`). A bond that crosses a box face
-  is drawn as two **dashed** stubs (`dashes()`) running from each atom **to its partner's nearest
-  image** (`a→b_image`, `b→a_image` — the full bond toward the image, not beyond it) — so they
-  cross opposite faces, reach where the partner actually is in the nearest cell, and nothing crosses
-  the box interior (no long-line artifact). Non-wrapping bonds use the usual solid midpoint split.
+  `SsMap` once when the rep is Cartoon or colored by SecStruct. **PBC dashed half-bonds** (gated by
+  `build`'s `dashed_pbc` arg — the *Dashed wrap-around bonds* setting; when off, `pbox = None` and
+  all bonds draw as plain solid half-bonds): the box is read from the bound (`BoxProvider::get_box`).
+  Per bond, a **cheap ½-box pre-test** (`wrap_thresh2` = `(½·shortest lattice vector)²`) skips the
+  two `PeriodicBox::closest_image` calls for the non-wrapping majority — a real covalent bond is
+  short, so it can only wrap if the atoms sit > ½ box apart in raw coords. A bond that does cross a
+  box face is drawn as two **dashed** stubs (`dashes()`) running from each atom **to its partner's
+  nearest image** (`half_bond_ends`: `a→b_image`, `b→a_image` — the full bond toward the image, not
+  beyond it) — so they cross opposite faces, reach where the partner actually is in the nearest cell,
+  and nothing crosses the box interior (no long-line artifact). Non-wrapping bonds use the usual
+  solid midpoint split.
   Applies to cylinders (Licorice/BallAndStick) and lines. **Cartoon over PBC** (`cartoon.rs`):
   runs are split at a PBC jump between consecutive Cα (`is_pbc_jump`), so the ribbon never crosses
   the box. A run ending at such a jump is **extended one residue past the face** with a *ghost*
@@ -190,7 +194,9 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   seeded onto a **new** scene's camera via `ViewDefaults::seed_camera`), `RepDefaults` (new-rep
   style / color / material / selection / surface-quality — `Representation::from_defaults`),
   `BehaviorSettings` (mouse sensitivity, default pick/selection mode, trajectory fps/loop,
-  bond-guessing thresholds → `data::BondParams`). Same design as `session.rs`: pure data + serde,
+  bond-guessing thresholds + **periodic search** → `data::BondParams`, and **`dashed_pbc_bonds`** —
+  the only live render toggle here, applied by marking all reps `geom_dirty` on Save). Same design
+  as `session.rs`: pure data + serde,
   WASM-safe, every field `#[serde(default)]` with `Default` impls reproducing the **exact** old
   constants (a fresh config = old behavior); forward/back-compatible. Native IO
   (`load_or_create`/`save`/`config_path`, `#[cfg(not(wasm))]`) creates the file with defaults on
@@ -432,11 +438,14 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   and per-frame buffer reallocation. Per-rep **`ss_per_frame`** toggle (settings **Traj**
   tab, Cartoon / SecStruct only; in `EditState`) forces DSSP recompute every frame when
   motion changes SS.
-- Bonds aren't in GRO (partial in PDB); guessed at load (`distance_search_single` +
-  `dist < 0.6*(vdw_i+vdw_j)`). **PBC-aware when the structure has a box** (`bonds::guess` takes the
-  `PeriodicBox`): uses `distance_search_single_pbc` + minimum-image distance scoring, so a covalent
-  bond whose atoms sit on opposite faces of a wrapped structure is still found (then rendered as a
-  dashed PBC half-bond). A whole protein in a box gets the same bonds as the non-PBC path.
+- Bonds aren't in GRO (partial in PDB); guessed **once at load** (`distance_search_single` +
+  `dist < 0.6*(vdw_i+vdw_j)`; `BondParams` = factor/cutoff/min_dist/**periodic**) and never
+  recomputed on a frame change. **Periodic bond search is opt-in** (`BondParams.periodic`, the
+  *Periodic search* setting — off by default): only then does `bonds::guess` use
+  `distance_search_single_pbc` + minimum-image scoring to find covalent bonds across a box face in a
+  wrapped structure. The PBC search is **much slower** (scans neighbouring cells), so the default
+  non-periodic path keeps large-structure loads fast; a non-wrapped protein gets the same bonds
+  either way (wrapping bonds are then rendered as dashed PBC half-bonds — see `geometry.rs`).
 - Secondary structure for M6 cartoon: `molar::Dssp` (10-variant `SS` enum).
 
 ## Conventions & gotchas

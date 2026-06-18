@@ -132,9 +132,10 @@ the top bar, with **Camera / Lighting / Scene** tabs):
 - Quaternion arcball camera with VMD mouse mapping (rotate / roll / pan / dolly / zoom-to-cursor).
 - Zoom-to-selection and zoom-to-molecule; per-molecule periodic-box wireframe.
 - **Periodic images** — replicate any representation across ±a/±b/±c lattice cells (drawn *by
-  reference*, no data duplicated), with the box wireframe. Covalent bonds that wrap across a face are
-  drawn as **dashed minimum-image half-bonds**, and cartoon ribbons split cleanly at the boundary
-  rather than streaking across the cell.
+  reference*, no data duplicated), with the box wireframe. Enable **periodic bond search** (a
+  setting; off by default since it's slower on large structures) and covalent bonds that wrap across
+  a box face are found and drawn as **dashed minimum-image half-bonds**, with cartoon ribbons
+  splitting cleanly at the boundary rather than streaking across the cell.
 
 **Scene**
 - Multiple molecules, each with multiple representations.
@@ -148,7 +149,8 @@ the top bar, with **Camera / Lighting / Scene** tabs):
   (*Appearance / Rendering / View / Representations / Behavior*) for everything that used to be baked
   in at launch: UI theme + font scale + accent color, anti-aliasing and shadow-map quality, the
   default projection / background / lighting / representation / coloring for *new* scenes, mouse
-  sensitivity, trajectory playback defaults, and bond-detection thresholds. App-wide tweaks (theme,
+  sensitivity, trajectory playback defaults, and bond detection (thresholds, **periodic search**,
+  and the dashed wrap-around-bond toggle). App-wide tweaks (theme,
   anti-aliasing) apply live; the rest seed the next scene you open. Everything **persists to a JSON
   file** in your platform's config directory, written with sensible defaults on first launch.
 - **Sessions** — save and reload the whole visualization state (molecules by source path, every

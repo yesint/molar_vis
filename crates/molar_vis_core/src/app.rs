@@ -1373,6 +1373,20 @@ fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             slider_with_edit(ui, &mut b.bond_min_dist, 0.0..=0.1, true);
             ui.end_row();
         });
+    ui.checkbox(&mut b.bond_search_periodic, "Periodic search (bonds across box faces)")
+        .on_hover_text(
+            "Minimum-image bond search: also finds covalent bonds that cross a box face in a \
+             wrapped structure. Off (default) is much faster for large structures.",
+        );
+
+    ui.separator();
+    ui.label("Periodic rendering");
+    ui.checkbox(&mut b.dashed_pbc_bonds, "Dashed wrap-around bonds")
+        .on_hover_text(
+            "Draw bonds that span a box face as dashed minimum-image half-bonds (and split \
+             cartoon ribbons at the boundary). Off draws them as plain solid bonds. Applies to \
+             the current scene.",
+        );
 }
 
 /// The orientation-axes "screen" widget: a monitor-like rectangle showing a mini
@@ -2346,6 +2360,9 @@ impl App {
     /// true if any geometry was uploaded (so the frame needs re-rendering).
     fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
         let mut changed = false;
+        // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
+        // once: the molecule loop below borrows `self.scene` mutably).
+        let dashed = self.settings.behavior.dashed_pbc_bonds;
         // A structural change (molecule add/remove/reorder/visibility) shifts molecule
         // indices, so the GPU pick geometry's baked `mol+1` ids must be rebuilt.
         #[cfg(not(target_arch = "wasm32"))]
@@ -2445,7 +2462,7 @@ impl App {
                             .then(|| SsMap::compute(&bound, rep.ss_algo));
                         let geom = geometry::build(
                             &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
-                            ss.as_ref(),
+                            ss.as_ref(), dashed,
                         );
                         (geom, ss)
                     };
@@ -2470,7 +2487,7 @@ impl App {
                         let bound = mol.system.bind_with_state(sel, state);
                         geometry::build(
                             &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
-                            rep.ss_cache.as_ref(),
+                            rep.ss_cache.as_ref(), dashed,
                         )
                     };
                     self.renderer.update(rs, &mut rep.gpu, &geom);
@@ -2522,6 +2539,7 @@ impl App {
                 let geom = match &mol.pending {
                     Some(pending) => build_glow(
                         &mol.system, &mol.bonds, &mol.reps, &pending.atoms, render_state, n_atoms,
+                        dashed,
                     ),
                     None => geometry::GeometryData::default(),
                 };
@@ -2533,7 +2551,7 @@ impl App {
             if mol.hover_dirty {
                 let geom = match &mol.hover {
                     Some(atoms) => build_glow(
-                        &mol.system, &mol.bonds, &mol.reps, atoms, render_state, n_atoms,
+                        &mol.system, &mol.bonds, &mol.reps, atoms, render_state, n_atoms, dashed,
                     ),
                     None => geometry::GeometryData::default(),
                 };
@@ -2546,7 +2564,7 @@ impl App {
             if mol.hover_detail_dirty {
                 let geom = match &mol.hover_detail {
                     Some(d) => {
-                        build_hover_detail(&mol.system, &mol.bonds, d, render_state, n_atoms)
+                        build_hover_detail(&mol.system, &mol.bonds, d, render_state, n_atoms, dashed)
                     }
                     None => geometry::GeometryData::default(),
                 };
@@ -2579,6 +2597,7 @@ fn build_hover_detail(
     detail: &crate::scene::HoverDetail,
     state: &molar::prelude::State,
     n_atoms: usize,
+    dashed_pbc: bool,
 ) -> geometry::GeometryData {
     let Some(index_str) = pick::index_selection_string(&detail.atoms) else {
         return geometry::GeometryData::default();
@@ -2596,6 +2615,7 @@ fn build_hover_detail(
         ColorMethod::Element,
         crate::material::Material::Opaque,
         None,
+        dashed_pbc,
     );
     fade_by_ray(&mut geom, detail.ray_o, detail.ray_d, detail.radius);
     geom
@@ -2642,6 +2662,7 @@ fn build_glow(
     atoms: &[usize],
     state: &State,
     n_atoms: usize,
+    dashed_pbc: bool,
 ) -> geometry::GeometryData {
     let Some(index_str) = pick::index_selection_string(atoms) else {
         return geometry::GeometryData::default();
@@ -2679,7 +2700,7 @@ fn build_glow(
         let bound = system.bind_with_state(&sel, state);
         let mut geom = geometry::build(
             &bound, n_atoms, bonds, &rep.params, rep.color, rep.material,
-            rep.ss_cache.as_ref(),
+            rep.ss_cache.as_ref(), dashed_pbc,
         );
         // Surface re-builds the glow over the *subset* of selected atoms, so its mesh
         // nearly — but not exactly — coincides with the parent's (the grid isosurface
@@ -3489,8 +3510,19 @@ impl App {
         }
 
         if save {
+            // The dashed-PBC-bonds setting changes geometry, so rebuild every rep to
+            // apply it live (other defaults only affect new scenes / the next load).
+            let dashed_changed = self.settings.behavior.dashed_pbc_bonds
+                != draft.behavior.dashed_pbc_bonds;
             self.settings = draft;
             self.apply_settings(ctx, frame);
+            if dashed_changed {
+                for mol in &mut self.scene.molecules {
+                    for rep in &mut mol.reps {
+                        rep.geom_dirty = true;
+                    }
+                }
+            }
         } else if cancel {
             // Discard the working copy.
         } else {

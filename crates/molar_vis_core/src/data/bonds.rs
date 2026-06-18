@@ -15,20 +15,27 @@ pub struct BondParams {
     pub search_cutoff: f32,
     /// Reject coincident atoms / duplicate sites below this distance (nm).
     pub min_dist: f32,
+    /// **Periodic** bond search: when true *and* the structure has a box, use the
+    /// minimum-image distance search so covalent bonds crossing a box face (in a
+    /// wrapped structure) are found. Off by default — the periodic search is much
+    /// slower, and most structures don't need cross-face bonds.
+    pub periodic: bool,
 }
 
 impl Default for BondParams {
     fn default() -> Self {
-        Self { factor: 0.6, search_cutoff: 0.25, min_dist: 0.04 }
+        Self { factor: 0.6, search_cutoff: 0.25, min_dist: 0.04, periodic: false }
     }
 }
 
 /// Guess bonds for all atoms. `sel` is the bound all-selection (the position
 /// source for the grid search); `positions`/`vdw` are the extracted per-atom
-/// arrays (nm) used to score candidate pairs. When the molecule has a periodic
-/// box (`pbox`), the search and the distance scoring are **PBC-aware** (minimum
-/// image), so bonds that cross a box face in a wrapped structure are found — these
-/// are what the renderer draws as dashed half-bonds.
+/// arrays (nm) used to score candidate pairs. The **PBC-aware** (minimum-image)
+/// search + scoring — which finds bonds crossing a box face in a wrapped structure,
+/// drawn as dashed half-bonds — is used only when **`params.periodic` is on and the
+/// structure has a box**. The periodic search is much slower (it scans the
+/// neighbouring cells), so it's opt-in; the default non-periodic path is the fast
+/// one for large structures.
 pub fn guess(
     sel: &impl PosProvider,
     positions: &[[f32; 3]],
@@ -41,7 +48,9 @@ pub fn guess(
         return Vec::new();
     }
 
-    let candidates: Vec<(usize, usize)> = match pbox {
+    // Only honor the box when periodic search is requested.
+    let pbc = if params.periodic { pbox } else { None };
+    let candidates: Vec<(usize, usize)> = match pbc {
         Some(b) => distance_search_single_pbc::<(usize, usize), Vec<_>>(
             params.search_cutoff,
             sel.iter_pos(),
@@ -60,7 +69,7 @@ pub fn guess(
         }
         let (a, b) = if i < j { (i, j) } else { (j, i) };
         let (pa, pb) = (positions[a], positions[b]);
-        let d2 = match pbox {
+        let d2 = match pbc {
             // Minimum-image distance, so a covalent bond whose atoms sit on
             // opposite faces of the box still scores as short.
             Some(b) => b.distance_squared(

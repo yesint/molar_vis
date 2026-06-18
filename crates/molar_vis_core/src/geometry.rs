@@ -188,13 +188,15 @@ pub fn build(
     color: ColorMethod,
     material: Material,
     ss: Option<&SsMap>,
+    dashed_pbc: bool,
 ) -> GeometryData {
     let colorizer = Colorizer::new(color, bound, n_atoms, ss);
-    // The periodic box (if any) lets bond rendering use the minimum image, so a
-    // bond crossing a box face is drawn as two dashed half-bond stubs (one from
-    // each atom toward its partner's nearest image) instead of a long line
-    // stretching across the box.
-    let pbox = bound.get_box();
+    // The periodic box lets bond rendering use the minimum image, so a bond crossing
+    // a box face is drawn as two dashed half-bond stubs (one from each atom toward its
+    // partner's nearest image) instead of a long line across the box, and a cartoon
+    // ribbon is split at the boundary. Only consult it when the dashed-PBC setting is
+    // on — otherwise bonds draw as plain solid half-bonds (the cheap path).
+    let pbox = if dashed_pbc { bound.get_box() } else { None };
     let mut data = match *params {
         RepParams::Vdw { scale } => GeometryData {
             spheres: spheres(bound, &colorizer, |a| a.vdw() * scale),
@@ -419,22 +421,41 @@ fn half_bond_ends(
     pa: [f32; 3],
     pb: [f32; 3],
     pbox: Option<&PeriodicBox>,
+    wrap_thresh2: f32,
 ) -> ([f32; 3], [f32; 3], bool) {
     if let Some(b) = pbox {
-        let pa_p = Pos::new(pa[0], pa[1], pa[2]);
-        let pb_p = Pos::new(pb[0], pb[1], pb[2]);
-        // `closest_image(point, target)` = the image of `point` nearest `target`.
-        let b_img = b.closest_image(&pb_p, &pa_p); // image of b nearest a
-        let a_img = b.closest_image(&pa_p, &pb_p); // image of a nearest b
-        // Wraps iff b's nearest image to a isn't b's real position.
-        let (dx, dy, dz) = (b_img.x - pb[0], b_img.y - pb[1], b_img.z - pb[2]);
-        if dx * dx + dy * dy + dz * dz > 1e-8 {
-            let a_end = [b_img.x, b_img.y, b_img.z];
-            let b_end = [a_img.x, a_img.y, a_img.z];
-            return (a_end, b_end, true);
+        // Fast pre-test: a real covalent bond is short (< the search cutoff), so it
+        // can only wrap if the two atoms sit far apart in raw coords. Skip the two
+        // `closest_image` calls unless the raw separation exceeds half the box — the
+        // overwhelming majority of bonds are non-wrapping, so this is the hot path.
+        let (rx, ry, rz) = (pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]);
+        if rx * rx + ry * ry + rz * rz > wrap_thresh2 {
+            let pa_p = Pos::new(pa[0], pa[1], pa[2]);
+            let pb_p = Pos::new(pb[0], pb[1], pb[2]);
+            // `closest_image(point, target)` = the image of `point` nearest `target`.
+            let b_img = b.closest_image(&pb_p, &pa_p); // image of b nearest a
+            let a_img = b.closest_image(&pa_p, &pb_p); // image of a nearest b
+            // Wraps iff b's nearest image to a isn't b's real position.
+            let (dx, dy, dz) = (b_img.x - pb[0], b_img.y - pb[1], b_img.z - pb[2]);
+            if dx * dx + dy * dy + dz * dz > 1e-8 {
+                let a_end = [b_img.x, b_img.y, b_img.z];
+                let b_end = [a_img.x, a_img.y, a_img.z];
+                return (a_end, b_end, true);
+            }
         }
     }
     (midpoint(pa, pb), midpoint(pa, pb), false)
+}
+
+/// Squared half-box threshold for [`half_bond_ends`]: a bond whose raw separation
+/// stays within `½·(shortest lattice vector)` cannot wrap (minimum image == raw),
+/// so it skips the `closest_image` work. Computed once per build.
+fn wrap_thresh2(b: &PeriodicBox) -> f32 {
+    let m = b.get_matrix();
+    let len = |j: usize| (m[(0, j)].powi(2) + m[(1, j)].powi(2) + m[(2, j)].powi(2)).sqrt();
+    let l_min = len(0).min(len(1)).min(len(2));
+    let half = 0.5 * l_min;
+    half * half
 }
 
 /// Split `p0 → p1` into dash segments (`DASH_LEN` on, `DASH_GAP` off). Always
@@ -466,6 +487,7 @@ fn cylinders(
     radius: f32,
     pbox: Option<&PeriodicBox>,
 ) -> Vec<CylinderInstance> {
+    let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
     let mut push = |p0, p1, color, dashed: bool| {
         if dashed {
@@ -478,7 +500,7 @@ fn cylinders(
     };
     for &[a, b] in bonds {
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
-            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox);
+            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
             push(pa, a_end, ca, wrapped);
             push(pb, b_end, cb, wrapped);
         }
@@ -492,6 +514,7 @@ fn lines(
     width: f32,
     pbox: Option<&PeriodicBox>,
 ) -> Vec<LineVertex> {
+    let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
     let mut push = |p0: [f32; 3], p1: [f32; 3], color, dashed: bool| {
         if dashed {
@@ -506,7 +529,7 @@ fn lines(
     };
     for &[a, b] in bonds {
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
-            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox);
+            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
             push(pa, a_end, ca, wrapped);
             push(pb, b_end, cb, wrapped);
         }
