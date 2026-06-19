@@ -13,7 +13,9 @@ The user, Semen Yesylevsky, is the author of molar. The full approved plan lives
 
 ```sh
 cargo build
-cargo run -p molar_vis -- tests/2lao.pdb [more files...]   # each file = one molecule
+cargo run -p molar_vis -- tests/2lao.pdb            # one molecule
+cargo run -p molar_vis -- a.pdb a.xtc               # VMD-style: a.pdb + a.xtc traj = ONE molecule
+cargo run -p molar_vis -- -m a.pdb a.xtc -m b.pdb   # `-m` starts a new molecule → two molecules
 cargo test -p molar_vis_core
 cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
 ```
@@ -96,7 +98,17 @@ and/or point `molar` at a local path — but don't commit those.
 argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 
 - `lib.rs` — module decls, `run`/`App` re-exports.
-- `launch.rs` — `AppLaunch`, eframe bootstrap (`Renderer::Wgpu`).
+- `launch.rs` — `AppLaunch` (startup files, **grouped per molecule** as `Vec<Vec<PathBuf>>`),
+  eframe bootstrap (`Renderer::Wgpu`), and **`parse_file_args`** — the VMD-style command-line file
+  grouping (pure logic, WASM-safe, unit-tested): `-m`/`--molecule` starts a new molecule; within a
+  group the **first file provides the topology** and **all frames of the group's files form the
+  trajectory**. The native bin (`crates/molar_vis/src/main.rs`) parses argv (incl. `-h`/`--help`)
+  into the groups; `App::new` loads each group's structure, then appends the **first file's frames
+  beyond frame 0** (so a multi-MODEL/trajectory structure file contributes all its frames, like VMD)
+  **plus** every extra file's frames via `read_frames_sync` (native-only); files that yield no extra
+  frames aren't recorded as trajectory loads, so a plain single-frame structure stays static. So
+  `traj.pdb` = one molecule with its full trajectory, `a.pdb a.xtc` = one molecule with a trajectory,
+  `-m a.pdb -m b.pdb` = two molecules.
 - `app.rs` — `eframe::App`; owns `SceneRenderer`, `Camera`, `Scene`; left panel
   (Scene/Molecules/Representations/Controls) + central viewport; `rebuild_dirty()`
   and the render-skip logic. Holds the `MOLAR_VIS_DEBUG_*` hooks.

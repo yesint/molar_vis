@@ -9,8 +9,45 @@ use crate::app::App;
 /// platform-agnostic launch surface.
 #[derive(Debug, Default, Clone)]
 pub struct AppLaunch {
-    /// Structure/trajectory files to load on startup (PDB/GRO/… — anything molar reads).
-    pub files: Vec<PathBuf>,
+    /// Files to load on startup, **grouped per molecule** (VMD-style). Each inner
+    /// `Vec` is one molecule: the first file provides the topology, and all frames of
+    /// the group's files form the trajectory. See [`parse_file_args`].
+    pub files: Vec<Vec<PathBuf>>,
+}
+
+/// Parse VMD-style command-line file arguments into per-molecule groups.
+///
+/// Files are grouped into molecules by the `-m` (or `--molecule`) flag: each `-m`
+/// starts a new molecule and every file up to the next `-m` belongs to it. Within a
+/// group the **first** file provides the topology, and **all** frames of the group's
+/// files form the trajectory (a multi-MODEL/trajectory first file contributes all of
+/// its frames, like VMD's `mol new` / `mol addfile`). With no `-m` at all, every file
+/// forms a single molecule. So `-m a.pdb a.xtc -m b.pdb` → two molecules, the first
+/// carrying `a.xtc` as a trajectory. Pure logic (no IO), so it's WASM-safe and
+/// unit-tested. (The actual frame loading lives in `App::new`.)
+pub fn parse_file_args<I, S>(args: I) -> Vec<Vec<PathBuf>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut groups: Vec<Vec<PathBuf>> = Vec::new();
+    let mut current: Vec<PathBuf> = Vec::new();
+    for arg in args {
+        let a = arg.as_ref();
+        if a == "-m" || a == "--molecule" {
+            // Start a new molecule; flush the one in progress (an empty `-m`, e.g. a
+            // leading or doubled flag, just opens a fresh group).
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(PathBuf::from(a));
+        }
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 /// Launch the native viewer window. Returns once the window is closed.
@@ -82,4 +119,46 @@ pub fn run_web() {
             log::info!("molar_vis: web runner started");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_file_args;
+    use std::path::PathBuf;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn dash_m_groups_into_separate_molecules() {
+        // The spec example: two molecules, the first with a trajectory.
+        assert_eq!(
+            parse_file_args(["-m", "a.pdb", "a.xtc", "-m", "b.pdb"]),
+            vec![vec![p("a.pdb"), p("a.xtc")], vec![p("b.pdb")]]
+        );
+    }
+
+    #[test]
+    fn no_dash_m_is_one_molecule_with_states() {
+        assert_eq!(
+            parse_file_args(["a.pdb", "b.pdb", "c.pdb"]),
+            vec![vec![p("a.pdb"), p("b.pdb"), p("c.pdb")]]
+        );
+    }
+
+    #[test]
+    fn implicit_first_group_then_explicit() {
+        assert_eq!(
+            parse_file_args(["a.pdb", "-m", "b.pdb"]),
+            vec![vec![p("a.pdb")], vec![p("b.pdb")]]
+        );
+    }
+
+    #[test]
+    fn empty_and_stray_flags() {
+        assert!(parse_file_args(Vec::<String>::new()).is_empty());
+        // Leading/doubled/trailing `-m` just open (empty → ignored) groups.
+        assert_eq!(parse_file_args(["-m", "-m", "a.pdb", "-m"]), vec![vec![p("a.pdb")]]);
+    }
 }

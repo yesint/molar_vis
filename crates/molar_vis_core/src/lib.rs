@@ -24,7 +24,7 @@ mod theme;
 mod trajectory;
 
 pub use app::App;
-pub use launch::AppLaunch;
+pub use launch::{parse_file_args, AppLaunch};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::run;
 #[cfg(target_arch = "wasm32")]

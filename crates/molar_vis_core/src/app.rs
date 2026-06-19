@@ -1974,20 +1974,70 @@ impl App {
 
         let mut scene = Scene::default();
         let mut status = String::new();
-        for path in &launch.files {
-            match data::load_with(path, &bond_params) {
-                Ok(raw) => {
-                    scene.add(raw, &rep_defaults);
-                    if let Some(mol) = scene.molecules.last_mut() {
-                        mol.trajectory.speed_fps = settings.behavior.traj_fps;
-                        mol.trajectory.loop_mode = settings.behavior.loop_mode;
-                    }
-                }
+        // VMD-style command-line grouping: each `launch.files` entry is one molecule's
+        // file list — the first file is the structure (topology + frame 0) and any
+        // following files load as appended trajectory states. `-m` on the command line
+        // starts a new molecule (see `launch::parse_file_args`).
+        for group in &launch.files {
+            let (structure, extra) = match group.split_first() {
+                Some(parts) => parts,
+                None => continue,
+            };
+            let raw = match data::load_with(structure, &bond_params) {
+                Ok(raw) => raw,
                 Err(e) => {
                     log::error!("{e}");
                     status = e;
+                    continue;
+                }
+            };
+            scene.add(raw, &rep_defaults);
+            let mol = scene.molecules.last_mut().unwrap();
+            mol.trajectory.speed_fps = settings.behavior.traj_fps;
+            mol.trajectory.loop_mode = settings.behavior.loop_mode;
+            // Build the trajectory from ALL frames in the group, VMD-style: the **first
+            // file's frames beyond frame 0** (frame 0 is the structure just loaded — a
+            // multi-MODEL/trajectory structure file thus contributes all its frames),
+            // then every extra file's frames. `seed_frame0` (idempotent) makes frame 0
+            // the structure; only files that actually yield frames are recorded as
+            // trajectory loads, so a plain single-frame structure stays static.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let n = mol.n_atoms;
+                let mut seeded = false;
+                // (path, from): the first file is read from frame 1 (frame 0 is the
+                // structure); extra files from frame 0.
+                let sources = std::iter::once((structure, 1usize))
+                    .chain(extra.iter().map(|p| (p, 0usize)));
+                for (path, from) in sources {
+                    let opts = LoadOptions { from, to: None, stride: 1 };
+                    match data::traj_loader::read_frames_sync(path, &opts, n) {
+                        Ok(frames) if !frames.is_empty() => {
+                            if !seeded {
+                                mol.seed_frame0();
+                                seeded = true;
+                            }
+                            mol.append_frames(frames);
+                            mol.traj_loads.push(crate::scene::TrajLoad {
+                                path: path.clone(),
+                                from,
+                                to: None,
+                                stride: 1,
+                            });
+                        }
+                        Ok(_) => {} // no frames in this file (e.g. single-MODEL structure)
+                        Err(e) => {
+                            log::error!("trajectory {}: {e}", path.display());
+                            status = e;
+                        }
+                    }
+                }
+                if seeded {
+                    mol.apply_current_frame();
                 }
             }
+            #[cfg(target_arch = "wasm32")]
+            let _ = extra;
         }
         if !scene.molecules.is_empty() {
             scene.selected_mol = Some(0);
