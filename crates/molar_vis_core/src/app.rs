@@ -1895,6 +1895,11 @@ pub struct App {
     traj_rx: std::sync::mpsc::Receiver<(MolId, String, Vec<u8>)>,
     #[cfg(target_arch = "wasm32")]
     wasm_loaders: HashMap<MolId, data::traj_wasm::TrajStream>,
+    /// Active interactive-drawing session (Draw mode), or `None` when off. Mutually
+    /// exclusive with the pick modes (`pick_mode`): turning Draw on forces `pick_mode
+    /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
+    /// the bottom of this file.
+    draw: Option<DrawSession>,
 }
 
 /// Tabs in the top-bar "view settings" (hamburger) menu.
@@ -2395,6 +2400,7 @@ impl App {
             traj_rx,
             #[cfg(target_arch = "wasm32")]
             wasm_loaders: HashMap::new(),
+            draw: None,
         };
 
         // Verification hooks (native): exercise the session save/load round-trip
@@ -2454,7 +2460,161 @@ impl App {
             app.editing_rep = Some((0, 0));
         }
 
+        // Verification hook: MOLAR_VIS_DEBUG_DRAW=<preset> builds a small molecule
+        // through the *same* `Molecule` edit helpers the Draw-mode UI uses (single_atom
+        // → add_atom/add_bond with rough coords), turns Draw mode on, gives it a
+        // Ball-and-Stick rep, frames the camera, and relaxes it once — so the drawing
+        // path can be exercised without a mouse on this headless (Wayland) box. Pair
+        // with `RUST_LOG=molar_vis_core=info` to see the atom/bond counts + a bond
+        // length after relaxation. Presets: methane, ethane, water, benzene.
+        if let Ok(preset) = std::env::var("MOLAR_VIS_DEBUG_DRAW") {
+            app.debug_draw_preset(&preset.to_ascii_lowercase());
+        }
+
         Ok(app)
+    }
+
+    /// Headless verification: build a known small molecule via the Draw-mode edit
+    /// helpers and relax it. Enters Draw mode (so the toolbar/viewport state is
+    /// realistic). Logs the result at `info`. Native + wasm safe (pure CPU + molar).
+    fn debug_draw_preset(&mut self, preset: &str) {
+        use crate::minimize::{BondOrder, RelaxKind};
+        // (element, x, y, z) seed atoms + (i, j, order) bonds — rough/strained coords
+        // (a hand-drawn sketch), all in nm. The minimizer is what makes them sensible.
+        let atoms: Vec<(Element, glam::Vec3)>;
+        let bonds: Vec<(usize, usize, BondOrder)>;
+        match preset {
+            "water" => {
+                atoms = vec![
+                    (Element::O, glam::vec3(0.0, 0.0, 0.0)),
+                    (Element::H, glam::vec3(0.10, 0.0, 0.0)),
+                    (Element::H, glam::vec3(0.0, 0.10, 0.0)),
+                ];
+                bonds = vec![(0, 1, BondOrder::Single), (0, 2, BondOrder::Single)];
+            }
+            "ethane" => {
+                atoms = vec![
+                    (Element::C, glam::vec3(0.0, 0.0, 0.0)),
+                    (Element::C, glam::vec3(0.16, 0.0, 0.0)),
+                    (Element::H, glam::vec3(-0.05, 0.09, 0.0)),
+                    (Element::H, glam::vec3(-0.05, -0.09, 0.0)),
+                    (Element::H, glam::vec3(-0.05, 0.0, 0.09)),
+                    (Element::H, glam::vec3(0.21, 0.09, 0.0)),
+                    (Element::H, glam::vec3(0.21, -0.09, 0.0)),
+                    (Element::H, glam::vec3(0.21, 0.0, -0.09)),
+                ];
+                bonds = vec![
+                    (0, 1, BondOrder::Single),
+                    (0, 2, BondOrder::Single),
+                    (0, 3, BondOrder::Single),
+                    (0, 4, BondOrder::Single),
+                    (1, 5, BondOrder::Single),
+                    (1, 6, BondOrder::Single),
+                    (1, 7, BondOrder::Single),
+                ];
+            }
+            "benzene" => {
+                // Six carbons on a rough hexagon (radius ~0.14 nm) — deliberately a bit
+                // off so the relax has something to do — with aromatic ring bonds.
+                let mut a = Vec::new();
+                let mut b = Vec::new();
+                let r = 0.135_f32;
+                for k in 0..6 {
+                    let th = std::f32::consts::TAU * (k as f32) / 6.0;
+                    // jitter so it isn't already perfect
+                    let rr = r * if k % 2 == 0 { 1.08 } else { 0.92 };
+                    a.push((Element::C, glam::vec3(rr * th.cos(), rr * th.sin(), 0.0)));
+                }
+                for k in 0..6 {
+                    b.push((k, (k + 1) % 6, BondOrder::Aromatic));
+                }
+                atoms = a;
+                bonds = b;
+            }
+            // "methane" and anything unrecognized → methane.
+            _ => {
+                atoms = vec![
+                    (Element::C, glam::vec3(0.0, 0.0, 0.0)),
+                    (Element::H, glam::vec3(0.08, 0.08, 0.08)),
+                    (Element::H, glam::vec3(-0.08, -0.08, 0.08)),
+                    (Element::H, glam::vec3(-0.08, 0.08, -0.08)),
+                    (Element::H, glam::vec3(0.08, -0.08, -0.08)),
+                ];
+                bonds = vec![
+                    (0, 1, BondOrder::Single),
+                    (0, 2, BondOrder::Single),
+                    (0, 3, BondOrder::Single),
+                    (0, 4, BondOrder::Single),
+                ];
+            }
+        }
+        let Some((first_el, first_pos)) = atoms.first().copied() else {
+            return;
+        };
+        // Create the molecule from the first atom (a drawn molecule is never empty),
+        // exactly like the first click of the Atom tool.
+        let raw = match data::RawMolecule::single_atom("drawn", first_el.make_atom(), first_pos) {
+            Ok(raw) => raw,
+            Err(e) => {
+                log::error!("debug draw: {e}");
+                return;
+            }
+        };
+        let mut session = DrawSession { element: first_el, ..DrawSession::default() };
+        self.start_drawn_molecule(raw, &mut session);
+        let Some(target) = session.target else { return };
+        let Some(mi) = self.scene.molecules.iter().position(|m| m.id == target) else {
+            return;
+        };
+        // Append the rest via the same helpers, then relax to convergence.
+        {
+            let mol = &mut self.scene.molecules[mi];
+            for &(el, pos) in atoms.iter().skip(1) {
+                mol.add_atom(&el.make_atom(), pos);
+            }
+            for &(i, j, order) in &bonds {
+                mol.add_bond(i, j, order);
+            }
+            mol.refresh_bbox();
+            let res = crate::minimize::relax_in_system(
+                &mut mol.system,
+                &mol.bonds,
+                &mol.bond_orders,
+                RelaxKind::Cleanup,
+            );
+            // A representative bond length after relaxation (the first bond).
+            let len0 = mol.bonds.first().map(|&[a, b]| {
+                let st = mol.system.state();
+                match (st.coords.get(a), st.coords.get(b)) {
+                    (Some(pa), Some(pb)) => {
+                        glam::vec3(pa.x, pa.y, pa.z).distance(glam::vec3(pb.x, pb.y, pb.z))
+                    }
+                    _ => f32::NAN,
+                }
+            });
+            log::info!(
+                "debug draw '{preset}': {} atoms, {} bonds, relax {} steps (converged={}, fmax={:.4}), bond0 len = {:.4} nm",
+                mol.n_atoms,
+                mol.bonds.len(),
+                res.steps,
+                res.converged,
+                res.final_force_norm,
+                len0.unwrap_or(f32::NAN),
+            );
+            if let Some(rep) = mol.reps.first_mut() {
+                rep.geom_dirty = true;
+            }
+        }
+        // Frame the camera on the drawn molecule and keep the session active.
+        let (min, max) = self.scene.molecules[mi].current_bbox();
+        self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
+        self.settings.view.seed_camera(&mut self.camera);
+        self.last_render_camera = None;
+        self.view_dirty = true;
+        self.pick_mode = PickMode::Off;
+        self.draw = Some(session);
+        // A fresh drawn molecule is its own baseline for undo.
+        self.history = History::new(EditState::capture(&self.scene));
     }
 
     /// Recompile dirty selections and rebuild/reupload dirty geometry. Returns
@@ -3143,11 +3303,18 @@ impl App {
                     let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
                     let resp =
                         overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
+                    let mut pick_changed = false;
                     egui::Popup::menu(&resp).show(|ui| {
                         for m in [PickMode::Off, PickMode::Click, PickMode::Lasso] {
-                            ui.selectable_value(&mut self.pick_mode, m, m.label());
+                            if ui.selectable_value(&mut self.pick_mode, m, m.label()).clicked() {
+                                pick_changed = true;
+                            }
                         }
                     });
+                    // Mutually exclusive with Draw: choosing any pick mode leaves Draw.
+                    if pick_changed && self.pick_mode != PickMode::Off {
+                        self.draw = None;
+                    }
                     // Scope dropdown (how a hit expands: Atoms / Residues / Bound H).
                     // Only relevant when picking is on, so hidden while pick mode is Off.
                     // `Bound H` is meaningless for single-atom click picking, so hidden in
@@ -3174,6 +3341,22 @@ impl App {
                                 ui.selectable_value(&mut self.selection_mode, m, m.label());
                             }
                         });
+                    }
+
+                    // Draw-mode toggle (after the pick controls). Mutually exclusive
+                    // with picking: turning Draw on forces the pick mode Off.
+                    {
+                        let active = self.draw.is_some();
+                        if overlay_button(
+                            ui,
+                            &format!("{}  Draw", icon::PENCIL_SIMPLE),
+                            active,
+                        )
+                        .on_hover_text("Draw mode — sketch atoms and bonds by hand")
+                        .clicked()
+                        {
+                            self.toggle_draw();
+                        }
                     }
 
                     // In Click/Lasso mode, a held modifier changes the set operation (or,
@@ -3213,6 +3396,9 @@ impl App {
                         .inner;
                     self.view_settings_window(ui.ctx(), anchor);
                 });
+                // Draw-mode second row (tool / element palette / order / actions),
+                // shown only while Draw mode is active.
+                self.draw_toolbar_extras(ui);
             });
     }
 
@@ -4995,11 +5181,18 @@ impl App {
             if !lasso_mode {
                 self.lasso_path.clear();
             }
+            // Draw mode: plain LMB is the active drawing tool (handled in `draw_input`);
+            // Alt+LMB orbits, so the view can be rotated without leaving Draw. RMB/MMB/
+            // wheel navigate as usual.
+            let draw_mode = self.draw.is_some();
             let delta = response.drag_delta();
             let mods = ui.input(|i| i.modifiers);
             let (shift, alt) = (mods.shift, mods.alt);
-            // Alt+drag in Lasso mode orbits; otherwise an LMB lasso draws the polygon.
+            // Alt+drag in Lasso/Draw mode orbits; otherwise an LMB lasso draws the
+            // polygon (lasso), or the drawing tool acts (draw — handled separately).
             let lasso_draw = lasso_mode && !alt;
+            // A plain LMB in Draw mode does not orbit (the tool handles it).
+            let draw_tool_drag = draw_mode && !alt;
             if response.dragged_by(egui::PointerButton::Primary) {
                 if lasso_draw {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -5008,10 +5201,13 @@ impl App {
                             self.lasso_path.push(pos);
                         }
                     }
-                } else if shift && !lasso_mode {
+                } else if draw_tool_drag {
+                    // Drawing tool drag (e.g. Bond rubber-band) — see `draw_input`; no
+                    // camera motion here.
+                } else if shift && !lasso_mode && !draw_mode {
                     self.camera.roll(delta.x, self.settings.behavior.roll_sensitivity);
                 } else {
-                    // Non-lasso LMB, or Alt+LMB in lasso mode → free orbit.
+                    // Non-lasso/non-draw LMB, or Alt+LMB in lasso/draw mode → free orbit.
                     self.camera
                         .orbit(delta.x, delta.y, self.settings.behavior.orbit_sensitivity);
                 }
@@ -5094,6 +5290,13 @@ impl App {
             let texture_id = self.renderer.texture_id();
             egui::Image::new(egui::load::SizedTexture::new(texture_id, rect.size()))
                 .paint_at(ui, rect);
+
+            // Draw mode: handle the active tool (atom/bond/erase) for this frame's
+            // pointer events, draw the bond rubber-band, and drive the debounced
+            // minimizer. Plain LMB acts as the tool; Alt+LMB orbits (handled above).
+            if self.draw.is_some() {
+                self.draw_input(ui, &response, rect, size_px);
+            }
 
             // Hover-info picking. On native the hit comes from the **async GPU
             // id-buffer** (collect a finished readback, request the next); on wasm it's
@@ -5587,4 +5790,723 @@ enum LassoOp {
     Add,
     /// Ctrl/⌘+drag: remove the lassoed atoms from the active selection.
     Subtract,
+}
+
+// ===========================================================================
+// Draw mode — interactive molecule sketching
+// ===========================================================================
+//
+// Draw mode lets the user build a small molecule by hand: place atoms in the
+// viewport, draw bonds between them, cycle bond orders, and erase, with the
+// force-field cleanup minimizer (`crate::minimize`) relaxing the strained
+// hand-drawn geometry into sensible bond lengths/angles. State lives in an
+// `App::draw: Option<DrawSession>`; it's mutually exclusive with the pick modes
+// (turning one on clears the other). Cross-platform (no native-only deps in the
+// pointer/UI path), so it works in the browser too.
+
+/// An element on the drawing palette. Atoms are built via
+/// `Atom::new().with_name(symbol).guess()`, which fills element/mass/vdw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Element {
+    H,
+    C,
+    N,
+    O,
+    S,
+    P,
+    F,
+    Cl,
+    Br,
+    I,
+}
+
+impl Element {
+    /// The full palette, in display order (Carbon-first, the common organics, then
+    /// the heteroatoms and halogens).
+    const ALL: [Element; 10] = [
+        Element::C,
+        Element::H,
+        Element::N,
+        Element::O,
+        Element::S,
+        Element::P,
+        Element::F,
+        Element::Cl,
+        Element::Br,
+        Element::I,
+    ];
+
+    /// The atomic symbol — the name fed to molar's `Atom::with_name(..).guess()`,
+    /// and the palette button label.
+    fn symbol(self) -> &'static str {
+        match self {
+            Element::H => "H",
+            Element::C => "C",
+            Element::N => "N",
+            Element::O => "O",
+            Element::S => "S",
+            Element::P => "P",
+            Element::F => "F",
+            Element::Cl => "Cl",
+            Element::Br => "Br",
+            Element::I => "I",
+        }
+    }
+
+    /// Build a fresh molar `Atom` of this element (element/mass/vdw guessed from the
+    /// name). The residue is a generic `DRG` so a drawn molecule reads as one ligand.
+    fn make_atom(self) -> molar::prelude::Atom {
+        molar::prelude::Atom::new()
+            .with_name(self.symbol())
+            .with_resname("DRG")
+            .guess()
+    }
+}
+
+/// Which drawing tool the next viewport click acts as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DrawTool {
+    /// Place a new atom (or no-op on an existing atom).
+    Atom,
+    /// Drag between atoms to add a bond; click a bond to cycle its order.
+    Bond,
+    /// Click an atom to delete it (+ its bonds), or a bond to delete the bond.
+    Erase,
+}
+
+impl DrawTool {
+    fn label(self) -> &'static str {
+        match self {
+            DrawTool::Atom => "Atom",
+            DrawTool::Bond => "Bond",
+            DrawTool::Erase => "Erase",
+        }
+    }
+}
+
+/// In-progress pointer gesture for the Bond tool.
+enum DrawDrag {
+    /// No drag in progress.
+    Idle,
+    /// Dragging a bond out of atom `from` (global index); `current` is the live
+    /// cursor position (viewport pixels) for the rubber-band line.
+    FromAtom { from: usize, current: egui::Pos2 },
+}
+
+/// An in-flight relaxation. The minimizer is cheap for a few-atom molecule, so a job
+/// is a one-shot — run a single `relax_in_system` call next eligible frame, then
+/// clear. `to_convergence` picks the profile (Cleanup vs Quick).
+struct RelaxJob {
+    /// Steps budget left (unused in the one-shot model, kept for the job shape /
+    /// future incremental stepping per the Draw-mode contract). 0 ⇒ done.
+    #[allow(dead_code)]
+    remaining: u32,
+    /// Whether to run the full Cleanup profile (the "Clean up" button) vs Quick.
+    to_convergence: bool,
+}
+
+/// State of an active drawing session.
+struct DrawSession {
+    /// The molecule edits land in. `None` until the first atom is placed (which
+    /// *creates* the molecule, since molar can't append to a 0-atom system).
+    target: Option<MolId>,
+    /// The active tool.
+    tool: DrawTool,
+    /// The element placed by the Atom tool / a bonded end atom.
+    element: Element,
+    /// Default order for newly drawn bonds.
+    bond_order: crate::minimize::BondOrder,
+    /// The Bond tool's in-progress drag (rubber band).
+    drag: DrawDrag,
+    /// A committed edit happened; relax once the pointer settles (debounced).
+    minimize_pending: bool,
+    /// Active relaxation job, if any (drives the per-frame `relax_in_system` call).
+    relax: Option<RelaxJob>,
+    /// A world point the drawing plane passes through (updated to the last-touched
+    /// atom). `None` ⇒ use the camera target.
+    plane_depth: Option<glam::Vec3>,
+}
+
+impl Default for DrawSession {
+    fn default() -> Self {
+        Self {
+            target: None,
+            tool: DrawTool::Atom,
+            element: Element::C,
+            bond_order: crate::minimize::BondOrder::Single,
+            drag: DrawDrag::Idle,
+            minimize_pending: false,
+            relax: None,
+            plane_depth: None,
+        }
+    }
+}
+
+impl App {
+    /// Turn Draw mode on (a fresh session) or off. Mutually exclusive with picking:
+    /// entering Draw forces `pick_mode = Off` (and clears any in-progress lasso).
+    fn toggle_draw(&mut self) {
+        if self.draw.is_some() {
+            self.draw = None;
+        } else {
+            self.draw = Some(DrawSession::default());
+            self.pick_mode = PickMode::Off;
+            self.lasso_path.clear();
+        }
+    }
+
+    /// Create a new editable molecule from a freshly seeded single-atom `RawMolecule`,
+    /// give it a Ball-and-Stick rep (Element color), mark it `editable`, select it,
+    /// and record its `MolId` on `session.target`. Shared by the first Atom-tool click
+    /// and the headless preset hook.
+    fn start_drawn_molecule(&mut self, raw: data::RawMolecule, session: &mut DrawSession) {
+        let rep_defaults = self.rep_defaults.clone();
+        let id = self.scene.add(raw, &rep_defaults);
+        let mol = self.scene.molecules.last_mut().unwrap();
+        mol.editable = true;
+        mol.trajectory.speed_fps = self.settings.behavior.traj_fps;
+        mol.trajectory.loop_mode = self.settings.behavior.loop_mode;
+        // A drawn molecule reads best as Ball-and-Stick / Element color.
+        if let Some(rep) = mol.reps.first_mut() {
+            rep.kind = RepKind::BallAndStick;
+            rep.params = RepParams::for_kind(RepKind::BallAndStick);
+            rep.color = ColorMethod::Element;
+            rep.sel_text = "all".to_string();
+            rep.sel_dirty = true;
+            rep.geom_dirty = true;
+        }
+        self.scene.selected_mol = Some(self.scene.molecules.len() - 1);
+        session.target = Some(id);
+        self.view_dirty = true;
+    }
+
+    /// The Draw-mode toggle button + (when active) a second toolbar row with the
+    /// tool selector, element palette, bond-order selector, and the Clean up / New /
+    /// Finish actions. Drawn inside `draw_view_toolbar`'s panel. Returns nothing; all
+    /// state lives in `self.draw`.
+    fn draw_toolbar_extras(&mut self, ui: &mut egui::Ui) {
+        if self.draw.is_none() {
+            return;
+        }
+        // A thin second row under the selection controls. Wrapping, so the palette /
+        // order / action buttons stay reachable on a narrow window instead of running
+        // off the right edge.
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+
+            // — Tool selector —
+            toolbar_label(ui, "Tool");
+            for tool in [DrawTool::Atom, DrawTool::Bond, DrawTool::Erase] {
+                let active = self.draw.as_ref().map(|d| d.tool) == Some(tool);
+                let glyph = match tool {
+                    DrawTool::Atom => icon::PLUS_CIRCLE,
+                    DrawTool::Bond => icon::LINE_SEGMENT,
+                    DrawTool::Erase => icon::ERASER,
+                };
+                if overlay_button(ui, &format!("{}  {}", glyph, tool.label()), active)
+                    .on_hover_text(match tool {
+                        DrawTool::Atom => "Place atoms (click empty space)",
+                        DrawTool::Bond => "Draw bonds (drag atom→atom); click a bond to cycle its order",
+                        DrawTool::Erase => "Erase atoms or bonds (click)",
+                    })
+                    .clicked()
+                {
+                    if let Some(d) = self.draw.as_mut() {
+                        d.tool = tool;
+                        d.drag = DrawDrag::Idle;
+                    }
+                }
+            }
+
+            ui.separator();
+
+            // — Element palette — each button selects the element and switches to the
+            // Atom tool (so picking an element implies "place this kind of atom").
+            toolbar_label(ui, "Element");
+            let cur_el = self.draw.as_ref().map(|d| d.element);
+            for el in Element::ALL {
+                if overlay_button(ui, el.symbol(), cur_el == Some(el))
+                    .on_hover_text(format!("Draw {} atoms", el.symbol()))
+                    .clicked()
+                {
+                    if let Some(d) = self.draw.as_mut() {
+                        d.element = el;
+                        d.tool = DrawTool::Atom;
+                    }
+                }
+            }
+
+            ui.separator();
+
+            // — Bond-order selector (1 / 2 / 3) for new bonds.
+            toolbar_label(ui, "Order");
+            for (order, lbl) in [
+                (crate::minimize::BondOrder::Single, "1"),
+                (crate::minimize::BondOrder::Double, "2"),
+                (crate::minimize::BondOrder::Triple, "3"),
+            ] {
+                let active = self.draw.as_ref().map(|d| d.bond_order) == Some(order);
+                if overlay_button(ui, lbl, active)
+                    .on_hover_text(format!("{} bond", order.label()))
+                    .clicked()
+                {
+                    if let Some(d) = self.draw.as_mut() {
+                        d.bond_order = order;
+                    }
+                }
+            }
+
+            ui.separator();
+
+            // — Clean up (relax to convergence) — disabled until a molecule exists.
+            let has_target = self.draw.as_ref().and_then(|d| d.target).is_some();
+            let cleanup = ui.add_enabled(
+                has_target,
+                egui::Button::new(format!("{}  Clean up", icon::SPARKLE)),
+            );
+            if cleanup.on_hover_text("Relax the drawn geometry to convergence").clicked() {
+                if let Some(d) = self.draw.as_mut() {
+                    d.relax = Some(RelaxJob { remaining: 1, to_convergence: true });
+                }
+            }
+            // — New: the next click starts a fresh molecule.
+            if ui
+                .button(format!("{}  New", icon::PLUS))
+                .on_hover_text("Start a new drawn molecule on the next click")
+                .clicked()
+            {
+                if let Some(d) = self.draw.as_mut() {
+                    d.target = None;
+                    d.drag = DrawDrag::Idle;
+                }
+            }
+            // — Finish: leave Draw mode.
+            if ui
+                .button(format!("{}  Finish", icon::CHECK))
+                .on_hover_text("Leave Draw mode")
+                .clicked()
+            {
+                self.draw = None;
+            }
+
+            // Modifier hint (Alt rotates the view without leaving Draw).
+            let m = ui.input(|i| i.modifiers);
+            if m.alt {
+                ui.separator();
+                let c = egui::Color32::from_rgb(150, 190, 230);
+                ui.colored_label(c, egui::RichText::new(icon::ARROWS_CLOCKWISE).size(16.0));
+                ui.colored_label(c, "rotate view");
+            }
+        });
+    }
+
+    /// Project a viewport pixel onto the active drawing plane → a world point (nm).
+    /// The plane passes through `plane_depth` (the last-touched atom, else the camera
+    /// target) with the camera view direction as its normal, so freshly placed atoms
+    /// land on the focal plane the user is looking at. `None` if the ray is parallel
+    /// to the plane (degenerate).
+    fn drawing_plane_point(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> Option<glam::Vec3> {
+        let ndc_x = ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0;
+        let ndc_y = 1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0;
+        let aspect = size_px[0] as f32 / size_px[1] as f32;
+        let view = self.camera.view();
+        let proj = self.camera.proj(aspect);
+        let (ro, rd) = pick::cursor_ray(view, proj, ndc_x, ndc_y);
+        // Plane normal = the view direction toward the eye (camera-facing).
+        let n = (self.camera.eye() - self.camera.target).normalize_or_zero();
+        let p0 = self
+            .draw
+            .as_ref()
+            .and_then(|d| d.plane_depth)
+            .unwrap_or(self.camera.target);
+        let denom = rd.dot(n);
+        if denom.abs() < 1.0e-5 {
+            return None;
+        }
+        let t = (p0 - ro).dot(n) / denom;
+        if !t.is_finite() {
+            return None;
+        }
+        Some(ro + rd * t)
+    }
+
+    /// Pixel → world ray on the current camera (for snap-to-atom hit tests).
+    fn cursor_world_ray(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> (glam::Vec3, glam::Vec3) {
+        let ndc_x = ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0;
+        let ndc_y = 1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0;
+        let aspect = size_px[0] as f32 / size_px[1] as f32;
+        pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc_x, ndc_y)
+    }
+
+    /// Project a world point (nm) to a viewport pixel (for the rubber-band's start).
+    fn world_to_pixel(&self, world: glam::Vec3, rect: egui::Rect, size_px: [u32; 2]) -> Option<egui::Pos2> {
+        let aspect = size_px[0] as f32 / size_px[1] as f32;
+        let mvp = self.camera.proj(aspect) * self.camera.view();
+        let clip = mvp * world.extend(1.0);
+        if clip.w.abs() < 1.0e-6 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        Some(egui::pos2(
+            rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
+            rect.top() + (1.0 - (ndc.y * 0.5 + 0.5)) * rect.height(),
+        ))
+    }
+
+    /// World position (nm) of atom `i` of molecule `mi` at the displayed frame.
+    fn atom_world(&self, mi: usize, i: usize) -> Option<glam::Vec3> {
+        let mol = self.scene.molecules.get(mi)?;
+        let p = mol.render_state().coords.get(i)?;
+        Some(glam::vec3(p.x, p.y, p.z))
+    }
+
+    /// Pointer handling for the active drawing tool (atom/bond/erase) + the bond
+    /// rubber-band + the debounced minimizer. Called from `draw_viewport` each frame
+    /// while Draw mode is on. Alt+LMB orbits (handled by the navigation block), so the
+    /// tool only acts when Alt is *not* held.
+    fn draw_input(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+        size_px: [u32; 2],
+    ) {
+        let alt = ui.input(|i| i.modifiers.alt);
+        // Snapshot the session's tool params (avoids holding a borrow on `self.draw`
+        // while we mutate `self.scene`).
+        let (tool, element, bond_order, target) = match self.draw.as_ref() {
+            Some(d) => (d.tool, d.element, d.bond_order, d.target),
+            None => return,
+        };
+
+        // Resolve the target molecule's index (it may have been deleted/reordered).
+        let target_mi = target.and_then(|id| self.scene.molecules.iter().position(|m| m.id == id));
+
+        // --- Bond rubber-band (drawn regardless of which event fired) ----------
+        // Update the live cursor + paint the line from the source atom to the cursor.
+        if matches!(tool, DrawTool::Bond) && !alt {
+            // Keep the rubber-band's current cursor in sync.
+            if let Some(pos) = response.interact_pointer_pos().or_else(|| response.hover_pos()) {
+                if let Some(d) = self.draw.as_mut() {
+                    if let DrawDrag::FromAtom { current, .. } = &mut d.drag {
+                        *current = pos;
+                    }
+                }
+            }
+            let band = match self.draw.as_ref().map(|d| &d.drag) {
+                Some(DrawDrag::FromAtom { from, current }) => Some((*from, *current)),
+                _ => None,
+            };
+            if let (Some((from, current)), Some(mi)) = (band, target_mi) {
+                if let Some(start) = self
+                    .atom_world(mi, from)
+                    .and_then(|w| self.world_to_pixel(w, rect, size_px))
+                {
+                    let painter = ui.painter_at(rect);
+                    painter.line_segment(
+                        [start, current],
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(130, 215, 255)),
+                    );
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
+        // --- Tool events (suppressed while Alt orbits) -------------------------
+        if !alt {
+            match tool {
+                DrawTool::Atom => self.draw_input_atom(response, rect, size_px, element, target_mi),
+                DrawTool::Bond => self.draw_input_bond(response, rect, size_px, element, bond_order, target_mi),
+                DrawTool::Erase => self.draw_input_erase(response, rect, size_px, target_mi),
+            }
+            if response.clicked() || response.drag_stopped_by(egui::PointerButton::Primary) {
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // --- Debounced minimizer + active relax job ----------------------------
+        self.drive_minimize(ui);
+    }
+
+    /// Atom tool: a click on empty space places a new atom on the drawing plane (the
+    /// first one *creates* the molecule); a click on an existing atom is a no-op.
+    fn draw_input_atom(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        size_px: [u32; 2],
+        element: Element,
+        target_mi: Option<usize>,
+    ) {
+        if !response.clicked() {
+            return;
+        }
+        let Some(px) = response.interact_pointer_pos() else { return };
+        match target_mi {
+            // No molecule yet → create one from this first atom.
+            None => {
+                let pos = self
+                    .drawing_plane_point(px, rect, size_px)
+                    .unwrap_or(self.camera.target);
+                let raw = match data::RawMolecule::single_atom("drawn", element.make_atom(), pos) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        log::error!("draw: {e}");
+                        self.status = e;
+                        return;
+                    }
+                };
+                let mut session = self.draw.take().unwrap_or_default();
+                session.element = element;
+                self.start_drawn_molecule(raw, &mut session);
+                session.plane_depth = Some(pos);
+                session.minimize_pending = false; // a single atom needs no relax
+                self.draw = Some(session);
+            }
+            Some(mi) => {
+                // Clicking an existing atom is a no-op (reserved for element-change).
+                let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+                if pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).is_some() {
+                    return;
+                }
+                let Some(pos) = self.drawing_plane_point(px, rect, size_px) else { return };
+                let mol = &mut self.scene.molecules[mi];
+                mol.add_atom(&element.make_atom(), pos);
+                mol.refresh_bbox();
+                self.flag_edit(mi);
+                if let Some(d) = self.draw.as_mut() {
+                    d.plane_depth = Some(pos);
+                    d.minimize_pending = true;
+                }
+            }
+        }
+    }
+
+    /// Bond tool: drag atom→atom adds a bond (creating an end atom on empty space);
+    /// a plain click on a bond cycles its order.
+    fn draw_input_bond(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        size_px: [u32; 2],
+        element: Element,
+        bond_order: crate::minimize::BondOrder,
+        target_mi: Option<usize>,
+    ) {
+        let Some(mi) = target_mi else { return };
+
+        // Begin a drag from an atom.
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(px) = response.interact_pointer_pos() {
+                let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+                if let Some((from, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08) {
+                    if let Some(d) = self.draw.as_mut() {
+                        d.drag = DrawDrag::FromAtom { from, current: px };
+                    }
+                }
+            }
+            return;
+        }
+
+        // Finish a drag → add a bond (to an existing atom, or to a new atom on empty
+        // space).
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            let from = match self.draw.as_ref().map(|d| &d.drag) {
+                Some(DrawDrag::FromAtom { from, .. }) => Some(*from),
+                _ => None,
+            };
+            if let Some(d) = self.draw.as_mut() {
+                d.drag = DrawDrag::Idle;
+            }
+            let Some(from) = from else { return };
+            let Some(px) = response.interact_pointer_pos() else { return };
+            let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+            let dest = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i);
+            match dest {
+                Some(to) if to != from => {
+                    let mol = &mut self.scene.molecules[mi];
+                    if mol.add_bond(from, to, bond_order) {
+                        self.flag_edit(mi);
+                        if let Some(d) = self.draw.as_mut() {
+                            d.plane_depth = self.scene.molecules[mi]
+                                .render_state()
+                                .coords
+                                .get(to)
+                                .map(|p| glam::vec3(p.x, p.y, p.z));
+                            d.minimize_pending = true;
+                        }
+                    }
+                }
+                Some(_) => {} // released on the same atom → no-op
+                None => {
+                    // Released on empty space → new atom + a bond to it.
+                    if let Some(pos) = self.drawing_plane_point(px, rect, size_px) {
+                        let mol = &mut self.scene.molecules[mi];
+                        if let Some(new_idx) = mol.add_atom(&element.make_atom(), pos) {
+                            mol.add_bond(from, new_idx, bond_order);
+                            mol.refresh_bbox();
+                            self.flag_edit(mi);
+                            if let Some(d) = self.draw.as_mut() {
+                                d.plane_depth = Some(pos);
+                                d.minimize_pending = true;
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        // A plain click (no real drag) on a bond cycles its order.
+        if response.clicked() {
+            if let Some(px) = response.interact_pointer_pos() {
+                let aspect = size_px[0] as f32 / size_px[1] as f32;
+                let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
+                let ndc = glam::vec2(
+                    ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+                    1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+                );
+                if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02) {
+                    self.scene.molecules[mi].cycle_bond_order(k);
+                    self.flag_edit(mi);
+                    // A bond-order change shifts equilibrium length → relax.
+                    if let Some(d) = self.draw.as_mut() {
+                        d.minimize_pending = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Erase tool: a click deletes the nearest atom (and its bonds; deleting the
+    /// molecule if it becomes empty), else the nearest bond.
+    fn draw_input_erase(
+        &mut self,
+        response: &egui::Response,
+        rect: egui::Rect,
+        size_px: [u32; 2],
+        target_mi: Option<usize>,
+    ) {
+        if !response.clicked() {
+            return;
+        }
+        let Some(mi) = target_mi else { return };
+        let Some(px) = response.interact_pointer_pos() else { return };
+        let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+        if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08) {
+            let empty = self.scene.molecules[mi].remove_atom(i);
+            if empty {
+                // The molecule is now empty → delete it (park in trash, undoable).
+                let m = self.scene.molecules.remove(mi);
+                self.loaders.remove(&m.id);
+                #[cfg(target_arch = "wasm32")]
+                self.wasm_loaders.remove(&m.id);
+                self.scene.trash.insert(m.id, m);
+                self.scene.clamp_selection();
+                if let Some(d) = self.draw.as_mut() {
+                    d.target = None;
+                    d.drag = DrawDrag::Idle;
+                    d.minimize_pending = false;
+                }
+                self.view_dirty = true;
+            } else {
+                self.flag_edit(mi);
+                if let Some(d) = self.draw.as_mut() {
+                    d.minimize_pending = true;
+                }
+            }
+            return;
+        }
+        // No atom hit → try a bond.
+        let aspect = size_px[0] as f32 / size_px[1] as f32;
+        let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
+        let ndc = glam::vec2(
+            ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+            1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+        );
+        if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02) {
+            self.scene.molecules[mi].remove_bond_at(k);
+            self.flag_edit(mi);
+            if let Some(d) = self.draw.as_mut() {
+                d.minimize_pending = true;
+            }
+        }
+    }
+
+    /// Mark molecule `mi`'s reps dirty after a structural edit (rebuild geometry +
+    /// the GPU pick buffer) and flag a re-render.
+    fn flag_edit(&mut self, mi: usize) {
+        if let Some(mol) = self.scene.molecules.get_mut(mi) {
+            for rep in &mut mol.reps {
+                rep.sel_dirty = true; // the selection set ("all") grows/shrinks
+                rep.geom_dirty = true;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                mol.pick_dirty = true;
+            }
+        }
+        self.view_dirty = true;
+    }
+
+    /// Debounced minimizer: when an edit is pending and the pointer has settled, run a
+    /// Quick relax; an active relax job (Quick or Cleanup) runs one `relax_in_system`
+    /// call then clears. Repaints only while a relax job is active (idle = 0 GPU).
+    fn drive_minimize(&mut self, ui: &mut egui::Ui) {
+        // Promote a pending edit to a relax job once the pointer has settled — the same
+        // predicate the history checkpoint uses, so we never relax mid-drag.
+        let settled = !ui.ctx().egui_is_using_pointer();
+        let (start_quick, target) = match self.draw.as_ref() {
+            Some(d) => (
+                d.minimize_pending && settled && d.relax.is_none(),
+                d.target,
+            ),
+            None => (false, None),
+        };
+        if start_quick {
+            if let Some(d) = self.draw.as_mut() {
+                d.relax = Some(RelaxJob { remaining: 1, to_convergence: false });
+                d.minimize_pending = false;
+            }
+        }
+
+        // Run an active relax job (one-shot: a single relax call, then done).
+        let kind = match self.draw.as_ref().and_then(|d| d.relax.as_ref()) {
+            Some(job) if job.to_convergence => Some(crate::minimize::RelaxKind::Cleanup),
+            Some(_) => Some(crate::minimize::RelaxKind::Quick),
+            None => None,
+        };
+        if let Some(kind) = kind {
+            if let Some(mi) = target.and_then(|id| self.scene.molecules.iter().position(|m| m.id == id)) {
+                let mol = &mut self.scene.molecules[mi];
+                let _ = crate::minimize::relax_in_system(
+                    &mut mol.system,
+                    &mol.bonds,
+                    &mol.bond_orders,
+                    kind,
+                );
+                mol.refresh_bbox();
+                // Coordinates moved → in-place GPU coord update (no rebuild) + glow.
+                for rep in &mut mol.reps {
+                    rep.coords_dirty = true;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    mol.pick_dirty = true;
+                }
+                if mol.pending.is_some() {
+                    mol.glow_dirty = true;
+                }
+                self.view_dirty = true;
+            }
+            // One-shot: clear the job.
+            if let Some(d) = self.draw.as_mut() {
+                d.relax = None;
+            }
+            // Keep repainting while relaxing (a Cleanup ran in one frame, but request
+            // one more paint so the moved coords show immediately).
+            ui.ctx().request_repaint();
+        }
+    }
 }
