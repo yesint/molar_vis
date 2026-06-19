@@ -9,7 +9,7 @@ use glam::{Mat4, Vec2, Vec3, Vec4Swizzles};
 use molar::prelude::*;
 
 use crate::geometry::{RepKind, RepParams};
-use crate::scene::Scene;
+use crate::scene::{Molecule, Scene};
 
 /// What the picker does on hover / drag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -203,7 +203,7 @@ pub fn cursor_ray(view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> (Vec3, Vec3
 }
 
 /// Nearest non-negative ray–sphere intersection distance, if any.
-fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, r: f32) -> Option<f32> {
+pub(crate) fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, r: f32) -> Option<f32> {
     let oc = ro - center;
     let b = oc.dot(rd);
     let c = oc.dot(oc) - r * r;
@@ -219,6 +219,80 @@ fn ray_sphere(ro: Vec3, rd: Vec3, center: Vec3, r: f32) -> Option<f32> {
         let t1 = -b + s; // origin inside the sphere
         (t1 >= 0.0).then_some(t1)
     }
+}
+
+/// Nearest atom of `mol` hit by the world ray `(ro, rd)`, at its currently displayed
+/// position. Atoms are hit-tested as spheres of half their vdW radius, floored at
+/// `min_radius` (nm) so they stay easy to grab while drawing. Returns the global atom
+/// index + ray distance. Used by the drawing tool for snap-to-atom and erase.
+pub(crate) fn nearest_atom(
+    mol: &Molecule,
+    ro: Vec3,
+    rd: Vec3,
+    min_radius: f32,
+) -> Option<(usize, f32)> {
+    let state = mol.render_state();
+    let topo = mol.system.topology();
+    let mut best: Option<(usize, f32)> = None;
+    for (i, p) in state.coords.iter().enumerate() {
+        let r = topo
+            .get_atom(i)
+            .map(|a| a.vdw() * 0.5)
+            .unwrap_or(min_radius)
+            .max(min_radius);
+        let center = Vec3::new(p.x, p.y, p.z);
+        if let Some(t) = ray_sphere(ro, rd, center, r) {
+            if best.is_none_or(|(_, bt)| t < bt) {
+                best = Some((i, t));
+            }
+        }
+    }
+    best
+}
+
+/// Distance from point `p` to segment `a–b` (all in the same 2-D space).
+fn point_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    let t = if len2 > 1.0e-12 {
+        ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p - (a + ab * t)).length()
+}
+
+/// Index of the bond of `mol` closest to the cursor (in screen NDC), within
+/// `max_dist` NDC units, hit-testing the projected bond segment. Used by the drawing
+/// tool to cycle a bond's order or erase it. `ndc` is the cursor in `[-1,1]` (y up).
+pub(crate) fn nearest_bond(
+    mol: &Molecule,
+    view: Mat4,
+    proj: Mat4,
+    ndc: Vec2,
+    max_dist: f32,
+) -> Option<usize> {
+    let mvp = proj * view;
+    let state = mol.render_state();
+    let project = |i: usize| -> Option<Vec2> {
+        let p = state.coords.get(i)?;
+        let clip = mvp * glam::vec4(p.x, p.y, p.z, 1.0);
+        if clip.w.abs() < 1.0e-6 {
+            return None;
+        }
+        Some(Vec2::new(clip.x / clip.w, clip.y / clip.w))
+    };
+    let mut best: Option<(usize, f32)> = None;
+    for (k, &[a, b]) in mol.bonds.iter().enumerate() {
+        let (Some(pa), Some(pb)) = (project(a), project(b)) else {
+            continue;
+        };
+        let d = point_segment_dist(ndc, pa, pb);
+        if d <= max_dist && best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((k, d));
+        }
+    }
+    best.map(|(k, _)| k)
 }
 
 /// Build a [`PickHit`] for a specific atom, given the molecule + rep that drew it

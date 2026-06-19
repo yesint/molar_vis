@@ -12,6 +12,7 @@ mod geometry;
 mod history;
 mod launch;
 mod material;
+mod minimize;
 mod pick;
 mod render;
 mod scene;

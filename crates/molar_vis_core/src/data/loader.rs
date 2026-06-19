@@ -121,3 +121,31 @@ fn assemble(
         bbox_max,
     }
 }
+
+impl RawMolecule {
+    /// Build a fresh in-memory molecule holding a single `atom` at `pos` (nm), for
+    /// the drawing tool. molar's `append_atom` underflows on a 0-atom system, so a
+    /// drawable molecule must never be empty: the first viewport click *creates* it
+    /// here via `System::new`, and every later atom is appended. `mol_name` is the
+    /// display name; the source is `Bytes` (no file to reload from).
+    pub fn single_atom(mol_name: &str, atom: Atom, pos: Vec3) -> Result<RawMolecule, String> {
+        let mut top = Topology::default();
+        top.atoms.push(atom);
+        top.assign_resindex();
+        let st = State {
+            coords: vec![Pos::new(pos.x, pos.y, pos.z)],
+            ..Default::default()
+        };
+        let system =
+            System::new(top, st).map_err(|e| format!("can't create drawn molecule: {e}"))?;
+        Ok(RawMolecule {
+            name: mol_name.to_string(),
+            source: MoleculeSource::Bytes { name: mol_name.to_string() },
+            system,
+            n_atoms: 1,
+            bonds: Vec::new(),
+            bbox_min: pos,
+            bbox_max: pos,
+        })
+    }
+}

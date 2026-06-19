@@ -11,6 +11,7 @@ use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
+use crate::minimize::BondOrder;
 use crate::render::RepGpu;
 use crate::secstruct::SsMap;
 use crate::trajectory::Trajectory;
@@ -325,6 +326,16 @@ pub struct Molecule {
     pub traj_loads: Vec<TrajLoad>,
     pub system: System,
     pub bonds: Vec<[usize; 2]>,
+    /// Per-bond order, index-aligned with `bonds` (kept the same length by every
+    /// bond mutation helper). Guessed bonds load as `Single`; the drawing editor is
+    /// what introduces double/triple. Read by the force field; ignored by the
+    /// renderer/picker for now (multi-order *rendering* is a follow-up).
+    pub bond_orders: Vec<BondOrder>,
+    /// This molecule was created/edited by the drawing tool, so its full structure
+    /// (atoms + coords + bonds) is snapshotted for undo and may be relaxed by the
+    /// force field. Loaded molecules stay `false` (referenced by source, never
+    /// structure-snapshotted) — see [`crate::history`].
+    pub editable: bool,
     pub n_atoms: usize,
     pub bbox_min: Vec3,
     pub bbox_max: Vec3,
@@ -392,7 +403,9 @@ impl Molecule {
             source: raw.source,
             traj_loads: Vec::new(),
             system: raw.system,
+            bond_orders: vec![BondOrder::Single; raw.bonds.len()],
             bonds: raw.bonds,
+            editable: false,
             n_atoms: raw.n_atoms,
             bbox_min: raw.bbox_min,
             bbox_max: raw.bbox_max,
@@ -509,6 +522,100 @@ impl Molecule {
     /// Bounding box (nm) of the whole molecule at the currently displayed frame.
     pub fn current_bbox(&self) -> (Vec3, Vec3) {
         self.sel_bbox(&self.system.select_all())
+    }
+
+    /// Recompute the cached bounding box from the live structure (guards the
+    /// 0-atom case, where molar's `min_max` would panic).
+    pub fn refresh_bbox(&mut self) {
+        if self.n_atoms == 0 {
+            return;
+        }
+        let (min, max) = self.current_bbox();
+        self.bbox_min = min;
+        self.bbox_max = max;
+    }
+
+    // --- Structure editing (drawing tool) ----------------------------------
+    // These are the single source of bond/atom mutation; they keep `bonds` and
+    // `bond_orders` index-aligned and the same length. The molar `System` is the
+    // source of truth for per-atom data, so atoms go in/out through it.
+
+    /// Append a new atom (already built by the caller, e.g. from the element
+    /// palette) at world position `pos` (nm). Returns its global index, or `None`
+    /// if molar rejected the append. Does **not** touch bonds.
+    pub fn add_atom(&mut self, atom: &Atom, pos: Vec3) -> Option<usize> {
+        let p = Pos::new(pos.x, pos.y, pos.z);
+        match self.system.append_atom(atom, &p) {
+            Ok(_) => {
+                let idx = self.n_atoms;
+                self.n_atoms += 1;
+                self.bbox_min = self.bbox_min.min(pos);
+                self.bbox_max = self.bbox_max.max(pos);
+                self.hover_grid = None;
+                Some(idx)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Index of the bond between `i` and `j` (either direction), if any.
+    pub fn bond_between(&self, i: usize, j: usize) -> Option<usize> {
+        self.bonds
+            .iter()
+            .position(|&[a, b]| (a == i && b == j) || (a == j && b == i))
+    }
+
+    /// Add a bond `i–j` of the given order. No-op (returns `false`) for a self-bond,
+    /// an out-of-range endpoint, or a duplicate of an existing bond.
+    pub fn add_bond(&mut self, i: usize, j: usize, order: BondOrder) -> bool {
+        if i == j || i >= self.n_atoms || j >= self.n_atoms || self.bond_between(i, j).is_some() {
+            return false;
+        }
+        self.bonds.push([i, j]);
+        self.bond_orders.push(order);
+        true
+    }
+
+    /// Remove the bond at index `k` (keeping the two vecs aligned).
+    pub fn remove_bond_at(&mut self, k: usize) {
+        if k < self.bonds.len() {
+            self.bonds.remove(k);
+            self.bond_orders.remove(k);
+        }
+    }
+
+    /// Cycle the order of bond `k` (single→double→triple→single).
+    pub fn cycle_bond_order(&mut self, k: usize) {
+        if let Some(o) = self.bond_orders.get_mut(k) {
+            *o = o.cycle();
+        }
+    }
+
+    /// Remove atom `i` and every bond incident to it, re-indexing the surviving
+    /// bonds (endpoints `> i` shift down by one, mirroring molar's atom re-index).
+    /// Returns `true` if the molecule is now **empty** (the caller should delete it).
+    pub fn remove_atom(&mut self, i: usize) -> bool {
+        if i >= self.n_atoms {
+            return self.n_atoms == 0;
+        }
+        let mut new_bonds = Vec::with_capacity(self.bonds.len());
+        let mut new_orders = Vec::with_capacity(self.bond_orders.len());
+        for (b, &[a, c]) in self.bonds.iter().enumerate() {
+            if a == i || c == i {
+                continue; // incident bond → dropped
+            }
+            let na = if a > i { a - 1 } else { a };
+            let nc = if c > i { c - 1 } else { c };
+            new_bonds.push([na, nc]);
+            new_orders.push(self.bond_orders[b]);
+        }
+        self.bonds = new_bonds;
+        self.bond_orders = new_orders;
+        let _ = self.system.remove(std::iter::once(i));
+        self.n_atoms = self.n_atoms.saturating_sub(1);
+        self.hover_grid = None;
+        self.refresh_bbox();
+        self.n_atoms == 0
     }
 }
 
