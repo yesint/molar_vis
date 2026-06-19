@@ -1834,6 +1834,8 @@ pub struct App {
     load_dialog: Option<LoadDialog>,
     /// Open "delete trajectory frames" dialog, if any.
     delete_frames_dialog: Option<DeleteFramesDialog>,
+    /// Open "rename molecule" dialog: the target molecule + the edit buffer.
+    rename_mol: Option<(MolId, String)>,
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
@@ -1930,9 +1932,8 @@ struct LoadDialog {
     mol_id: MolId,
     path: Option<PathBuf>,
     from: usize,
-    /// Whether `to` bounds the read (else read to end of file).
-    to_enabled: bool,
-    to: usize,
+    /// Last frame to read, as text. **Empty = read to the end of the file.**
+    to_text: String,
     stride: usize,
     mode: LoadMode,
     error: Option<String>,
@@ -1944,8 +1945,7 @@ impl LoadDialog {
             mol_id,
             path: None,
             from: 0,
-            to_enabled: false,
-            to: 0,
+            to_text: String::new(),
             stride: 1,
             mode: LoadMode::Sync,
             error: None,
@@ -2370,6 +2370,7 @@ impl App {
             sel_hints: HashMap::new(),
             load_dialog: None,
             delete_frames_dialog: None,
+            rename_mol: None,
             loaders: HashMap::new(),
             pick_mode,
             selection_mode,
@@ -3044,6 +3045,7 @@ impl eframe::App for App {
         // The "Load trajectory" / "Delete frames" modals float above everything.
         self.draw_load_dialog(&ctx);
         self.draw_delete_frames_dialog(&ctx);
+        self.draw_rename_dialog(&ctx);
         self.draw_settings_dialog(&ctx, frame);
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
@@ -3676,6 +3678,7 @@ impl App {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut save_mol: Option<usize> = None;
         let mut open_del_frames: Option<MolId> = None;
+        let mut rename: Option<(MolId, String)> = None;
         // A camera "zoom to fit" request (whole-molecule bbox), applied after the
         // loop so it doesn't conflict with the `&mut` molecule borrow.
         let mut focus: Option<(glam::Vec3, glam::Vec3)> = None;
@@ -3693,8 +3696,14 @@ impl App {
                     {
                         mol.reps_open = !mol.reps_open;
                     }
-                    ui.label(mol.name.as_str());
-                    ui.weak(format!("({})", mol.n_atoms));
+                    // Name only; the atom/frame counts move to a hover tooltip.
+                    let frames = mol.trajectory.n_frames().max(1);
+                    ui.label(mol.name.as_str()).on_hover_text(format!(
+                        "{} atoms / {} frame{}",
+                        mol.n_atoms,
+                        frames,
+                        if frames == 1 { "" } else { "s" }
+                    ));
                     // Load a trajectory into this molecule (left-aligned, by the name).
                     if icon_button(ui, icon::FOLDER_OPEN, "Load trajectory").clicked() {
                         open_load = Some(mol.id);
@@ -3711,6 +3720,10 @@ impl App {
                                 .clicked()
                             {
                                 save_mol = Some(i);
+                                ui.close();
+                            }
+                            if ui.button(format!("{}  Rename…", icon::PENCIL_SIMPLE)).clicked() {
+                                rename = Some((mol.id, mol.name.clone()));
                                 ui.close();
                             }
                             if ui
@@ -3810,6 +3823,9 @@ impl App {
         let _ = save_mol;
         if let Some(id) = open_del_frames {
             self.delete_frames_dialog = Some(DeleteFramesDialog::new(id));
+        }
+        if rename.is_some() {
+            self.rename_mol = rename;
         }
         if let Some(id) = open_load {
             // Native: the load dialog (file picker + range/stride/sync-async).
@@ -4093,6 +4109,9 @@ impl App {
             };
             self.scene.add(raw, &self.rep_defaults);
             let mol = self.scene.molecules.last_mut().unwrap();
+            if !ms.name.is_empty() {
+                mol.name = ms.name.clone(); // restore a custom (renamed) display name
+            }
             mol.visible = ms.visible;
             mol.show_box = ms.show_box;
             mol.box_dirty = true;
@@ -4335,11 +4354,12 @@ impl App {
 
                     ui.label("Last frame");
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut dialog.to_enabled, "");
-                        ui.add_enabled(dialog.to_enabled, egui::DragValue::new(&mut dialog.to));
-                        if !dialog.to_enabled {
-                            ui.weak("(to end of file)");
-                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dialog.to_text)
+                                .desired_width(60.0)
+                                .hint_text("end"),
+                        );
+                        ui.weak("(empty = to end of file)");
                     });
                     ui.end_row();
 
@@ -4391,14 +4411,50 @@ impl App {
         }
     }
 
+    /// Modal to rename a molecule's displayed name (set from the molecule menu).
+    fn draw_rename_dialog(&mut self, ctx: &egui::Context) {
+        let Some((id, mut name)) = self.rename_mol.take() else {
+            return;
+        };
+        let mut commit = false;
+        let mut cancel = false;
+        let modal = egui::Modal::new(egui::Id::new("rename_mol_modal")).show(ctx, |ui| {
+            ui.set_width(280.0);
+            ui.heading("Rename molecule");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut name)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("name"),
+            );
+            resp.request_focus();
+            let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.separator();
+            ui.horizontal(|ui| {
+                let ok = ui
+                    .add_enabled(!name.trim().is_empty(), egui::Button::new("Rename"))
+                    .clicked();
+                commit = ok || (entered && !name.trim().is_empty());
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if commit && !name.trim().is_empty() {
+            if let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == id) {
+                mol.name = name.trim().to_string();
+            }
+        } else if !cancel && !modal.should_close() {
+            self.rename_mol = Some((id, name)); // still open — keep the edit buffer
+        }
+    }
+
     /// Begin loading the dialog's file into its molecule (sync or async).
     fn start_load(&mut self, dialog: &LoadDialog) -> Result<(), String> {
         let path = dialog.path.clone().ok_or("no file selected")?;
-        let opts = LoadOptions {
-            from: dialog.from,
-            to: dialog.to_enabled.then_some(dialog.to),
-            stride: dialog.stride.max(1),
+        // Empty "last frame" → read to the end of the file.
+        let to = match dialog.to_text.trim() {
+            "" => None,
+            s => Some(s.parse::<usize>().map_err(|_| "last frame must be a number".to_string())?),
         };
+        let opts = LoadOptions { from: dialog.from, to, stride: dialog.stride.max(1) };
         if let Some(to) = opts.to {
             if to < opts.from {
                 return Err("last frame is before first frame".to_string());

@@ -533,14 +533,20 @@ empty document), **Save…** (`App::save_session`), **Load…** (`App::load_sess
 the whole visualization state as a JSON session (see `session.rs`) · then
 undo/redo buttons, each with a `▼` dropdown for **cumulative** undo/redo (also Ctrl+Z /
 Ctrl+Shift+Z / Ctrl+Y) · then a **settings cogwheel** (`GEAR_SIX`) opening the program-settings
-window (`App::draw_settings_dialog`; see `settings.rs` / M21). Then one **molecule row** each: expand-caret + name + atom count +
-**Load-trajectory** (`FOLDER_OPEN`, left of the name), right-justified **add-rep** ·
-**zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` → `Camera::focus_bbox`) · eye · a **per-molecule
-menu** (`LIST` hamburger, replacing the old standalone trash/box buttons): **Save molecule…**
-(`FLOPPY_DISK` → `save_molecule`, native), **Show periodic box** checkbox (`mol.show_box`),
+window (`App::draw_settings_dialog`; see `settings.rs` / M21). Then one **molecule row** each:
+expand-caret + **name** (the atom/frame counts are no longer shown inline — they're a **hover
+tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
+name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
+`Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old
+standalone trash/box buttons): **Save molecule…** (`FLOPPY_DISK` → `save_molecule`, native),
+**Rename…** (`PENCIL_SIMPLE` → `rename_mol` + the `draw_rename_dialog` modal; edits `mol.name`,
+persisted in sessions via `MolSession.name`), **Show periodic box** checkbox (`mol.show_box`),
 **Delete frames…** (`SCISSORS` → the delete-frames modal; enabled only with a loaded
-trajectory), **Delete molecule** (`TRASH`). A trajectory control bar + slider appears below when
->1 frame; reps listed (indented) when the molecule caret is open.
+trajectory), **Delete molecule** (`TRASH`). A **two-row trajectory bar** appears below when
+>1 frame (row 1: play · frame/total · fps · loop · **slider-zoom** toggle (±25-frame window,
+enabled >50 frames) · **step** = playback skip per tick; row 2: first · back · full-width scrub
+slider · forward · last); reps listed (indented) when the molecule caret is open. The
+**Load-trajectory** modal's *Last frame* is a **text field** (empty = read to EOF), not a checkbox.
 
 **Top view toolbar** (`draw_view_toolbar`, an `egui::Panel::top("view_toolbar")` *above*
 the viewport — a real panel, **not** a floating `Area` over the 3D image; spans the central
