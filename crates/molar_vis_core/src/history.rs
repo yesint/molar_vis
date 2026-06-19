@@ -12,12 +12,13 @@
 //! whole slider drag becomes one undo step. Each step is tagged with a descriptive
 //! label (derived by diffing the two states) shown in the undo/redo dropdowns.
 
-use molar::prelude::SsAlgorithm;
+use molar::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
+use crate::minimize::BondOrder;
 use crate::scene::{MolId, Molecule, PeriodicParams, Representation, Scene};
 
 /// The editable state of a single representation — the canonical "document" unit.
@@ -89,9 +90,65 @@ impl RepState {
     }
 }
 
-/// The editable state of a molecule (its representations + visibility). The
-/// molecule's heavy data (the molar `System`, source, trajectory) is referenced
-/// by [`MolId`] for undo/redo and by source for sessions — never snapshotted here.
+/// The minimal per-atom fields needed to reconstruct a drawn molecule's `Atom`.
+/// (Mass/vdW are re-derived from the name by molar's `guess`; `atomic_number` is
+/// then pinned exactly so an unusual name can't mis-elementize the atom.)
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct AtomLite {
+    pub name: String,
+    pub atomic_number: u8,
+    pub resname: String,
+    pub resid: i32,
+}
+
+/// A full structure snapshot of an **editable** (drawn) molecule — atoms, their
+/// coordinates, and the bond graph with orders. Captured per checkpoint only for
+/// molecules flagged `editable`; loaded molecules carry `None` (referenced by
+/// source / id instead), so this adds zero cost to the normal load path. Small by
+/// construction (sketches are tens of atoms), so cloning it each frame is cheap.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct StructureSnapshot {
+    pub atoms: Vec<AtomLite>,
+    pub coords: Vec<[f32; 3]>,
+    pub bonds: Vec<[usize; 2]>,
+    pub bond_orders: Vec<BondOrder>,
+}
+
+impl StructureSnapshot {
+    /// Snapshot a molecule's live structure (topology atoms + system coords + the
+    /// editor's bond graph).
+    fn capture(mol: &Molecule) -> Self {
+        let topo = mol.system.topology();
+        let atoms = (0..mol.n_atoms)
+            .filter_map(|i| topo.get_atom(i))
+            .map(|a| AtomLite {
+                name: a.name.as_str().to_string(),
+                atomic_number: a.atomic_number,
+                resname: a.resname.as_str().to_string(),
+                resid: a.resid,
+            })
+            .collect();
+        let coords = mol
+            .system
+            .state()
+            .coords
+            .iter()
+            .map(|p| [p.x, p.y, p.z])
+            .collect();
+        StructureSnapshot {
+            atoms,
+            coords,
+            bonds: mol.bonds.clone(),
+            bond_orders: mol.bond_orders.clone(),
+        }
+    }
+}
+
+/// The editable state of a molecule (its representations + visibility, plus — for a
+/// drawn molecule — its full structure). A *loaded* molecule's heavy data (the molar
+/// `System`, source, trajectory) is referenced by [`MolId`] for undo/redo and by
+/// source for sessions, never snapshotted; a *drawn* molecule has no source to
+/// reload from, so its structure rides in `structure`.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct MolState {
     /// Runtime identity; only meaningful within a live session (undo/redo). Not
@@ -100,6 +157,10 @@ pub struct MolState {
     pub id: MolId,
     pub visible: bool,
     pub reps: Vec<RepState>,
+    /// Full structure snapshot for an editable (drawn) molecule; `None` for loaded
+    /// molecules. Drives undo/redo of atom/bond edits.
+    #[serde(default)]
+    pub structure: Option<StructureSnapshot>,
 }
 
 /// A snapshot of the editable document. `PartialEq` decides whether anything
@@ -119,6 +180,8 @@ impl EditState {
                     id: m.id,
                     visible: m.visible,
                     reps: m.reps.iter().map(RepState::capture).collect(),
+                    // Only drawn molecules carry a structure snapshot.
+                    structure: m.editable.then(|| StructureSnapshot::capture(m)),
                 })
                 .collect(),
         }
@@ -136,6 +199,12 @@ impl EditState {
                 continue;
             };
             mol.visible = ms.visible;
+            // Restore the drawn structure first (rebuilds the System, resets atom
+            // count), then reconcile reps over it.
+            mol.editable = ms.structure.is_some();
+            if let Some(snap) = &ms.structure {
+                reconcile_structure(&mut mol, snap);
+            }
             reconcile_reps(&mut mol, &ms.reps);
             new_mols.push(mol);
         }
@@ -144,6 +213,38 @@ impl EditState {
         }
         scene.molecules = new_mols;
         scene.clamp_selection();
+    }
+}
+
+/// Rebuild a molecule's molar `System` + bond graph from a [`StructureSnapshot`]
+/// (undo/redo of a drawn molecule). Editable molecules are tiny, so an
+/// unconditional rebuild is fine. Marks the reps for a geometry rebuild.
+fn reconcile_structure(mol: &mut Molecule, snap: &StructureSnapshot) {
+    let mut top = Topology::default();
+    for lite in &snap.atoms {
+        let mut a = Atom::new()
+            .with_name(&lite.name)
+            .with_resname(&lite.resname)
+            .with_resid(lite.resid)
+            .guess();
+        a.atomic_number = lite.atomic_number; // pin the element exactly
+        top.atoms.push(a);
+    }
+    top.assign_resindex();
+    let st = State {
+        coords: snap.coords.iter().map(|c| Pos::new(c[0], c[1], c[2])).collect(),
+        ..Default::default()
+    };
+    if let Ok(sys) = System::new(top, st) {
+        mol.system = sys;
+        mol.bonds = snap.bonds.clone();
+        mol.bond_orders = snap.bond_orders.clone();
+        mol.n_atoms = snap.atoms.len();
+        mol.hover_grid = None;
+        mol.refresh_bbox();
+        for rep in &mut mol.reps {
+            rep.geom_dirty = true;
+        }
     }
 }
 
@@ -194,6 +295,27 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
         };
         if om.visible != nm.visible {
             return "toggle molecule".into();
+        }
+        // Structure edits on a drawn molecule.
+        if om.structure != nm.structure {
+            if let (Some(o), Some(n)) = (&om.structure, &nm.structure) {
+                use std::cmp::Ordering::*;
+                match n.atoms.len().cmp(&o.atoms.len()) {
+                    Greater => return "add atom".into(),
+                    Less => return "delete atom".into(),
+                    Equal => {}
+                }
+                match n.bonds.len().cmp(&o.bonds.len()) {
+                    Greater => return "add bond".into(),
+                    Less => return "delete bond".into(),
+                    Equal => {}
+                }
+                if n.bond_orders != o.bond_orders {
+                    return "change bond order".into();
+                }
+                return "edit geometry".into(); // coordinates changed (minimize / move)
+            }
+            return "draw".into();
         }
         match nm.reps.len().cmp(&om.reps.len()) {
             Greater => return "add representation".into(),
@@ -408,5 +530,44 @@ mod tests {
         hist.undo_n(1).unwrap().apply(&mut scene);
         assert_eq!(scene.molecules.len(), 2);
         assert!(scene.trash.is_empty());
+    }
+
+    #[test]
+    fn undo_redo_structure_edit() {
+        use glam::Vec3;
+        // A drawn molecule: one carbon, flagged editable.
+        let raw = crate::data::RawMolecule::single_atom(
+            "Drawn",
+            Atom::new().with_name("C").guess(),
+            Vec3::new(0.0, 0.0, 0.0),
+        )
+        .unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        scene.molecules[0].editable = true;
+        let mut hist = History::new(EditState::capture(&scene));
+
+        // Add a second atom + bond it to the first.
+        let mol = &mut scene.molecules[0];
+        let idx = mol
+            .add_atom(&Atom::new().with_name("C").guess(), Vec3::new(0.15, 0.0, 0.0))
+            .unwrap();
+        assert!(mol.add_bond(0, idx, BondOrder::Single));
+        hist.maybe_record(EditState::capture(&scene));
+        assert_eq!(hist.undo_label(0), "add atom");
+
+        // Undo → back to the lone carbon, no bonds, still editable.
+        hist.undo_n(1).unwrap().apply(&mut scene);
+        assert_eq!(scene.molecules[0].n_atoms, 1);
+        assert_eq!(scene.molecules[0].bonds.len(), 0);
+        // The molar System itself was rebuilt from the snapshot, not just n_atoms.
+        assert_eq!(scene.molecules[0].system.state().coords.len(), 1);
+        assert!(scene.molecules[0].editable);
+
+        // Redo → two atoms + one bond restored.
+        hist.redo_n(1).unwrap().apply(&mut scene);
+        assert_eq!(scene.molecules[0].n_atoms, 2);
+        assert_eq!(scene.molecules[0].bonds.len(), 1);
+        assert_eq!(scene.molecules[0].bond_orders.len(), 1);
     }
 }
