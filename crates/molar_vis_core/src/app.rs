@@ -1729,18 +1729,19 @@ fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
                 .fixed_decimals(0),
         )
         .on_hover_text("Playback speed");
-    });
 
-    // Slider on its own row, filling the width.
-    let mut cur = traj.current;
-    let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
-    if resp.changed() {
-        traj.set_playing(false);
-        traj.set_current(cur);
-    }
-    if let Some(t) = traj.current_time() {
-        resp.on_hover_text(format!("frame {} — t = {:.3}", traj.current, t));
-    }
+        // Frame slider — same row, after the controls, filling the remaining width.
+        let mut cur = traj.current;
+        ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
+        let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
+        if resp.changed() {
+            traj.set_playing(false);
+            traj.set_current(cur);
+        }
+        if let Some(t) = traj.current_time() {
+            resp.on_hover_text(format!("frame {} — t = {:.3}", traj.current, t));
+        }
+    });
 
     traj.current != before
 }
