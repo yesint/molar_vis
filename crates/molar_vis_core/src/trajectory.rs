@@ -37,6 +37,11 @@ pub struct Trajectory {
     pub loop_mode: LoopMode,
     /// Target playback rate, frames per second.
     pub speed_fps: f32,
+    /// Frames to advance per playback step (skip during playing; `1` = every frame).
+    pub play_step: usize,
+    /// UI: zoom the scrub slider to a ±25-frame window around the current frame
+    /// (only meaningful for long trajectories). Transient view state, not serialized.
+    pub slider_zoom: bool,
     /// Wall-clock seconds accumulated toward the next frame advance.
     accum: f64,
 }
@@ -50,6 +55,8 @@ impl Default for Trajectory {
             dir: 1,
             loop_mode: LoopMode::Loop,
             speed_fps: 15.0,
+            play_step: 1,
+            slider_zoom: false,
             accum: 0.0,
         }
     }
@@ -152,7 +159,8 @@ impl Trajectory {
         self.accum += dt;
         let period = 1.0 / self.speed_fps as f64;
         let n = self.frames.len() as i32;
-        let stepv = self.dir.signum();
+        // Advance by `play_step` frames per tick (skip frames during playback).
+        let stepv = self.dir.signum() * self.play_step.max(1) as i32;
         let mut moved = false;
         while self.accum >= period {
             self.accum -= period;
@@ -164,6 +172,10 @@ impl Trajectory {
                 }
                 LoopMode::Once => {
                     if next < 0 || next >= n {
+                        // A multi-frame step can overshoot — land on the end, then stop.
+                        let end = if next < 0 { 0 } else { (n - 1) as usize };
+                        moved |= self.current != end;
+                        self.current = end;
                         self.playing = false;
                         self.accum = 0.0;
                         break;

@@ -1669,16 +1669,10 @@ fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
     let last = n - 1;
     let before = traj.current;
 
+    // Row 1: play · frame/total · fps · loop · zoom · step.
     ui.horizontal(|ui| {
         compact_actions(ui);
-        if icon_button(ui, icon::SKIP_BACK, "First frame").clicked() {
-            traj.set_playing(false);
-            traj.set_current(0);
-        }
-        if icon_button(ui, icon::CARET_LEFT, "Step back").clicked() {
-            traj.set_playing(false);
-            traj.step(-1);
-        }
+
         let play_glyph = if traj.playing { icon::PAUSE } else { icon::PLAY };
         if ui
             .selectable_label(traj.playing, play_glyph)
@@ -1687,15 +1681,8 @@ fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
         {
             traj.set_playing(!traj.playing);
         }
-        if icon_button(ui, icon::CARET_RIGHT, "Step forward").clicked() {
-            traj.set_playing(false);
-            traj.step(1);
-        }
-        if icon_button(ui, icon::SKIP_FORWARD, "Last frame").clicked() {
-            traj.set_playing(false);
-            traj.set_current(last);
-        }
 
+        ui.separator();
         // Editable current-frame field + total.
         let mut cur = traj.current;
         if ui
@@ -1707,6 +1694,17 @@ fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
         }
         ui.weak(format!("/ {last}"));
 
+        ui.separator();
+        // Playback speed (frames per second).
+        ui.add(
+            egui::DragValue::new(&mut traj.speed_fps)
+                .range(1.0..=120.0)
+                .suffix(" fps")
+                .fixed_decimals(0),
+        )
+        .on_hover_text("Playback speed");
+
+        ui.separator();
         // Loop / once toggle.
         let looping = traj.loop_mode == LoopMode::Loop;
         if ui
@@ -1721,25 +1719,76 @@ fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
             traj.loop_mode = if looping { LoopMode::Once } else { LoopMode::Loop };
         }
 
-        // Playback speed (frames per second).
-        ui.add(
-            egui::DragValue::new(&mut traj.speed_fps)
-                .range(1.0..=120.0)
-                .suffix(" fps")
-                .fixed_decimals(0),
-        )
-        .on_hover_text("Playback speed");
+        ui.separator();
+        // Slider zoom toggle — only useful (and enabled) for long trajectories; it
+        // narrows the scrub slider to a ±25-frame window around the current frame.
+        let can_zoom = n > 50;
+        if !can_zoom {
+            traj.slider_zoom = false;
+        }
+        ui.add_enabled_ui(can_zoom, |ui| {
+            if ui
+                .selectable_label(traj.slider_zoom, icon::MAGNIFYING_GLASS_PLUS)
+                .on_hover_text("Zoom the scrub slider to ±25 frames around the current frame")
+                .clicked()
+            {
+                traj.slider_zoom = !traj.slider_zoom;
+            }
+        });
 
-        // Frame slider — same row, after the controls, filling the remaining width.
+        ui.separator();
+        // Playback step (skip frames while playing).
+        ui.label("step");
+        let mut step = traj.play_step.max(1);
+        if ui
+            .add(egui::DragValue::new(&mut step).range(1..=last.max(1)))
+            .on_hover_text("Frames to advance per playback step")
+            .changed()
+        {
+            traj.play_step = step.max(1);
+        }
+    });
+
+    // Row 2: first · back · [full-width scrub slider] · forward · last.
+    ui.horizontal(|ui| {
+        compact_actions(ui);
+        if icon_button(ui, icon::SKIP_BACK, "First frame").clicked() {
+            traj.set_playing(false);
+            traj.set_current(0);
+        }
+        if icon_button(ui, icon::CARET_LEFT, "Step back").clicked() {
+            traj.set_playing(false);
+            traj.step(-1);
+        }
+
+        // The slider stretches across the row between the flanking step buttons.
+        // Zoomed: a ±25-frame window around the current frame (finer scrubbing on a
+        // long trajectory); otherwise the full range.
+        let (lo, hi) = if traj.slider_zoom && n > 50 {
+            (traj.current.saturating_sub(25), (traj.current + 25).min(last))
+        } else {
+            (0, last)
+        };
+        // Reserve room for the two trailing buttons (forward, last) + spacing.
+        let reserve = 52.0;
+        ui.spacing_mut().slider_width = (ui.available_width() - reserve).max(40.0);
         let mut cur = traj.current;
-        ui.spacing_mut().slider_width = (ui.available_width() - 4.0).max(40.0);
-        let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
+        let resp = ui.add(egui::Slider::new(&mut cur, lo..=hi).show_value(false));
         if resp.changed() {
             traj.set_playing(false);
             traj.set_current(cur);
         }
         if let Some(t) = traj.current_time() {
             resp.on_hover_text(format!("frame {} — t = {:.3}", traj.current, t));
+        }
+
+        if icon_button(ui, icon::CARET_RIGHT, "Step forward").clicked() {
+            traj.set_playing(false);
+            traj.step(1);
+        }
+        if icon_button(ui, icon::SKIP_FORWARD, "Last frame").clicked() {
+            traj.set_playing(false);
+            traj.set_current(last);
         }
     });
 
