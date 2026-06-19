@@ -117,6 +117,9 @@ const K_BOND: f32 = 5.0e4;
 const K_ANGLE: f32 = 500.0;
 /// vdW well depth (ff-energy). Only scales the repulsion strength.
 const VDW_EPS: f32 = 2.0;
+/// Torsion barrier (ff-energy). Deliberately weak — it only biases sp3 bonds toward
+/// staggering and sp2/aromatic bonds toward planarity; it never fights stretch/bend.
+const TORSION_VN: f32 = 5.0;
 /// 2^(1/6): the LJ minimum, where the WCA core is truncated.
 const TWO_POW_1_6: f32 = 1.122_462_048;
 
@@ -230,10 +233,9 @@ struct AngleTerm {
     kt: f32,
 }
 
-/// A four-body torsion term. Enumerated but **not yet evaluated** — reserved for the
-/// planned sp2-planarity / sp3-staggering follow-up. Kept so the model layout is
-/// stable when it lands.
-#[allow(dead_code)]
+/// A four-body torsion term `E = (Vn/2)·(1 + cos(n·φ − phase))` about the central
+/// bond `j–k`. sp3–sp3 bonds use `n=3, phase=0` (staggering); sp2/aromatic–sp2 bonds
+/// use `n=2, phase=π` (planarity).
 struct TorsionTerm {
     i: usize,
     j: usize,
@@ -244,6 +246,18 @@ struct TorsionTerm {
     phase: f32,
 }
 
+/// Torsion parameters `(Vn, periodicity, phase)` for a central bond whose two atoms
+/// have hybridizations `hj`/`hk`. Returns `None` when no meaningful torsion applies
+/// (a linear/terminal end, or a mixed sp2/sp3 bond whose barrier is negligible).
+fn torsion_params(hj: Hybrid, hk: Hybrid) -> Option<(f32, f32, f32)> {
+    use Hybrid::*;
+    match (hj, hk) {
+        (Sp3, Sp3) => Some((TORSION_VN, 3.0, 0.0)),
+        (Sp2, Sp2) => Some((TORSION_VN, 2.0, std::f32::consts::PI)),
+        _ => None,
+    }
+}
+
 /// A typed, parameterized force field for one molecule's current topology. Built
 /// once per committed edit (cheap, O(N·deg²)) and reused across every FIRE step.
 /// Holds no coordinates, so it stays valid as long as the topology is unchanged.
@@ -251,7 +265,6 @@ pub struct FfModel {
     n: usize,
     bonds: Vec<BondTerm>,
     angles: Vec<AngleTerm>,
-    #[allow(dead_code)]
     torsions: Vec<TorsionTerm>,
     /// Per-atom WCA σ (nm) = vdW radius · 2^(-1/6), so the LJ minimum sits at the
     /// vdW radius.
@@ -322,6 +335,26 @@ pub fn build_model(atomic_numbers: &[u8], bonds: &[[usize; 2]], orders: &[BondOr
         }
     }
 
+    // Torsions: i–j–k–l about each central bond j–k (staggering / planarity).
+    let mut torsion_terms = Vec::new();
+    for bt in &bond_terms {
+        let (j, k) = (bt.i, bt.j);
+        let Some((vn, period, phase)) = torsion_params(hyb[j], hyb[k]) else {
+            continue;
+        };
+        for &i in &nbr[j] {
+            if i == k {
+                continue;
+            }
+            for &l in &nbr[k] {
+                if l == j || l == i {
+                    continue;
+                }
+                torsion_terms.push(TorsionTerm { i, j, k, l, vn, n: period, phase });
+            }
+        }
+    }
+
     let sigma = (0..n)
         .map(|i| vdw_radius(atomic_numbers[i]) / TWO_POW_1_6)
         .collect();
@@ -330,7 +363,7 @@ pub fn build_model(atomic_numbers: &[u8], bonds: &[[usize; 2]], orders: &[BondOr
         n,
         bonds: bond_terms,
         angles: angle_terms,
-        torsions: Vec::new(),
+        torsions: torsion_terms,
         sigma,
         excluded,
     }
@@ -390,6 +423,40 @@ fn energy_forces(coords: &[Vec3], model: &FfModel, forces: &mut [Vec3]) -> f32 {
         forces[t.i] += fi;
         forces[t.k] += fk;
         forces[t.j] -= fi + fk;
+    }
+
+    // Torsion: E = (Vn/2)·(1 + cos(n·φ − phase)), Blondel–Karplus forces (no acos).
+    for t in &model.torsions {
+        let b1 = coords[t.j] - coords[t.i];
+        let b2 = coords[t.k] - coords[t.j];
+        let b3 = coords[t.l] - coords[t.k];
+        let n1 = b1.cross(b2);
+        let n2 = b2.cross(b3);
+        let n1n = n1.length_squared();
+        let n2n = n2.length_squared();
+        let b2len = b2.length();
+        if n1n < 1.0e-12 || n2n < 1.0e-12 || b2len < EPS_DIST {
+            continue; // collinear i-j-k or j-k-l → dihedral undefined
+        }
+        // Signed dihedral via atan2 (robust near 0/π).
+        let m1 = n1.cross(b2 / b2len);
+        let phi = m1.dot(n2).atan2(n1.dot(n2));
+        let arg = t.n * phi - t.phase;
+        energy += 0.5 * t.vn * (1.0 + arg.cos());
+        let de_dphi = -0.5 * t.vn * t.n * arg.sin();
+        let fi = n1 * (-de_dphi * b2len / n1n);
+        let fl = n2 * (de_dphi * b2len / n2n);
+        // Middle-atom distribution (Blondel–Karplus). The projection scalars use the
+        // GROMACS vector convention (r_ij = i−j, r_kl = k−l), which is the negation
+        // of our b1 = j−i and b3 = l−k, hence the leading minus.
+        let s = -b1.dot(b2) / (b2len * b2len);
+        let u = -b3.dot(b2) / (b2len * b2len);
+        let fj = fi * (s - 1.0) - fl * u;
+        let fk = fl * (u - 1.0) - fi * s;
+        forces[t.i] += fi;
+        forces[t.j] += fj;
+        forces[t.k] += fk;
+        forces[t.l] += fl;
     }
 
     // van der Waals: purely-repulsive WCA core between non-excluded pairs.
@@ -767,6 +834,51 @@ mod tests {
         let sigma = vdw_radius(6) / TWO_POW_1_6;
         let r_cut = TWO_POW_1_6 * sigma;
         assert!(r >= r_cut - 1.0e-3, "vdW should separate to ~{r_cut}, got {r}");
+    }
+
+    /// A C–C–C–C chain with the central C1–C2 dihedral set to `phi_deg`. Bonds at
+    /// equilibrium, ~109.5° angles; only the dihedral varies, so it isolates torsion
+    /// (+ the 1-4 vdW between the end carbons).
+    fn carbon_chain(phi_deg: f32) -> ([u8; 4], [[usize; 2]; 3], [BondOrder; 3], [Vec3; 4]) {
+        let z = [6u8; 4];
+        let bonds = [[0usize, 1], [1, 2], [2, 3]];
+        let orders = [BondOrder::Single; 3];
+        let l = equilibrium_bond_length(6, 6, BondOrder::Single);
+        let theta = 109.5_f32.to_radians();
+        let c1 = Vec3::ZERO;
+        let c2 = Vec3::new(l, 0.0, 0.0);
+        let c0 = c1 + l * Vec3::new(theta.cos(), theta.sin(), 0.0);
+        // C2→C3 base direction (phi=0 → cis to C1→C0, both +y), rotated about x by phi.
+        let base = Vec3::new(-theta.cos(), theta.sin(), 0.0);
+        let phi = phi_deg.to_radians();
+        let rot = Vec3::new(
+            base.x,
+            base.y * phi.cos() - base.z * phi.sin(),
+            base.y * phi.sin() + base.z * phi.cos(),
+        );
+        let c3 = c2 + l * rot;
+        (z, bonds, orders, [c0, c1, c2, c3])
+    }
+
+    #[test]
+    fn torsion_gradient_matches_finite_difference() {
+        let (z, bonds, orders, coords) = carbon_chain(40.0);
+        let model = build_model(&z, &bonds, &orders);
+        assert_eq!(model.torsions.len(), 1, "one sp3–sp3 torsion expected");
+        grad_check(&coords, &model);
+    }
+
+    #[test]
+    fn torsion_prefers_staggered_over_eclipsed() {
+        let (z, bonds, orders, _) = carbon_chain(0.0);
+        let model = build_model(&z, &bonds, &orders);
+        let mut f = vec![Vec3::ZERO; 4];
+        let e_eclipsed = energy_forces(&carbon_chain(0.0).3, &model, &mut f);
+        let e_staggered = energy_forces(&carbon_chain(60.0).3, &model, &mut f);
+        assert!(
+            e_eclipsed > e_staggered,
+            "eclipsed {e_eclipsed} should cost more than staggered {e_staggered}"
+        );
     }
 
     #[test]
