@@ -1321,7 +1321,7 @@ fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             egui::ComboBox::from_id_salt("set_pick_mode")
                 .selected_text(b.pick_mode.label())
                 .show_ui(ui, |ui| {
-                    for m in [PickMode::Off, PickMode::HoverInfo, PickMode::Lasso] {
+                    for m in [PickMode::Off, PickMode::Click, PickMode::Lasso] {
                         ui.selectable_value(&mut b.pick_mode, m, m.label());
                     }
                 });
@@ -1839,9 +1839,9 @@ pub struct App {
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
-    /// Picking mode (top view-toolbar dropdown). `HoverInfo` shows the hovered
-    /// atom's identity + real coords and glows its outline; `Lasso` drags a
-    /// freehand selection polygon.
+    /// Picking mode (top view-toolbar dropdown). `Click` shows the hovered atom's
+    /// identity + glow and selects it on click; `Lasso` drags a freehand selection
+    /// polygon.
     pick_mode: PickMode,
     /// How a lasso expands its hit atoms (viewport-overlay dropdown): exact atoms,
     /// whole residues, or heavy atoms + their bonded hydrogens.
@@ -2340,7 +2340,7 @@ impl App {
 
         // Compute these before the struct init moves `settings` in.
         let pick_mode = if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
-            PickMode::HoverInfo
+            PickMode::Click
         } else {
             settings.behavior.pick_mode
         };
@@ -3144,20 +3144,20 @@ impl App {
                     let resp =
                         overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
                     egui::Popup::menu(&resp).show(|ui| {
-                        for m in [PickMode::Off, PickMode::HoverInfo, PickMode::Lasso] {
+                        for m in [PickMode::Off, PickMode::Click, PickMode::Lasso] {
                             ui.selectable_value(&mut self.pick_mode, m, m.label());
                         }
                     });
                     // Scope dropdown (how a hit expands: Atoms / Residues / Bound H).
                     // Only relevant when picking is on, so hidden while pick mode is Off.
-                    // `Bound H` is meaningless for single-atom hover, so hidden in
-                    // HoverInfo (and a stale value snaps back to Atoms).
+                    // `Bound H` is meaningless for single-atom click picking, so hidden in
+                    // Click mode (and a stale value snaps back to Atoms).
                     if self.pick_mode != PickMode::Off {
-                        let hover = self.pick_mode == PickMode::HoverInfo;
-                        if hover && self.selection_mode == SelectionMode::BoundH {
+                        let single = self.pick_mode == PickMode::Click;
+                        if single && self.selection_mode == SelectionMode::BoundH {
                             self.selection_mode = SelectionMode::Atoms;
                         }
-                        let modes: &[SelectionMode] = if hover {
+                        let modes: &[SelectionMode] = if single {
                             &[SelectionMode::Atoms, SelectionMode::Residues]
                         } else {
                             &[SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH]
@@ -3176,12 +3176,12 @@ impl App {
                         });
                     }
 
-                    // In Lasso mode, a held modifier changes the set operation (or, for
-                    // Alt, orbits the view) — trail the hint (matches `finish_lasso`'s
-                    // `LassoOp` and `draw_viewport`'s Alt orbit).
-                    if self.pick_mode == PickMode::Lasso {
+                    // In Click/Lasso mode, a held modifier changes the set operation (or,
+                    // for Alt in Lasso, orbits the view) — trail the hint (matches
+                    // `finish_lasso`'s `LassoOp` and the click-to-select path).
+                    if matches!(self.pick_mode, PickMode::Click | PickMode::Lasso) {
                         let m = ui.input(|i| i.modifiers);
-                        let hint = if m.alt {
+                        let hint = if m.alt && self.pick_mode == PickMode::Lasso {
                             Some((icon::ARROWS_CLOCKWISE, "rotate view", egui::Color32::from_rgb(150, 190, 230)))
                         } else if m.shift {
                             Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
@@ -5121,7 +5121,7 @@ impl App {
                 self.hover_pick = ids;
             }
 
-            let hovering = self.pick_mode == PickMode::HoverInfo && !response.dragged();
+            let hovering = self.pick_mode == PickMode::Click && !response.dragged();
             let mut residue_hit = false;
             let mut lens_shown = false;
             if hovering {
@@ -5171,6 +5171,35 @@ impl App {
                         pick::pick(&self.scene, view, proj, ndc_x, ndc_y)
                     };
                     if let Some(hit) = hit {
+                        // Click selects the hovered atom/residue: merge it into the
+                        // active (pending) selection (Shift = add, Ctrl/⌘ = subtract,
+                        // plain = replace), expanded per the scope mode. A plain LMB
+                        // *drag* still orbits (handled above), so only a real click here.
+                        if response.clicked() {
+                            let m = ui.input(|i| i.modifiers);
+                            let op = if m.shift {
+                                LassoOp::Add
+                            } else if m.command {
+                                LassoOp::Subtract
+                            } else {
+                                LassoOp::Replace
+                            };
+                            if op == LassoOp::Replace {
+                                for mol in &mut self.scene.molecules {
+                                    if mol.pending.take().is_some() {
+                                        mol.glow_dirty = true;
+                                    }
+                                }
+                            }
+                            let mode = self.effective_selection_mode();
+                            let hits = {
+                                let mol = &self.scene.molecules[hit.mol];
+                                pick::expand_selection(&mol.system, &mol.bonds, &[hit.id], mode)
+                            };
+                            self.merge_into_pending(hit.mol, hits, op);
+                            self.view_dirty = true;
+                            ui.ctx().request_repaint();
+                        }
                         if self.effective_selection_mode() == SelectionMode::Residues {
                             // Expand the hit to its whole residue → steady glow.
                             let atoms = {
@@ -5395,7 +5424,7 @@ impl App {
     /// meaningless for single-atom hover picking, so it falls back to `Atoms` there
     /// (and the toolbar hides it); it stays available for the lasso.
     fn effective_selection_mode(&self) -> SelectionMode {
-        if self.pick_mode == PickMode::HoverInfo && self.selection_mode == SelectionMode::BoundH {
+        if self.pick_mode == PickMode::Click && self.selection_mode == SelectionMode::BoundH {
             SelectionMode::Atoms
         } else {
             self.selection_mode
@@ -5506,40 +5535,46 @@ impl App {
         }
         let mode = self.selection_mode;
         for res in results {
-            let mol = &mut self.scene.molecules[res.mol];
             // Expand this gesture's raw hits per the selection mode (exact atoms /
-            // whole residues / heavy + bonded H) before combining with the op.
-            let hits = pick::expand_selection(&mol.system, &mol.bonds, &res.atoms, mode);
-            // Start from the current pending atoms (sorted, unique), then apply the op.
-            let mut set: std::collections::BTreeSet<usize> = mol
-                .pending
-                .as_ref()
-                .map(|p| p.atoms.iter().copied().collect())
-                .unwrap_or_default();
-            match op {
-                // For Replace the set was just cleared above, so this is just the new
-                // atoms; Add unions them in.
-                LassoOp::Replace | LassoOp::Add => set.extend(hits),
-                LassoOp::Subtract => {
-                    for a in &hits {
-                        set.remove(a);
-                    }
-                }
-            }
-            let atoms: Vec<usize> = set.into_iter().collect();
-            match pick::index_selection_string(&atoms) {
-                Some(sel_text) => {
-                    mol.pending = Some(scene::PendingSelection { sel_text, atoms });
-                    mol.reps_open = true;
-                }
-                // Empty result (e.g. subtracted everything) → no active selection.
-                None => {
-                    mol.pending = None;
-                }
-            }
-            mol.glow_dirty = true;
+            // whole residues / heavy + bonded H), then merge into the pending set.
+            let hits = {
+                let mol = &self.scene.molecules[res.mol];
+                pick::expand_selection(&mol.system, &mol.bonds, &res.atoms, mode)
+            };
+            self.merge_into_pending(res.mol, hits, op);
         }
         self.view_dirty = true;
+    }
+
+    /// Combine `hits` into molecule `mi`'s **active (pending) selection** per `op`
+    /// (Replace/Add union the atoms in, Subtract removes them) and flag its glow.
+    /// Shared by the lasso and click-to-select paths; clearing *other* molecules'
+    /// pending sets for a `Replace` is the caller's job.
+    fn merge_into_pending(&mut self, mi: usize, hits: Vec<usize>, op: LassoOp) {
+        let mol = &mut self.scene.molecules[mi];
+        let mut set: std::collections::BTreeSet<usize> = mol
+            .pending
+            .as_ref()
+            .map(|p| p.atoms.iter().copied().collect())
+            .unwrap_or_default();
+        match op {
+            LassoOp::Replace | LassoOp::Add => set.extend(hits),
+            LassoOp::Subtract => {
+                for a in &hits {
+                    set.remove(a);
+                }
+            }
+        }
+        let atoms: Vec<usize> = set.into_iter().collect();
+        match pick::index_selection_string(&atoms) {
+            Some(sel_text) => {
+                mol.pending = Some(scene::PendingSelection { sel_text, atoms });
+                mol.reps_open = true;
+            }
+            // Empty result (e.g. subtracted everything) → no active selection.
+            None => mol.pending = None,
+        }
+        mol.glow_dirty = true;
     }
 }
 

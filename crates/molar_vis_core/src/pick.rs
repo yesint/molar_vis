@@ -17,8 +17,10 @@ pub enum PickMode {
     /// Picking disabled (no per-hover cost).
     #[default]
     Off,
-    /// Show the hovered atom's identity + real coordinates and glow its outline.
-    HoverInfo,
+    /// Hovering shows the atom's identity + glow (as before); **clicking** the hovered
+    /// atom/residue adds it to the active selection (Shift = add, Ctrl/⌘ = subtract,
+    /// plain = replace), expanded per the `Atoms`/`Residues` scope.
+    Click,
     /// Drag a freehand lasso; atoms whose displayed positions fall inside it
     /// become a new selection (see [`lasso_select`]).
     Lasso,
@@ -28,7 +30,7 @@ impl PickMode {
     pub fn label(self) -> &'static str {
         match self {
             PickMode::Off => "Off",
-            PickMode::HoverInfo => "Hover",
+            PickMode::Click => "Click",
             PickMode::Lasso => "Lasso",
         }
     }
