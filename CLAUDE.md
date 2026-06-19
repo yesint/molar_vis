@@ -18,8 +18,11 @@ cargo test -p molar_vis_core
 cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
 ```
 
-- Test assets in `tests/`: `2lao.pdb` (1911 atoms), `large_375k.gro` (375,548 atoms,
-  generated — **not in git**; regenerate per `tests/README.md` with `gmx genconf`).
+- Test assets in `tests/`: `2lao.pdb` (1911 atoms), `2lao_cg.pdb` (238-residue martinized 2lao,
+  mixed α/β — the committed **CG cartoon** fixture; regenerate per `tests/README.md` with
+  `martinize2`), `large_375k.gro` (375,548 atoms, generated — **not in git**; regenerate per
+  `tests/README.md` with `gmx genconf`). `cg.pdb` (a Martini membrane bundle, all-helix) is a handy
+  CG check but **not in git** (~4 MB, user-supplied).
 - Dev machine is **Wayland**; screenshot a running window with `spectacle -b -n -a -o out.png`
   (**`-a` = active window — use this**; `-f` full-screen captures blank on this compositor).
 - Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon|surface`
@@ -112,8 +115,17 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `background` (`Background { Solid|Gradient, color/top/bottom }`) — all `serde(default)`, so
   sessions save/load them for free. `#[derive(PartialEq)]` drives render-skip.
 - `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `Colorizer`.
-- `secstruct.rs` — `SsMap` (molar `Dssp` keyed by `resindex`), `SsClass` (helix/sheet/coil),
-  VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme.
+- `secstruct.rs` — `SsMap` (per-residue SS keyed by `resindex`), `SsClass` (helix/sheet/coil),
+  VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme. **Coarse-grained
+  (Martini) path** (`assign_cg_ss`, M22): when the residues are CG `BB` beads (no atomistic `CA`),
+  DSSP can't run (it needs the N/CA/C/O backbone), so SS is inferred **geometrically** from the BB
+  trace's *virtual bond angle* θ (∠ BBᵢ₋₁,BBᵢ,BBᵢ₊₁) and *virtual dihedral* τ (over four BB) — both
+  scale-invariant, so they transfer despite BB spacing (~0.32 nm) ≠ Cα (~0.38 nm): helix
+  `θ∈[80,118]°, τ∈[−100,−20]°`; sheet `θ≥122°, τ≥120° | τ≤−150°` (`vangle`/`vdihedral`, windows
+  calibrated against mdtraj-DSSP on a martinized α/β protein). A **β-pairing filter** then drops any
+  extended residue with **no non-sequential partner BB within 0.6 nm** (CG has no H-bonds, so this
+  is what stops inventing spurious strands — lifts strand precision 0.59→0.92), followed by
+  single-residue gap-fill and demotion of helix runs <4 / sheet runs <2 to coil.
 - `geometry.rs` — `RepKind`, `RepParams` (**per-style enum**), `GeometryData`/`MeshData`;
   `build(system, sel, bonds, params, color)` binds the `Sel` (`system.bind`), reads
   positions/atoms via `iter_particle` (nothing cached), and dispatches on `params`. Spheres
@@ -158,6 +170,36 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `normalize`→NaN→white on NVIDIA.) Every emitted vertex is tagged with its source `resindex` in
   `MeshData::vert_res` (parallel to `vertices`, not uploaded) so the selection glow can extract a
   given residue's ribbon segment from the *exact* parent mesh (`cartoon_cache` + `cartoon_submesh`).
+  **Coarse-grained (Martini) helices** (M22; `cg` path, detected by `BB` beads + no `CA`): a CG
+  backbone has no carbonyl to orient the ribbon, and the BB beads spiral the helix axis at
+  ~100°/residue (3.66 res/turn, 0.55 nm pitch, ~0.18 nm radius — measured), so the all-atom
+  carbonyl-frame machinery can't apply (every backbone-derived flat frame either twists into a
+  candy-screw or goes edge-on). Instead the helix is a **flat ribbon wrapped on the helix
+  cylinder's surface**: (1) collapse the spiralling BB trace onto a smooth local **axis** (windowed
+  centroid over ~a turn + a helix-only Laplacian low-pass, clamped to the run); (2) per residue the
+  outward **radial** (raw BB − axis, ⟂ the axis tangent) is the ribbon **normal** (broad face out),
+  and the centerline rides the cylinder at `axis + radius·radial` (`cg_helix_ribbon`; `radius` = the
+  helix's own mean BB-to-axis distance × `RADIUS_SCALE` 1.25 ≈ the all-atom Cα helix radius). The
+  **phase** comes from a parallel-transported frame (`e1`), the measured angle unwrapped to
+  monotonic, then made **uniform** by linear interpolation **anchored to the measured phase at both
+  ends** — equal turns in the middle, but endpoints pinned to the real backbone so the coil/sheet
+  connect without a detour (a least-squares slope put the end turn on the wrong side of the cylinder
+  → a weird ribbon "extension"). **Helix-interior** segments are evaluated as an **analytic helix**
+  (`cg_helix_sample`: a CR spline on the *smooth axis* — well-spaced, no overshoot — plus the
+  analytic rotation `radius·(cosφ·e1+sinφ·e2)`), *not* by CR-splining the ~3.7 surface control
+  points per turn (which overshoots → overlapping turns). **Helix↔coil boundary** segments
+  (`cg_boundary_centerline`) use a **Hermite** whose helix-side tangent is the true spiral tangent
+  (`hermite`), so the ribbon flows out of the last turn straight into the coil tube instead of a CR
+  spline swinging back and laying a doubled stub over the last turn. The ribbon **half-width tapers**
+  from full to the coil radius over ~2 residues at each run end (`cg_res_width`, smoothstep) so the
+  flat tape blends into the thin loop tube. β-sheets keep the SC1-oriented arrow ribbon; coil stays
+  a round tube. The CG data (axis/`e1`/phase/radius per residue) is carried on `RunCtx` for the
+  analytic sample. Verified on `tests/2lao_cg.pdb` (α/β) and a Martini membrane bundle from many
+  angles. **Flat-ribbon shading** (`emit`, applies to **all-atom too**): a flat cross-section
+  (half-thickness ≪ half-width — helix/sheet) gets a **constant ±normal on its two broad faces**
+  (crisp flat tape) rather than the elliptical normal, which fans ~180° across the broad face and
+  shades the ribbon like a domed lens (foreshortened helix turns then read as solid blobs); round
+  cross-sections (coil tube) keep the smooth ellipse.
 - `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
   guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
@@ -891,6 +933,25 @@ History labels via `describe_change` ("edit selection", "change coloring",
   the config file. Existing `MOLAR_VIS_DEBUG_REP/SEL/COLOR/MATERIAL/PICK/SELMODE` still override the
   settings. Verified: 4 new unit tests (41 total), native+wasm build green, headless screenshots of
   every tab, and a load→apply round-trip (edited config → Light theme + VDW/Chain default rep).
+- ✅ M22 **CG (Martini) cartoon — secondary structure + helix ribbon** (a "Coarse-grained"
+  roadmap item; the *display* half — bond guessing for CG is still TODO, the cartoon needs **no
+  bonds**: it groups per-residue `BB`/`SC1` beads directly). Two parts, both in `secstruct.rs` +
+  `geometry/cartoon.rs` (see those module bullets): **(1) geometric SS** for a CG backbone
+  (`assign_cg_ss`) — DSSP can't run without the N/CA/C/O backbone, so helix/sheet are classified
+  from the BB trace's virtual bond angle θ + virtual dihedral τ (scale-invariant), with a β-pairing
+  filter (no non-sequential partner BB nearby → not a strand) so it never invents strands that
+  aren't there. **(2) Wrapping-ribbon helices** — a CG helix has no carbonyl frame and its BB beads
+  spiral the axis at ~100°/residue, so it's drawn as a flat ribbon **wrapped on the helix cylinder
+  surface**: collapse BB → smooth axis, ride the surface at the all-atom-matched radius with a
+  uniform phase **anchored to the real backbone at both ends**, evaluate the interior as an
+  **analytic helix** (no CR overshoot/overlap), join the coil with a **Hermite** that uses the true
+  spiral tangent (no doubled end stub), and **taper** the width into the loop tube at each end.
+  Also landed a general **flat-ribbon shading** in `emit` (constant broad-face normal → crisp flat
+  tape instead of a domed lens), which improves **all-atom** cartoons too. β-sheets render as the
+  SC1-oriented arrow ribbon. Iterated heavily against the user's visual validation (helix-orientation
+  was the hard part — the dead-ends: solid cylinder, raw-radial screw, CR-spline overshoot, blobby
+  ellipse shading, full-size sharp ends, off-backbone least-squares phase). Verified on
+  `tests/2lao_cg.pdb` (α/β) + a Martini membrane bundle; 38 tests pass, native+wasm green.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, HoverInfo, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

@@ -29,7 +29,10 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - ~~Pick modes: whole residues~~
 
 ## Coarse-grained
-- CG (Martini) bonds and secondary-structure display
+- ~~CG (Martini) secondary-structure **display** (cartoon)~~ — **shipped** (M22; geometric SS from
+  the BB trace + flat ribbon wrapped on the helix cylinder surface, no bonds needed)
+- CG (Martini) bond guessing — distance search doesn't transfer to CG bead sizes; needs a
+  Martini-aware criterion (the cartoon sidesteps this by grouping per-residue BB/SC beads)
 
 ## Scripting & extensibility
 - Python bindings with exposed visualizer objects
