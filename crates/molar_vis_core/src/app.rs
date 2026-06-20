@@ -168,13 +168,8 @@ fn draw_glow_ring(painter: &egui::Painter, center: egui::Pos2, rpx: f32) {
 /// aromatize live; a large loaded structure is edited without those.
 const DRAW_AUTO_MAX_ATOMS: usize = 300;
 
-/// Pixel distance from point `p` to segment `a–b`.
-fn point_segment_px(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
-    let ab = b - a;
-    let len2 = ab.length_sq();
-    let t = if len2 > 1.0e-6 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
-    (p - (a + ab * t)).length()
-}
+/// Length (nm) of a freshly drawn bond before relaxation (a generic single bond).
+const DRAW_BOND_LEN: f32 = 0.15;
 
 /// Draw the hover-pick highlight over the viewport: a glowing outline ring at the
 /// hovered atom's **displayed** position (sized to the rep's sphere radius) plus a
@@ -6460,40 +6455,59 @@ impl App {
         self.draw_draw_overlays(ui, rect, size_px);
     }
 
-    /// Closest draw target under `cursor` (pixel): the atom or bond whose projected
-    /// position is nearest, so hover-highlight and click agree. `None` if neither is
-    /// close. Atoms use the generous grab radius; bonds use screen-segment distance,
-    /// and whichever is nearer in pixels wins (so a bond between near-touching spheres
-    /// is still selectable).
+    /// Unit world direction from `src` toward the cursor, in the screen-parallel
+    /// drawing plane (so a new bonded atom grows in the dragged direction). Falls back
+    /// to camera-right when degenerate.
+    fn drag_dir(&self, src: glam::Vec3, cursor: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> glam::Vec3 {
+        let aim = self.drawing_plane_point(cursor, rect, size_px).unwrap_or(src);
+        let d = (aim - src).normalize_or_zero();
+        if d == glam::Vec3::ZERO {
+            self.camera.right()
+        } else {
+            d
+        }
+    }
+
+    /// The projected screen radius (px) of atom `i` as drawn (its rep's sphere).
+    fn atom_screen_radius(&self, mi: usize, i: usize, rect: egui::Rect, size_px: [u32; 2]) -> f32 {
+        let mol = &self.scene.molecules[mi];
+        let (Some(w), Some(atom)) = (self.atom_world(mi, i), mol.system.topology().get_atom(i)) else {
+            return 4.0;
+        };
+        let r_world = mol
+            .reps
+            .iter()
+            .find(|r| r.visible)
+            .map_or(0.05, |r| pick::effective_radius(&r.params, atom));
+        let right = self.camera.orientation * glam::Vec3::X;
+        match (self.world_to_pixel(w, rect, size_px), self.world_to_pixel(w + right * r_world, rect, size_px)) {
+            (Some(c), Some(e)) => (e - c).length().max(3.0),
+            _ => 4.0,
+        }
+    }
+
+    /// What the cursor is over: an atom **only when the cursor is inside that atom's
+    /// drawn sphere** (front-most), otherwise the nearest bond *outside* the spheres.
+    /// Shared by hover-highlight and click so they agree.
     fn draw_hit_test(&self, mi: usize, rect: egui::Rect, size_px: [u32; 2], cursor: egui::Pos2) -> Option<HitTarget> {
         let mol = &self.scene.molecules[mi];
+        // Front-most atom whose drawn sphere the cursor is inside.
+        let (ro, rd) = self.cursor_world_ray(cursor, rect, size_px);
+        if let Some((i, _)) = pick::nearest_atom(mol, ro, rd, 0.04) {
+            if let Some(c) = self.atom_world(mi, i).and_then(|w| self.world_to_pixel(w, rect, size_px)) {
+                if (cursor - c).length() <= self.atom_screen_radius(mi, i, rect, size_px) {
+                    return Some(HitTarget::Atom(i));
+                }
+            }
+        }
+        // Outside every sphere → the nearest bond, if the cursor is close to its line.
         let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
         let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
-        let px_of = |w: glam::Vec3| self.world_to_pixel(w, rect, size_px);
-
-        let (ro, rd) = self.cursor_world_ray(cursor, rect, size_px);
-        let atom_px = pick::nearest_atom(mol, ro, rd, 0.08)
-            .and_then(|(i, _)| self.atom_world(mi, i).and_then(px_of).map(|p| ((cursor - p).length(), i)));
-
         let ndc = glam::vec2(
             ((cursor.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
             1.0 - ((cursor.y - rect.top()) / rect.height().max(1.0)) * 2.0,
         );
-        let bond_px = pick::nearest_bond(mol, view, proj, ndc, 0.02).and_then(|k| {
-            let b = mol.bonds[k];
-            let p = self.atom_world(mi, b.i1).and_then(px_of)?;
-            let q = self.atom_world(mi, b.i2).and_then(px_of)?;
-            Some((point_segment_px(cursor, p, q), k))
-        });
-
-        match (atom_px, bond_px) {
-            (Some((da, i)), Some((db, k))) => {
-                Some(if da <= db { HitTarget::Atom(i) } else { HitTarget::Bond(k) })
-            }
-            (Some((_, i)), None) => Some(HitTarget::Atom(i)),
-            (None, Some((_, k))) => Some(HitTarget::Bond(k)),
-            (None, None) => None,
-        }
+        pick::nearest_bond(mol, view, proj, ndc, 0.02).map(HitTarget::Bond)
     }
 
     /// Painter overlays for the drawing editor: a hover highlight on the atom/bond
@@ -6582,27 +6596,10 @@ impl App {
         if let Some(px) = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p)) {
             match self.draw_hit_test(mi, rect, size_px, px) {
                 Some(HitTarget::Atom(i)) => {
-                    if let Some(w) = self.atom_world(mi, i) {
-                        if let Some(c) = px_of(w) {
-                            // Ring sized to the atom's *drawn* radius, projected like the
-                            // pick-mode hover (project a point one radius to camera-right):
-                            // it tracks zoom because both the center and the offset point
-                            // are projected each frame.
-                            let atom = mol.system.topology().get_atom(i);
-                            let r_world = atom
-                                .and_then(|a| {
-                                    mol.reps
-                                        .iter()
-                                        .find(|r| r.visible)
-                                        .map(|r| pick::effective_radius(&r.params, a))
-                                })
-                                .unwrap_or(0.05);
-                            let right = self.camera.orientation * glam::Vec3::X;
-                            let rpx = px_of(w + right * r_world)
-                                .map_or(6.0, |e| (e - c).length())
-                                .clamp(3.0, rect.width());
-                            draw_glow_ring(&painter, c, rpx);
-                        }
+                    if let Some(c) = self.atom_world(mi, i).and_then(px_of) {
+                        // Ring sized to the atom's drawn sphere (tracks zoom).
+                        let rpx = self.atom_screen_radius(mi, i, rect, size_px);
+                        draw_glow_ring(&painter, c, rpx);
                     }
                 }
                 Some(HitTarget::Bond(k)) => {
@@ -6717,30 +6714,30 @@ impl App {
                             }
                         }
                         Some(_) => {} // same atom → no-op
-                        // Onto empty space → a new atom bonded to `from`.
+                        // Onto empty space → a new atom one bond-length from the source
+                        // in the dragged direction (fixed length, not wherever the cursor
+                        // landed — robust + Marvin-style; the relax refines small molecules).
                         None => {
-                            let Some(pos) = self.drawing_plane_point(px, rect, size_px) else { return };
-                            if let Some((mi, new_idx)) = self.place_atom(element, pos) {
+                            let src = self.atom_world(mi, from).unwrap_or(self.camera.target);
+                            let new_pos = src + self.drag_dir(src, px, rect, size_px) * DRAW_BOND_LEN;
+                            if let Some((mi, new_idx)) = self.place_atom(element, new_pos) {
                                 self.scene.molecules[mi].add_bond(from, new_idx, bond_order);
-                                self.after_draw_edit(mi, Some(pos));
+                                self.after_draw_edit(mi, Some(new_pos));
                             }
                         }
                     }
                 }
                 DrawDrag::FromEmpty { start, .. } => {
-                    // Drag from empty space → two bonded atoms (start + release). A
+                    // Drag from empty space → two bonded atoms: the first at the start
+                    // point, the second one bond-length away in the drag direction. A
                     // negligible drag falls back to a single atom.
-                    let (Some(p_start), Some(p_end)) = (
-                        self.drawing_plane_point(start, rect, size_px),
-                        self.drawing_plane_point(px, rect, size_px),
-                    ) else {
-                        return;
-                    };
+                    let Some(p_start) = self.drawing_plane_point(start, rect, size_px) else { return };
                     let Some((mi, a)) = self.place_atom(element, p_start) else { return };
                     if (px - start).length() < 6.0 {
                         self.after_draw_edit(mi, Some(p_start)); // too short → one atom
                         return;
                     }
+                    let p_end = p_start + self.drag_dir(p_start, px, rect, size_px) * DRAW_BOND_LEN;
                     if let Some((_, b)) = self.place_atom(element, p_end) {
                         self.scene.molecules[mi].add_bond(a, b, bond_order);
                         self.after_draw_edit(mi, Some(p_end));
