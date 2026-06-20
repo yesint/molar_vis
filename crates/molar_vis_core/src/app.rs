@@ -2514,6 +2514,38 @@ impl App {
                     (1, 7, BondOrder::Single),
                 ];
             }
+            "ethene" => {
+                // H2C=CH2 — a double bond to exercise multi-order rendering.
+                atoms = vec![
+                    (Element::C, glam::vec3(0.0, 0.0, 0.0)),
+                    (Element::C, glam::vec3(0.14, 0.0, 0.0)),
+                    (Element::H, glam::vec3(-0.06, 0.08, 0.0)),
+                    (Element::H, glam::vec3(-0.06, -0.08, 0.0)),
+                    (Element::H, glam::vec3(0.20, 0.08, 0.0)),
+                    (Element::H, glam::vec3(0.20, -0.08, 0.0)),
+                ];
+                bonds = vec![
+                    (0, 1, BondOrder::Double),
+                    (0, 2, BondOrder::Single),
+                    (0, 3, BondOrder::Single),
+                    (1, 4, BondOrder::Single),
+                    (1, 5, BondOrder::Single),
+                ];
+            }
+            "acetylene" => {
+                // HC≡CH — a triple bond.
+                atoms = vec![
+                    (Element::C, glam::vec3(0.0, 0.0, 0.0)),
+                    (Element::C, glam::vec3(0.13, 0.0, 0.0)),
+                    (Element::H, glam::vec3(-0.10, 0.0, 0.0)),
+                    (Element::H, glam::vec3(0.23, 0.0, 0.0)),
+                ];
+                bonds = vec![
+                    (0, 1, BondOrder::Triple),
+                    (0, 2, BondOrder::Single),
+                    (1, 3, BondOrder::Single),
+                ];
+            }
             "benzene" => {
                 // Six carbons on a rough hexagon (radius ~0.14 nm) — deliberately a bit
                 // off so the relax has something to do — with aromatic ring bonds.
