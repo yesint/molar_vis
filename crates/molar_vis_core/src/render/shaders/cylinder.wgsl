@@ -35,6 +35,11 @@ struct Instance {
     @location(2) p1: vec3<f32>,
     @location(3) color: u32,
     @location(4) mat: u32,
+    // Multi-order strand offset: x = signed slot (−1,0,+1…), y = gap (nm). The
+    // strand is shifted by slot*gap along the bond's screen-plane perpendicular so
+    // the parallel tubes of a double/triple/aromatic bond stay side-by-side and
+    // legible from any angle. [0,0] for a single bond → a no-op.
+    @location(5) offset: vec2<f32>,
 };
 
 struct VsOut {
@@ -96,8 +101,27 @@ fn oit_weight(eye_z: f32, a: f32) -> f32 {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
-    let a0 = (camera.view * vec4<f32>(inst.p0, 1.0)).xyz;
-    let a1 = (camera.view * vec4<f32>(inst.p1, 1.0)).xyz;
+    var a0 = (camera.view * vec4<f32>(inst.p0, 1.0)).xyz;
+    var a1 = (camera.view * vec4<f32>(inst.p1, 1.0)).xyz;
+
+    // Multi-order strand offset (screen-plane, per-frame). The screen plane in view
+    // space is XY (camera looks down -Z), so the bond's screen-perpendicular is
+    // cross(axis, +Z): perpendicular to the bond AND lying in the screen plane, so
+    // the strands stay side-by-side from any angle. If the bond points at the camera
+    // (axis ∥ Z) the cross degenerates → fall back to a fixed X. The shift is applied
+    // in view space (so the impostor math below is unchanged); [0,0] → no-op.
+    if (inst.offset.y != 0.0) {
+        let ax = a1 - a0;
+        let axl = length(ax);
+        let dir = select(vec3<f32>(1.0, 0.0, 0.0), ax / axl, axl > 1e-8);
+        var sp = cross(dir, vec3<f32>(0.0, 0.0, 1.0));
+        let spl = length(sp);
+        sp = select(vec3<f32>(1.0, 0.0, 0.0), sp / spl, spl > 1e-4);
+        let shift = sp * (inst.offset.x * inst.offset.y);
+        a0 = a0 + shift;
+        a1 = a1 + shift;
+    }
+
     let axis_v = a1 - a0;
     let seg_len = length(axis_v);
     let d = select(vec3<f32>(0.0, 0.0, 1.0), axis_v / seg_len, seg_len > 1e-8);

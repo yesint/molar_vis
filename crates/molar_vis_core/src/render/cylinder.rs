@@ -16,6 +16,13 @@ pub struct CylinderInstance {
     pub color: u32,
     /// Packed material lighting (ambient|diffuse<<8|specular<<16|shininess<<24).
     pub mat: u32,
+    /// Multi-order strand offset: `x` = signed slot (−1, 0, +1 …) and `y` = gap
+    /// distance (nm). The shader shifts both endpoints by `slot * gap * perp`,
+    /// where `perp` is the bond's screen-plane perpendicular computed per-frame
+    /// from the camera, so the parallel strands of a double/triple/aromatic bond
+    /// stay side-by-side and legible from any view angle (never collapsing edge-on).
+    /// Single/Unspecified bonds use `[0, 0]` → the shift is a no-op.
+    pub offset: [f32; 2],
 }
 
 impl CylinderInstance {
@@ -48,6 +55,12 @@ impl CylinderInstance {
                 offset: 32,
                 shader_location: 4,
                 format: wgpu::VertexFormat::Uint32,
+            },
+            // offset: vec2<f32> @location(5) — [slot, gap_nm] for multi-order bonds
+            wgpu::VertexAttribute {
+                offset: 36,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x2,
             },
         ],
     };

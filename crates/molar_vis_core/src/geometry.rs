@@ -316,8 +316,8 @@ pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
     ];
     let mut v = Vec::with_capacity(24);
     for ((i0, j0, k0), (i1, j1, k1)) in EDGES {
-        v.push(LineVertex { pos: corner(i0, j0, k0), color, width: 1.0 });
-        v.push(LineVertex { pos: corner(i1, j1, k1), color, width: 1.0 });
+        v.push(LineVertex { pos: corner(i0, j0, k0), color, width: 1.0, offset_px: 0.0 });
+        v.push(LineVertex { pos: corner(i1, j1, k1), color, width: 1.0, offset_px: 0.0 });
     }
     v
 }
@@ -364,8 +364,8 @@ fn isolated_crosses(
             let (mut lo, mut hi) = (c, c);
             lo[axis] -= h;
             hi[axis] += h;
-            v.push(LineVertex { pos: lo, color, width });
-            v.push(LineVertex { pos: hi, color, width });
+            v.push(LineVertex { pos: lo, color, width, offset_px: 0.0 });
+            v.push(LineVertex { pos: hi, color, width, offset_px: 0.0 });
         }
     }
     v
@@ -410,6 +410,40 @@ fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 /// with gaps so it reads as dashed.
 const DASH_LEN: f32 = 0.02;
 const DASH_GAP: f32 = 0.015;
+
+/// Multi-order bond rendering. A bond with order ≥ 2 is drawn as several parallel
+/// strands offset sideways in the **screen plane** (the offset direction is computed
+/// per-frame in the shader from the camera — see `cylinder.wgsl`/`line.wgsl`), so the
+/// cluster reads as one bond and stays legible from any angle. Each strand uses a
+/// reduced size so the bundle has roughly the visual weight of a single bond.
+///
+/// Strand radius/width = single × this factor when order ≥ 2 (single bonds keep the
+/// full size).
+const MULTI_SIZE_SCALE: f32 = 0.5;
+
+/// Cylinder strand gap (nm). The shader shifts strand `slot` by `slot * gap` along
+/// the screen-perpendicular. A double bond uses slots −1/+1, so the two tube centers
+/// sit `2·gap` apart; sized to ~2.3× the reduced tube radius is barely separated.
+const CYL_STRAND_GAP_FACTOR: f32 = 2.3;
+
+/// Line strand gap in **pixels** (the line shader works in screen-px). Slots −1/+1 →
+/// the two lines are `2·gap` px apart; tuned to read as a clear double/triple.
+const LINE_STRAND_GAP_PX: f32 = 2.5;
+
+/// The slot multipliers (which screen-offset lane each strand rides) for a bond of a
+/// given chemical order, paired with whether that strand is **dashed**. Slot 0 = the
+/// single-bond center. Aromatic = one solid + one dashed parallel strand (the classic
+/// look). Returns a single centered solid strand for Single/Unspecified.
+fn strand_slots(order: BondOrder) -> &'static [(f32, bool)] {
+    match order {
+        BondOrder::Double => &[(-1.0, false), (1.0, false)],
+        BondOrder::Triple => &[(-1.0, false), (0.0, false), (1.0, false)],
+        // Solid strand on one side, dashed on the other.
+        BondOrder::Aromatic => &[(-1.0, false), (1.0, true)],
+        // Single / Unspecified: one centered solid strand (full size).
+        _ => &[(0.0, false)],
+    }
+}
 
 /// The two half-bond endpoints for a bond `a→b` plus whether it **crosses a box
 /// face** (wraps). A normal bond uses the usual midpoint split (`a → mid`, `b →
@@ -490,21 +524,40 @@ fn cylinders(
 ) -> Vec<CylinderInstance> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
-    let mut push = |p0, p1, color, dashed: bool| {
+    // Emit one half-bond stub (solid or PBC-dashed) at a screen-offset lane.
+    // `offset = [slot, gap_nm]`; the shader shifts the strand by `slot*gap` along
+    // the screen-plane perpendicular. `[0,0]` (single bond) → no shift.
+    let mut push = |p0, p1, color, rad: f32, offset: [f32; 2], dashed: bool| {
         if dashed {
             for (s, e) in dashes(p0, p1) {
-                v.push(CylinderInstance { p0: s, radius, p1: e, color, mat: 0 });
+                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, mat: 0, offset });
             }
         } else {
-            v.push(CylinderInstance { p0, radius, p1, color, mat: 0 });
+            v.push(CylinderInstance { p0, radius: rad, p1, color, mat: 0, offset });
         }
     };
     for bond in bonds {
         let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
-            push(pa, a_end, ca, wrapped);
-            push(pb, b_end, cb, wrapped);
+            // A bond that wraps a periodic box face is drawn as the single dashed
+            // PBC half-bonds (the rare PBC + multi-order combo falls back to a single
+            // strand — see CLAUDE notes). A normal bond is split by chemical order
+            // into parallel screen-offset strands.
+            if wrapped {
+                push(pa, a_end, ca, radius, [0.0, 0.0], true);
+                push(pb, b_end, cb, radius, [0.0, 0.0], true);
+                continue;
+            }
+            let slots = strand_slots(bond.order);
+            let multi = slots.len() > 1;
+            let rad = if multi { radius * MULTI_SIZE_SCALE } else { radius };
+            let gap = if multi { rad * CYL_STRAND_GAP_FACTOR } else { 0.0 };
+            for &(slot, dash) in slots {
+                let off = [slot, gap];
+                push(pa, a_end, ca, rad, off, dash);
+                push(pb, b_end, cb, rad, off, dash);
+            }
         }
     }
     v
@@ -518,23 +571,36 @@ fn lines(
 ) -> Vec<LineVertex> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
-    let mut push = |p0: [f32; 3], p1: [f32; 3], color, dashed: bool| {
+    // Emit one half-bond segment (solid or PBC-dashed) at a screen-px offset lane.
+    // `offset_px` shifts the line sideways along the segment's screen perpendicular
+    // (computed per-frame in the shader). `0.0` = the single-bond center.
+    let mut push = |p0: [f32; 3], p1: [f32; 3], color, offset_px: f32, dashed: bool| {
         if dashed {
             for (s, e) in dashes(p0, p1) {
-                v.push(LineVertex { pos: s, color, width });
-                v.push(LineVertex { pos: e, color, width });
+                v.push(LineVertex { pos: s, color, width, offset_px });
+                v.push(LineVertex { pos: e, color, width, offset_px });
             }
         } else {
-            v.push(LineVertex { pos: p0, color, width });
-            v.push(LineVertex { pos: p1, color, width });
+            v.push(LineVertex { pos: p0, color, width, offset_px });
+            v.push(LineVertex { pos: p1, color, width, offset_px });
         }
     };
     for bond in bonds {
         let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
-            push(pa, a_end, ca, wrapped);
-            push(pb, b_end, cb, wrapped);
+            // PBC-wrapping bond → the single dashed PBC half-bonds (the rare PBC +
+            // multi-order combo falls back to one strand). Otherwise split by order.
+            if wrapped {
+                push(pa, a_end, ca, 0.0, true);
+                push(pb, b_end, cb, 0.0, true);
+                continue;
+            }
+            for &(slot, dash) in strand_slots(bond.order) {
+                let off = slot * LINE_STRAND_GAP_PX;
+                push(pa, a_end, ca, off, dash);
+                push(pb, b_end, cb, off, dash);
+            }
         }
     }
     v

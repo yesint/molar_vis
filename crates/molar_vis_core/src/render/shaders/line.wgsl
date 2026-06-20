@@ -34,8 +34,10 @@ struct VsIn {
     @location(0) pos0: vec3<f32>,
     @location(1) color0: u32,
     @location(2) width: f32,
+    @location(5) offset_px0: f32,
     @location(3) pos1: vec3<f32>,
     @location(4) color1: u32,
+    @location(6) offset_px1: f32,
 };
 
 struct VsOut {
@@ -80,10 +82,17 @@ fn vs_main(@builtin(vertex_index) vidx: u32, seg: VsIn) -> VsOut {
     let color = unpack_color(select(seg.color0, seg.color1, at_end1));
     let eye_z = select(view0.z, view1.z, at_end1);
 
-    // Offset by half-width pixels along the screen perpendicular. Convert the
-    // pixel offset to NDC (1 NDC unit = viewport/2 px), then back to clip by *w so
-    // it survives the perspective divide.
-    let offset_px = perp * side * (seg.width * 0.5);
+    // Multi-order strand offset (px, screen-space): shift the whole strand sideways
+    // along the same screen perpendicular used for the width, so the parallel lines
+    // of a double/triple/aromatic bond stay side-by-side and legible from any view
+    // angle (the perpendicular is recomputed per frame from the projected segment).
+    // 0.0 for a single bond.
+    let strand_px = select(seg.offset_px0, seg.offset_px1, at_end1);
+
+    // Offset by half-width pixels along the screen perpendicular (for the quad's
+    // thickness) plus the strand offset. Convert the pixel offset to NDC (1 NDC
+    // unit = viewport/2 px), then back to clip by *w so it survives the divide.
+    let offset_px = perp * (side * (seg.width * 0.5) + strand_px);
     let offset_ndc = offset_px / (0.5 * viewport);
 
     var out: VsOut;

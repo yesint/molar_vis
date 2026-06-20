@@ -20,6 +20,12 @@ pub struct LineVertex {
     pub color: u32,
     /// Line width in pixels (screen-space). Equal for both endpoints of a segment.
     pub width: f32,
+    /// Multi-order strand offset in pixels (screen-space, signed). The vertex
+    /// shader translates the vertex by this many pixels along the segment's
+    /// screen-plane perpendicular (the same perpendicular used for the width), so
+    /// the parallel lines of a double/triple/aromatic bond stay side-by-side and
+    /// legible from any angle. `0.0` for a single bond. Equal for both endpoints.
+    pub offset_px: f32,
 }
 
 impl LineVertex {
@@ -29,7 +35,7 @@ impl LineVertex {
         array_stride: 2 * std::mem::size_of::<LineVertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
-            // Endpoint 0.
+            // Endpoint 0: pos @0, color @12, width @16, offset_px @20.
             wgpu::VertexAttribute {
                 offset: 0,
                 shader_location: 0,
@@ -45,16 +51,26 @@ impl LineVertex {
                 shader_location: 2,
                 format: wgpu::VertexFormat::Float32,
             },
-            // Endpoint 1 (next vertex in the pair).
             wgpu::VertexAttribute {
                 offset: 20,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32,
+            },
+            // Endpoint 1 (next vertex in the pair): pos @24, color @36, offset_px @44.
+            wgpu::VertexAttribute {
+                offset: 24,
                 shader_location: 3,
                 format: wgpu::VertexFormat::Float32x3,
             },
             wgpu::VertexAttribute {
-                offset: 32,
+                offset: 36,
                 shader_location: 4,
                 format: wgpu::VertexFormat::Uint32,
+            },
+            wgpu::VertexAttribute {
+                offset: 44,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32,
             },
         ],
     };
