@@ -163,6 +163,19 @@ fn draw_glow_ring(painter: &egui::Painter, center: egui::Pos2, rpx: f32) {
     painter.circle_stroke(center, rpx, egui::Stroke::new(1.8, glow(235)));
 }
 
+/// Above this atom count, draw-mode edits skip the automatic whole-molecule
+/// perception + relax (relax is O(N²) per step). Editor-scale fragments relax/
+/// aromatize live; a large loaded structure is edited without those.
+const DRAW_AUTO_MAX_ATOMS: usize = 300;
+
+/// Pixel distance from point `p` to segment `a–b`.
+fn point_segment_px(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    let t = if len2 > 1.0e-6 { ((p - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (p - (a + ab * t)).length()
+}
+
 /// Draw the hover-pick highlight over the viewport: a glowing outline ring at the
 /// hovered atom's **displayed** position (sized to the rep's sphere radius) plus a
 /// lower-left info box with the atom's identity and **real** coordinates (nm).
@@ -5967,6 +5980,13 @@ enum DrawTool {
     Erase,
 }
 
+/// What the cursor is over in the drawing editor (used by hover-highlight + click).
+#[derive(Clone, Copy)]
+enum HitTarget {
+    Atom(usize),
+    Bond(usize),
+}
+
 /// In-progress pointer gesture for the Draw tool. `current` is the live cursor
 /// position (viewport pixels) for the rubber-band line.
 enum DrawDrag {
@@ -6440,10 +6460,46 @@ impl App {
         self.draw_draw_overlays(ui, rect, size_px);
     }
 
+    /// Closest draw target under `cursor` (pixel): the atom or bond whose projected
+    /// position is nearest, so hover-highlight and click agree. `None` if neither is
+    /// close. Atoms use the generous grab radius; bonds use screen-segment distance,
+    /// and whichever is nearer in pixels wins (so a bond between near-touching spheres
+    /// is still selectable).
+    fn draw_hit_test(&self, mi: usize, rect: egui::Rect, size_px: [u32; 2], cursor: egui::Pos2) -> Option<HitTarget> {
+        let mol = &self.scene.molecules[mi];
+        let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
+        let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
+        let px_of = |w: glam::Vec3| self.world_to_pixel(w, rect, size_px);
+
+        let (ro, rd) = self.cursor_world_ray(cursor, rect, size_px);
+        let atom_px = pick::nearest_atom(mol, ro, rd, 0.08)
+            .and_then(|(i, _)| self.atom_world(mi, i).and_then(px_of).map(|p| ((cursor - p).length(), i)));
+
+        let ndc = glam::vec2(
+            ((cursor.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+            1.0 - ((cursor.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+        );
+        let bond_px = pick::nearest_bond(mol, view, proj, ndc, 0.02).and_then(|k| {
+            let b = mol.bonds[k];
+            let p = self.atom_world(mi, b.i1).and_then(px_of)?;
+            let q = self.atom_world(mi, b.i2).and_then(px_of)?;
+            Some((point_segment_px(cursor, p, q), k))
+        });
+
+        match (atom_px, bond_px) {
+            (Some((da, i)), Some((db, k))) => {
+                Some(if da <= db { HitTarget::Atom(i) } else { HitTarget::Bond(k) })
+            }
+            (Some((_, i)), None) => Some(HitTarget::Atom(i)),
+            (None, Some((_, k))) => Some(HitTarget::Bond(k)),
+            (None, None) => None,
+        }
+    }
+
     /// Painter overlays for the drawing editor: a hover highlight on the atom/bond
-    /// under the cursor (so the user sees what a click/drag will hit, like pick mode),
-    /// a circle inside each aromatic ring, and a small "?" over each bond of
-    /// unspecified order.
+    /// under the cursor (shown during a drag too), a gray circle in the plane of each
+    /// aromatic ring, and a "?" over each unspecified-order bond that's front-facing
+    /// and on-screen (capped, so a big loaded molecule isn't flooded).
     fn draw_draw_overlays(&self, ui: &egui::Ui, rect: egui::Rect, size_px: [u32; 2]) {
         let Some(d) = self.draw.as_ref() else { return };
         let Some(mi) = d
@@ -6454,71 +6510,101 @@ impl App {
         };
         let mol = &self.scene.molecules[mi];
         let painter = ui.painter_at(rect);
-        let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
-        let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
+        let view = self.camera.view();
         let px_of = |w: glam::Vec3| self.world_to_pixel(w, rect, size_px);
-        let font = egui::FontId::proportional(13.0);
+        let eye_z = |w: glam::Vec3| (view * w.extend(1.0)).z; // larger (less negative) = nearer
 
-        // "?" over each unspecified-order bond (e.g. guessed bonds of a loaded molecule).
+        // "?" over unspecified bonds — only the front-facing, on-screen ones, capped.
+        let center = (mol.bbox_min + mol.bbox_max) * 0.5;
+        let center_z = eye_z(center);
+        let font = egui::FontId::proportional(13.0);
+        let mut shown = 0usize;
+        const Q_MAX: usize = 150;
         for b in &mol.bonds {
+            if shown >= Q_MAX {
+                break;
+            }
             if b.order != crate::minimize::BondOrder::Unspecified {
                 continue;
             }
-            if let (Some(p), Some(q)) = (self.atom_world(mi, b.i1), self.atom_world(mi, b.i2)) {
-                if let Some(m) = px_of((p + q) * 0.5) {
-                    painter.text(
-                        m,
-                        egui::Align2::CENTER_CENTER,
-                        "?",
-                        font.clone(),
-                        egui::Color32::from_rgb(255, 200, 90),
-                    );
-                }
+            let (Some(p), Some(q)) = (self.atom_world(mi, b.i1), self.atom_world(mi, b.i2)) else {
+                continue;
+            };
+            let mid = (p + q) * 0.5;
+            if eye_z(mid) < center_z {
+                continue; // back half of the molecule
+            }
+            if let Some(m) = px_of(mid).filter(|m| rect.contains(*m)) {
+                painter.text(m, egui::Align2::CENTER_CENTER, "?", font.clone(), egui::Color32::from_rgb(255, 200, 90));
+                shown += 1;
             }
         }
 
-        // Aromatic ring circle: project the ring atoms, draw a circle at their centroid
-        // sized to sit inside the ring (shrinks edge-on, approximating the in-plane ring).
+        // Aromatic ring circle: a gray ring drawn in the ring's own 3-D plane (so it
+        // tilts with the ring under rotation), projected as a polyline.
+        let gray = egui::Color32::from_gray(165);
         for ring in &mol.aromatic_rings {
-            let pts: Vec<egui::Pos2> = ring
-                .iter()
-                .filter_map(|&a| self.atom_world(mi, a).and_then(px_of))
-                .collect();
+            let pts: Vec<glam::Vec3> = ring.iter().filter_map(|&a| self.atom_world(mi, a)).collect();
             if pts.len() < 3 || pts.len() != ring.len() {
                 continue;
             }
-            let c = pts.iter().fold(egui::Pos2::ZERO, |acc, p| acc + p.to_vec2())
-                / pts.len() as f32;
-            let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32 * 0.62;
-            painter.circle_stroke(c, r, egui::Stroke::new(1.6, egui::Color32::from_rgb(140, 200, 255)));
+            let c = pts.iter().copied().sum::<glam::Vec3>() / pts.len() as f32;
+            // Newell's method for the best-fit plane normal.
+            let mut nrm = glam::Vec3::ZERO;
+            for i in 0..pts.len() {
+                nrm += (pts[i] - c).cross(pts[(i + 1) % pts.len()] - c);
+            }
+            let nrm = nrm.normalize_or_zero();
+            if nrm == glam::Vec3::ZERO {
+                continue;
+            }
+            let u = (pts[0] - c - nrm * (pts[0] - c).dot(nrm)).normalize_or_zero();
+            if u == glam::Vec3::ZERO {
+                continue;
+            }
+            let v = nrm.cross(u);
+            let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32 * 0.70;
+            const SEG: usize = 36;
+            let mut prev: Option<egui::Pos2> = None;
+            for k in 0..=SEG {
+                let a = std::f32::consts::TAU * k as f32 / SEG as f32;
+                let p3 = c + (u * a.cos() + v * a.sin()) * r;
+                let p2 = px_of(p3);
+                if let (Some(pp), Some(cur)) = (prev, p2) {
+                    painter.line_segment([pp, cur], egui::Stroke::new(1.6, gray));
+                }
+                prev = p2;
+            }
         }
 
-        // Hover highlight (only when not mid-drag): the atom under the cursor gets a glow
-        // ring; otherwise the nearest bond is thickened.
-        if matches!(d.drag, DrawDrag::Idle) {
-            if let Some(px) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) {
-                let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
-                if let Some((i, _)) = pick::nearest_atom(mol, ro, rd, 0.08) {
+        // Hover highlight (also during a drag, so you see the atom you'd bond to —
+        // `pointer_latest_pos` stays valid while the button is held, unlike hover_pos).
+        if let Some(px) = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p)) {
+            match self.draw_hit_test(mi, rect, size_px, px) {
+                Some(HitTarget::Atom(i)) => {
                     if let Some(c) = self.atom_world(mi, i).and_then(px_of) {
-                        draw_glow_ring(&painter, c, 11.0);
-                    }
-                } else {
-                    let ndc = glam::vec2(
-                        ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-                        1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-                    );
-                    if let Some(k) = pick::nearest_bond(mol, view, proj, ndc, 0.02) {
-                        let b = mol.bonds[k];
-                        if let (Some(p), Some(q)) =
-                            (self.atom_world(mi, b.i1).and_then(px_of), self.atom_world(mi, b.i2).and_then(px_of))
-                        {
-                            painter.line_segment(
-                                [p, q],
-                                egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(120, 220, 255, 150)),
-                            );
-                        }
+                        // Size the ring to the atom's projected radius so it tracks zoom.
+                        let rw = mol.system.topology().get_atom(i).map_or(0.08, |a| a.vdw() * 0.55);
+                        let rpx = self
+                            .atom_world(mi, i)
+                            .and_then(|w| px_of(w + self.camera.up() * rw))
+                            .map_or(11.0, |e| (e - c).length())
+                            .max(5.0);
+                        draw_glow_ring(&painter, c, rpx);
                     }
                 }
+                Some(HitTarget::Bond(k)) => {
+                    let b = mol.bonds[k];
+                    if let (Some(p), Some(q)) =
+                        (self.atom_world(mi, b.i1).and_then(px_of), self.atom_world(mi, b.i2).and_then(px_of))
+                    {
+                        painter.line_segment(
+                            [p, q],
+                            egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(120, 220, 255, 160)),
+                        );
+                    }
+                }
+                None => {}
             }
         }
     }
@@ -6576,7 +6662,16 @@ impl App {
                 let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
                 pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i)
             });
+            // Drag from an existing atom → set the drawing plane to that atom's depth, so
+            // a new bonded atom on release lands next to it (not on the far camera-target
+            // plane, which produced a stray long bond on big molecules).
+            let from_depth = from_atom
+                .zip(target_mi)
+                .and_then(|(from, mi)| self.atom_world(mi, from));
             if let Some(d) = self.draw.as_mut() {
+                if let Some(w) = from_depth {
+                    d.plane_depth = Some(w);
+                }
                 d.drag = match from_atom {
                     Some(from) => DrawDrag::FromAtom { from, current: px },
                     None => DrawDrag::FromEmpty { start: px, current: px },
@@ -6647,30 +6742,27 @@ impl App {
         // --- A plain click (no drag). ------------------------------------------
         if response.clicked() {
             let Some(px) = response.interact_pointer_pos() else { return };
-            let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
-            // On an existing atom → replace its element (keeping its bonds). On a bond →
-            // cycle its order. Else place a new atom.
+            // On an atom → replace its element (keeping bonds). On a bond → cycle its
+            // order. Else place a new atom. Uses the same closer-wins hit-test as the
+            // hover highlight so the click matches what was highlighted.
             if let Some(mi) = target_mi {
-                if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08) {
-                    let src = element.make_atom();
-                    if self.scene.molecules[mi].system.topology().get_atom(i).map(|a| a.atomic_number)
-                        != Some(element.atomic_number())
-                    {
-                        self.scene.molecules[mi].set_atom_element(i, &src);
-                        self.after_draw_edit(mi, self.atom_world(mi, i));
+                match self.draw_hit_test(mi, rect, size_px, px) {
+                    Some(HitTarget::Atom(i)) => {
+                        if self.scene.molecules[mi].system.topology().get_atom(i).map(|a| a.atomic_number)
+                            != Some(element.atomic_number())
+                        {
+                            let src = element.make_atom();
+                            self.scene.molecules[mi].set_atom_element(i, &src);
+                            self.after_draw_edit(mi, self.atom_world(mi, i));
+                        }
+                        return;
                     }
-                    return;
-                }
-                let aspect = size_px[0] as f32 / size_px[1] as f32;
-                let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
-                let ndc = glam::vec2(
-                    ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-                    1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-                );
-                if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02) {
-                    self.scene.molecules[mi].cycle_bond_order(k);
-                    self.after_draw_edit(mi, None);
-                    return;
+                    Some(HitTarget::Bond(k)) => {
+                        self.scene.molecules[mi].cycle_bond_order(k);
+                        self.after_draw_edit(mi, None);
+                        return;
+                    }
+                    None => {}
                 }
             }
             // Empty space → place an atom (creating the molecule if needed).
@@ -6691,10 +6783,19 @@ impl App {
         let worth_relaxing = {
             let mol = &mut self.scene.molecules[mi];
             mol.refresh_bbox();
-            // Perceive rings + aromaticity: a freshly closed ring with alternating
-            // orders becomes aromatic (bonds → Aromatic, rings cached for the overlay).
-            mol.perceive_aromaticity();
-            mol.n_atoms > 1 || !mol.bonds.is_empty()
+            // Auto-perception + auto-relax only for editor-scale molecules: ring
+            // perception is cheap but relaxing the whole molecule is O(N²) per step, so
+            // editing a large loaded structure (e.g. a protein) must NOT relax/aromatize
+            // the whole thing on every click. Above the cap, edits apply instantly; the
+            // user can still hand-build a small fragment.
+            if mol.n_atoms <= DRAW_AUTO_MAX_ATOMS {
+                // Perceive rings + aromaticity: a freshly closed ring with alternating
+                // orders becomes aromatic (bonds → Aromatic, rings cached for the overlay).
+                mol.perceive_aromaticity();
+                mol.n_atoms > 1 || !mol.bonds.is_empty()
+            } else {
+                false // skip the whole-molecule relax on large structures
+            }
         };
         self.flag_edit(mi);
         if let Some(d) = self.draw.as_mut() {
@@ -6859,6 +6960,14 @@ impl App {
         if let Some(kind) = kind {
             if let Some(mi) = target.and_then(|id| self.scene.molecules.iter().position(|m| m.id == id)) {
                 let mol = &mut self.scene.molecules[mi];
+                // Relaxing is O(N²) per step (all-pairs vdW) — never auto-relax a large
+                // loaded structure; clear the job and leave coordinates as drawn.
+                if mol.n_atoms > DRAW_AUTO_MAX_ATOMS {
+                    if let Some(d) = self.draw.as_mut() {
+                        d.relax = None;
+                    }
+                    return;
+                }
                 let _ = crate::minimize::relax_in_system(
                     &mut mol.system,
                     &mol.bonds,

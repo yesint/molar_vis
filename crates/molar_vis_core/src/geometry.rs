@@ -438,8 +438,8 @@ fn strand_slots(order: BondOrder) -> &'static [(f32, bool)] {
     match order {
         BondOrder::Double => &[(-1.0, false), (1.0, false)],
         BondOrder::Triple => &[(-1.0, false), (0.0, false), (1.0, false)],
-        // Solid strand on one side, dashed on the other.
-        BondOrder::Aromatic => &[(-1.0, false), (1.0, true)],
+        // Aromatic: a single solid bond — the aromatic character is shown by the ring
+        // circle drawn inside the ring (the classic depiction), not solid+dashed.
         // Single / Unspecified: one centered solid strand (full size).
         _ => &[(0.0, false)],
     }

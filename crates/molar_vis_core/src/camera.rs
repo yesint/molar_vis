@@ -284,10 +284,10 @@ impl Camera {
         [front, back]
     }
 
-    fn right(&self) -> Vec3 {
+    pub fn right(&self) -> Vec3 {
         self.orientation * Vec3::X
     }
-    fn up(&self) -> Vec3 {
+    pub fn up(&self) -> Vec3 {
         self.orientation * Vec3::Y
     }
     /// Eye position: behind the target along the camera's local +Z.
