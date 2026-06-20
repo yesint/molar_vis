@@ -273,12 +273,6 @@ pub struct FfModel {
     excluded: HashSet<(u32, u32)>,
 }
 
-impl FfModel {
-    pub fn num_atoms(&self) -> usize {
-        self.n
-    }
-}
-
 fn excl_key(a: usize, b: usize) -> (u32, u32) {
     if a < b {
         (a as u32, b as u32)
@@ -663,6 +657,10 @@ pub fn relax_in_system(
         RelaxKind::Cleanup => MinimizeOpts::full_cleanup(),
     };
     let res = minimize(&mut coords, &model, opts);
+
+    if res.had_nan {
+        log::warn!("minimize: sanitized a non-finite force (degenerate geometry?)");
+    }
 
     let mut bmut = system.select_all_bound_mut();
     for (p, c) in bmut.iter_pos_mut().zip(&coords) {

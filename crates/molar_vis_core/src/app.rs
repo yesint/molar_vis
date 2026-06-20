@@ -3243,6 +3243,9 @@ impl eframe::App for App {
         // View/selection controls live in a top toolbar above the viewport (right of
         // the left panel); the central panel then fills the rest with the 3D image.
         self.draw_view_toolbar(ui);
+        // Vertical drawing-tools palette on the right (only while Draw mode is on);
+        // a panel, so it reserves its strip before the viewport fills the rest.
+        self.draw_tools_panel(ui);
         self.draw_viewport(ui, frame);
 
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
@@ -3396,9 +3399,6 @@ impl App {
                         .inner;
                     self.view_settings_window(ui.ctx(), anchor);
                 });
-                // Draw-mode second row (tool / element palette / order / actions),
-                // shown only while Draw mode is active.
-                self.draw_toolbar_extras(ui);
             });
     }
 
@@ -4222,10 +4222,20 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn save_session_to(&mut self, path: &std::path::Path) {
         let session = Session::capture(&self.scene, self.view_state());
+        // Drawn molecules have no file source to reload from, so a session can't
+        // restore them (it references molecules by source path). Warn so the user
+        // knows to export them via "Save molecule…" instead.
+        let drawn = self.scene.molecules.iter().filter(|m| m.editable).count();
         let result = session
             .to_json()
             .and_then(|json| std::fs::write(path, json).map_err(|e| e.to_string()));
         match result {
+            Ok(()) if drawn > 0 => {
+                self.status = format!(
+                    "Saved session to {} — {drawn} drawn molecule(s) won't reload (use Save molecule… to export them)",
+                    path.display()
+                );
+            }
             Ok(()) => self.status = format!("Saved session to {}", path.display()),
             Err(e) => {
                 log::error!("save session: {e}");
@@ -5853,6 +5863,22 @@ impl Element {
         }
     }
 
+    /// Atomic number (for the CPK palette color).
+    fn atomic_number(self) -> u8 {
+        match self {
+            Element::H => 1,
+            Element::C => 6,
+            Element::N => 7,
+            Element::O => 8,
+            Element::F => 9,
+            Element::P => 15,
+            Element::S => 16,
+            Element::Cl => 17,
+            Element::Br => 35,
+            Element::I => 53,
+        }
+    }
+
     /// Build a fresh molar `Atom` of this element (element/mass/vdw guessed from the
     /// name). The residue is a generic `DRG` so a drawn molecule reads as one ligand.
     fn make_atom(self) -> molar::prelude::Atom {
@@ -5872,16 +5898,6 @@ enum DrawTool {
     Bond,
     /// Click an atom to delete it (+ its bonds), or a bond to delete the bond.
     Erase,
-}
-
-impl DrawTool {
-    fn label(self) -> &'static str {
-        match self {
-            DrawTool::Atom => "Atom",
-            DrawTool::Bond => "Bond",
-            DrawTool::Erase => "Erase",
-        }
-    }
 }
 
 /// In-progress pointer gesture for the Bond tool.
@@ -5984,121 +6000,189 @@ impl App {
     /// tool selector, element palette, bond-order selector, and the Clean up / New /
     /// Finish actions. Drawn inside `draw_view_toolbar`'s panel. Returns nothing; all
     /// state lives in `self.draw`.
-    fn draw_toolbar_extras(&mut self, ui: &mut egui::Ui) {
+    /// The vertical drawing-tools palette, shown as a narrow right-side panel only
+    /// while Draw mode is active. Icon-only buttons (labels in hover tooltips): tool
+    /// selector, CPK-colored element chips, bond-order line icons, then Clean-up /
+    /// New / Finish actions. Scrolls if the window is short.
+    fn draw_tools_panel(&mut self, ui: &mut egui::Ui) {
         if self.draw.is_none() {
             return;
         }
-        // A thin second row under the selection controls. Wrapping, so the palette /
-        // order / action buttons stay reachable on a narrow window instead of running
-        // off the right edge.
-        ui.add_space(2.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        egui::Panel::right("draw_tools_panel")
+            .resizable(false)
+            .default_size(42.0)
+            .show_inside(ui, |ui| {
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(4.0, 5.0);
 
-            // — Tool selector —
-            toolbar_label(ui, "Tool");
-            for tool in [DrawTool::Atom, DrawTool::Bond, DrawTool::Erase] {
-                let active = self.draw.as_ref().map(|d| d.tool) == Some(tool);
-                let glyph = match tool {
-                    DrawTool::Atom => icon::PLUS_CIRCLE,
-                    DrawTool::Bond => icon::LINE_SEGMENT,
-                    DrawTool::Erase => icon::ERASER,
-                };
-                if overlay_button(ui, &format!("{}  {}", glyph, tool.label()), active)
-                    .on_hover_text(match tool {
-                        DrawTool::Atom => "Place atoms (click empty space)",
-                        DrawTool::Bond => "Draw bonds (drag atom→atom); click a bond to cycle its order",
-                        DrawTool::Erase => "Erase atoms or bonds (click)",
-                    })
-                    .clicked()
-                {
-                    if let Some(d) = self.draw.as_mut() {
-                        d.tool = tool;
-                        d.drag = DrawDrag::Idle;
-                    }
-                }
-            }
+                        // — Tools —
+                        let cur_tool = self.draw.as_ref().map(|d| d.tool);
+                        for tool in [DrawTool::Atom, DrawTool::Bond, DrawTool::Erase] {
+                            let glyph = match tool {
+                                DrawTool::Atom => icon::PLUS_CIRCLE,
+                                DrawTool::Bond => icon::LINE_SEGMENT,
+                                DrawTool::Erase => icon::ERASER,
+                            };
+                            let tip = match tool {
+                                DrawTool::Atom => "Atom — place atoms (click empty space)",
+                                DrawTool::Bond => "Bond — drag atom→atom; click a bond to cycle its order",
+                                DrawTool::Erase => "Erase — click an atom or bond to delete it",
+                            };
+                            if overlay_button(ui, glyph, cur_tool == Some(tool))
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                if let Some(d) = self.draw.as_mut() {
+                                    d.tool = tool;
+                                    d.drag = DrawDrag::Idle;
+                                }
+                            }
+                        }
 
-            ui.separator();
+                        ui.separator();
 
-            // — Element palette — each button selects the element and switches to the
-            // Atom tool (so picking an element implies "place this kind of atom").
-            toolbar_label(ui, "Element");
-            let cur_el = self.draw.as_ref().map(|d| d.element);
-            for el in Element::ALL {
-                if overlay_button(ui, el.symbol(), cur_el == Some(el))
-                    .on_hover_text(format!("Draw {} atoms", el.symbol()))
-                    .clicked()
-                {
-                    if let Some(d) = self.draw.as_mut() {
-                        d.element = el;
-                        d.tool = DrawTool::Atom;
-                    }
-                }
-            }
+                        // — Element palette — CPK-colored chips; picking one also
+                        // switches to the Atom tool.
+                        let cur_el = self.draw.as_ref().map(|d| d.element);
+                        for el in Element::ALL {
+                            let rgba = crate::color::element_color(el.atomic_number());
+                            if Self::element_chip(ui, el.symbol(), rgba, cur_el == Some(el))
+                                .on_hover_text(format!("Draw {} atoms", el.symbol()))
+                                .clicked()
+                            {
+                                if let Some(d) = self.draw.as_mut() {
+                                    d.element = el;
+                                    d.tool = DrawTool::Atom;
+                                }
+                            }
+                        }
 
-            ui.separator();
+                        ui.separator();
 
-            // — Bond-order selector (1 / 2 / 3) for new bonds.
-            toolbar_label(ui, "Order");
-            for (order, lbl) in [
-                (crate::minimize::BondOrder::Single, "1"),
-                (crate::minimize::BondOrder::Double, "2"),
-                (crate::minimize::BondOrder::Triple, "3"),
-            ] {
-                let active = self.draw.as_ref().map(|d| d.bond_order) == Some(order);
-                if overlay_button(ui, lbl, active)
-                    .on_hover_text(format!("{} bond", order.label()))
-                    .clicked()
-                {
-                    if let Some(d) = self.draw.as_mut() {
-                        d.bond_order = order;
-                    }
-                }
-            }
+                        // — Bond order (1 / 2 / 3 lines) for new bonds.
+                        let cur_ord = self.draw.as_ref().map(|d| d.bond_order);
+                        for (order, n) in [
+                            (crate::minimize::BondOrder::Single, 1u8),
+                            (crate::minimize::BondOrder::Double, 2),
+                            (crate::minimize::BondOrder::Triple, 3),
+                        ] {
+                            if Self::bond_order_icon(ui, n, cur_ord == Some(order))
+                                .on_hover_text(format!("{} bond", order.label()))
+                                .clicked()
+                            {
+                                if let Some(d) = self.draw.as_mut() {
+                                    d.bond_order = order;
+                                }
+                            }
+                        }
 
-            ui.separator();
+                        ui.separator();
 
-            // — Clean up (relax to convergence) — disabled until a molecule exists.
-            let has_target = self.draw.as_ref().and_then(|d| d.target).is_some();
-            let cleanup = ui.add_enabled(
-                has_target,
-                egui::Button::new(format!("{}  Clean up", icon::SPARKLE)),
+                        // — Clean up (relax to convergence) — disabled until a molecule exists.
+                        let has_target = self.draw.as_ref().and_then(|d| d.target).is_some();
+                        let cleanup = ui
+                            .add_enabled_ui(has_target, |ui| {
+                                overlay_button(ui, icon::SPARKLE, false)
+                                    .on_hover_text("Clean up — relax the geometry to convergence")
+                                    .clicked()
+                            })
+                            .inner;
+                        if cleanup {
+                            if let Some(d) = self.draw.as_mut() {
+                                d.relax = Some(RelaxJob { remaining: 1, to_convergence: true });
+                            }
+                        }
+                        // — New: the next click starts a fresh molecule.
+                        if overlay_button(ui, icon::FILE_PLUS, false)
+                            .on_hover_text("New — start a fresh molecule on the next click")
+                            .clicked()
+                        {
+                            if let Some(d) = self.draw.as_mut() {
+                                d.target = None;
+                                d.drag = DrawDrag::Idle;
+                            }
+                        }
+                        // — Finish: leave Draw mode.
+                        if overlay_button(ui, icon::CHECK, false)
+                            .on_hover_text("Finish — leave Draw mode")
+                            .clicked()
+                        {
+                            self.draw = None;
+                        }
+
+                        // Alt-to-rotate hint (icon only; tooltip explains).
+                        if ui.input(|i| i.modifiers.alt) {
+                            ui.separator();
+                            ui.colored_label(
+                                egui::Color32::from_rgb(150, 190, 230),
+                                egui::RichText::new(icon::ARROWS_CLOCKWISE).size(16.0),
+                            )
+                            .on_hover_text("Alt: rotate the view");
+                        }
+                    });
+                });
+            });
+    }
+
+    /// A small CPK-colored element chip (icon-only palette button): a rounded square
+    /// filled with the element's color, the symbol drawn in contrasting ink, a ring
+    /// when active/hovered.
+    fn element_chip(ui: &mut egui::Ui, symbol: &str, rgba: [u8; 4], active: bool) -> egui::Response {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), egui::Sense::click());
+        let fill = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
+        let chip = rect.shrink(1.0);
+        ui.painter().rect_filled(chip, 4.0, fill);
+        if active {
+            ui.painter().rect_stroke(
+                chip,
+                4.0,
+                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                egui::StrokeKind::Inside,
             );
-            if cleanup.on_hover_text("Relax the drawn geometry to convergence").clicked() {
-                if let Some(d) = self.draw.as_mut() {
-                    d.relax = Some(RelaxJob { remaining: 1, to_convergence: true });
-                }
-            }
-            // — New: the next click starts a fresh molecule.
-            if ui
-                .button(format!("{}  New", icon::PLUS))
-                .on_hover_text("Start a new drawn molecule on the next click")
-                .clicked()
-            {
-                if let Some(d) = self.draw.as_mut() {
-                    d.target = None;
-                    d.drag = DrawDrag::Idle;
-                }
-            }
-            // — Finish: leave Draw mode.
-            if ui
-                .button(format!("{}  Finish", icon::CHECK))
-                .on_hover_text("Leave Draw mode")
-                .clicked()
-            {
-                self.draw = None;
-            }
+        } else if resp.hovered() {
+            ui.painter().rect_stroke(
+                chip,
+                4.0,
+                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(180)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // Contrasting label by luminance.
+        let lum = 0.299 * rgba[0] as f32 + 0.587 * rgba[1] as f32 + 0.114 * rgba[2] as f32;
+        let txt = if lum > 140.0 { egui::Color32::BLACK } else { egui::Color32::WHITE };
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let galley = ui.painter().layout_no_wrap(symbol.to_owned(), font, txt);
+        let ink = galley.mesh_bounds;
+        ui.painter().galley(rect.center() - ink.center().to_vec2(), galley, txt);
+        resp
+    }
 
-            // Modifier hint (Alt rotates the view without leaving Draw).
-            let m = ui.input(|i| i.modifiers);
-            if m.alt {
-                ui.separator();
-                let c = egui::Color32::from_rgb(150, 190, 230);
-                ui.colored_label(c, egui::RichText::new(icon::ARROWS_CLOCKWISE).size(16.0));
-                ui.colored_label(c, "rotate view");
-            }
-        });
+    /// A bond-order icon button: `n` stacked horizontal lines on the toolbar-button
+    /// frame (1 = single, 2 = double, 3 = triple).
+    fn bond_order_icon(ui: &mut egui::Ui, n: u8, active: bool) -> egui::Response {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 26.0), egui::Sense::click());
+        let vis = ui.style().interact_selectable(&resp, active);
+        let fill = if active {
+            ui.visuals().selection.bg_fill
+        } else {
+            vis.weak_bg_fill
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        let col = ui.visuals().text_color();
+        let c = rect.center();
+        let half_w = 7.0;
+        let spacing = 4.0;
+        let total = (n as f32 - 1.0) * spacing;
+        for i in 0..n {
+            let y = c.y - total / 2.0 + i as f32 * spacing;
+            ui.painter().line_segment(
+                [egui::pos2(c.x - half_w, y), egui::pos2(c.x + half_w, y)],
+                egui::Stroke::new(1.8, col),
+            );
+        }
+        resp
     }
 
     /// Project a viewport pixel onto the active drawing plane → a world point (nm).
