@@ -6582,15 +6582,27 @@ impl App {
         if let Some(px) = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p)) {
             match self.draw_hit_test(mi, rect, size_px, px) {
                 Some(HitTarget::Atom(i)) => {
-                    if let Some(c) = self.atom_world(mi, i).and_then(px_of) {
-                        // Size the ring to the atom's projected radius so it tracks zoom.
-                        let rw = mol.system.topology().get_atom(i).map_or(0.08, |a| a.vdw() * 0.55);
-                        let rpx = self
-                            .atom_world(mi, i)
-                            .and_then(|w| px_of(w + self.camera.up() * rw))
-                            .map_or(11.0, |e| (e - c).length())
-                            .max(5.0);
-                        draw_glow_ring(&painter, c, rpx);
+                    if let Some(w) = self.atom_world(mi, i) {
+                        if let Some(c) = px_of(w) {
+                            // Ring sized to the atom's *drawn* radius, projected like the
+                            // pick-mode hover (project a point one radius to camera-right):
+                            // it tracks zoom because both the center and the offset point
+                            // are projected each frame.
+                            let atom = mol.system.topology().get_atom(i);
+                            let r_world = atom
+                                .and_then(|a| {
+                                    mol.reps
+                                        .iter()
+                                        .find(|r| r.visible)
+                                        .map(|r| pick::effective_radius(&r.params, a))
+                                })
+                                .unwrap_or(0.05);
+                            let right = self.camera.orientation * glam::Vec3::X;
+                            let rpx = px_of(w + right * r_world)
+                                .map_or(6.0, |e| (e - c).length())
+                                .clamp(3.0, rect.width());
+                            draw_glow_ring(&painter, c, rpx);
+                        }
                     }
                 }
                 Some(HitTarget::Bond(k)) => {
