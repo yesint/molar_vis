@@ -240,7 +240,29 @@ fn reconcile_structure(mol: &mut Molecule, snap: &StructureSnapshot) {
         mol.hover_grid = None;
         mol.refresh_bbox();
         for rep in &mut mol.reps {
+            // The atom set changed, so any cached compiled selection holds indices
+            // from the old (possibly larger) system — re-evaluate it against the new
+            // one before building, else molar rejects the stale indices ("selection
+            // out of bounds"). `reconcile_reps` won't recompile a rep whose text is
+            // unchanged (e.g. "all"), so force it here.
+            rep.sel = None;
+            rep.expr = None;
+            rep.sel_dirty = true;
             rep.geom_dirty = true;
+            rep.coords_dirty = false;
+            rep.ss_cache = None;
+            rep.cartoon_cache = None;
+        }
+        // Transient highlights may reference now-gone atoms — drop them.
+        mol.pending = None;
+        mol.glow_dirty = true;
+        mol.hover = None;
+        mol.hover_dirty = true;
+        mol.hover_detail = None;
+        mol.hover_detail_dirty = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            mol.pick_dirty = true;
         }
     }
 }
