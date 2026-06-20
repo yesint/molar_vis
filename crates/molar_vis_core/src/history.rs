@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
-use crate::minimize::BondOrder;
 use crate::scene::{MolId, Molecule, PeriodicParams, Representation, Scene};
 
 /// The editable state of a single representation — the canonical "document" unit.
@@ -110,8 +109,8 @@ pub struct AtomLite {
 pub struct StructureSnapshot {
     pub atoms: Vec<AtomLite>,
     pub coords: Vec<[f32; 3]>,
-    pub bonds: Vec<[usize; 2]>,
-    pub bond_orders: Vec<BondOrder>,
+    /// The bond graph with orders (molar's [`Bond`] derives serde directly).
+    pub bonds: Vec<Bond>,
 }
 
 impl StructureSnapshot {
@@ -139,7 +138,6 @@ impl StructureSnapshot {
             atoms,
             coords,
             bonds: mol.bonds.clone(),
-            bond_orders: mol.bond_orders.clone(),
         }
     }
 }
@@ -238,7 +236,6 @@ fn reconcile_structure(mol: &mut Molecule, snap: &StructureSnapshot) {
     if let Ok(sys) = System::new(top, st) {
         mol.system = sys;
         mol.bonds = snap.bonds.clone();
-        mol.bond_orders = snap.bond_orders.clone();
         mol.n_atoms = snap.atoms.len();
         mol.hover_grid = None;
         mol.refresh_bbox();
@@ -310,7 +307,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
                     Less => return "delete bond".into(),
                     Equal => {}
                 }
-                if n.bond_orders != o.bond_orders {
+                // Equal atom/bond counts: a bond difference is an order change
+                // (or a re-bond); otherwise only the coordinates moved.
+                if n.bonds != o.bonds {
                     return "change bond order".into();
                 }
                 return "edit geometry".into(); // coordinates changed (minimize / move)
@@ -568,6 +567,6 @@ mod tests {
         hist.redo_n(1).unwrap().apply(&mut scene);
         assert_eq!(scene.molecules[0].n_atoms, 2);
         assert_eq!(scene.molecules[0].bonds.len(), 1);
-        assert_eq!(scene.molecules[0].bond_orders.len(), 1);
+        assert_eq!(scene.molecules[0].bonds[0].order, BondOrder::Single);
     }
 }

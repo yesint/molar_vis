@@ -11,7 +11,7 @@ use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
-use crate::minimize::BondOrder;
+use crate::minimize::{Bond, BondOrder};
 use crate::render::RepGpu;
 use crate::secstruct::SsMap;
 use crate::trajectory::Trajectory;
@@ -325,12 +325,11 @@ pub struct Molecule {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub traj_loads: Vec<TrajLoad>,
     pub system: System,
-    pub bonds: Vec<[usize; 2]>,
-    /// Per-bond order, index-aligned with `bonds` (kept the same length by every
-    /// bond mutation helper). Guessed bonds load as `Single`; the drawing editor is
-    /// what introduces double/triple. Read by the force field; ignored by the
-    /// renderer/picker for now (multi-order *rendering* is a follow-up).
-    pub bond_orders: Vec<BondOrder>,
+    /// Connectivity used for rendering/picking and the editor. Each [`Bond`] carries
+    /// its endpoints + chemical order (molar's type; guessed/file bonds without a
+    /// recorded order are `Unspecified`). Mutated only via the helper methods so it
+    /// stays consistent.
+    pub bonds: Vec<Bond>,
     /// This molecule was created/edited by the drawing tool, so its full structure
     /// (atoms + coords + bonds) is snapshotted for undo and may be relaxed by the
     /// force field. Loaded molecules stay `false` (referenced by source, never
@@ -403,7 +402,6 @@ impl Molecule {
             source: raw.source,
             traj_loads: Vec::new(),
             system: raw.system,
-            bond_orders: vec![BondOrder::Single; raw.bonds.len()],
             bonds: raw.bonds,
             editable: false,
             n_atoms: raw.n_atoms,
@@ -562,7 +560,7 @@ impl Molecule {
     pub fn bond_between(&self, i: usize, j: usize) -> Option<usize> {
         self.bonds
             .iter()
-            .position(|&[a, b]| (a == i && b == j) || (a == j && b == i))
+            .position(|b| (b.i1 == i && b.i2 == j) || (b.i1 == j && b.i2 == i))
     }
 
     /// Add a bond `i–j` of the given order. No-op (returns `false`) for a self-bond,
@@ -571,23 +569,22 @@ impl Molecule {
         if i == j || i >= self.n_atoms || j >= self.n_atoms || self.bond_between(i, j).is_some() {
             return false;
         }
-        self.bonds.push([i, j]);
-        self.bond_orders.push(order);
+        self.bonds.push(Bond::with_order(i, j, order));
         true
     }
 
-    /// Remove the bond at index `k` (keeping the two vecs aligned).
+    /// Remove the bond at index `k`.
     pub fn remove_bond_at(&mut self, k: usize) {
         if k < self.bonds.len() {
             self.bonds.remove(k);
-            self.bond_orders.remove(k);
         }
     }
 
     /// Cycle the order of bond `k` (single→double→triple→single).
     pub fn cycle_bond_order(&mut self, k: usize) {
-        if let Some(o) = self.bond_orders.get_mut(k) {
-            *o = o.cycle();
+        use crate::minimize::BondOrderExt;
+        if let Some(b) = self.bonds.get_mut(k) {
+            b.order = b.order.cycle();
         }
     }
 
@@ -598,19 +595,13 @@ impl Molecule {
         if i >= self.n_atoms {
             return self.n_atoms == 0;
         }
-        let mut new_bonds = Vec::with_capacity(self.bonds.len());
-        let mut new_orders = Vec::with_capacity(self.bond_orders.len());
-        for (b, &[a, c]) in self.bonds.iter().enumerate() {
-            if a == i || c == i {
-                continue; // incident bond → dropped
-            }
-            let na = if a > i { a - 1 } else { a };
-            let nc = if c > i { c - 1 } else { c };
-            new_bonds.push([na, nc]);
-            new_orders.push(self.bond_orders[b]);
-        }
-        self.bonds = new_bonds;
-        self.bond_orders = new_orders;
+        let shift = |x: usize| if x > i { x - 1 } else { x };
+        self.bonds = self
+            .bonds
+            .iter()
+            .filter(|b| !b.contains(i)) // drop incident bonds
+            .map(|b| Bond::with_order(shift(b.i1), shift(b.i2), b.order))
+            .collect();
         let _ = self.system.remove(std::iter::once(i));
         self.n_atoms = self.n_atoms.saturating_sub(1);
         self.hover_grid = None;

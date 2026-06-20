@@ -19,6 +19,7 @@ use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
 use crate::launch::AppLaunch;
 use crate::material::{Material, MaterialParams};
+use crate::minimize::{Bond, BondOrderExt};
 use crate::pick::{self, PickMode, SelectionMode};
 use crate::render::{SceneRenderer, SphereInstance};
 use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
@@ -2579,11 +2580,11 @@ impl App {
             let res = crate::minimize::relax_in_system(
                 &mut mol.system,
                 &mol.bonds,
-                &mol.bond_orders,
                 RelaxKind::Cleanup,
             );
             // A representative bond length after relaxation (the first bond).
-            let len0 = mol.bonds.first().map(|&[a, b]| {
+            let len0 = mol.bonds.first().map(|bond| {
+                let (a, b) = (bond.i1, bond.i2);
                 let st = mol.system.state();
                 match (st.coords.get(a), st.coords.get(b)) {
                     (Some(pa), Some(pb)) => {
@@ -2854,7 +2855,7 @@ impl App {
 /// over a Cartoon/Surface rep to reveal local atomic detail the abstraction hides.
 fn build_hover_detail(
     system: &molar::prelude::System,
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     detail: &crate::scene::HoverDetail,
     state: &molar::prelude::State,
     n_atoms: usize,
@@ -2918,7 +2919,7 @@ fn fade_by_ray(geom: &mut geometry::GeometryData, o: glam::Vec3, d: glam::Vec3, 
 /// filled by the same `rebuild_dirty` pass, just before this).
 fn build_glow(
     system: &molar::prelude::System,
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     reps: &[Representation],
     atoms: &[usize],
     state: &State,
@@ -6567,7 +6568,6 @@ impl App {
                 let _ = crate::minimize::relax_in_system(
                     &mut mol.system,
                     &mol.bonds,
-                    &mol.bond_orders,
                     kind,
                 );
                 mol.refresh_bbox();

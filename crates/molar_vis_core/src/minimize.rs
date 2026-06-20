@@ -25,42 +25,45 @@ use molar::prelude::*;
 // Bond order
 // ---------------------------------------------------------------------------
 
-/// Bond multiplicity as drawn in the editor. `Aromatic` is a sentinel treated as
-/// effective order 1.5 (for the equilibrium length) and forces sp2 on its atoms.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[repr(u8)]
-pub enum BondOrder {
-    #[default]
-    Single = 1,
-    Double = 2,
-    Triple = 3,
-    Aromatic = 4,
+// `Bond` and `BondOrder` now live in molar (`Topology.bonds: Vec<Bond>`); re-export
+// them so the rest of molar_vis can name them as `crate::minimize::{Bond, BondOrder}`.
+pub use molar::prelude::{Bond, BondOrder};
+
+/// Editor/force-field helpers on molar's foreign [`BondOrder`] (can't be inherent
+/// methods on a foreign type, so they ride an extension trait).
+pub trait BondOrderExt {
+    /// Numeric order used for the equilibrium bond length. `Unspecified` is treated
+    /// as a single bond; `Aromatic` as 1.5.
+    fn effective(self) -> f32;
+    /// Next order when the user clicks a bond to cycle it
+    /// (unspecified/single → double → triple → single). Aromatic → single.
+    fn cycle(self) -> Self;
+    /// Short human label for tooltips.
+    fn label(self) -> &'static str;
 }
 
-impl BondOrder {
-    /// Numeric order used for the equilibrium bond length (aromatic = 1.5).
-    pub fn effective(self) -> f32 {
+impl BondOrderExt for BondOrder {
+    fn effective(self) -> f32 {
         match self {
-            BondOrder::Single => 1.0,
+            BondOrder::Unspecified | BondOrder::Single => 1.0,
             BondOrder::Double => 2.0,
             BondOrder::Triple => 3.0,
             BondOrder::Aromatic => 1.5,
         }
     }
 
-    /// Next order when the user clicks a bond to cycle it (single→double→triple→single).
-    /// Aromatic cycles back to single (it isn't reachable by clicking in the MVP).
-    pub fn cycle(self) -> Self {
+    fn cycle(self) -> Self {
         match self {
-            BondOrder::Single => BondOrder::Double,
+            BondOrder::Unspecified | BondOrder::Single => BondOrder::Double,
             BondOrder::Double => BondOrder::Triple,
             BondOrder::Triple => BondOrder::Single,
             BondOrder::Aromatic => BondOrder::Single,
         }
     }
 
-    pub fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
+            BondOrder::Unspecified => "Unspecified",
             BondOrder::Single => "Single",
             BondOrder::Double => "Double",
             BondOrder::Triple => "Triple",
@@ -164,25 +167,21 @@ impl Hybrid {
 /// Classify every atom's hybridization from the bond graph: neighbour count plus the
 /// maximum incident bond order. Halogens and hydrogen are always terminal; carbon and
 /// the other organic centers fall back to sp3 unless a multiple bond raises them.
-pub fn perceive_hybridization(
-    atomic_numbers: &[u8],
-    bonds: &[[usize; 2]],
-    orders: &[BondOrder],
-) -> Vec<Hybrid> {
+pub fn perceive_hybridization(atomic_numbers: &[u8], bonds: &[Bond]) -> Vec<Hybrid> {
     let n = atomic_numbers.len();
     let mut degree = vec![0u32; n];
     let mut max_order = vec![0.0f32; n];
     let mut aromatic = vec![false; n];
-    for (b, &[i, j]) in bonds.iter().enumerate() {
+    for bond in bonds {
+        let (i, j) = (bond.i1, bond.i2);
         if i >= n || j >= n {
             continue;
         }
-        let o = orders.get(b).copied().unwrap_or_default();
         degree[i] += 1;
         degree[j] += 1;
-        max_order[i] = max_order[i].max(o.effective());
-        max_order[j] = max_order[j].max(o.effective());
-        if o == BondOrder::Aromatic {
+        max_order[i] = max_order[i].max(bond.order.effective());
+        max_order[j] = max_order[j].max(bond.order.effective());
+        if bond.order == BondOrder::Aromatic {
             aromatic[i] = true;
             aromatic[j] = true;
         }
@@ -281,27 +280,28 @@ fn excl_key(a: usize, b: usize) -> (u32, u32) {
     }
 }
 
-/// Build the force-field model from per-atom elements + the editor's bonds/orders.
-/// Out-of-range bond endpoints (e.g. a stale bond after an atom deletion) are skipped.
-pub fn build_model(atomic_numbers: &[u8], bonds: &[[usize; 2]], orders: &[BondOrder]) -> FfModel {
+/// Build the force-field model from per-atom elements + the editor's bonds (whose
+/// `order` drives the equilibrium length). Out-of-range bond endpoints (e.g. a stale
+/// bond after an atom deletion) are skipped.
+pub fn build_model(atomic_numbers: &[u8], bonds: &[Bond]) -> FfModel {
     let n = atomic_numbers.len();
-    let hyb = perceive_hybridization(atomic_numbers, bonds, orders);
+    let hyb = perceive_hybridization(atomic_numbers, bonds);
 
     // Adjacency (only valid, in-range bonds).
     let mut nbr: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut bond_terms = Vec::with_capacity(bonds.len());
     let mut excluded: HashSet<(u32, u32)> = HashSet::new();
-    for (b, &[i, j]) in bonds.iter().enumerate() {
+    for bond in bonds {
+        let (i, j) = (bond.i1, bond.i2);
         if i >= n || j >= n || i == j {
             continue;
         }
         nbr[i].push(j);
         nbr[j].push(i);
-        let order = orders.get(b).copied().unwrap_or_default();
         bond_terms.push(BondTerm {
             i,
             j,
-            r0: equilibrium_bond_length(atomic_numbers[i], atomic_numbers[j], order),
+            r0: equilibrium_bond_length(atomic_numbers[i], atomic_numbers[j], bond.order),
             k: K_BOND,
         });
         excluded.insert(excl_key(i, j));
@@ -640,8 +640,7 @@ pub enum RelaxKind {
 /// molar; everything below it is pure `glam` math.
 pub fn relax_in_system(
     system: &mut System,
-    bonds: &[[usize; 2]],
-    orders: &[BondOrder],
+    bonds: &[Bond],
     kind: RelaxKind,
 ) -> MinimizeResult {
     let (mut coords, atomic_numbers): (Vec<Vec3>, Vec<u8>) = {
@@ -651,7 +650,7 @@ pub fn relax_in_system(
         (coords, z)
     };
 
-    let model = build_model(&atomic_numbers, bonds, orders);
+    let model = build_model(&atomic_numbers, bonds);
     let opts = match kind {
         RelaxKind::Quick => MinimizeOpts::quick_relax(),
         RelaxKind::Cleanup => MinimizeOpts::full_cleanup(),
@@ -706,12 +705,16 @@ mod tests {
         }
     }
 
+    /// Shorthand for a single bond `i–j`.
+    fn b1(i: usize, j: usize) -> Bond {
+        Bond::with_order(i, j, BondOrder::Single)
+    }
+
     #[test]
     fn bond_gradient_matches_finite_difference() {
         let z = [6u8, 8u8];
-        let bonds = [[0usize, 1usize]];
-        let orders = [BondOrder::Single];
-        let model = build_model(&z, &bonds, &orders);
+        let bonds = [b1(0, 1)];
+        let model = build_model(&z, &bonds);
         let coords = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.18, 0.02, -0.01)];
         grad_check(&coords, &model);
     }
@@ -719,9 +722,8 @@ mod tests {
     #[test]
     fn angle_gradient_matches_finite_difference() {
         let z = [1u8, 8u8, 1u8];
-        let bonds = [[0usize, 1usize], [1usize, 2usize]];
-        let orders = [BondOrder::Single, BondOrder::Single];
-        let model = build_model(&z, &bonds, &orders);
+        let bonds = [b1(0, 1), b1(1, 2)];
+        let model = build_model(&z, &bonds);
         let coords = [
             Vec3::new(0.09, 0.01, 0.0),
             Vec3::new(0.0, 0.0, 0.0),
@@ -734,9 +736,7 @@ mod tests {
     fn vdw_gradient_matches_finite_difference() {
         // Two unbonded carbons inside the WCA cutoff.
         let z = [6u8, 6u8];
-        let bonds: [[usize; 2]; 0] = [];
-        let orders: [BondOrder; 0] = [];
-        let model = build_model(&z, &bonds, &orders);
+        let model = build_model(&z, &[]);
         let coords = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.12, 0.03, 0.0)];
         grad_check(&coords, &model);
     }
@@ -744,7 +744,7 @@ mod tests {
     #[test]
     fn vdw_zero_beyond_cutoff() {
         let z = [6u8, 6u8];
-        let model = build_model(&z, &[], &[]);
+        let model = build_model(&z, &[]);
         // Two carbons well past r_cut (~0.34 nm): no energy, no force.
         let coords = [Vec3::ZERO, Vec3::new(0.6, 0.0, 0.0)];
         let mut f = vec![Vec3::ZERO; 2];
@@ -756,9 +756,8 @@ mod tests {
     #[test]
     fn single_bond_relaxes_to_equilibrium() {
         let z = [6u8, 6u8];
-        let bonds = [[0usize, 1usize]];
-        let orders = [BondOrder::Single];
-        let model = build_model(&z, &bonds, &orders);
+        let bonds = [b1(0, 1)];
+        let model = build_model(&z, &bonds);
         let r0 = equilibrium_bond_length(6, 6, BondOrder::Single);
         // Start far too long.
         let mut coords = [Vec3::ZERO, Vec3::new(0.3, 0.0, 0.0)];
@@ -771,9 +770,8 @@ mod tests {
     #[test]
     fn water_relaxes_to_sensible_geometry() {
         let z = [8u8, 1u8, 1u8];
-        let bonds = [[0usize, 1usize], [0usize, 2usize]];
-        let orders = [BondOrder::Single, BondOrder::Single];
-        let model = build_model(&z, &bonds, &orders);
+        let bonds = [b1(0, 1), b1(0, 2)];
+        let model = build_model(&z, &bonds);
         // Distorted start: wrong lengths, ~70° angle.
         let mut coords = [
             Vec3::new(0.0, 0.0, 0.0),
@@ -797,9 +795,8 @@ mod tests {
     #[test]
     fn coincident_atoms_separate_without_nan() {
         let z = [6u8, 6u8];
-        let bonds = [[0usize, 1usize]];
-        let orders = [BondOrder::Single];
-        let model = build_model(&z, &bonds, &orders);
+        let bonds = [b1(0, 1)];
+        let model = build_model(&z, &bonds);
         // Both atoms at exactly the same point.
         let mut coords = [Vec3::ZERO, Vec3::ZERO];
         let res = minimize(&mut coords, &model, MinimizeOpts::full_cleanup());
@@ -813,7 +810,7 @@ mod tests {
     #[test]
     fn isolated_atom_is_left_alone() {
         let z = [6u8];
-        let model = build_model(&z, &[], &[]);
+        let model = build_model(&z, &[]);
         let mut coords = [Vec3::new(0.1, 0.2, 0.3)];
         let res = minimize(&mut coords, &model, MinimizeOpts::full_cleanup());
         assert!(res.converged);
@@ -824,7 +821,7 @@ mod tests {
     fn disconnected_fragments_separate() {
         // Two unbonded carbons placed on top of each other must be pushed apart by vdW.
         let z = [6u8, 6u8];
-        let model = build_model(&z, &[], &[]);
+        let model = build_model(&z, &[]);
         let mut coords = [Vec3::ZERO, Vec3::new(0.02, 0.0, 0.0)];
         let res = minimize(&mut coords, &model, MinimizeOpts::full_cleanup());
         assert!(!res.had_nan);
@@ -837,10 +834,9 @@ mod tests {
     /// A C–C–C–C chain with the central C1–C2 dihedral set to `phi_deg`. Bonds at
     /// equilibrium, ~109.5° angles; only the dihedral varies, so it isolates torsion
     /// (+ the 1-4 vdW between the end carbons).
-    fn carbon_chain(phi_deg: f32) -> ([u8; 4], [[usize; 2]; 3], [BondOrder; 3], [Vec3; 4]) {
+    fn carbon_chain(phi_deg: f32) -> ([u8; 4], [Bond; 3], [Vec3; 4]) {
         let z = [6u8; 4];
-        let bonds = [[0usize, 1], [1, 2], [2, 3]];
-        let orders = [BondOrder::Single; 3];
+        let bonds = [b1(0, 1), b1(1, 2), b1(2, 3)];
         let l = equilibrium_bond_length(6, 6, BondOrder::Single);
         let theta = 109.5_f32.to_radians();
         let c1 = Vec3::ZERO;
@@ -855,24 +851,24 @@ mod tests {
             base.y * phi.sin() + base.z * phi.cos(),
         );
         let c3 = c2 + l * rot;
-        (z, bonds, orders, [c0, c1, c2, c3])
+        (z, bonds, [c0, c1, c2, c3])
     }
 
     #[test]
     fn torsion_gradient_matches_finite_difference() {
-        let (z, bonds, orders, coords) = carbon_chain(40.0);
-        let model = build_model(&z, &bonds, &orders);
+        let (z, bonds, coords) = carbon_chain(40.0);
+        let model = build_model(&z, &bonds);
         assert_eq!(model.torsions.len(), 1, "one sp3–sp3 torsion expected");
         grad_check(&coords, &model);
     }
 
     #[test]
     fn torsion_prefers_staggered_over_eclipsed() {
-        let (z, bonds, orders, _) = carbon_chain(0.0);
-        let model = build_model(&z, &bonds, &orders);
+        let (z, bonds, _) = carbon_chain(0.0);
+        let model = build_model(&z, &bonds);
         let mut f = vec![Vec3::ZERO; 4];
-        let e_eclipsed = energy_forces(&carbon_chain(0.0).3, &model, &mut f);
-        let e_staggered = energy_forces(&carbon_chain(60.0).3, &model, &mut f);
+        let e_eclipsed = energy_forces(&carbon_chain(0.0).2, &model, &mut f);
+        let e_staggered = energy_forces(&carbon_chain(60.0).2, &model, &mut f);
         assert!(
             e_eclipsed > e_staggered,
             "eclipsed {e_eclipsed} should cost more than staggered {e_staggered}"
@@ -881,20 +877,21 @@ mod tests {
 
     #[test]
     fn hybridization_perception() {
-        // Ethene-like: C=C, each carbon sp2; the triple-bonded carbons sp.
+        // A lone C=C: each carbon has degree 1 → terminal.
         let z = [6u8, 6u8];
-        let bonds = [[0usize, 1usize]];
         assert_eq!(
-            perceive_hybridization(&z, &bonds, &[BondOrder::Double]),
-            vec![Hybrid::Terminal, Hybrid::Terminal] // degree 1 each → terminal
+            perceive_hybridization(&z, &[Bond::with_order(0, 1, BondOrder::Double)]),
+            vec![Hybrid::Terminal, Hybrid::Terminal]
         );
         // Central carbon with two single bonds → sp3.
         let z3 = [1u8, 6u8, 1u8];
-        let bonds3 = [[0usize, 1usize], [1usize, 2usize]];
-        let h = perceive_hybridization(&z3, &bonds3, &[BondOrder::Single, BondOrder::Single]);
+        let h = perceive_hybridization(&z3, &[b1(0, 1), b1(1, 2)]);
         assert_eq!(h[1], Hybrid::Sp3);
         // Central carbon with a double bond → sp2.
-        let h2 = perceive_hybridization(&z3, &bonds3, &[BondOrder::Double, BondOrder::Single]);
+        let h2 = perceive_hybridization(
+            &z3,
+            &[Bond::with_order(0, 1, BondOrder::Double), b1(1, 2)],
+        );
         assert_eq!(h2[1], Hybrid::Sp2);
     }
 }

@@ -183,7 +183,7 @@ pub fn needs_ss(params: &RepParams, color: ColorMethod) -> bool {
 pub fn build(
     bound: &(impl ParticleIterProvider + PosProvider + AtomProvider + BoxProvider),
     n_atoms: usize,
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     params: &RepParams,
     color: ColorMethod,
     material: Material,
@@ -338,13 +338,14 @@ fn isolated_crosses(
     bound: &impl ParticleIterProvider,
     colorizer: &Colorizer,
     lut: &[Option<([f32; 3], u32)>],
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     width: f32,
 ) -> Vec<LineVertex> {
     // `lut[i].is_some()` == atom i is selected; mark every selected endpoint of a
     // drawn bond as bonded.
     let mut bonded = vec![false; lut.len()];
-    for &[a, b] in bonds {
+    for bond in bonds {
+        let [a, b] = bond.pair();
         if lut[a].is_some() && lut[b].is_some() {
             bonded[a] = true;
             bonded[b] = true;
@@ -483,7 +484,7 @@ fn dashes(p0: [f32; 3], p1: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
 
 fn cylinders(
     lut: &[Option<([f32; 3], u32)>],
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     radius: f32,
     pbox: Option<&PeriodicBox>,
 ) -> Vec<CylinderInstance> {
@@ -498,7 +499,8 @@ fn cylinders(
             v.push(CylinderInstance { p0, radius, p1, color, mat: 0 });
         }
     };
-    for &[a, b] in bonds {
+    for bond in bonds {
+        let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
             push(pa, a_end, ca, wrapped);
@@ -510,7 +512,7 @@ fn cylinders(
 
 fn lines(
     lut: &[Option<([f32; 3], u32)>],
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     width: f32,
     pbox: Option<&PeriodicBox>,
 ) -> Vec<LineVertex> {
@@ -527,7 +529,8 @@ fn lines(
             v.push(LineVertex { pos: p1, color, width });
         }
     };
-    for &[a, b] in bonds {
+    for bond in bonds {
+        let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
             push(pa, a_end, ca, wrapped);

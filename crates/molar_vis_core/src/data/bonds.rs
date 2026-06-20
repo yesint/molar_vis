@@ -42,7 +42,7 @@ pub fn guess(
     vdw: &[f32],
     pbox: Option<&PeriodicBox>,
     params: &BondParams,
-) -> Vec<[usize; 2]> {
+) -> Vec<Bond> {
     let n = positions.len();
     if n < 2 {
         return Vec::new();
@@ -93,5 +93,6 @@ pub fn guess(
     // The search may report a pair from either cell ordering; dedup.
     bonds.sort_unstable();
     bonds.dedup();
-    bonds
+    // Guessed bonds carry no chemical order (no file format we read records it).
+    bonds.into_iter().map(|[a, b]| Bond::new(a, b)).collect()
 }

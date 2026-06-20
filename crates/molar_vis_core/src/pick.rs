@@ -66,7 +66,7 @@ impl SelectionMode {
 /// `i`), so this never scans the whole system.
 pub fn expand_selection(
     system: &System,
-    bonds: &[[usize; 2]],
+    bonds: &[Bond],
     atoms: &[usize],
     mode: SelectionMode,
 ) -> Vec<usize> {
@@ -124,7 +124,8 @@ pub fn expand_selection(
                 .filter(|&i| topo.get_atom(i).is_some_and(|a| a.atomic_number != 1))
                 .collect();
             let mut out = heavy.clone();
-            for &[a, b] in bonds {
+            for bond in bonds {
+                let (a, b) = (bond.i1, bond.i2);
                 if heavy.contains(&a) && is_h(b) {
                     out.insert(b);
                 }
@@ -283,8 +284,8 @@ pub(crate) fn nearest_bond(
         Some(Vec2::new(clip.x / clip.w, clip.y / clip.w))
     };
     let mut best: Option<(usize, f32)> = None;
-    for (k, &[a, b]) in mol.bonds.iter().enumerate() {
-        let (Some(pa), Some(pb)) = (project(a), project(b)) else {
+    for (k, bond) in mol.bonds.iter().enumerate() {
+        let (Some(pa), Some(pb)) = (project(bond.i1), project(bond.i2)) else {
             continue;
         };
         let d = point_segment_dist(ndc, pa, pb);
@@ -790,7 +791,7 @@ mod tests {
         let bound = raw.system.bind(&all);
         let z: Vec<u8> = bound.iter_particle().map(|p| p.atom.atomic_number).collect();
         assert_eq!(z, vec![6, 1, 1, 1, 1, 1], "expected C + 5 H");
-        let c_bonds = raw.bonds.iter().filter(|b| b.contains(&0)).count();
+        let c_bonds = raw.bonds.iter().filter(|b| b.contains(0)).count();
         assert_eq!(c_bonds, 4, "carbon should have 4 bonded H (lone H unbonded)");
 
         let exp = |atoms: &[usize]| {

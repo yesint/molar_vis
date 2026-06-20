@@ -28,7 +28,7 @@ pub struct RawMolecule {
     pub source: MoleculeSource,
     pub system: System,
     pub n_atoms: usize,
-    pub bonds: Vec<[usize; 2]>,
+    pub bonds: Vec<Bond>,
     pub bbox_min: Vec3,
     pub bbox_max: Vec3,
 }
