@@ -44,6 +44,14 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - Reading SDF files (molar)
 
 ## Altering structures visually
-- Moving / rotating atoms, residues, molecules
+- Deleting / Moving / rotating atoms, residues, molecules
 - Rotating bonds and dihedrals
-- Simple UFF minimization
+- ~~Simple UFF minimization~~ — **shipped** (M23; lightweight UFF-style cleanup FF —
+  harmonic bond/angle + weak torsion + WCA repulsive vdW — with a FIRE minimizer; see
+  `minimize.rs`)
+- ~~Drawing molecules with atoms/bonds palette a-la Marvin JS with on-the-fly minimization~~ —
+  **shipped** (M23; Draw mode: vertical icon toolbar + viewport place-atom / drag-to-bond /
+  cycle-order / erase, debounced FIRE cleanup + a "Clean up" button). **Deferred follow-ups:**
+  ring/fragment templates · automatic hydrogens · formal charges · change-element-of-existing-atom ·
+  multi-order *bond rendering* (double/triple still draw as one cylinder) · SMILES import/export ·
+  embedding drawn molecules in sessions
