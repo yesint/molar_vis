@@ -357,6 +357,11 @@ pub struct Molecule {
     pub box_gpu: RepGpu,
     /// Box geometry needs (re)building — toggled on, or coordinates changed.
     pub box_dirty: bool,
+    /// GPU line buffer for the aromatic-ring circles (drawn depth-tested in the scene,
+    /// so they occlude correctly); built from `aromatic_rings` when `aromatic_dirty`.
+    pub aromatic_gpu: RepGpu,
+    /// Aromatic-circle geometry needs (re)building — perception ran or coords moved.
+    pub aromatic_dirty: bool,
     /// A not-yet-committed selection (e.g. captured by a lasso), shown as a glowing
     /// highlight with a minimal accept/discard UI. View state, not undoable; see
     /// [`PendingSelection`]. `None` when there is no active selection.
@@ -418,6 +423,8 @@ impl Molecule {
             trajectory: Trajectory::default(),
             show_box: false,
             box_gpu: RepGpu::default(),
+            aromatic_gpu: RepGpu::default(),
+            aromatic_dirty: false,
             // Build the box geometry up front (if the molecule has one) so a rep's
             // periodic `Box` toggle can draw it without the molecule-level box ever
             // being shown. Cheap (24 verts); a no-op when there's no box.
@@ -676,6 +683,7 @@ impl Molecule {
         let perc = perceive(&mut top); // molar::perception (via prelude)
         self.bonds = top.bonds; // aromatic orders written back
         self.aromatic_rings = perc.aromatic_rings().cloned().collect();
+        self.aromatic_dirty = true; // the ring-circle geometry must rebuild
     }
 
     /// Implicit-hydrogen count per atom, over the editor's connectivity.

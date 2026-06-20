@@ -1642,6 +1642,14 @@ impl SceneRenderer {
                         }
                     }
                 }
+                // Aromatic-ring circles (depth-tested grey lines, base camera): present
+                // only for molecules perceived in the editor.
+                if let Some(l) = &mol.aromatic_gpu.lines {
+                    pass.set_pipeline(&self.line_pipeline[0]);
+                    pass.set_vertex_buffer(0, l.buffer.slice(..));
+                    pass.set_bind_group(0, &self.camera_bind_group, &[0]);
+                    pass.draw(0..4, 0..l.count / 2);
+                }
             }
         }
     }

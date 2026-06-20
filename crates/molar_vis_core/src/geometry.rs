@@ -285,6 +285,53 @@ pub fn build(
 /// The 12 edges of the periodic box as a line list (24 vertices). The box is the
 /// parallelepiped spanned by its three lattice vectors from the origin (GROMACS
 /// convention). Drawn in a neutral grey.
+/// Line segments tracing a gray circle in the plane of each aromatic ring (the classic
+/// aromatic depiction). Drawn through the line pipeline so it depth-tests against the
+/// atoms/bonds (the back of a tilted circle is correctly occluded). `coords` are the
+/// displayed atom positions (nm); each ring is its atom indices.
+pub fn aromatic_circles(rings: &[Vec<usize>], coords: &[Pos]) -> Vec<LineVertex> {
+    use glam::Vec3;
+    let color = crate::color::pack_rgba8([180, 180, 180, 255]);
+    let mut out = Vec::new();
+    for ring in rings {
+        let pts: Vec<Vec3> = ring
+            .iter()
+            .filter_map(|&a| coords.get(a).map(|p| Vec3::new(p.x, p.y, p.z)))
+            .collect();
+        if pts.len() < 3 || pts.len() != ring.len() {
+            continue;
+        }
+        let c = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
+        // Newell's best-fit plane normal, then an in-plane orthonormal basis.
+        let mut nrm = Vec3::ZERO;
+        for i in 0..pts.len() {
+            nrm += (pts[i] - c).cross(pts[(i + 1) % pts.len()] - c);
+        }
+        let nrm = nrm.normalize_or_zero();
+        if nrm == Vec3::ZERO {
+            continue;
+        }
+        let u0 = pts[0] - c;
+        let u = (u0 - nrm * u0.dot(nrm)).normalize_or_zero();
+        if u == Vec3::ZERO {
+            continue;
+        }
+        let v = nrm.cross(u);
+        let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32 * 0.70;
+        const SEG: usize = 40;
+        let at = |k: usize| -> [f32; 3] {
+            let a = std::f32::consts::TAU * k as f32 / SEG as f32;
+            (c + (u * a.cos() + v * a.sin()) * r).to_array()
+        };
+        for k in 0..SEG {
+            for pos in [at(k), at(k + 1)] {
+                out.push(LineVertex { pos, color, width: 1.6, offset_px: 0.0 });
+            }
+        }
+    }
+    out
+}
+
 pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
     let m = pbox.get_matrix();
     // Columns of the box matrix are the three lattice vectors a, b, c.

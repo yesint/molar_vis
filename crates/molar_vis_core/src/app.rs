@@ -2685,6 +2685,7 @@ impl App {
                 .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty);
             if !any_rep_dirty
                 && !(mol.show_box && mol.box_dirty)
+                && !mol.aromatic_dirty
                 && !mol.glow_dirty
                 && !mol.hover_dirty
                 && !mol.hover_detail_dirty
@@ -2817,6 +2818,16 @@ impl App {
                 let geom = geometry::GeometryData { lines, ..Default::default() };
                 mol.box_gpu = self.renderer.upload(rs, &geom);
                 mol.box_dirty = false;
+                changed = true;
+            }
+
+            // Aromatic-ring circles: depth-tested 3-D line geometry (built from the
+            // perceived rings at the displayed coords), so they occlude correctly.
+            if mol.aromatic_dirty || (rep_geom_changed && !mol.aromatic_rings.is_empty()) {
+                let lines = geometry::aromatic_circles(&mol.aromatic_rings, &render_state.coords);
+                let geom = geometry::GeometryData { lines, ..Default::default() };
+                mol.aromatic_gpu = self.renderer.upload(rs, &geom);
+                mol.aromatic_dirty = false;
                 changed = true;
             }
 
@@ -6554,42 +6565,8 @@ impl App {
             }
         }
 
-        // Aromatic ring circle: a gray ring drawn in the ring's own 3-D plane (so it
-        // tilts with the ring under rotation), projected as a polyline.
-        let gray = egui::Color32::from_gray(165);
-        for ring in &mol.aromatic_rings {
-            let pts: Vec<glam::Vec3> = ring.iter().filter_map(|&a| self.atom_world(mi, a)).collect();
-            if pts.len() < 3 || pts.len() != ring.len() {
-                continue;
-            }
-            let c = pts.iter().copied().sum::<glam::Vec3>() / pts.len() as f32;
-            // Newell's method for the best-fit plane normal.
-            let mut nrm = glam::Vec3::ZERO;
-            for i in 0..pts.len() {
-                nrm += (pts[i] - c).cross(pts[(i + 1) % pts.len()] - c);
-            }
-            let nrm = nrm.normalize_or_zero();
-            if nrm == glam::Vec3::ZERO {
-                continue;
-            }
-            let u = (pts[0] - c - nrm * (pts[0] - c).dot(nrm)).normalize_or_zero();
-            if u == glam::Vec3::ZERO {
-                continue;
-            }
-            let v = nrm.cross(u);
-            let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32 * 0.70;
-            const SEG: usize = 36;
-            let mut prev: Option<egui::Pos2> = None;
-            for k in 0..=SEG {
-                let a = std::f32::consts::TAU * k as f32 / SEG as f32;
-                let p3 = c + (u * a.cos() + v * a.sin()) * r;
-                let p2 = px_of(p3);
-                if let (Some(pp), Some(cur)) = (prev, p2) {
-                    painter.line_segment([pp, cur], egui::Stroke::new(1.6, gray));
-                }
-                prev = p2;
-            }
-        }
+        // (The aromatic-ring circle is drawn as depth-tested 3-D line geometry in the
+        // scene — `Molecule::aromatic_gpu` — not as a flat overlay here, so it occludes.)
 
         // Hover highlight (also during a drag, so you see the atom you'd bond to —
         // `pointer_latest_pos` stays valid while the button is held, unlike hover_pos).
@@ -6983,9 +6960,13 @@ impl App {
                     kind,
                 );
                 mol.refresh_bbox();
-                // Coordinates moved → in-place GPU coord update (no rebuild) + glow.
+                // Coordinates moved → in-place GPU coord update (no rebuild) + glow +
+                // aromatic circles follow.
                 for rep in &mut mol.reps {
                     rep.coords_dirty = true;
+                }
+                if !mol.aromatic_rings.is_empty() {
+                    mol.aromatic_dirty = true;
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 {
