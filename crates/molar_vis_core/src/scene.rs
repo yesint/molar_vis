@@ -341,6 +341,9 @@ pub struct Molecule {
     pub visible: bool,
     pub reps: Vec<Representation>,
     pub selected_rep: Option<usize>,
+    /// Aromatic rings (atom-index loops) from the last [`Molecule::perceive_aromaticity`],
+    /// for the in-ring aromatic-circle overlay in the drawing editor. Transient.
+    pub aromatic_rings: Vec<Vec<usize>>,
     /// Transient UI state: whether this molecule's representations block is
     /// expanded in the panel. Not part of `EditState` (view state, not undoable).
     pub reps_open: bool,
@@ -410,6 +413,7 @@ impl Molecule {
             visible: true,
             reps: vec![Representation::from_defaults(rep_defaults)],
             selected_rep: Some(0),
+            aromatic_rings: Vec::new(),
             reps_open: true,
             trajectory: Trajectory::default(),
             show_box: false,
@@ -580,6 +584,37 @@ impl Molecule {
         }
     }
 
+    /// Bond `i–j` at the given order: override an existing bond's order, else add a new
+    /// bond. Returns `true` if anything changed.
+    pub fn set_or_add_bond(&mut self, i: usize, j: usize, order: BondOrder) -> bool {
+        match self.bond_between(i, j) {
+            Some(k) => {
+                if self.bonds[k].order != order {
+                    self.bonds[k].order = order;
+                    return true;
+                }
+                false
+            }
+            None => self.add_bond(i, j, order),
+        }
+    }
+
+    /// Replace atom `i`'s element in place (name / atomic number / mass), preserving
+    /// its residue identity, coordinates, and bonds. `src` is a freshly built atom of
+    /// the target element (e.g. from the palette).
+    pub fn set_atom_element(&mut self, i: usize, src: &Atom) {
+        if i >= self.n_atoms {
+            return;
+        }
+        let mut bound = self.system.select_all_bound_mut();
+        if let Some(a) = bound.get_atom_mut(i) {
+            a.name = src.name;
+            a.atomic_number = src.atomic_number;
+            a.mass = src.mass;
+        }
+        self.hover_grid = None;
+    }
+
     /// Cycle the order of bond `k` (single→double→triple→single).
     pub fn cycle_bond_order(&mut self, k: usize) {
         use crate::minimize::BondOrderExt;
@@ -607,6 +642,45 @@ impl Molecule {
         self.hover_grid = None;
         self.refresh_bbox();
         self.n_atoms == 0
+    }
+
+    /// Remove several atoms (and their bonds). Returns `true` if the molecule is now
+    /// empty. Removes in descending index order so earlier indices stay valid.
+    pub fn remove_atoms(&mut self, indices: &[usize]) -> bool {
+        let mut idx: Vec<usize> = indices.to_vec();
+        idx.sort_unstable();
+        idx.dedup();
+        for &i in idx.iter().rev() {
+            self.remove_atom(i);
+        }
+        self.n_atoms == 0
+    }
+
+    // --- Molecular perception bridge ---------------------------------------
+    // molar's perception works on a `Topology`, but the editor keeps its connectivity
+    // in `self.bonds` (separate from the System's topology bonds). These helpers run
+    // perception over a topology assembled from the System's atoms + `self.bonds`.
+
+    /// A topology with the System's atoms but the editor's bond graph.
+    fn topology_with_bonds(&self) -> Topology {
+        let mut top = self.system.topology().clone();
+        top.bonds = self.bonds.clone();
+        top
+    }
+
+    /// Perceive rings + aromaticity: write the perceived aromatic orders back into
+    /// `self.bonds` and cache the aromatic rings (atom-index loops) for the ring-circle
+    /// overlay. Coordinate-free; cheap for editor-scale molecules.
+    pub fn perceive_aromaticity(&mut self) {
+        let mut top = self.topology_with_bonds();
+        let perc = perceive(&mut top); // molar::perception (via prelude)
+        self.bonds = top.bonds; // aromatic orders written back
+        self.aromatic_rings = perc.aromatic_rings().cloned().collect();
+    }
+
+    /// Implicit-hydrogen count per atom, over the editor's connectivity.
+    pub fn implicit_hydrogens(&self) -> Vec<u8> {
+        implicit_hydrogens(&self.topology_with_bonds())
     }
 }
 

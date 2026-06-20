@@ -2609,6 +2609,7 @@ impl App {
                 mol.add_bond(i, j, order);
             }
             mol.refresh_bbox();
+            mol.perceive_aromaticity(); // detect rings/aromaticity (drives the ring-circle overlay)
             let res = crate::minimize::relax_in_system(
                 &mut mol.system,
                 &mol.bonds,
@@ -6167,6 +6168,24 @@ impl App {
                                 d.relax = Some(RelaxJob { remaining: 1, to_convergence: true });
                             }
                         }
+                        // — H+ : add explicit hydrogens to satisfy valence, or remove
+                        // them if the molecule already has any (toggle).
+                        let toggle_h = ui
+                            .add_enabled_ui(has_target, |ui| {
+                                overlay_button(ui, "H+", false)
+                                    .on_hover_text("Add/remove explicit hydrogens")
+                                    .clicked()
+                            })
+                            .inner;
+                        if toggle_h {
+                            if let Some(mi) =
+                                self.draw.as_ref().and_then(|d| d.target).and_then(|id| {
+                                    self.scene.molecules.iter().position(|m| m.id == id)
+                                })
+                            {
+                                self.toggle_hydrogens(mi);
+                            }
+                        }
                         // — New: the next click starts a fresh molecule.
                         if overlay_button(ui, icon::FILE_PLUS, false)
                             .on_hover_text("New — start a fresh molecule on the next click")
@@ -6416,6 +6435,92 @@ impl App {
 
         // --- Debounced minimizer + active relax job ----------------------------
         self.drive_minimize(ui);
+
+        // --- Overlays: hover highlight, aromatic ring circles, "?" on unspecified ---
+        self.draw_draw_overlays(ui, rect, size_px);
+    }
+
+    /// Painter overlays for the drawing editor: a hover highlight on the atom/bond
+    /// under the cursor (so the user sees what a click/drag will hit, like pick mode),
+    /// a circle inside each aromatic ring, and a small "?" over each bond of
+    /// unspecified order.
+    fn draw_draw_overlays(&self, ui: &egui::Ui, rect: egui::Rect, size_px: [u32; 2]) {
+        let Some(d) = self.draw.as_ref() else { return };
+        let Some(mi) = d
+            .target
+            .and_then(|id| self.scene.molecules.iter().position(|m| m.id == id))
+        else {
+            return;
+        };
+        let mol = &self.scene.molecules[mi];
+        let painter = ui.painter_at(rect);
+        let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
+        let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
+        let px_of = |w: glam::Vec3| self.world_to_pixel(w, rect, size_px);
+        let font = egui::FontId::proportional(13.0);
+
+        // "?" over each unspecified-order bond (e.g. guessed bonds of a loaded molecule).
+        for b in &mol.bonds {
+            if b.order != crate::minimize::BondOrder::Unspecified {
+                continue;
+            }
+            if let (Some(p), Some(q)) = (self.atom_world(mi, b.i1), self.atom_world(mi, b.i2)) {
+                if let Some(m) = px_of((p + q) * 0.5) {
+                    painter.text(
+                        m,
+                        egui::Align2::CENTER_CENTER,
+                        "?",
+                        font.clone(),
+                        egui::Color32::from_rgb(255, 200, 90),
+                    );
+                }
+            }
+        }
+
+        // Aromatic ring circle: project the ring atoms, draw a circle at their centroid
+        // sized to sit inside the ring (shrinks edge-on, approximating the in-plane ring).
+        for ring in &mol.aromatic_rings {
+            let pts: Vec<egui::Pos2> = ring
+                .iter()
+                .filter_map(|&a| self.atom_world(mi, a).and_then(px_of))
+                .collect();
+            if pts.len() < 3 || pts.len() != ring.len() {
+                continue;
+            }
+            let c = pts.iter().fold(egui::Pos2::ZERO, |acc, p| acc + p.to_vec2())
+                / pts.len() as f32;
+            let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32 * 0.62;
+            painter.circle_stroke(c, r, egui::Stroke::new(1.6, egui::Color32::from_rgb(140, 200, 255)));
+        }
+
+        // Hover highlight (only when not mid-drag): the atom under the cursor gets a glow
+        // ring; otherwise the nearest bond is thickened.
+        if matches!(d.drag, DrawDrag::Idle) {
+            if let Some(px) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) {
+                let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+                if let Some((i, _)) = pick::nearest_atom(mol, ro, rd, 0.08) {
+                    if let Some(c) = self.atom_world(mi, i).and_then(px_of) {
+                        draw_glow_ring(&painter, c, 11.0);
+                    }
+                } else {
+                    let ndc = glam::vec2(
+                        ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+                        1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+                    );
+                    if let Some(k) = pick::nearest_bond(mol, view, proj, ndc, 0.02) {
+                        let b = mol.bonds[k];
+                        if let (Some(p), Some(q)) =
+                            (self.atom_world(mi, b.i1).and_then(px_of), self.atom_world(mi, b.i2).and_then(px_of))
+                        {
+                            painter.line_segment(
+                                [p, q],
+                                egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(120, 220, 255, 150)),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Place an atom of `element` at world `pos` (nm), creating the drawn molecule
@@ -6497,9 +6602,10 @@ impl App {
                     let dest =
                         pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i);
                     match dest {
-                        // Onto another atom → just a bond.
+                        // Onto another atom → add a bond, or override an existing
+                        // bond's order if one already joins them.
                         Some(to) if to != from => {
-                            if self.scene.molecules[mi].add_bond(from, to, bond_order) {
+                            if self.scene.molecules[mi].set_or_add_bond(from, to, bond_order) {
                                 self.after_draw_edit(mi, self.atom_world(mi, to));
                             }
                         }
@@ -6542,9 +6648,17 @@ impl App {
         if response.clicked() {
             let Some(px) = response.interact_pointer_pos() else { return };
             let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
-            // On an existing atom → no-op. On a bond → cycle its order. Else place.
+            // On an existing atom → replace its element (keeping its bonds). On a bond →
+            // cycle its order. Else place a new atom.
             if let Some(mi) = target_mi {
-                if pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).is_some() {
+                if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08) {
+                    let src = element.make_atom();
+                    if self.scene.molecules[mi].system.topology().get_atom(i).map(|a| a.atomic_number)
+                        != Some(element.atomic_number())
+                    {
+                        self.scene.molecules[mi].set_atom_element(i, &src);
+                        self.after_draw_edit(mi, self.atom_world(mi, i));
+                    }
                     return;
                 }
                 let aspect = size_px[0] as f32 / size_px[1] as f32;
@@ -6577,6 +6691,9 @@ impl App {
         let worth_relaxing = {
             let mol = &mut self.scene.molecules[mi];
             mol.refresh_bbox();
+            // Perceive rings + aromaticity: a freshly closed ring with alternating
+            // orders becomes aromatic (bonds → Aromatic, rings cached for the overlay).
+            mol.perceive_aromaticity();
             mol.n_atoms > 1 || !mol.bonds.is_empty()
         };
         self.flag_edit(mi);
@@ -6588,6 +6705,57 @@ impl App {
                 d.minimize_pending = true;
             }
         }
+    }
+
+    /// Toggle explicit hydrogens on the drawn molecule: if it already has any H, remove
+    /// them all; otherwise add the implicit-hydrogen count to every heavy atom (placed at
+    /// rough offsets and then relaxed). Undoable + perceived like any draw edit.
+    fn toggle_hydrogens(&mut self, mi: usize) {
+        let has_h = {
+            let mol = &self.scene.molecules[mi];
+            let topo = mol.system.topology();
+            (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1))
+        };
+        if has_h {
+            let mol = &mut self.scene.molecules[mi];
+            let topo = mol.system.topology();
+            let h_idx: Vec<usize> = (0..mol.n_atoms)
+                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1))
+                .collect();
+            // Don't strip an all-hydrogen molecule down to nothing.
+            if !h_idx.is_empty() && h_idx.len() < mol.n_atoms {
+                mol.remove_atoms(&h_idx);
+            }
+        } else {
+            // Offset directions for placed H (FIRE relaxes them into real geometry); the
+            // per-H nudge breaks symmetry so e.g. methane doesn't start in a planar saddle.
+            const DIRS: [glam::Vec3; 6] = [
+                glam::Vec3::X, glam::Vec3::NEG_X, glam::Vec3::Y,
+                glam::Vec3::NEG_Y, glam::Vec3::Z, glam::Vec3::NEG_Z,
+            ];
+            let mol = &mut self.scene.molecules[mi];
+            let counts = mol.implicit_hydrogens();
+            let parents: Vec<(usize, glam::Vec3, u8)> = (0..mol.n_atoms)
+                .filter_map(|i| {
+                    let c = *counts.get(i)?;
+                    let p = mol.system.state().coords.get(i)?;
+                    (c > 0).then_some((i, glam::vec3(p.x, p.y, p.z), c))
+                })
+                .collect();
+            let h_atom = Element::H.make_atom();
+            for (i, p, c) in parents {
+                for k in 0..c as usize {
+                    let k = k as f32;
+                    let dir = (DIRS[(c as usize - 1 + k as usize) % 6]
+                        + glam::vec3(0.01 * k, 0.013 * (k + 1.0), 0.017 * k))
+                    .normalize_or_zero();
+                    if let Some(hi) = mol.add_atom(&h_atom, p + dir * 0.11) {
+                        mol.add_bond(i, hi, crate::minimize::BondOrder::Single);
+                    }
+                }
+            }
+        }
+        self.after_draw_edit(mi, None);
     }
 
     /// Erase tool: a click deletes the nearest atom (and its bonds; deleting the
