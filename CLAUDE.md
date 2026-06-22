@@ -519,6 +519,12 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   widgets for clickable icons.
 - Icons: `egui_phosphor::regular::{EYE, EYE_SLASH, TRASH, COPY, PLUS, PERSPECTIVE, CUBE}`;
   the font is installed in `theme::apply` via `egui_phosphor::add_to_fonts`.
+- **Wayland IME workaround** (`defuse_broken_ime` at the top of `App::ui`, Linux-gated):
+  recent Wayland compositors make winit stream `Ime(Disabled)` + deliver typed chars as
+  `Ime(Commit(..))` with no `Enabled`/`Preedit`, which egui 0.34.3 mishandles so text
+  fields accept only the **first** character (paste/backspace still work). We rewrite
+  `Ime(Commit)`→`Text` and drop stray `Ime` events. No-op on X11; macOS/Windows untouched.
+  See `mod ime_workaround_tests` and the [[wayland-ime-textinput-workaround]] memory.
 
 ## UI layout
 

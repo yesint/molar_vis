@@ -153,6 +153,36 @@ fn sel_text_edit(
     )
 }
 
+/// Workaround for a winit/egui IME bug seen on recent Wayland compositors: while a
+/// text field is focused the compositor streams `Ime(Disabled)` events and delivers
+/// every typed character as `Ime(Commit(..))` *without* a preceding `Ime(Enabled)` or
+/// `Ime(Preedit)`. egui's `TextEdit` only honors a commit when its (preedit-derived)
+/// IME cursor matches the live cursor, and that IME cursor is only updated by
+/// `Enabled`/`Preedit` — so it stays at the post-focus position and only the **first**
+/// keystroke is accepted; every later one (and any edit of pre-existing text) is
+/// silently dropped, though paste and backspace still work. Rewriting each
+/// `Ime(Commit(s))` into a plain `Text(s)` event routes it through egui's ungated
+/// insertion path, and dropping the stray `Ime` events stops them from confusing the
+/// state machine. Selection/name fields are ASCII, so IME composition isn't needed.
+///
+/// Linux-only: X11 emits no `Commit` events (characters arrive as `Text`), so this is
+/// a no-op there, and macOS/Windows IME (which works) is left untouched.
+#[cfg(target_os = "linux")]
+fn defuse_broken_ime(ctx: &egui::Context) {
+    ctx.input_mut(|i| {
+        if !i.events.iter().any(|e| matches!(e, egui::Event::Ime(_))) {
+            return;
+        }
+        for ev in &mut i.events {
+            if let egui::Event::Ime(egui::ImeEvent::Commit(s)) = ev {
+                let s = std::mem::take(s);
+                *ev = egui::Event::Text(s);
+            }
+        }
+        i.events.retain(|e| !matches!(e, egui::Event::Ime(_)));
+    });
+}
+
 /// The blue glow ring shared by hover-picking and the active-selection highlight:
 /// a faint thick halo fading inward to a bright thin core, centered at `center`
 /// with core pixel radius `rpx`.
@@ -3193,6 +3223,11 @@ impl eframe::App for App {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).
         let ctx = ui.ctx().clone();
+
+        // Work around a winit/egui Wayland IME bug that otherwise breaks all text
+        // entry (only the first char of a field is accepted). See `defuse_broken_ime`.
+        #[cfg(target_os = "linux")]
+        defuse_broken_ime(&ctx);
 
         // Browser file picker results: load each (filename, bytes) the async picker
         // delivered (see `pick_file`) as a new molecule.
@@ -6985,5 +7020,80 @@ impl App {
             // one more paint so the moved coords show immediately).
             ui.ctx().request_repaint();
         }
+    }
+}
+
+// Regression test for the Wayland IME workaround (`defuse_broken_ime`). Reproduces the
+// broken event stream a recent Wayland/winit combo emits — a flood of `Ime(Disabled)`
+// plus one `Ime(Commit)` per keystroke, with no `Enabled`/`Preedit` — which egui's
+// `TextEdit` otherwise drops after the first character. Linux-only (the workaround and
+// the bug are Linux/Wayland-specific); CI runs on Linux.
+#[cfg(all(test, target_os = "linux"))]
+mod ime_workaround_tests {
+    use super::*;
+
+    fn raw(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(400.0, 400.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn run(ctx: &egui::Context, text: &mut String, id: egui::Id, events: Vec<egui::Event>) {
+        let _ = ctx.run(raw(events), |ctx| {
+            defuse_broken_ime(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(text).id(id));
+            });
+        });
+    }
+
+    /// Typing `a`,`b`,`c` arrives as `Ime(Commit)` amid `Ime(Disabled)` noise; with the
+    /// workaround every character is inserted (without it, egui keeps only the first).
+    #[test]
+    fn ime_commit_stream_accumulates_into_empty_field() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("f");
+        let mut text = String::new();
+        ctx.memory_mut(|m| m.request_focus(id));
+        run(&ctx, &mut text, id, vec![egui::Event::Ime(egui::ImeEvent::Disabled)]);
+        for ch in ["a", "b", "c"] {
+            run(
+                &ctx,
+                &mut text,
+                id,
+                vec![
+                    egui::Event::Ime(egui::ImeEvent::Disabled),
+                    egui::Event::Ime(egui::ImeEvent::Commit(ch.into())),
+                    egui::Event::Ime(egui::ImeEvent::Disabled),
+                ],
+            );
+        }
+        assert_eq!(text, "abc");
+    }
+
+    /// The same stream must also append to *pre-existing* text (the cursor starts > 0,
+    /// which is the case egui's commit gate rejects outright).
+    #[test]
+    fn ime_commit_stream_appends_to_existing_text() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("f");
+        let mut text = String::from("all");
+        ctx.memory_mut(|m| m.request_focus(id));
+        // One frame to place the cursor at the end of the existing text.
+        run(&ctx, &mut text, id, vec![]);
+        for ch in ["X", "Y"] {
+            run(
+                &ctx,
+                &mut text,
+                id,
+                vec![egui::Event::Ime(egui::ImeEvent::Commit(ch.into()))],
+            );
+        }
+        assert_eq!(text, "allXY");
     }
 }
