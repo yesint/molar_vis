@@ -29,7 +29,6 @@ use crate::session::{Session, ViewState};
 use crate::settings::{RepDefaults, Settings, ThemeMode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::scene::{MoleculeSource, TrajLoad};
-use crate::suggest::SelHints;
 use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
 
 use egui_phosphor::regular as icon;
@@ -75,7 +74,7 @@ fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
 /// feedback is recomputed when the edit is committed (`sel_dirty` → `rebuild_dirty`).
 fn clear_sel_feedback(rep: &mut Representation) {
     rep.sel_error = None;
-    rep.sel_error_caret = None;
+    rep.sel_error_span = None;
     rep.sel_empty = false;
 }
 
@@ -108,16 +107,15 @@ fn save_displayed(
     res
 }
 
-/// Draw the rep selection `TextEdit`. When `error_caret` is `Some(off)`, the text
-/// from character `off` to the end is painted **red** (via a custom layouter),
-/// highlighting the part of the selection where molar reported a parse error
-/// (the caret position in its message). Returns the field's `Response`.
+/// Draw the rep selection `TextEdit`. When `error_span` is `Some(range)`, that byte
+/// range of the text — molar's offending-word span — is painted **red** via a custom
+/// layouter, marking the whole bad word in place. Returns the field's `Response`.
 fn sel_text_edit(
     ui: &mut egui::Ui,
     text: &mut String,
     id: egui::Id,
     width: f32,
-    error_caret: Option<usize>,
+    error_span: Option<std::ops::Range<usize>>,
 ) -> egui::Response {
     let red = egui::Color32::from_rgb(240, 120, 120);
     let fmt = |font_id: egui::FontId, color: egui::Color32| egui::text::TextFormat {
@@ -130,15 +128,16 @@ fn sel_text_edit(
         let font_id = egui::TextStyle::Body.resolve(ui.style());
         let base = ui.visuals().text_color();
         let mut job = egui::text::LayoutJob::default();
-        match error_caret.filter(|_| !s.is_empty()) {
-            Some(off) => {
-                let nchars = s.chars().count();
-                // If the caret sits at/after the end (an "expected more" error),
-                // highlight the last character so there's always a visible mark.
-                let off = off.min(nchars.saturating_sub(1));
-                let split = s.char_indices().nth(off).map(|(b, _)| b).unwrap_or(s.len());
-                job.append(&s[..split], 0.0, fmt(font_id.clone(), base));
-                job.append(&s[split..], 0.0, fmt(font_id, red));
+        // Highlight the span only if it's in-bounds and on char boundaries (it may be
+        // momentarily stale while the text is being edited).
+        let valid = error_span.as_ref().filter(|r| {
+            r.start < r.end && r.end <= s.len() && s.is_char_boundary(r.start) && s.is_char_boundary(r.end)
+        });
+        match valid {
+            Some(r) => {
+                job.append(&s[..r.start], 0.0, fmt(font_id.clone(), base));
+                job.append(&s[r.start..r.end], 0.0, fmt(font_id.clone(), red));
+                job.append(&s[r.end..], 0.0, fmt(font_id, base));
             }
             None => job.append(s, 0.0, fmt(font_id, base)),
         }
@@ -1865,10 +1864,6 @@ pub struct App {
     pending_redo_n: Option<usize>,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
-    /// Cached per-molecule selection hints (distinct chains/resnames/names +
-    /// numeric ranges), shown under the selection field while editing. Computed
-    /// lazily on first edit of a molecule (topology is static); keyed by [`MolId`].
-    sel_hints: HashMap<MolId, SelHints>,
     /// Open trajectory-load dialog, if any (one at a time).
     load_dialog: Option<LoadDialog>,
     /// Open "delete trajectory frames" dialog, if any.
@@ -2411,7 +2406,6 @@ impl App {
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,
-            sel_hints: HashMap::new(),
             load_dialog: None,
             delete_frames_dialog: None,
             rename_mol: None,
@@ -2491,8 +2485,8 @@ impl App {
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_EDIT_REP=1 opens mol 0's first rep
-        // selection field in edit mode, so the contextual suggestion hint (and a
-        // selection error's in-field highlight) can be screenshot headlessly.
+        // selection field in edit mode, so a selection error's in-field
+        // whole-word highlight can be screenshot headlessly.
         if std::env::var("MOLAR_VIS_DEBUG_EDIT_REP").is_ok()
             && app.scene.molecules.first().is_some_and(|m| !m.reps.is_empty())
         {
@@ -2743,7 +2737,7 @@ impl App {
                             rep.expr = Some(expr);
                             rep.sel = Some(sel);
                             rep.sel_error = None;
-                            rep.sel_error_caret = None;
+                            rep.sel_error_span = None;
                             rep.sel_empty = false;
                             rep.geom_dirty = true;
                         }
@@ -2754,20 +2748,22 @@ impl App {
                             rep.expr = None;
                             rep.sel = None;
                             rep.sel_error = None;
-                            rep.sel_error_caret = None;
+                            rep.sel_error_span = None;
                             rep.sel_empty = true;
                             rep.gpu = Default::default();
                             changed = true;
                         }
-                        Err(scene::EvalError::Invalid(e)) => {
-                            let (msg, caret) = crate::suggest::parse_sel_error(&e);
-                            // molar trims the input before parsing, so shift the
-                            // caret past any leading whitespace to align it with
-                            // the field's text.
-                            let lead =
-                                rep.sel_text.chars().take_while(|c| c.is_whitespace()).count();
-                            rep.sel_error = Some(msg);
-                            rep.sel_error_caret = caret.map(|c| c + lead);
+                        Err(scene::EvalError::Invalid { message, span }) => {
+                            // molar trims the input before parsing, so shift the span
+                            // past any leading whitespace to align it with the field's
+                            // text (leading whitespace is ASCII, so bytes == chars).
+                            let lead = rep
+                                .sel_text
+                                .bytes()
+                                .take_while(|b| *b == b' ' || *b == b'\t')
+                                .count();
+                            rep.sel_error = Some(message);
+                            rep.sel_error_span = span.map(|r| r.start + lead..r.end + lead);
                             rep.sel_empty = false;
                         }
                     }
@@ -4231,7 +4227,6 @@ impl App {
         self.loaders.clear();
         self.editing_rep = None;
         self.load_dialog = None;
-        self.sel_hints.clear();
     }
 
     /// Start a new, empty visualization state: remove every molecule, reset the
@@ -4445,10 +4440,11 @@ impl App {
                         stride: tl.stride.max(1),
                     };
                     match data::traj_loader::read_frames_sync(&tl.path, &opts, mol.n_atoms) {
-                        Ok(frames) => {
+                        Ok(frames) if !frames.is_empty() => {
                             mol.append_frames(frames);
                             mol.traj_loads.push(tl.clone());
                         }
+                        Ok(_) => {} // recorded load now yields no frames — skip silently
                         Err(e) => errors.push(format!("trajectory {}: {e}", tl.path.display())),
                     }
                 }
@@ -4803,6 +4799,9 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let frames = data::traj_loader::read_frames_sync(&path, &opts, expected)?;
+                    if frames.is_empty() {
+                        return Err("no frames matched the selected range".to_string());
+                    }
                     let added = frames.len();
                     let mol = self
                         .scene
@@ -4969,20 +4968,6 @@ impl App {
             .map(|(_, r)| r);
         let mut new_editing = self.editing_rep;
 
-        // Contextual suggestion for the rep being edited here: compute (and cache,
-        // lazily) this molecule's distinct values, then derive the hint for the
-        // last keyword in the edited rep's current selection text. Done up front,
-        // before the `&mut` borrow of the molecule, so it can read both the system
-        // (to build hints) and the sel text via shared borrows.
-        let active_hint: Option<String> = editing.and_then(|r| {
-            let mol_id = self.scene.molecules[mi].id;
-            self.sel_hints
-                .entry(mol_id)
-                .or_insert_with(|| SelHints::compute(&self.scene.molecules[mi].system));
-            let rep = self.scene.molecules[mi].reps.get(r)?;
-            self.sel_hints[&mol_id].hint_for(&rep.sel_text)
-        });
-
         let mol = &mut self.scene.molecules[mi];
         let mol_id = mol.id;
         // The Periodic tab is only offered when the molecule has a box.
@@ -5026,7 +5011,7 @@ impl App {
                                 &mut rep.sel_text,
                                 sel_id,
                                 f32::INFINITY,
-                                rep.sel_error_caret,
+                                rep.sel_error_span.clone(),
                             );
                             // Editing invalidates the last evaluation: drop the
                             // stale error message / red highlight / empty flag
@@ -5086,7 +5071,7 @@ impl App {
                                             &mut rep.sel_text,
                                             sel_id,
                                             width,
-                                            rep.sel_error_caret,
+                                            rep.sel_error_span.clone(),
                                         );
                                         if resp.changed() {
                                             clear_sel_feedback(rep);
@@ -5113,24 +5098,6 @@ impl App {
                             ui.add_space(row2_indent);
                             ui.colored_label(egui::Color32::from_rgb(240, 120, 120), err);
                         });
-                    }
-
-                    // Contextual suggestion for the keyword being typed (e.g.
-                    // `chains: A B C R`, `resid: 2..120`), shown only on the rep
-                    // currently being edited.
-                    if editing == Some(j) {
-                        if let Some(hint) = &active_hint {
-                            ui.horizontal(|ui| {
-                                ui.add_space(row2_indent);
-                                // Truncate to the panel width with an ellipsis so a
-                                // long value list (many resnames/names) stays on one
-                                // line instead of wrapping.
-                                ui.add(
-                                    egui::Label::new(egui::RichText::new(hint).small().weak())
-                                        .truncate(),
-                                );
-                            });
-                        }
                     }
 
                     // Row 2: [settings expander] style | color | material. The caret
@@ -7044,11 +7011,9 @@ mod ime_workaround_tests {
     }
 
     fn run(ctx: &egui::Context, text: &mut String, id: egui::Id, events: Vec<egui::Event>) {
-        let _ = ctx.run(raw(events), |ctx| {
-            defuse_broken_ime(ctx);
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.add(egui::TextEdit::singleline(text).id(id));
-            });
+        let _ = ctx.run_ui(raw(events), |ui| {
+            defuse_broken_ime(ui.ctx());
+            ui.add(egui::TextEdit::singleline(text).id(id));
         });
     }
 

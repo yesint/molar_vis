@@ -83,9 +83,10 @@ pub fn read_frames_sync(
         frames.push(st);
         true
     })?;
-    if frames.is_empty() {
-        return Err("no frames matched the selected range".to_string());
-    }
+    // An empty range is not an error — it just means no frames matched (e.g. asking
+    // for frames beyond frame 0 of a single-frame structure on startup). Callers that
+    // made an *explicit* load request check `is_empty()` and surface it themselves; the
+    // startup/append path treats it as the benign "no extra frames" case.
     Ok(frames)
 }
 

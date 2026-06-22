@@ -119,10 +119,11 @@ pub struct Representation {
     pub sel: Option<Sel>,
     /// Last selection error, shown in the UI; `None` if the selection is valid.
     pub sel_error: Option<String>,
-    /// For a parse error, the character offset into `sel_text` the molar caret
-    /// points at, so the UI can highlight the erroring part of the text in place.
-    /// `None` for non-positional errors. Transient, not in `EditState`.
-    pub sel_error_caret: Option<usize>,
+    /// For a parse error, the byte range of the offending word within `sel_text`
+    /// (from molar's structured `SyntaxError::span`, shifted past leading whitespace),
+    /// so the UI highlights the whole bad word in place. `None` for non-positional
+    /// errors. Transient, not in `EditState`.
+    pub sel_error_span: Option<std::ops::Range<usize>>,
     /// The selection is valid but matches **zero atoms** (molar's "empty" error,
     /// surfaced as a non-destructive warning). The field is flagged in the UI and
     /// the rep renders nothing; the text is kept. Transient, not in `EditState`.
@@ -251,7 +252,7 @@ impl Representation {
             expr: None,
             sel: None,
             sel_error: None,
-            sel_error_caret: None,
+            sel_error_span: None,
             sel_empty: false,
             periodic,
             smooth_window,
@@ -700,8 +701,13 @@ impl Molecule {
 pub enum EvalError {
     /// Valid syntax, but the selection matched no atoms.
     Empty,
-    /// Syntax (or other) error, with the message to surface.
-    Invalid(String),
+    /// Syntax (or other) error: a concise message to surface, plus — for a parse
+    /// error — the byte range of the offending word in the (trimmed) selection text,
+    /// so the UI can highlight the whole bad word. `None` for non-positional errors.
+    Invalid {
+        message: String,
+        span: Option<std::ops::Range<usize>>,
+    },
 }
 
 /// Parse a VMD-like selection string into a compiled `SelectionExpr` and evaluate
@@ -710,11 +716,20 @@ pub enum EvalError {
 /// alongside the evaluated index set. `Err(Empty)` = valid but zero atoms;
 /// `Err(Invalid)` = a syntax/other error.
 pub fn evaluate(system: &System, text: &str) -> Result<(SelectionExpr, Sel), EvalError> {
-    let expr = SelectionExpr::new(text).map_err(|e| EvalError::Invalid(e.to_string()))?;
+    let expr = SelectionExpr::new(text).map_err(|e| match e {
+        // Structured parse error: build a concise message + keep the offending-word
+        // span (relative to the trimmed text; the caller shifts it past any leading
+        // whitespace to align with the field).
+        SelectionParserError::SyntaxError(info) => EvalError::Invalid {
+            message: crate::suggest::concise_message(&info),
+            span: Some(info.span),
+        },
+        other => EvalError::Invalid { message: other.to_string(), span: None },
+    })?;
     match system.select(&expr) {
         Ok(sel) => Ok((expr, sel)),
         Err(e) if is_empty_selection(&e) => Err(EvalError::Empty),
-        Err(e) => Err(EvalError::Invalid(e.to_string())),
+        Err(e) => Err(EvalError::Invalid { message: e.to_string(), span: None }),
     }
 }
 
