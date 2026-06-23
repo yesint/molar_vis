@@ -1632,23 +1632,50 @@ fn draw_periodic_tab(ui: &mut egui::Ui, rep: &mut Representation) -> bool {
             .changed();
     });
     ui.add_space(2.0);
-    // One row per axis: [−n] −x  [+n] +x  (counts of images along ±a, ±b, ±c).
+    // One row per axis: [− n +] −x  [− n +] +x  (counts of images along ±a, ±b, ±c).
+    // Each count is a spinbox (drag/edit the value, or click the ∓ step buttons).
     egui::Grid::new("periodic_images")
         .num_columns(4)
         .spacing(egui::vec2(6.0, 4.0))
         .show(ui, |ui| {
             for (axis, name) in [(0usize, "x"), (1, "y"), (2, "z")] {
-                changed |= ui
-                    .add(egui::DragValue::new(&mut p.neg[axis]).range(0..=8))
-                    .changed();
+                changed |= spin_u32(ui, &mut p.neg[axis], 0..=8);
                 ui.label(format!("−{name}"));
-                changed |= ui
-                    .add(egui::DragValue::new(&mut p.pos[axis]).range(0..=8))
-                    .changed();
+                changed |= spin_u32(ui, &mut p.pos[axis], 0..=8);
                 ui.label(format!("+{name}"));
                 ui.end_row();
             }
         });
+    changed
+}
+
+/// A compact `u32` spinbox: a `DragValue` flanked by `−`/`+` step buttons that
+/// decrement/increment by one (clamped to `range`). The value can still be dragged
+/// or typed directly in the middle field. Returns true if it changed this frame.
+fn spin_u32(ui: &mut egui::Ui, value: &mut u32, range: std::ops::RangeInclusive<u32>) -> bool {
+    let (min, max) = (*range.start(), *range.end());
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let step = egui::vec2(20.0, 0.0);
+        if ui
+            .add_enabled(*value > min, egui::Button::new("−").min_size(step))
+            .clicked()
+        {
+            *value -= 1;
+            changed = true;
+        }
+        changed |= ui
+            .add(egui::DragValue::new(value).range(range.clone()))
+            .changed();
+        if ui
+            .add_enabled(*value < max, egui::Button::new("+").min_size(step))
+            .clicked()
+        {
+            *value += 1;
+            changed = true;
+        }
+    });
     changed
 }
 
@@ -3350,7 +3377,7 @@ impl App {
             .show_inside(ui, |ui| {
                 ui.add_space(8.0);
 
-                self.draw_history_toolbar(ui);
+                self.draw_menu_bar(ui);
                 ui.add_space(6.0);
 
                 // Molecules are listed directly (no "Molecules"/"Scene" headers);
@@ -3386,7 +3413,7 @@ impl App {
 
                     // — Selection controls (left) —
                     // Pick/selection-mode dropdown (label + caret). Off by default.
-                    toolbar_label(ui, "Sel. mode");
+                    toolbar_label(ui, "Selection mode");
                     let pick_label = format!("{}  {}", self.pick_mode.label(), icon::CARET_DOWN);
                     let resp =
                         overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
@@ -3430,21 +3457,7 @@ impl App {
                         });
                     }
 
-                    // Draw-mode toggle (after the pick controls). Mutually exclusive
-                    // with picking: turning Draw on forces the pick mode Off.
-                    {
-                        let active = self.draw.is_some();
-                        if overlay_button(
-                            ui,
-                            &format!("{}  Draw", icon::PENCIL_SIMPLE),
-                            active,
-                        )
-                        .on_hover_text("Draw mode — sketch atoms and bonds by hand")
-                        .clicked()
-                        {
-                            self.toggle_draw();
-                        }
-                    }
+                    // (Draw-mode toggle now lives in the left-panel Molecule menu.)
 
                     // In Click/Lasso mode, a held modifier changes the set operation (or,
                     // for Alt in Lasso, orbits the view) — trail the hint (matches
@@ -3684,25 +3697,48 @@ impl App {
         });
     }
 
-    /// Undo/redo buttons, each with a dropdown listing the named actions on the
-    /// stack; selecting an entry undoes/redoes cumulatively up to it.
-    fn draw_history_toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+    /// The left-panel **menu bar** — three drop-down menus that hold every global
+    /// action (the old inline toolbar of buttons is gone):
+    /// - **Molecule**: *Draw* (toggle the interactive sketch mode) · *Load…* (open a
+    ///   structure file as a new molecule).
+    /// - **Session** (native only — wasm has no filesystem to reload sources from):
+    ///   *New* / *Save…* / *Load…* the whole visualization state.
+    /// - **Edit**: *Undo* / *Redo* (single step, labelled with the next action; the
+    ///   `▼`-dropdown cumulative undo is gone — Ctrl+Z/Ctrl+Shift+Z still repeat) ·
+    ///   *Settings…*.
+    fn draw_menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            // Each top-level menu's button response is collected so we can switch the
+            // open menu on **hover** (desktop menu-bar behavior): egui only opens a
+            // bar menu on click, so once one is open we forward a hover over a sibling
+            // button to `Popup::open_id` (which closes the others — at most one popup
+            // is open per viewport). See the hover-switch block at the end.
+            let mut menu_buttons: Vec<egui::Response> = Vec::new();
 
-            // Open a structure file as a new molecule (topology+coords formats only).
-            if ui
-                .button(format!("{}  Open", icon::FOLDER_OPEN))
-                .on_hover_text("Open a structure file as a new molecule")
-                .clicked()
-            {
-                self.open_structure(ui.ctx());
-            }
-            // Session menu: New (empty scene) / Save / Load the whole visualization
-            // state. Native only: the wasm build has no filesystem to reload
-            // molecule sources from.
+            // — Molecule —
+            menu_buttons.push(ui.menu_button("Molecule", |ui| {
+                let drawing = self.draw.is_some();
+                if ui
+                    .selectable_label(drawing, format!("{}  Draw", icon::PENCIL_SIMPLE))
+                    .on_hover_text("Draw mode — sketch atoms and bonds by hand")
+                    .clicked()
+                {
+                    self.toggle_draw();
+                    ui.close();
+                }
+                if ui
+                    .button(format!("{}  Load…", icon::FOLDER_OPEN))
+                    .on_hover_text("Open a structure file as a new molecule")
+                    .clicked()
+                {
+                    self.open_structure(ui.ctx());
+                    ui.close();
+                }
+            }).response);
+
+            // — Session — (New / Save / Load the whole visualization state)
             #[cfg(not(target_arch = "wasm32"))]
-            ui.menu_button(format!("{}  Session  {}", icon::STACK, icon::CARET_DOWN), |ui| {
+            menu_buttons.push(ui.menu_button("Session", |ui| {
                 if ui
                     .button(format!("{}  New", icon::FILE))
                     .on_hover_text("Clear all molecules and start an empty scene")
@@ -3727,65 +3763,74 @@ impl App {
                     self.load_session();
                     ui.close();
                 }
-            });
-            ui.separator();
+            }).response);
 
-            let can_undo = self.history.can_undo();
-            if ui
-                .add_enabled(can_undo, egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE))
-                .on_hover_text("Undo (Ctrl+Z)")
-                .clicked()
-            {
-                self.pending_undo_n = Some(1);
-            }
-            if can_undo {
-                ui.menu_button(icon::CARET_DOWN, |ui| {
-                    for d in 0..self.history.undo_len() {
-                        let label = format!("{}.  {}", d + 1, self.history.undo_label(d));
-                        if ui.button(label).clicked() {
-                            self.pending_undo_n = Some(d + 1);
-                            ui.close();
+            // — Edit —
+            menu_buttons.push(ui.menu_button("Edit", |ui| {
+                let can_undo = self.history.can_undo();
+                let undo_label = if can_undo {
+                    format!("{}  Undo {}", icon::ARROW_COUNTER_CLOCKWISE, self.history.undo_label(0))
+                } else {
+                    format!("{}  Undo", icon::ARROW_COUNTER_CLOCKWISE)
+                };
+                if ui
+                    .add_enabled(can_undo, egui::Button::new(undo_label).shortcut_text("Ctrl+Z"))
+                    .clicked()
+                {
+                    self.pending_undo_n = Some(1);
+                    ui.close();
+                }
+
+                let can_redo = self.history.can_redo();
+                let redo_label = if can_redo {
+                    format!("{}  Redo {}", icon::ARROW_CLOCKWISE, self.history.redo_label(0))
+                } else {
+                    format!("{}  Redo", icon::ARROW_CLOCKWISE)
+                };
+                if ui
+                    .add_enabled(can_redo, egui::Button::new(redo_label).shortcut_text("Ctrl+Shift+Z"))
+                    .clicked()
+                {
+                    self.pending_redo_n = Some(1);
+                    ui.close();
+                }
+
+                ui.separator();
+
+                if ui
+                    .button(format!("{}  Settings…", icon::GEAR_SIX))
+                    .on_hover_text("Program settings")
+                    .clicked()
+                {
+                    if self.settings_draft.is_none() {
+                        self.settings_draft = Some(self.settings.clone());
+                    }
+                    ui.close();
+                }
+            }).response);
+
+            // Hover-switch: once any bar menu is open, moving the pointer onto a
+            // different top-level button opens that menu (and closes the rest, since
+            // only one popup is open at a time). Takes effect next frame, so request a
+            // repaint to show it even if the pointer then holds still. We test the raw
+            // pointer against each button rect (not `Response::hovered`, which egui can
+            // gate by layer while another Area is open) — the open popup hangs *below*
+            // the bar, so it never covers a sibling button.
+            let ctx = ui.ctx();
+            let popup_id = |r: &egui::Response| egui::Popup::default_response_id(r);
+            let any_open = menu_buttons
+                .iter()
+                .any(|r| egui::Popup::is_id_open(ctx, popup_id(r)));
+            if any_open {
+                if let Some(pos) = ctx.pointer_hover_pos() {
+                    for r in &menu_buttons {
+                        let id = popup_id(r);
+                        if r.rect.contains(pos) && !egui::Popup::is_id_open(ctx, id) {
+                            egui::Popup::open_id(ctx, id);
+                            ctx.request_repaint();
                         }
                     }
-                });
-            } else {
-                ui.add_enabled(false, egui::Button::new(icon::CARET_DOWN));
-            }
-
-            ui.add_space(8.0);
-
-            let can_redo = self.history.can_redo();
-            if ui
-                .add_enabled(can_redo, egui::Button::new(icon::ARROW_CLOCKWISE))
-                .on_hover_text("Redo (Ctrl+Shift+Z)")
-                .clicked()
-            {
-                self.pending_redo_n = Some(1);
-            }
-            if can_redo {
-                ui.menu_button(icon::CARET_DOWN, |ui| {
-                    for d in 0..self.history.redo_len() {
-                        let label = format!("{}.  {}", d + 1, self.history.redo_label(d));
-                        if ui.button(label).clicked() {
-                            self.pending_redo_n = Some(d + 1);
-                            ui.close();
-                        }
-                    }
-                });
-            } else {
-                ui.add_enabled(false, egui::Button::new(icon::CARET_DOWN));
-            }
-
-            ui.add_space(8.0);
-            ui.separator();
-            // Program settings (cogwheel): open the modal editing a working copy.
-            if ui
-                .button(icon::GEAR_SIX)
-                .on_hover_text("Program settings")
-                .clicked()
-                && self.settings_draft.is_none()
-            {
-                self.settings_draft = Some(self.settings.clone());
+                }
             }
         });
     }

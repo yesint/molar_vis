@@ -528,18 +528,31 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
 
 ## UI layout
 
-**Left panel** = toolbar + the molecule list directly (no `Scene`/`Molecules`
+**Left panel** = a **menu bar** + the molecule list directly (no `Scene`/`Molecules`
 collapsing headers; global scene controls live in the top view toolbar, below).
-Toolbar: **`Open`** button (`App::open_structure` — native `rfd` picker filtered to
-topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
-molecule, frames the camera on the first one, undoable via the normal checkpoint) · then a
-**`Session` menu** (`STACK`; native only — the wasm build has no filesystem to reload molecule
-sources from) with **New** (`App::new_session` — drop all molecules + reset camera/history to an
-empty document), **Save…** (`App::save_session`), **Load…** (`App::load_session`), saving/loading
-the whole visualization state as a JSON session (see `session.rs`) · then
-undo/redo buttons, each with a `▼` dropdown for **cumulative** undo/redo (also Ctrl+Z /
-Ctrl+Shift+Z / Ctrl+Y) · then a **settings cogwheel** (`GEAR_SIX`) opening the program-settings
-window (`App::draw_settings_dialog`; see `settings.rs` / M21). Then one **molecule row** each:
+**Menu bar** (`draw_menu_bar`, an `egui::MenuBar` — the old inline toolbar of buttons is gone,
+every global action now lives in a menu): three drop-downs — with **hover-switching** (once one
+menu is open, moving the pointer onto a sibling top-level button opens that one). egui 0.34's
+`MenuBar` only opens a top-level menu on **click** (the `bar` flag merely picks `MenuButton` vs
+`SubMenuButton`), so the hover-switch is added by hand: each menu button's `Response` is collected,
+and when any bar popup `is_id_open`, a hover over a *different* button calls `Popup::open_id` (which
+closes the others — at most one popup is open per viewport) + a `request_repaint` (it takes effect
+next frame). The menus —
+- **Molecule** — **Draw** (toggle the interactive sketch mode, `toggle_draw`; a checkable
+  `selectable_label`) · **Load…** (`App::open_structure` — native `rfd` picker / wasm file picker
+  filtered to topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
+  molecule, frames the camera on the first one, undoable via the normal checkpoint).
+- **Session** (`STACK`; native only — the wasm build has no filesystem to reload molecule sources
+  from) — **New** (`App::new_session` — drop all molecules + reset camera/history to an empty
+  document), **Save…** (`App::save_session`), **Load…** (`App::load_session`), saving/loading the
+  whole visualization state as a JSON session (see `session.rs`).
+- **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
+  `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
+  Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
+  remain as test-only/API machinery) · **Settings…** (`GEAR_SIX`) opening the program-settings window
+  (`App::draw_settings_dialog`; see `settings.rs` / M21).
+
+Then one **molecule row** each:
 expand-caret + **name** (the atom/frame counts are no longer shown inline — they're a **hover
 tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
@@ -559,7 +572,7 @@ the viewport — a real panel, **not** a floating `Area` over the 3D image; span
 area right of the left panel, added in `ui()` between the left panel and `draw_viewport`).
 Left-aligned **selection controls**, then a right-aligned (`Layout::right_to_left`) **hamburger**
 opening the view-settings menu:
-**selection** — a **`Sel. mode`-labelled pick-mode dropdown** (`Off` default / `Click` / `Lasso` —
+**selection** — a **`Selection mode`-labelled pick-mode dropdown** (`Off` default / `Click` / `Lasso` —
 see `pick.rs` / M11; **`Click`** hovers to show the atom's identity/glow (as before) and **on click
 selects** the hovered atom/residue — merging it into the molecule's **active (pending) selection**
 via the same op as the lasso (plain = replace, **Shift** = add, **Ctrl/⌘** = subtract;
@@ -603,7 +616,7 @@ is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anc
     `color_picker_color32`, linear↔Color32 via `egui::Rgba` for WYSIWYG; `Camera::background`).
 Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered
 by ink bounds** `Galley::mesh_bounds`, not the font line-box); the **`toolbar_label`** helper draws
-the `Sel. mode`/`Scope` labels with the **same ink-centering** so they line up with the buttons next
+the `Selection mode`/`Scope` labels with the **same ink-centering** so they line up with the buttons next
 to them. Dropdowns hang off `egui::Popup::menu(&resp)`.
 
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
@@ -637,7 +650,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   *Smooth window* = `rep.smooth_window` — odd (1=off, 3,5,7…; a half-width `DragValue` shown as the
   window via `custom_formatter`), trajectory smoothing; sets `coords_dirty`), **[Periodic]** (`draw_periodic_tab`, **only shown when the
   molecule has a box** — gated by `mol.system.state().pbox.is_some()`: *Self* / *Box* checkboxes
-  + six `DragValue` spinboxes −x/+x/−y/+y/−z/+z giving the image counts along ±a,±b,±c; these
+  + six `spin_u32` spinboxes −x/+x/−y/+y/−z/+z (a `DragValue` flanked by `−`/`+` step buttons,
+  range 0..=8) giving the image counts along ±a,±b,±c; these
   are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`); tab in
   `rep.settings_tab: SettingsTab`. The tab bar uses the shared **`tab_bar(ui, &mut current, &[(T,
   label)…])`** helper — the **app-default tab style** (underline tabs: selected = bold + accent

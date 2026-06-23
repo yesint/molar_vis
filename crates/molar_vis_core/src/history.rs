@@ -439,9 +439,13 @@ impl History {
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
+    // Depth accessors for the (now test-only) cumulative undo/redo machinery; the
+    // UI dropdown that used them was folded into the single-step Edit-menu items.
+    #[allow(dead_code)]
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
+    #[allow(dead_code)]
     pub fn redo_len(&self) -> usize {
         self.redo.len()
     }
