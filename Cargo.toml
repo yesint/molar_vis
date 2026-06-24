@@ -30,6 +30,9 @@ serde_json = "1"
 # + bonds-carry-order (Vec<Bond>) + the wasm runtime support + structured selection
 # parse errors (SyntaxError: offset/span/expected).
 molar = { git = "https://github.com/yesint/molar.git", rev = "f4ad043", default-features = false }
+# Pure-Rust embedded scripting language for the in-app command console (native + wasm).
+# default-features=false + "std" == Rhai's own default; single-threaded (no "sync"), no time deps.
+rhai = { version = "1", default-features = false, features = ["std"] }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]

@@ -16,6 +16,7 @@ mod minimize;
 mod pick;
 mod render;
 mod scene;
+mod script;
 mod secstruct;
 mod session;
 mod settings;

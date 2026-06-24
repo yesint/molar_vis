@@ -75,7 +75,10 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
   modal at that tab — `=1`/empty = Appearance — so each tab can be screenshot; the dialog can't be
   mouse-driven headlessly) +
   `MOLAR_VIS_DEBUG_DEFAULTS=1` (use built-in `Settings::default()` and skip the config-file
-  read/write, so headless runs are reproducible and never touch the dev's saved config). Generate a
+  read/write, so headless runs are reproducible and never touch the dev's saved config) +
+  `MOLAR_VIS_DEBUG_SCRIPT="<rhai source>"` (or `@path` to a file, native) — runs a console script at
+  startup through the same path the console uses, and opens the console window, so a command's effect
+  (e.g. `mol(0).rep(0).set_color("chain")`) + the echoed output can be screenshot headlessly. Generate a
   quick test trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not
   in git**).
 
@@ -84,8 +87,9 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
 molar **1.4** (**git dep** `git = "https://github.com/yesint/molar.git"`,
-`default-features=false` → `Float=f32`; pulls `powersasa` transitively from git).
-GROMACS 2026.1 available as `gmx`.
+`default-features=false` → `Float=f32`; pulls `powersasa` transitively from git),
+rhai **1** (`default-features=false, features=["std"]` — pure-Rust embedded scripting
+language for the console; builds for wasm). GROMACS 2026.1 available as `gmx`.
 
 **Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
 `[patch]`). `Cargo.lock` pins the resolved git revisions. To develop molar/powersasa
@@ -262,6 +266,43 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   `egui::Window`** (not a centered `Modal` — a Modal re-centers each frame so its top jumps as the
   per-tab content height changes; a top-anchored fixed-width Window grows/shrinks only at the
   **bottom**), closed via Save / Cancel / Escape. 4 round-trip/default/compat tests.
+- `script.rs` (+ `script/{command,console}.rs`) — **in-app Rhai scripting console** (M24). A
+  togglable Console — a **resizable bottom `Panel::bottom`** (View menu → `[x] Console`; the input
+  field auto-focuses on open via `console.focus_input`), *not* a floating window. The input row is a
+  nested `Panel::bottom` (keeps the outer panel at its set height — computing a scroll height from
+  `available_height` instead fed back and blew the panel to full size); the field is `add_sized`
+  with the Run (↵) button to its right (a plain row — a `right_to_left` + INFINITY-width field also
+  broke the sizing), close is the phosphor `X`. The user types **Rhai** commands in a **fluent,
+  object-oriented** style:
+  `mol(i)` → a `MolHandle`, `.rep(j)` → a `RepHandle`, with chaining
+  (`mol(0).rep(0).set_style("vdw").set_color("chain").select("protein")`;
+  `mol(0).add_rep("cartoon").set_color("ss")`). **Command-queue binding**: the handles are
+  lightweight (a molecule index + a [`RepRef`] + a clone of a shared `Rc<RefCell<Vec<Command>>>`);
+  Rhai closures can't borrow `&mut App`, so the handle methods **push** `Command`s
+  (`script/command.rs`) during eval and never touch the scene; `print`/`debug`/`list()` route text
+  into an output buffer. **`RepRef {Index, Last}`** lets `add_rep` return a handle to the
+  just-appended rep (`Last` resolves to the molecule's last rep at apply time) so further `.set_*`
+  chain onto it. `evaluate_script(source, summary)` builds a *local* `Engine` (operation/call/expr-
+  depth limits; `register_type_with_name` for the two handles), runs, and returns
+  `EvalOutcome { commands, output }`. `App::run_script` echoes the line, appends the output, applies
+  each command, then records **one** undo checkpoint.
+  `apply_scene_command(scene, camera, rep_defaults, cmd)` (the testable, GPU-free seam) does the
+  *same field-set + dirty-flag the GUI does* for every command except `Load` — `select` → `sel_text`
+  + `sel_dirty`, `set_color`/`set_style`/`set_material` → `geom_dirty`, `add_rep`/`delete_rep`/
+  `show`/`hide`, `frame`/`play`/`pause`, `focus` → `camera.focus_bbox` — converging on the normal
+  `rebuild_dirty` path with no new render branch (`resolve_rep` maps `RepRef::Last` → last index);
+  `App::execute_command` handles `Load` (native `data::load_with` + `add_loaded`; wasm → "not
+  available") and delegates the rest. Enum args (color/style/material) ride as raw strings, parsed
+  (with `parse_color`/`parse_material`/`RepKind::from_name`) in `apply_scene_command` so a bad value
+  is one clean console error. `mol(i)`/`load(path)`/`list()` are the only free functions; `list()`
+  reflects the **pre-script** scene summary. Pure-Rust + WASM-safe (the console runs in the browser;
+  only `load()` is native-gated). 5 unit tests
+  (parse→commands, chaining/loops, syntax-error-not-panic, color-parser, apply→scene). `script/console.rs`
+  is pure UI (`ScriptConsole` state + `show(ui, …)` builds the bottom panel — drawn in the panel
+  sequence *before* `draw_viewport` so the 3D view fills the space above it; scrollback fills the
+  middle with the **input row pinned to the bottom via a nested `Panel::bottom`** so the prompt stays
+  visible/editable at any height; Enter via the rename-dialog focus idiom, ↑/↓ history recall, ✕
+  close). See M24.
 - `suggest.rs` — **selection-input assistance** for the rep selection field (M14). `SelHints`
   (distinct chains / resnames / names + resid/resindex/index ranges, computed once from the
   static topology and cached per molecule on `App::sel_hints`); `SelHints::hint_for(text)` finds
@@ -551,6 +592,9 @@ next frame). The menus —
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
   remain as test-only/API machinery) · **Settings…** (`GEAR_SIX`) opening the program-settings window
   (`App::draw_settings_dialog`; see `settings.rs` / M21).
+- **View** — **`[x] Console`** (a `CHECK_SQUARE`/`SQUARE`-marked toggle of `console_open` — the Rhai
+  scripting console bottom panel; opening it sets `console.focus_input` so the input grabs focus; see
+  `script.rs` / M24).
 
 Then one **molecule row** each:
 expand-caret + **name** (the atom/frame counts are no longer shown inline — they're a **hover
@@ -583,8 +627,9 @@ the same `Molecule::pending` (*not* a rep yet) glowing highlight + minimal accep
 **two-step**, so accepting is the only undoable part) and — **only when the selection mode isn't
 `Off`** — a **`Scope` dropdown** (`Atoms`/`Residues`/`Bound H` — how a hit expands;
 `App::selection_mode`, see `pick::expand_selection`; `Bound H` is lasso-only, hidden in `Click`). In
-`Click`/`Lasso` mode the trailing **modifier hint**
-(add/subtract, + rotate for Lasso-Alt) follows.
+`Click`/`Lasso` mode, while a modifier is held a **modifier hint** (add/subtract, + rotate for
+Lasso-Alt) is drawn as a **floating overlay on the 3D viewport** (a top-center pill,
+`draw_modifier_hint_overlay` in `draw_viewport`) — *not* a toolbar row, so it never resizes the view.
 **view-settings hamburger** (`LIST`, right-aligned) — toggles a **`Window`** (`App::view_menu_open`,
 `view_settings_window`; **not** a `Popup` — a Popup's `CloseOnClickOutside` fights the nested
 click-to-open dropdowns/color pickers below, which was the bug), positioned under the button
@@ -994,6 +1039,40 @@ History labels via `describe_change` ("edit selection", "change coloring",
   was the hard part — the dead-ends: solid cylinder, raw-radial screw, CR-spline overshoot, blobby
   ellipse shading, full-size sharp ends, off-backbone least-squares phase). Verified on
   `tests/2lao_cg.pdb` (α/β) + a Martini membrane bundle; 38 tests pass, native+wasm green.
+- ✅ M23 **Draw mode — interactive molecule sketching + on-the-fly minimization** (the ROADMAP
+  "drawing molecules + simple UFF" items). A togglable Draw mode (Molecule menu → Draw, mutually
+  exclusive with the pick modes) with a vertical right-side tools palette (`draw_tools_panel`):
+  Draw/Erase tools + CPK element chips + bond-order icons. The unified **Draw tool** infers the
+  action from the gesture (click empty → atom, drag from atom → bond, click bond → cycle order,
+  Erase → delete); `App::draw: Option<DrawSession>` + the edit helpers on `Molecule`
+  (`add_atom`/`add_bond`/`cycle_bond_order`). Structure edits are undoable via
+  `MolState.structure: Option<StructureSnapshot>` (captured only for `editable` molecules). A
+  greenfield cleanup force field (`minimize.rs`: harmonic bond/angle + weak torsion + WCA-repulsive
+  vdW, analytic gradients, FIRE integrator) relaxes the sketch debounced + via a Clean-up button;
+  molar's `Vec<Bond>` carries `BondOrder`, and Double/Triple/Aromatic render as parallel/dashed
+  screen-space strands. `MOLAR_VIS_DEBUG_DRAW=methane|ethane|water|benzene` builds + relaxes a preset
+  headlessly. (Documented in detail in the `app.rs` / `minimize.rs` sections above.)
+- ✅ M24 **In-app scripting console (Rhai)** — the first slice of the scripting roadmap (the data
+  layer was already Python-scriptable via molar's published `pymolar` PyO3 bindings; PyO3 can't
+  target `wasm32-unknown-unknown`, so the *portable* surface is a pure-Rust embedded language).
+  **Decision: Rhai** (pure-Rust, WASM-proven, best API-binding ergonomics, sandboxable) driven from
+  an **in-app console window** (works in the browser too); external-terminal / Python-driver
+  transports deferred behind a transport-agnostic command core. **Fluent OO surface** (per user
+  feedback — the first flat-function cut, `color("chain")`, was "lame"): `mol(i).rep(j).set_style(…)
+  .set_color(…).select(…)`, `mol(i).add_rep("cartoon").set_color("ss")`, `mol(i).show()/hide()/
+  frame(n)/play()/focus(sel)`. `script.rs` (+ `script/{command,console}.rs`): lightweight
+  `MolHandle`/`RepHandle` (index + `RepRef{Index,Last}` + shared command queue) whose methods push a
+  `Command`; `evaluate_script` (Rhai fns push commands, no scene access) + `apply_scene_command`
+  (GPU-free, testable; same field-set + dirty-flag the GUI does → converges on `rebuild_dirty`, no
+  new render branch) + `App::{run_script,execute_command,draw_console}`. Free fns: `mol(i)`,
+  `load(path)` (native), `list()`, plus Rhai's `print`. One undo checkpoint per script run. Console
+  is a resizable bottom panel toggled from the **View menu** (`[x] Console`); `MOLAR_VIS_DEBUG_SCRIPT` runs a script
+  at startup for headless verification. See the `script.rs` module bullet. Verified: 5 unit tests
+  (62 total), native+wasm green, and a headless screenshot of `mol(0).rep(0).set_style("vdw")
+  .set_color("resid"); mol(0).add_rep("cartoon")` (rep 0 → rainbow VDW spheres + a new Cartoon rep,
+  in the console + rep list). Deferred: property setters (`rep.style = …`) + indexing (`mol[0]`,
+  declined by the user), camera/background scripting, autocompletion, multi-line editor, `.rhai`
+  file open/save, external/Python transports.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

@@ -287,6 +287,30 @@ fn draw_info_box(painter: &egui::Painter, rect: egui::Rect, lines: &[String]) {
     }
 }
 
+/// Floating overlay on the 3D viewport showing the active selection-modifier action
+/// (add / subtract / rotate) while a modifier is held in Click/Lasso mode. Frameless
+/// glyph + label, in the action's `color`, centered at the **very top** of `rect` —
+/// painted over the 3D image, so it never resizes the viewport (unlike a toolbar row).
+fn draw_modifier_hint_overlay(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    glyph: &str,
+    text: &str,
+    color: egui::Color32,
+) {
+    let painter = ui.painter_at(rect);
+    let g_icon = painter.layout_no_wrap(glyph.to_string(), egui::FontId::proportional(16.0), color);
+    let g_text = painter.layout_no_wrap(text.to_string(), egui::FontId::proportional(14.0), color);
+    let gap = 6.0;
+    let w = g_icon.size().x + gap + g_text.size().x;
+    let h = g_icon.size().y.max(g_text.size().y);
+    let x = rect.center().x - w * 0.5;
+    let y = rect.top() + 3.0;
+    let icon_w = g_icon.size().x;
+    painter.galley(egui::pos2(x, y + (h - g_icon.size().y) * 0.5), g_icon, color);
+    painter.galley(egui::pos2(x + icon_w + gap, y + (h - g_text.size().y) * 0.5), g_text, color);
+}
+
 /// Draw a VMD-style orientation-axes gizmo into the chosen corner of `rect`.
 /// The three world axes (X red, Y green, Z blue) rotate with the camera; only the
 /// positive directions are drawn, labelled, and depth-sorted so nearer axes sit on top.
@@ -1961,6 +1985,10 @@ pub struct App {
     /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
     /// the bottom of this file.
     draw: Option<DrawSession>,
+    /// Whether the scripting console window is open (toggled from the Edit menu).
+    console_open: bool,
+    /// Scripting-console scrollback + input + history (see `script::console`).
+    console: crate::script::ScriptConsole,
 }
 
 /// Tabs in the top-bar "view settings" (hamburger) menu.
@@ -2461,6 +2489,8 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             wasm_loaders: HashMap::new(),
             draw: None,
+            console_open: false,
+            console: crate::script::ScriptConsole::default(),
         };
 
         // Verification hooks (native): exercise the session save/load round-trip
@@ -2529,6 +2559,23 @@ impl App {
         // length after relaxation. Presets: methane, ethane, water, benzene.
         if let Ok(preset) = std::env::var("MOLAR_VIS_DEBUG_DRAW") {
             app.debug_draw_preset(&preset.to_ascii_lowercase());
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai
+        // script at startup through the same path the console uses, so a command's
+        // effect (e.g. `mol(0).rep(0).set_color("chain")`) can be screenshot headlessly.
+        if let Ok(src) = std::env::var("MOLAR_VIS_DEBUG_SCRIPT") {
+            #[cfg(not(target_arch = "wasm32"))]
+            let src = match src.strip_prefix('@') {
+                Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
+                    log::error!("debug script file: {e}");
+                    String::new()
+                }),
+                None => src,
+            };
+            app.run_script(&src);
+            app.console_open = true; // show the console (echo + output) for the screenshot
+            app.console.focus_input = true;
         }
 
         Ok(app)
@@ -3357,6 +3404,9 @@ impl eframe::App for App {
         // Vertical drawing-tools palette on the right (only while Draw mode is on);
         // a panel, so it reserves its strip before the viewport fills the rest.
         self.draw_tools_panel(ui);
+        // Scripting console as a resizable bottom panel (when open), claimed before
+        // the central viewport so the 3D view fills the space above it.
+        self.draw_console(ui);
         self.draw_viewport(ui, frame);
 
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
@@ -3397,7 +3447,8 @@ impl App {
     /// Top toolbar over the viewport (a real panel *above* the 3D image, not a
     /// floating overlay on it): **view** controls (projection · depth-cue popup ·
     /// orientation-axes dropdown) and **selection** controls (pick mode · selection
-    /// mode), grouped by a separator. The lasso modifier hint trails on the right.
+    /// mode), grouped by a separator. The lasso/click modifier hint (add / subtract /
+    /// rotate) appears on its own line **below** the controls while a modifier is held.
     /// All buttons are the shared `overlay_button` (uniform height, framed,
     /// ink-centered glyph); dropdowns/popups hang off `egui::Popup::menu`.
     fn draw_view_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -3458,27 +3509,10 @@ impl App {
                     }
 
                     // (Draw-mode toggle now lives in the left-panel Molecule menu.)
-
-                    // In Click/Lasso mode, a held modifier changes the set operation (or,
-                    // for Alt in Lasso, orbits the view) — trail the hint (matches
-                    // `finish_lasso`'s `LassoOp` and the click-to-select path).
-                    if matches!(self.pick_mode, PickMode::Click | PickMode::Lasso) {
-                        let m = ui.input(|i| i.modifiers);
-                        let hint = if m.alt && self.pick_mode == PickMode::Lasso {
-                            Some((icon::ARROWS_CLOCKWISE, "rotate view", egui::Color32::from_rgb(150, 190, 230)))
-                        } else if m.shift {
-                            Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
-                        } else if m.command {
-                            Some((icon::MINUS_CIRCLE, "subtract from selection", egui::Color32::from_rgb(230, 140, 140)))
-                        } else {
-                            None
-                        };
-                        if let Some((glyph, text, color)) = hint {
-                            ui.separator();
-                            ui.colored_label(color, egui::RichText::new(glyph).size(16.0));
-                            ui.colored_label(color, text);
-                        }
-                    }
+                    // (The selection modifier hint (add / subtract / rotate) is drawn
+                    // as a floating overlay *on the 3D viewport* — `modifier_hint` /
+                    // `draw_modifier_hint_overlay` in `draw_viewport` — so it never
+                    // resizes the view.)
 
                     // — View-settings hamburger (right-aligned) — toggles a tabbed
                     // Window (Camera / Lighting / Scene). A Window (not a Popup) so
@@ -3804,6 +3838,23 @@ impl App {
                 {
                     if self.settings_draft.is_none() {
                         self.settings_draft = Some(self.settings.clone());
+                    }
+                    ui.close();
+                }
+            }).response);
+
+            // — View —
+            menu_buttons.push(ui.menu_button("View", |ui| {
+                // Checkable Console toggle (a `[x]`-style item via the leading icon).
+                let mark = if self.console_open { icon::CHECK_SQUARE } else { icon::SQUARE };
+                if ui
+                    .button(format!("{}  Console", mark))
+                    .on_hover_text("Scripting console (Rhai) — drive the viewer with commands")
+                    .clicked()
+                {
+                    self.console_open = !self.console_open;
+                    if self.console_open {
+                        self.console.focus_input = true; // grab the input field on open
                     }
                     ui.close();
                 }
@@ -4259,6 +4310,97 @@ impl App {
         }
         self.status = format!("{} molecule(s) loaded", self.scene.molecules.len());
         self.view_dirty = true;
+    }
+
+    // --- Scripting console (Rhai) — see `script.rs`. ---
+
+    /// Draw the console as a resizable bottom panel (when open) and run any submitted
+    /// line. Added to the panel layout before the viewport, so the 3D view fills the
+    /// space above it (not a floating window).
+    fn draw_console(&mut self, ui: &mut egui::Ui) {
+        if !self.console_open {
+            return;
+        }
+        if let Some(src) = crate::script::console::show(ui, &mut self.console_open, &mut self.console) {
+            self.run_script(&src);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Evaluate `source` as a Rhai script: echo it, route `print`/`list` output and
+    /// errors into the console, apply the produced commands on the UI thread, then
+    /// record one undo checkpoint. (Called by the console and the
+    /// `MOLAR_VIS_DEBUG_SCRIPT` hook.)
+    fn run_script(&mut self, source: &str) {
+        use crate::script::{ConsoleLine, LineKind};
+        self.console.lines.push(ConsoleLine { kind: LineKind::Input, text: source.to_string() });
+        let summary = self.scene_summary();
+        let outcome = crate::script::evaluate_script(source, summary);
+        self.console.lines.extend(outcome.output);
+        for cmd in outcome.commands {
+            if let Err(e) = self.execute_command(cmd) {
+                self.console.lines.push(ConsoleLine { kind: LineKind::Error, text: e });
+            }
+        }
+        self.view_dirty = true;
+        // One checkpoint for the whole script (no-op if it changed no document state,
+        // e.g. a camera/frame-only script — those are view state, not in EditState).
+        self.history.maybe_record(EditState::capture(&self.scene));
+    }
+
+    /// Apply one script [`Command`](crate::script::Command). `Load` needs the App's
+    /// loader (and the filesystem, native-only); every scene-mutating command is
+    /// delegated to [`script::apply_scene_command`]. Returns a console message on failure.
+    fn execute_command(&mut self, cmd: crate::script::Command) -> Result<(), String> {
+        match cmd {
+            crate::script::Command::Load(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let raw = data::load_with(&path, &self.settings.behavior.bond_params())?;
+                    self.add_loaded(raw);
+                    Ok(())
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = path;
+                    Err("load() is not available in the browser".to_string())
+                }
+            }
+            other => crate::script::apply_scene_command(
+                &mut self.scene,
+                &mut self.camera,
+                &self.rep_defaults,
+                other,
+            ),
+        }
+    }
+
+    /// A one-line-per-rep listing of the scene, returned by the script `list()`.
+    fn scene_summary(&self) -> String {
+        if self.scene.molecules.is_empty() {
+            return "(no molecules)".to_string();
+        }
+        let mut s = String::new();
+        for (mi, m) in self.scene.molecules.iter().enumerate() {
+            let frames = m.trajectory.n_frames();
+            s.push_str(&format!(
+                "[{mi}] {} — {} atoms{}{}\n",
+                m.name,
+                m.n_atoms,
+                if frames > 1 { format!(", {frames} frames") } else { String::new() },
+                if m.visible { "" } else { " (hidden)" },
+            ));
+            for (ri, rep) in m.reps.iter().enumerate() {
+                s.push_str(&format!(
+                    "    rep {ri}: {} / {} / \"{}\"{}\n",
+                    rep.kind.label(),
+                    rep.color.label(),
+                    rep.sel_text,
+                    if rep.visible { "" } else { " (hidden)" },
+                ));
+            }
+        }
+        s.trim_end().to_string()
     }
 
     /// Tear down the current document: drop all molecules (and the trash), cancel
@@ -4783,8 +4925,13 @@ impl App {
                     .desired_width(f32::INFINITY)
                     .hint_text("name"),
             );
-            resp.request_focus();
+            // Detect Enter *before* re-requesting focus: `request_focus()` re-grabs
+            // focus the same frame, which would mask the Enter-induced `lost_focus()`
+            // (so Enter never committed). Only keep the field focused when not entered.
             let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if !entered {
+                resp.request_focus();
+            }
             ui.separator();
             ui.horizontal(|ui| {
                 let ok = ui
@@ -5761,6 +5908,26 @@ impl App {
             // onto the 3D image; its on/off + corner live in the top view toolbar).
             if self.axes_on {
                 draw_axes_overlay(ui, rect, &self.camera, self.axes_corner);
+            }
+
+            // Selection-modifier hint, floating over the 3D image (top-center) while a
+            // modifier is held in Click/Lasso mode — an overlay, not a toolbar row, so
+            // it never resizes the viewport. Matches `finish_lasso`'s `LassoOp` + the
+            // click-to-select path.
+            if matches!(self.pick_mode, PickMode::Click | PickMode::Lasso) {
+                let m = ui.input(|i| i.modifiers);
+                let hint = if m.alt && self.pick_mode == PickMode::Lasso {
+                    Some((icon::ARROWS_CLOCKWISE, "rotate view", egui::Color32::from_rgb(150, 190, 230)))
+                } else if m.shift {
+                    Some((icon::PLUS_CIRCLE, "add to selection", egui::Color32::from_rgb(120, 220, 120)))
+                } else if m.command {
+                    Some((icon::MINUS_CIRCLE, "subtract from selection", egui::Color32::from_rgb(230, 140, 140)))
+                } else {
+                    None
+                };
+                if let Some((glyph, text, color)) = hint {
+                    draw_modifier_hint_overlay(ui, rect, glyph, text, color);
+                }
             }
         });
     }
