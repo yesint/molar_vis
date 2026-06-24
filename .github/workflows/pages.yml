@@ -2,12 +2,12 @@ name: Deploy web demo to GitHub Pages
 
 # Build the wasm/browser app with trunk and publish it to GitHub Pages.
 # Project site, so assets are served under /<repo>/ — set --public-url to match.
+# Only deploys on a pushed **version tag** (e.g. v0.1.0), so day-to-day commits to
+# main don't redeploy; `workflow_dispatch` still allows a manual redeploy.
 on:
   push:
-    branches: [main]
-    # Don't rebuild/redeploy for docs-only changes.
-    paths-ignore:
-      - "**.md"
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_dispatch:
 
 permissions:
