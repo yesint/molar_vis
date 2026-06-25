@@ -113,9 +113,26 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   frames aren't recorded as trajectory loads, so a plain single-frame structure stays static. So
   `traj.pdb` = one molecule with its full trajectory, `a.pdb a.xtc` = one molecule with a trajectory,
   `-m a.pdb -m b.pdb` = two molecules.
-- `app.rs` — `eframe::App`; owns `SceneRenderer`, `Camera`, `Scene`; left panel
-  (Scene/Molecules/Representations/Controls) + central viewport; `rebuild_dirty()`
-  and the render-skip logic. Holds the `MOLAR_VIS_DEBUG_*` hooks.
+- `app.rs` + `app/` — the `eframe::App`. **Split into a thin root + `app/` submodules** (M25,
+  was a single 7276-line file): the root (`app.rs`, ~690 lines) holds the `App` struct + small
+  private enums (`ViewTab`/`SettingsPage`/`Corner`/`LassoOp`), the `impl eframe::App for App { ui }`
+  loop, `rebuild_dirty()` + render-skip logic, `defuse_broken_ime`, the `mod`/`use` wiring, and the
+  IME tests. Everything else moved into `app/` (the `impl App` methods read `App`'s **private fields
+  directly** — descendant modules see an ancestor's privates; the cross-module helpers/methods/types
+  are `pub(super)`, the only non-mechanical change of the split):
+  - `app/init.rs` — `App::new` + `debug_draw_preset` (the `MOLAR_VIS_DEBUG_*` hooks fire here).
+  - `app/viewport.rs` — `draw_viewport` + hover/lasso/pending-selection methods.
+  - `app/panels.rs` — left panel, menu bar, molecule list, top view toolbar, view-settings window.
+  - `app/rep_panel.rs` — rep rows: selection field, rep params, Traj/Periodic tabs, traj bar.
+  - `app/settings_dialog.rs` — the program-settings dialog (per-tab pages, apply, axes widget).
+  - `app/pickers.rs` — style/color/material pickers + their icon/preview painters.
+  - `app/widgets.rs` — shared egui helpers (`tab_bar`, `slider_with_edit`, `picker_button`, …).
+  - `app/overlay.rs` — viewport overlays (pick/residue info, modifier hint, axes gizmo, glow ring).
+  - `app/build.rs` — free-fn geometry builders (`build_glow`/`build_hover_detail`/`build_pick`/…).
+  - `app/loaders.rs` — load/delete-frames/rename dialogs, loaders, `pick_file` (cfg-heavy IO).
+  - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
+  - `app/console.rs` — scripting-console UI + command-execution glue.
+  - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.
 - `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font, configures both
   the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
   `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
@@ -1073,6 +1090,18 @@ History labels via `describe_change` ("edit selection", "change coloring",
   in the console + rep list). Deferred: property setters (`rep.style = …`) + indexing (`mol[0]`,
   declined by the user), camera/background scripting, autocompletion, multi-line editor, `.rhai`
   file open/save, external/Python transports.
+- ✅ M25 **`app.rs` modularization** — the 7276-line `app.rs` (4× the next file) was split into a
+  thin root (~690 lines: `App` struct + enums + `ui` loop + `rebuild_dirty` + IME tests) plus **14
+  `app/` submodules** by concern (see the `app.rs` + `app/` module bullet). Pure no-behavior-change
+  move: the `impl App` methods distribute across files reading `App`'s private fields directly
+  (descendant-module privacy), with cross-module helpers/methods/moved-struct-fields bumped to
+  `pub(super)` — the only non-mechanical edit. Also folded in 4 clippy cleanups exposed along the way
+  (De Morgan in `rebuild_dirty`, `while let` in `poll_loaders`, two `is_none_or` in `draw_viewport`).
+  Verified: native build 0 warnings, wasm build 0 errors (4 warnings, all pre-existing — confirmed
+  byte-identical via git-stash; the split even *removed* the original's `SphereInstance` warning by
+  gating it), 62 tests pass, app-module clippy clean, the save→load→save **session round-trip stays
+  byte-identical**, `SAVE_MOL` writes 1911 atoms, and a screenshot shows the app rendering + the
+  console-applied script working.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed
