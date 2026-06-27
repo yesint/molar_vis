@@ -1,6 +1,9 @@
 # Rust build artifacts
 /target
 
+# Python virtualenv for the native molar_vis module (maturin develop installs here)
+/.venv
+
 # Trunk (wasm/browser) build output
 /crates/molar_vis_web/dist
 
