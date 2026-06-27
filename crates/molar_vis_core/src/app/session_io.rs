@@ -15,19 +15,23 @@ pub(super) fn save_displayed(
     rep: Option<usize>,
 ) -> Result<(), String> {
     let displayed = mol.render_state().clone();
-    let prev = mol.system.set_state(displayed).map_err(|e| e.to_string())?;
+    let prev = mol.data.set_state(displayed).map_err(|e| e.to_string())?;
     let res = (|| -> Result<(), String> {
         let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
         match rep {
             Some(j) => {
                 let sel = mol.reps[j].sel.as_ref().ok_or("selection is empty")?;
-                let bound = mol.system.bind(sel);
+                // The whole-selection write needs `SaveTopologyState` (impl'd for the
+                // System-coupled `SelBound`, not `SelBoundParts`), and saving is
+                // owned-only, so bind through the owned `System`.
+                let sys = mol.data.system().ok_or("cannot save a shared molecule directly")?;
+                let bound = sys.bind(sel);
                 h.write(&bound).map_err(|e| e.to_string())
             }
-            None => h.write(&mol.system).map_err(|e| e.to_string()),
+            None => h.write(mol.data.system().ok_or("cannot save a shared molecule directly")?).map_err(|e| e.to_string()),
         }
     })();
-    let _ = mol.system.set_state(prev); // restore the System's own state
+    let _ = mol.data.set_state(prev); // restore the System's own state
     res
 }
 impl App {
@@ -43,6 +47,9 @@ impl App {
         self.loaders.clear();
         self.editing_rep = None;
         self.load_dialog = None;
+        // A new document = a fresh REPL: drop console variables so a stored handle
+        // (`let m = mol(0)`) doesn't outlive the molecule it referred to.
+        self.script.reset();
     }
 
     /// Start a new, empty visualization state: remove every molecule, reset the

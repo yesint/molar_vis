@@ -117,7 +117,7 @@ impl StructureSnapshot {
     /// Snapshot a molecule's live structure (topology atoms + system coords + the
     /// editor's bond graph).
     fn capture(mol: &Molecule) -> Self {
-        let topo = mol.system.topology();
+        let topo = mol.data.topology();
         let atoms = (0..mol.n_atoms)
             .filter_map(|i| topo.get_atom(i))
             .map(|a| AtomLite {
@@ -128,7 +128,7 @@ impl StructureSnapshot {
             })
             .collect();
         let coords = mol
-            .system
+            .data
             .state()
             .coords
             .iter()
@@ -234,7 +234,7 @@ fn reconcile_structure(mol: &mut Molecule, snap: &StructureSnapshot) {
         ..Default::default()
     };
     if let Ok(sys) = System::new(top, st) {
-        mol.system = sys;
+        mol.data = crate::moldata::MolData::Owned(sys);
         mol.bonds = snap.bonds.clone();
         mol.n_atoms = snap.atoms.len();
         mol.hover_grid = None;
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(scene.molecules[0].n_atoms, 1);
         assert_eq!(scene.molecules[0].bonds.len(), 0);
         // The molar System itself was rebuilt from the snapshot, not just n_atoms.
-        assert_eq!(scene.molecules[0].system.state().coords.len(), 1);
+        assert_eq!(scene.molecules[0].data.state().coords.len(), 1);
         assert!(scene.molecules[0].editable);
 
         // Redo → two atoms + one bond restored.

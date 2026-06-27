@@ -12,6 +12,7 @@ use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
 use crate::minimize::{Bond, BondOrder};
+use crate::moldata::MolData;
 use crate::render::RepGpu;
 use crate::secstruct::SsMap;
 use crate::trajectory::Trajectory;
@@ -325,7 +326,11 @@ pub struct Molecule {
     /// replay them. Appended whenever frames are loaded from a file.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub traj_loads: Vec<TrajLoad>,
-    pub system: System,
+    /// The molecule's topology + coordinates backend: an owned molar `System`, or
+    /// (later) a shared external source (pymolar). See [`MolData`]. Kept as a
+    /// directly-borrowable field so rebuild loops can read it while holding
+    /// `&mut reps`.
+    pub data: MolData,
     /// Connectivity used for rendering/picking and the editor. Each [`Bond`] carries
     /// its endpoints + chemical order (molar's type; guessed/file bonds without a
     /// recorded order are `Unspecified`). Mutated only via the helper methods so it
@@ -405,17 +410,90 @@ pub struct Molecule {
 
 impl Molecule {
     pub fn new(id: MolId, raw: RawMolecule, rep_defaults: &crate::settings::RepDefaults) -> Self {
+        Self::from_parts(
+            id,
+            raw.name,
+            raw.source,
+            MolData::Owned(raw.system),
+            raw.bonds,
+            raw.n_atoms,
+            raw.bbox_min,
+            raw.bbox_max,
+            rep_defaults,
+        )
+    }
+
+    /// Build a molecule that renders from a **shared external source** (pymolar),
+    /// zero-copy. Bonds + bounding box are guessed from the source's current
+    /// topology/state (the source then keeps providing live coordinates by reference).
+    pub fn new_shared(
+        id: MolId,
+        name: String,
+        source: Box<dyn crate::moldata::SharedSource>,
+        bond_params: &crate::data::bonds::BondParams,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Result<Self, String> {
+        let (bonds, bbox_min, bbox_max, n) = {
+            let topo = source.topology();
+            let state = source.state();
+            let n = topo.len();
+            if n == 0 {
+                return Err("cannot add an empty molecule".to_string());
+            }
+            let all = Sel::from_vec((0..n).collect()).map_err(|e| e.to_string())?;
+            let bound = all.bind_to(topo, state);
+            let (min, max) = bound.min_max();
+            let mut positions = Vec::with_capacity(n);
+            let mut vdw = Vec::with_capacity(n);
+            for (pos, atom) in bound.iter_pos().zip(bound.iter_atoms()) {
+                positions.push([pos.x, pos.y, pos.z]);
+                vdw.push(atom.vdw());
+            }
+            let bonds = crate::data::bonds::guess(&bound, &positions, &vdw, state.pbox.as_ref(), bond_params);
+            (
+                bonds,
+                Vec3::new(min.x, min.y, min.z),
+                Vec3::new(max.x, max.y, max.z),
+                n,
+            )
+        };
+        Ok(Self::from_parts(
+            id,
+            name.clone(),
+            MoleculeSource::Bytes { name },
+            MolData::Shared(source),
+            bonds,
+            n,
+            bbox_min,
+            bbox_max,
+            rep_defaults,
+        ))
+    }
+
+    /// Shared field initialization for [`new`](Self::new)/[`new_shared`](Self::new_shared).
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        id: MolId,
+        name: String,
+        source: MoleculeSource,
+        data: MolData,
+        bonds: Vec<Bond>,
+        n_atoms: usize,
+        bbox_min: Vec3,
+        bbox_max: Vec3,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Self {
         Self {
             id,
-            name: raw.name,
-            source: raw.source,
+            name,
+            source,
             traj_loads: Vec::new(),
-            system: raw.system,
-            bonds: raw.bonds,
+            data,
+            bonds,
             editable: false,
-            n_atoms: raw.n_atoms,
-            bbox_min: raw.bbox_min,
-            bbox_max: raw.bbox_max,
+            n_atoms,
+            bbox_min,
+            bbox_max,
             visible: true,
             reps: vec![Representation::from_defaults(rep_defaults)],
             selected_rep: Some(0),
@@ -456,9 +534,9 @@ impl Molecule {
             return;
         }
         let placeholder = State::new_fake(self.n_atoms);
-        if let Ok(real) = self.system.set_state(placeholder) {
+        if let Ok(real) = self.data.set_state(placeholder) {
             self.trajectory.frames.push(real.clone());
-            let _ = self.system.set_state(real); // restore the live state
+            let _ = self.data.set_state(real); // restore the live state
         }
     }
 
@@ -495,7 +573,7 @@ impl Molecule {
         let needs_eval = self.reps.iter().any(|r| r.dynamic);
         if needs_eval {
             if let Some(frame) = self.trajectory.frames.get(self.trajectory.current) {
-                let _ = self.system.set_state(frame.clone());
+                let _ = self.data.set_state(frame.clone());
             }
         }
         for rep in &mut self.reps {
@@ -520,18 +598,18 @@ impl Molecule {
         self.trajectory
             .frames
             .get(self.trajectory.current)
-            .unwrap_or_else(|| self.system.state())
+            .unwrap_or_else(|| self.data.state())
     }
 
     /// Bounding box (nm) of selection `sel` at the currently displayed frame.
     pub fn sel_bbox(&self, sel: &Sel) -> (Vec3, Vec3) {
-        let (min, max) = self.system.bind_with_state(sel, self.render_state()).min_max();
+        let (min, max) = self.data.bind_with_state(sel, self.render_state()).min_max();
         (Vec3::new(min.x, min.y, min.z), Vec3::new(max.x, max.y, max.z))
     }
 
     /// Bounding box (nm) of the whole molecule at the currently displayed frame.
     pub fn current_bbox(&self) -> (Vec3, Vec3) {
-        self.sel_bbox(&self.system.select_all())
+        self.sel_bbox(&self.data.select_all())
     }
 
     /// Recompute the cached bounding box from the live structure (guards the
@@ -555,7 +633,7 @@ impl Molecule {
     /// if molar rejected the append. Does **not** touch bonds.
     pub fn add_atom(&mut self, atom: &Atom, pos: Vec3) -> Option<usize> {
         let p = Pos::new(pos.x, pos.y, pos.z);
-        match self.system.append_atom(atom, &p) {
+        match self.data.append_atom(atom, &p) {
             Ok(_) => {
                 let idx = self.n_atoms;
                 self.n_atoms += 1;
@@ -614,7 +692,7 @@ impl Molecule {
         if i >= self.n_atoms {
             return;
         }
-        let mut bound = self.system.select_all_bound_mut();
+        let mut bound = self.data.select_all_bound_mut();
         if let Some(a) = bound.get_atom_mut(i) {
             a.name = src.name;
             a.atomic_number = src.atomic_number;
@@ -645,7 +723,7 @@ impl Molecule {
             .filter(|b| !b.contains(i)) // drop incident bonds
             .map(|b| Bond::with_order(shift(b.i1), shift(b.i2), b.order))
             .collect();
-        let _ = self.system.remove(std::iter::once(i));
+        let _ = self.data.remove(std::iter::once(i));
         self.n_atoms = self.n_atoms.saturating_sub(1);
         self.hover_grid = None;
         self.refresh_bbox();
@@ -671,7 +749,7 @@ impl Molecule {
 
     /// A topology with the System's atoms but the editor's bond graph.
     fn topology_with_bonds(&self) -> Topology {
-        let mut top = self.system.topology().clone();
+        let mut top = self.data.topology().clone();
         top.bonds = self.bonds.clone();
         top
     }
@@ -764,6 +842,23 @@ impl Scene {
         self.next_id += 1;
         self.molecules.push(Molecule::new(id, raw, rep_defaults));
         id
+    }
+
+    /// Add a molecule backed by a **shared external source** (pymolar), rendered
+    /// zero-copy. Returns the new molecule's `MolId`, or an error if the source is
+    /// empty / its selection machinery rejects it.
+    pub fn add_shared(
+        &mut self,
+        name: String,
+        source: Box<dyn crate::moldata::SharedSource>,
+        bond_params: &crate::data::bonds::BondParams,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Result<MolId, String> {
+        let id = MolId(self.next_id);
+        let mol = Molecule::new_shared(id, name, source, bond_params, rep_defaults)?;
+        self.next_id += 1;
+        self.molecules.push(mol);
+        Ok(id)
     }
 
     /// Clamp `selected_mol`/`selected_rep` to valid ranges (after add/remove).

@@ -315,7 +315,7 @@ impl App {
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
             if let Some(mol) = scene.molecules.first() {
-                if let Ok((_, sel)) = scene::evaluate(&mol.system, &sel_text) {
+                if let Ok((_, sel)) = mol.data.evaluate(&sel_text) {
                     let (min, max) = mol.sel_bbox(&sel);
                     camera.focus_bbox(min, max);
                 }
@@ -328,9 +328,9 @@ impl App {
         // simulating a mouse drag.
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_PENDING") {
             for mol in &mut scene.molecules {
-                if let Ok((_, sel)) = scene::evaluate(&mol.system, &sel_text) {
+                if let Ok((_, sel)) = mol.data.evaluate(&sel_text) {
                     let atoms: Vec<usize> = {
-                        let bound = mol.system.bind(&sel);
+                        let bound = mol.data.bind(&sel);
                         bound.iter_particle().map(|p| p.id).collect()
                     };
                     if atoms.is_empty() {
@@ -418,6 +418,8 @@ impl App {
             draw: None,
             console_open: false,
             console: crate::script::ScriptConsole::default(),
+            script: crate::script::ScriptSession::new(),
+            jobs_rx: None,
         };
 
         // Verification hooks (native): exercise the session save/load round-trip
@@ -644,14 +646,14 @@ impl App {
             mol.refresh_bbox();
             mol.perceive_aromaticity(); // detect rings/aromaticity (drives the ring-circle overlay)
             let res = crate::minimize::relax_in_system(
-                &mut mol.system,
+                mol.data.system_mut().expect("drawn molecule is owned"),
                 &mol.bonds,
                 RelaxKind::Cleanup,
             );
             // A representative bond length after relaxation (the first bond).
             let len0 = mol.bonds.first().map(|bond| {
                 let (a, b) = (bond.i1, bond.i2);
-                let st = mol.system.state();
+                let st = mol.data.state();
                 match (st.coords.get(a), st.coords.get(b)) {
                     (Some(pa), Some(pb)) => {
                         glam::vec3(pa.x, pa.y, pa.z).distance(glam::vec3(pb.x, pb.y, pb.z))

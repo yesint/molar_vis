@@ -192,7 +192,7 @@ impl App {
     /// The projected screen radius (px) of atom `i` as drawn (its rep's sphere).
     pub(super) fn atom_screen_radius(&self, mi: usize, i: usize, rect: egui::Rect, size_px: [u32; 2]) -> f32 {
         let mol = &self.scene.molecules[mi];
-        let (Some(w), Some(atom)) = (self.atom_world(mi, i), mol.system.topology().get_atom(i)) else {
+        let (Some(w), Some(atom)) = (self.atom_world(mi, i), mol.data.topology().get_atom(i)) else {
             return 4.0;
         };
         let r_world = mol
@@ -444,7 +444,7 @@ impl App {
             if let Some(mi) = target_mi {
                 match self.draw_hit_test(mi, rect, size_px, px) {
                     Some(HitTarget::Atom(i)) => {
-                        if self.scene.molecules[mi].system.topology().get_atom(i).map(|a| a.atomic_number)
+                        if self.scene.molecules[mi].data.topology().get_atom(i).map(|a| a.atomic_number)
                             != Some(element.atomic_number())
                         {
                             let src = element.make_atom();
@@ -510,12 +510,12 @@ impl App {
     pub(super) fn toggle_hydrogens(&mut self, mi: usize) {
         let has_h = {
             let mol = &self.scene.molecules[mi];
-            let topo = mol.system.topology();
+            let topo = mol.data.topology();
             (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1))
         };
         if has_h {
             let mol = &mut self.scene.molecules[mi];
-            let topo = mol.system.topology();
+            let topo = mol.data.topology();
             let h_idx: Vec<usize> = (0..mol.n_atoms)
                 .filter(|&i| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1))
                 .collect();
@@ -535,7 +535,7 @@ impl App {
             let parents: Vec<(usize, glam::Vec3, u8)> = (0..mol.n_atoms)
                 .filter_map(|i| {
                     let c = *counts.get(i)?;
-                    let p = mol.system.state().coords.get(i)?;
+                    let p = mol.data.state().coords.get(i)?;
                     (c > 0).then_some((i, glam::vec3(p.x, p.y, p.z), c))
                 })
                 .collect();
@@ -665,7 +665,7 @@ impl App {
                     return;
                 }
                 let _ = crate::minimize::relax_in_system(
-                    &mut mol.system,
+                    mol.data.system_mut().expect("drawn molecule is owned"),
                     &mol.bonds,
                     kind,
                 );

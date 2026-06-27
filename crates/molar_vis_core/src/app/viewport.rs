@@ -247,7 +247,7 @@ impl App {
                             let mode = self.effective_selection_mode();
                             let hits = {
                                 let mol = &self.scene.molecules[hit.mol];
-                                pick::expand_selection(&mol.system, &mol.bonds, &[hit.id], mode)
+                                pick::expand_selection(&mol.data, &mol.bonds, &[hit.id], mode)
                             };
                             self.merge_into_pending(hit.mol, hits, op);
                             self.view_dirty = true;
@@ -258,7 +258,7 @@ impl App {
                             let atoms = {
                                 let mol = &self.scene.molecules[hit.mol];
                                 pick::expand_selection(
-                                    &mol.system,
+                                    &mol.data,
                                     &mol.bonds,
                                     &[hit.id],
                                     SelectionMode::Residues,
@@ -317,8 +317,8 @@ impl App {
                                     });
                                     let grid = {
                                         let st = mol.render_state();
-                                        let all = mol.system.select_all();
-                                        let b = mol.system.bind_with_state(&all, st);
+                                        let all = mol.data.select_all();
+                                        let b = mol.data.bind_with_state(&all, st);
                                         let sasa = if has_surface {
                                             b.sasa().ok().map(|s| s.areas().to_vec())
                                         } else {
@@ -372,7 +372,7 @@ impl App {
                                         .map(|&(id, _)| id as usize)
                                         .collect();
                                     pick::expand_selection(
-                                        &mol.system,
+                                        &mol.data,
                                         &mol.bonds,
                                         &seeds,
                                         SelectionMode::Residues,
@@ -612,7 +612,7 @@ impl App {
             // whole residues / heavy + bonded H), then merge into the pending set.
             let hits = {
                 let mol = &self.scene.molecules[res.mol];
-                pick::expand_selection(&mol.system, &mol.bonds, &res.atoms, mode)
+                pick::expand_selection(&mol.data, &mol.bonds, &res.atoms, mode)
             };
             self.merge_into_pending(res.mol, hits, op);
         }

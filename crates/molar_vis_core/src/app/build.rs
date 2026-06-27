@@ -6,7 +6,7 @@ use super::*;
 /// near the cursor view-line (`detail.atoms`, found by the spatial grid). Rendered
 /// over a Cartoon/Surface rep to reveal local atomic detail the abstraction hides.
 pub(super) fn build_hover_detail(
-    system: &molar::prelude::System,
+    data: &crate::moldata::MolData,
     bonds: &[Bond],
     detail: &crate::scene::HoverDetail,
     state: &molar::prelude::State,
@@ -16,10 +16,10 @@ pub(super) fn build_hover_detail(
     let Some(index_str) = pick::index_selection_string(&detail.atoms) else {
         return geometry::GeometryData::default();
     };
-    let Ok((_, sel)) = scene::evaluate(system, &index_str) else {
+    let Ok((_, sel)) = data.evaluate(&index_str) else {
         return geometry::GeometryData::default();
     };
-    let bound = system.bind_with_state(&sel, state);
+    let bound = data.bind_with_state(&sel, state);
     let params = RepParams::BallAndStick { sphere_scale: 0.25, bond_radius: 0.04 };
     let mut geom = geometry::build(
         &bound,
@@ -70,7 +70,7 @@ pub(super) fn fade_by_ray(geom: &mut geometry::GeometryData, o: glam::Vec3, d: g
 /// reused. Cartoon/SecStruct reps are skipped until their SS cache exists (it's
 /// filled by the same `rebuild_dirty` pass, just before this).
 pub(super) fn build_glow(
-    system: &molar::prelude::System,
+    data: &crate::moldata::MolData,
     bonds: &[Bond],
     reps: &[Representation],
     atoms: &[usize],
@@ -82,7 +82,7 @@ pub(super) fn build_glow(
         return geometry::GeometryData::default();
     };
     // Highlighted residues (resindex), for extracting the Cartoon sub-ribbon.
-    let topo = system.topology();
+    let topo = data.topology();
     let res_set: std::collections::HashSet<u32> = atoms
         .iter()
         .filter_map(|&a| topo.get_atom(a).map(|at| at.resindex as u32))
@@ -108,10 +108,10 @@ pub(super) fn build_glow(
         // (rep selection) ∩ (pending atoms): glow only this rep's own atoms, in its
         // own style. Skip on an empty/invalid intersection.
         let combined = format!("({}) and ({})", rep.sel_text, index_str);
-        let Ok((_, sel)) = scene::evaluate(system, &combined) else {
+        let Ok((_, sel)) = data.evaluate(&combined) else {
             continue;
         };
-        let bound = system.bind_with_state(&sel, state);
+        let bound = data.bind_with_state(&sel, state);
         let mut geom = geometry::build(
             &bound, n_atoms, bonds, &rep.params, rep.color, rep.material,
             rep.ss_cache.as_ref(), dashed_pbc,
@@ -200,7 +200,7 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
             Some([a, b, c]) => rep.periodic.offsets(a, b, c),
             None => vec![glam::Vec3::ZERO],
         };
-        let bound = mol.system.bind_with_state(sel, disp_state);
+        let bound = mol.data.bind_with_state(sel, disp_state);
         let pick_x = mi as u32 + 1;
         let pick_rep = (rj as u32) << PICK_ATOM_BITS;
         for p in bound.iter_particle() {

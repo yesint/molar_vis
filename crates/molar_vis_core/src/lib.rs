@@ -13,6 +13,7 @@ mod history;
 mod launch;
 mod material;
 mod minimize;
+mod moldata;
 mod pick;
 mod render;
 mod scene;
@@ -25,7 +26,12 @@ mod suggest;
 mod theme;
 mod trajectory;
 
-pub use app::App;
+pub use app::{App, AppJob};
+// The per-molecule data backend + the shared-source seam, exposed so the native
+// `molar_vis_py` crate can render directly from a pymolar `System` (zero-copy).
+// `EvalError` rides along because it's in `SharedSource::evaluate`'s signature.
+pub use moldata::{MolData, SharedSource};
+pub use scene::EvalError;
 pub use launch::{parse_file_args, AppLaunch};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::run;

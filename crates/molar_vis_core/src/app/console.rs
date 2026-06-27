@@ -26,7 +26,9 @@ impl App {
         use crate::script::{ConsoleLine, LineKind};
         self.console.lines.push(ConsoleLine { kind: LineKind::Input, text: source.to_string() });
         let summary = self.scene_summary();
-        let outcome = crate::script::evaluate_script(source, summary);
+        // Evaluate in the persistent REPL session so `let` bindings survive across
+        // console lines (`let m = mol(0)` then, next line, `m.rep(0)…`).
+        let outcome = self.script.eval(source, summary);
         self.console.lines.extend(outcome.output);
         for cmd in outcome.commands {
             if let Err(e) = self.execute_command(cmd) {

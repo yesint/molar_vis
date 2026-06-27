@@ -191,7 +191,23 @@ pub struct App {
     console_open: bool,
     /// Scripting-console scrollback + input + history (see `script::console`).
     console: crate::script::ScriptConsole,
+    /// Persistent Rhai REPL backing the console: keeps the engine + a `Scope` alive
+    /// across input lines so `let` bindings survive between lines (see `script.rs`).
+    script: crate::script::ScriptSession,
+    /// External command channel for the native Python module (`molar_vis_py`): jobs
+    /// queued from the Python thread are drained + run with `&mut App` at the top of
+    /// each `ui()`, so Python can drive the running viewer. `None` for the standalone
+    /// app and wasm. See [`AppJob`].
+    jobs_rx: Option<std::sync::mpsc::Receiver<AppJob>>,
 }
+
+
+/// A unit of work run on the viewer (UI) thread with mutable [`App`] access. The
+/// native Python module sends these over a channel from the Python thread (e.g. "add
+/// this shared molecule", "set this rep's style"); they're drained at the top of each
+/// [`App::ui`]. The closure is `Send` so it can cross the thread boundary (it may
+/// capture pyo3 `Py<_>` handles, which are `Send`).
+pub type AppJob = Box<dyn FnOnce(&mut App) + Send>;
 
 
 /// Tabs in the top-bar "view settings" (hamburger) menu.
@@ -239,6 +255,127 @@ enum LassoOp {
 }
 
 impl App {
+    /// Install the external job channel (native Python module). Jobs sent on the
+    /// paired `Sender` are run on the UI thread each frame; while connected, the
+    /// viewport polls for them so commands from Python apply within a frame or two.
+    pub fn set_jobs(&mut self, rx: std::sync::mpsc::Receiver<AppJob>) {
+        self.jobs_rx = Some(rx);
+    }
+
+    /// Drain + run any jobs queued by the Python thread (native module). Collected
+    /// first so the receiver borrow is released before each job takes `&mut self`.
+    fn run_external_jobs(&mut self) {
+        let jobs: Vec<AppJob> = match &self.jobs_rx {
+            Some(rx) => rx.try_iter().collect(),
+            None => return,
+        };
+        for job in jobs {
+            job(self);
+        }
+    }
+
+    /// Mark every shared (pymolar-backed) molecule's geometry as coords-dirty, so the
+    /// render loop re-reads its externally-owned coordinates this frame. That's how a
+    /// Python-side `sel.translate(...)` (which mutates the shared `State` in place)
+    /// shows up live. Cheap rebuild (reuses the cached secondary structure, no DSSP);
+    /// a coords version stamp would let us skip unchanged frames, but isn't needed for
+    /// interactive sizes. Only runs while the external (Python) channel is connected.
+    fn mark_shared_dirty(&mut self) {
+        for mol in &mut self.scene.molecules {
+            if !mol.data.is_shared() {
+                continue;
+            }
+            for rep in &mut mol.reps {
+                rep.coords_dirty = true;
+            }
+            if mol.pending.is_some() {
+                mol.glow_dirty = true;
+            }
+            if mol.show_box {
+                mol.box_dirty = true;
+            }
+        }
+    }
+
+    // --- External (native Python module) API, run via `AppJob`s on the UI thread. ---
+
+    /// Add a molecule backed by a shared external source (pymolar), rendered
+    /// zero-copy. Frames the camera if it's the first molecule. Returns its index.
+    pub fn add_shared_molecule(
+        &mut self,
+        source: Box<dyn crate::moldata::SharedSource>,
+        name: String,
+    ) -> Result<usize, String> {
+        let was_empty = self.scene.molecules.is_empty();
+        let bond_params = self.settings.behavior.bond_params();
+        self.scene
+            .add_shared(name, source, &bond_params, &self.rep_defaults)?;
+        let idx = self.scene.molecules.len() - 1;
+        self.scene.selected_mol = Some(idx);
+        if let Some(mol) = self.scene.molecules.last_mut() {
+            mol.trajectory.speed_fps = self.settings.behavior.traj_fps;
+            mol.trajectory.loop_mode = self.settings.behavior.loop_mode;
+        }
+        if was_empty {
+            if let Some((min, max)) = self.scene.bbox() {
+                self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
+                self.settings.view.seed_camera(&mut self.camera);
+            }
+        }
+        self.view_dirty = true;
+        Ok(idx)
+    }
+
+    /// Append a default representation to molecule `mol`; returns the new rep index.
+    pub fn add_rep_default(&mut self, mol: usize) -> Result<usize, String> {
+        self.execute_command(crate::script::Command::AddRep { mol })?;
+        let n = self
+            .scene
+            .molecules
+            .get(mol)
+            .map(|m| m.reps.len())
+            .ok_or_else(|| format!("no molecule {mol}"))?;
+        Ok(n.saturating_sub(1))
+    }
+
+    /// Set representation `(mol, rep)`'s draw style (e.g. "vdw", "cartoon").
+    pub fn set_rep_style(&mut self, mol: usize, rep: usize, kind: &str) -> Result<(), String> {
+        self.execute_command(crate::script::Command::Style {
+            mol,
+            rep: crate::script::RepRef::Index(rep),
+            kind: kind.to_string(),
+        })
+    }
+
+    /// Set representation `(mol, rep)`'s color scheme (e.g. "chain", "ss").
+    pub fn set_rep_color(&mut self, mol: usize, rep: usize, method: &str) -> Result<(), String> {
+        self.execute_command(crate::script::Command::Color {
+            mol,
+            rep: crate::script::RepRef::Index(rep),
+            method: method.to_string(),
+        })
+    }
+
+    /// Set representation `(mol, rep)`'s material (e.g. "Transparent").
+    pub fn set_rep_material(&mut self, mol: usize, rep: usize, name: &str) -> Result<(), String> {
+        self.execute_command(crate::script::Command::Material {
+            mol,
+            rep: crate::script::RepRef::Index(rep),
+            name: name.to_string(),
+        })
+    }
+
+    /// Set representation `(mol, rep)`'s selection to exactly `indices` (e.g. a
+    /// pymolar `Sel`'s atoms), via a compact `index lo:hi …` selection string.
+    pub fn set_rep_selection(&mut self, mol: usize, rep: usize, indices: &[usize]) -> Result<(), String> {
+        let text = crate::pick::index_selection_string(indices)
+            .ok_or("selection is empty")?;
+        self.execute_command(crate::script::Command::Select {
+            mol,
+            rep: crate::script::RepRef::Index(rep),
+            text,
+        })
+    }
 
     /// Recompile dirty selections and rebuild/reupload dirty geometry. Returns
     /// true if any geometry was uploaded (so the frame needs re-rendering).
@@ -278,7 +415,7 @@ impl App {
             // reference (no copy into the System), or the static structure state.
             let render_state: &State = match mol.trajectory.frames.get(mol.trajectory.current) {
                 Some(frame) => frame,
-                None => mol.system.state(),
+                None => mol.data.state(),
             };
             let n_atoms = mol.n_atoms;
             // Whether any rep's geometry was (re)built this pass — if so and there's
@@ -289,7 +426,7 @@ impl App {
                     // Parse + evaluate the selection (against the System's own
                     // state). On error keep the previous selection/geometry and
                     // just surface the message.
-                    match scene::evaluate(&mol.system, rep.sel_text.as_str()) {
+                    match mol.data.evaluate(rep.sel_text.as_str()) {
                         Ok((expr, sel)) => {
                             rep.expr = Some(expr);
                             rep.sel = Some(sel);
@@ -344,7 +481,7 @@ impl App {
                     // Full structural rebuild: (re)compute secondary structure
                     // into the cache, build geometry, recreate GPU buffers.
                     let (geom, fresh_ss) = {
-                        let bound = mol.system.bind_with_state(sel, state);
+                        let bound = mol.data.bind_with_state(sel, state);
                         let ss = geometry::needs_ss(&rep.params, rep.color)
                             .then(|| SsMap::compute(&bound, rep.ss_algo));
                         let geom = geometry::build(
@@ -371,7 +508,7 @@ impl App {
                     // cached secondary structure (no DSSP), then update the
                     // existing GPU buffers in place (no reallocation).
                     let geom = {
-                        let bound = mol.system.bind_with_state(sel, state);
+                        let bound = mol.data.bind_with_state(sel, state);
                         geometry::build(
                             &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
                             rep.ss_cache.as_ref(), dashed,
@@ -396,7 +533,7 @@ impl App {
                 let pb = render_state
                     .pbox
                     .as_ref()
-                    .or_else(|| mol.system.state().pbox.as_ref());
+                    .or_else(|| mol.data.state().pbox.as_ref());
                 let lines = pb.map(geometry::box_wireframe).unwrap_or_default();
                 let geom = geometry::GeometryData { lines, ..Default::default() };
                 mol.box_gpu = self.renderer.upload(rs, &geom);
@@ -435,7 +572,7 @@ impl App {
             if mol.glow_dirty {
                 let geom = match &mol.pending {
                     Some(pending) => build_glow(
-                        &mol.system, &mol.bonds, &mol.reps, &pending.atoms, render_state, n_atoms,
+                        &mol.data, &mol.bonds, &mol.reps, &pending.atoms, render_state, n_atoms,
                         dashed,
                     ),
                     None => geometry::GeometryData::default(),
@@ -448,7 +585,7 @@ impl App {
             if mol.hover_dirty {
                 let geom = match &mol.hover {
                     Some(atoms) => build_glow(
-                        &mol.system, &mol.bonds, &mol.reps, atoms, render_state, n_atoms, dashed,
+                        &mol.data, &mol.bonds, &mol.reps, atoms, render_state, n_atoms, dashed,
                     ),
                     None => geometry::GeometryData::default(),
                 };
@@ -461,7 +598,7 @@ impl App {
             if mol.hover_detail_dirty {
                 let geom = match &mol.hover_detail {
                     Some(d) => {
-                        build_hover_detail(&mol.system, &mol.bonds, d, render_state, n_atoms, dashed)
+                        build_hover_detail(&mol.data, &mol.bonds, d, render_state, n_atoms, dashed)
                     }
                     None => geometry::GeometryData::default(),
                 };
@@ -491,6 +628,17 @@ impl eframe::App for App {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).
         let ctx = ui.ctx().clone();
+
+        // Native Python module: apply any jobs queued by the Python thread, and —
+        // while that channel is connected — keep polling for more (egui only calls
+        // `ui` on input/repaint, so without this a job sent while the window is idle
+        // wouldn't be picked up). The poll only repaints egui; the 3D scene still
+        // re-renders only on an actual change (render-skip), so idle stays cheap.
+        if self.jobs_rx.is_some() {
+            self.run_external_jobs();
+            self.mark_shared_dirty();
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
 
         // Work around a winit/egui Wayland IME bug that otherwise breaks all text
         // entry (only the first char of a field is accepted). See `defuse_broken_ime`.

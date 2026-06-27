@@ -1,0 +1,30 @@
+[package]
+name = "molar_vis_py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Native Python module driving the molar_vis viewer from pymolar (zero-copy)"
+
+[lib]
+# The Python import name. A single extension module that re-exports pymolar's
+# classes (System/Sel/…) *and* the viewer (spawn/Visualizer), so a `System` and the
+# viewer share one PyO3 type identity.
+name = "molar_vis"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27", features = ["extension-module"] }
+# pymolar as an rlib: its pyclasses (System/Sel) cross the FFI boundary into the
+# viewer, and `register_molar` re-exports them into this module.
+molar_python = { workspace = true }
+# Same molar (rev-pinned via the workspace) so Topology/State/Sel unify across the
+# graph (molar_vis_core ← here → molar_python all see one molar).
+molar = { workspace = true }
+molar_vis_core = { path = "../molar_vis_core" }
+# eframe is used via `molar_vis_core::eframe` (same instance). winit (matching
+# eframe's 0.30) is needed directly for `with_any_thread`, to run the viewer's event
+# loop on a background thread so the Python REPL stays responsive.
+winit = "0.30"
+log = { workspace = true }

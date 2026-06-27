@@ -65,7 +65,7 @@ impl SelectionMode {
 /// is the identity. `Topology`'s index is the identity (atom `i` *is* global atom
 /// `i`), so this never scans the whole system.
 pub fn expand_selection(
-    system: &System,
+    data: &crate::moldata::MolData,
     bonds: &[Bond],
     atoms: &[usize],
     mode: SelectionMode,
@@ -74,7 +74,7 @@ pub fn expand_selection(
     if atoms.is_empty() || mode == SelectionMode::Atoms {
         return atoms.to_vec();
     }
-    let topo = system.topology();
+    let topo = data.topology();
     match mode {
         SelectionMode::Atoms => unreachable!(),
         SelectionMode::Residues => {
@@ -233,7 +233,7 @@ pub(crate) fn nearest_atom(
     min_radius: f32,
 ) -> Option<(usize, f32)> {
     let state = mol.render_state();
-    let topo = mol.system.topology();
+    let topo = mol.data.topology();
     let mut best: Option<(usize, f32)> = None;
     for (i, p) in state.coords.iter().enumerate() {
         let r = topo
@@ -303,12 +303,12 @@ pub(crate) fn nearest_bond(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn hit_for_atom(scene: &Scene, mi: usize, rep_idx: usize, aid: usize) -> Option<PickHit> {
     let mol = scene.molecules.get(mi)?;
-    let atom = mol.system.topology().get_atom(aid)?;
+    let atom = mol.data.topology().get_atom(aid)?;
     let frame: &State = mol
         .trajectory
         .frames
         .get(mol.trajectory.current)
-        .unwrap_or_else(|| mol.system.state());
+        .unwrap_or_else(|| mol.data.state());
     let realp = *frame.coords.get(aid)?;
     let real = Vec3::new(realp.x, realp.y, realp.z);
     // Displayed position (smoothed if the rep smooths) + glow radius, from the rep
@@ -357,7 +357,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
             .trajectory
             .frames
             .get(mol.trajectory.current)
-            .unwrap_or_else(|| mol.system.state());
+            .unwrap_or_else(|| mol.data.state());
         // Box lattice vectors (columns of the box matrix), for periodic offsets.
         let box_vecs = frame.pbox.as_ref().map(|pb| {
             let m = pb.get_matrix();
@@ -386,7 +386,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                 None => vec![Vec3::ZERO],
             };
 
-            let bound = mol.system.bind_with_state(sel, disp_state);
+            let bound = mol.data.bind_with_state(sel, disp_state);
             for p in bound.iter_particle() {
                 // Only hit atoms that form part of this rep's visible geometry
                 // (Cartoon → backbone only; everything else → all selected atoms).
@@ -470,7 +470,7 @@ pub fn lasso_select(scene: &Scene, view: Mat4, proj: Mat4, polygon: &[Vec2]) -> 
             .trajectory
             .frames
             .get(mol.trajectory.current)
-            .unwrap_or_else(|| mol.system.state());
+            .unwrap_or_else(|| mol.data.state());
         let box_vecs = frame.pbox.as_ref().map(|pb| {
             let m = pb.get_matrix();
             [
@@ -498,7 +498,7 @@ pub fn lasso_select(scene: &Scene, view: Mat4, proj: Mat4, polygon: &[Vec2]) -> 
                 None => vec![Vec3::ZERO],
             };
 
-            let bound = mol.system.bind_with_state(sel, disp_state);
+            let bound = mol.data.bind_with_state(sel, disp_state);
             for p in bound.iter_particle() {
                 // Same style filter as picking, and skip atoms already selected.
                 if !atom_in_rep(rep.kind, p.atom.name.as_str()) || picked.contains(&p.id) {
@@ -608,7 +608,7 @@ mod tests {
         let rep = &mut mol.reps[0];
         rep.kind = kind;
         rep.sel_text = sel_text.to_string();
-        let (expr, sel) = crate::scene::evaluate(&mol.system, sel_text).expect("eval selection");
+        let (expr, sel) = mol.data.evaluate(sel_text).expect("eval selection");
         rep.expr = Some(expr);
         rep.sel = Some(sel);
         scene
@@ -648,7 +648,7 @@ mod tests {
         // Evaluate the second molecule's default rep so it has an atom set too.
         {
             let mol = &mut scene.molecules[1];
-            let (expr, sel) = crate::scene::evaluate(&mol.system, "all").expect("eval");
+            let (expr, sel) = mol.data.evaluate("all").expect("eval");
             mol.reps[0].kind = RepKind::Vdw;
             mol.reps[0].sel_text = "all".to_string();
             mol.reps[0].expr = Some(expr);
@@ -676,8 +676,8 @@ mod tests {
         let mol = &scene.molecules[0];
 
         // Atom name by global index, for checking the selected set.
-        let all = mol.system.select_all();
-        let bound = mol.system.bind(&all);
+        let all = mol.data.select_all();
+        let bound = mol.data.bind(&all);
         let mut name_by_id = vec![String::new(); mol.n_atoms];
         let mut n_protein = 0usize;
         for p in bound.iter_particle() {
@@ -685,7 +685,7 @@ mod tests {
         }
         // Protein atom count (the rep's selection size) for the "fewer" assertion.
         if let Some(sel) = &mol.reps[0].sel {
-            n_protein = mol.system.bind(sel).iter_particle().count();
+            n_protein = mol.data.bind(sel).iter_particle().count();
         }
 
         let cam = Camera::frame_bbox(mol.bbox_min, mol.bbox_max, 0.9);
@@ -711,7 +711,7 @@ mod tests {
         let scene = scene_with_rep(RepKind::Vdw, "all");
         let mol = &scene.molecules[0];
         let atoms = vec![5usize, 1, 9, 1]; // unsorted, with a dup
-        let out = expand_selection(&mol.system, &mol.bonds, &atoms, SelectionMode::Atoms);
+        let out = expand_selection(&mol.data, &mol.bonds, &atoms, SelectionMode::Atoms);
         assert_eq!(out, atoms, "Atoms mode must be the identity (no reorder/dedup)");
     }
 
@@ -721,8 +721,8 @@ mod tests {
         let mol = &scene.molecules[0];
 
         // resindex of every atom, and all atoms grouped by resindex.
-        let all = mol.system.select_all();
-        let bound = mol.system.bind(&all);
+        let all = mol.data.select_all();
+        let bound = mol.data.bind(&all);
         let mut resindex_by_id = vec![0usize; mol.n_atoms];
         let mut atoms_in_res: std::collections::HashMap<usize, Vec<usize>> = Default::default();
         for p in bound.iter_particle() {
@@ -736,7 +736,7 @@ mod tests {
         let later = resindex_by_id[mol.n_atoms - 1];
         let mid = atoms_in_res[&later][atoms_in_res[&later].len() / 2];
         let seed = vec![atoms_in_res[&r0][0], mid];
-        let out = expand_selection(&mol.system, &mol.bonds, &seed, SelectionMode::Residues);
+        let out = expand_selection(&mol.data, &mol.bonds, &seed, SelectionMode::Residues);
 
         // Output is exactly the union of the two residues' atoms, sorted.
         let mut expected: Vec<usize> = atoms_in_res[&r0]
@@ -786,16 +786,18 @@ mod tests {
     #[test]
     fn expand_bound_h() {
         let raw = methane_with_lone_h();
+        let bonds = raw.bonds.clone();
+        let data = crate::moldata::MolData::Owned(raw.system);
         // Sanity: the loader read the elements and guessed the 4 C–H bonds.
-        let all = raw.system.select_all();
-        let bound = raw.system.bind(&all);
+        let all = data.select_all();
+        let bound = data.bind(&all);
         let z: Vec<u8> = bound.iter_particle().map(|p| p.atom.atomic_number).collect();
         assert_eq!(z, vec![6, 1, 1, 1, 1, 1], "expected C + 5 H");
-        let c_bonds = raw.bonds.iter().filter(|b| b.contains(0)).count();
+        let c_bonds = bonds.iter().filter(|b| b.contains(0)).count();
         assert_eq!(c_bonds, 4, "carbon should have 4 bonded H (lone H unbonded)");
 
         let exp = |atoms: &[usize]| {
-            expand_selection(&raw.system, &raw.bonds, atoms, SelectionMode::BoundH)
+            expand_selection(&data, &bonds, atoms, SelectionMode::BoundH)
         };
 
         // Heavy atom hit → it plus all 4 bonded H.

@@ -468,7 +468,7 @@ impl App {
         let mol = &mut self.scene.molecules[mi];
         let mol_id = mol.id;
         // The Periodic tab is only offered when the molecule has a box.
-        let has_box = mol.system.state().pbox.is_some();
+        let has_box = mol.data.state().pbox.is_some();
 
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;

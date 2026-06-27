@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "molar_vis"
+description = "Drive the molar_vis molecular viewer from Python (zero-copy over pymolar)"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# This crate lives in the molar_vis cargo workspace.
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]

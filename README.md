@@ -204,6 +204,77 @@ on every push to `main`. molar's parallelism (rayon) runs serially on wasm; traj
 the picked file's frames stream into the viewer incrementally (no threads). File **export** and the
 on-disk **settings/session** files are native-only (the browser has no filesystem).
 
+### Python module
+
+`molar_vis` also builds as a **native Python module** (see
+[Scripting it from Python](#scripting-it-from-python)). Build and install it with
+[maturin](https://www.maturin.rs) into the active virtualenv / conda environment:
+
+```sh
+pip install maturin
+cd crates/molar_vis_py
+maturin develop --release        # build the extension + install it as `molar_vis`
+```
+
+A Rust toolchain is required (maturin invokes `cargo`). The module **re-exports
+[pymolar](https://github.com/yesint/molar)** (molar's Python bindings), so a single
+`import molar_vis` gives you both molar's full analysis API *and* the viewer, with one
+consistent set of types. Native only — a GPU/windowing extension can't target the
+browser (use the [WebAssembly build](#webassembly--run-it-in-the-browser) there). The
+viewer window runs on a background thread, which works on **Linux and Windows**; macOS
+(which requires the GUI on the main thread) isn't wired up yet.
+
+## Scripting it from Python
+
+Beyond the GUI, you can drive `molar_vis` from a **Python script or a Jupyter / IPython
+notebook**: build molecules and selections with molar's full (numpy-backed) analysis API,
+open a live viewer window, and keep working — the window runs on its own thread, so the
+REPL never blocks, and it renders **directly from your pymolar objects** (zero-copy), so
+edits show up without an explicit refresh.
+
+```python
+import molar_vis as mv
+
+s   = mv.System("protein.pdb")      # a pymolar System — full analysis API (numpy)
+sel = s("name CA")                  # a pymolar selection
+
+vis = mv.spawn()                    # open the viewer; returns immediately
+mol = vis.add_mol(s)                # render s — shared, no coordinates are copied
+rep = mol.add_rep(sel, style="cartoon", color="ss")
+
+sel.translate([1.0, 0.0, 0.0])      # move atoms in Python → the view updates live
+
+for rep in vis.mols[0].reps:        # introspect the scene…
+    rep.style = "lines"             # …property setters apply live
+```
+
+Because the viewer shares the molecule's memory with Python, anything you do to it —
+translate, superpose, edit coordinates, step a trajectory — is reflected on screen with
+no copy and no manual redraw. The same objects carry molar's analysis API (RMSD, SASA,
+DSSP, geometric selections, …), so you analyze and visualize in one session.
+
+**API at a glance**
+
+| Call | Effect |
+|---|---|
+| `mv.System(path)`, `s("protein")`, `rmsd(a, b)`, … | the re-exported **pymolar** API (analysis) |
+| `mv.spawn() -> Visualizer` | open a viewer window (non-blocking) |
+| `vis.add_mol(system) -> MolHandle` | render a molecule, zero-copy |
+| `vis.mols` | the molecules in the scene, as handles |
+| `mol.add_rep(sel=None, style=…, color=…, material=…) -> RepHandle` | add a representation |
+| `mol.reps` | that molecule's representations, as handles |
+| `rep.style = …` · `rep.color = …` · `rep.material = …` | live property setters |
+| `rep.select(sel)` | set a representation's selection from a pymolar `Sel` |
+
+`style`, `color` and `material` take the same names as the GUI pickers — e.g. `"vdw"`,
+`"licorice"`, `"ballstick"`, `"cartoon"`, `"surface"`; `"element"`, `"chain"`, `"resid"`,
+`"ss"`; `"Opaque"`, `"Transparent"`, `"Glossy"`, `"Glass"`, …
+
+> **Note.** Live coordinate updates re-render the shared molecule every frame while the
+> window is open (great for interactive work and animation; for very large systems a
+> coordinate-version stamp to skip unchanged frames is a planned optimization). The window
+> runs on a background thread (Linux / Windows; macOS support is pending).
+
 ## Selections
 
 `molar_vis` uses molar's selection language directly. A few examples:
@@ -275,10 +346,16 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 - Undo/redo; drag-reorder reps; zoom-to-selection/molecule.
 - **Browser build** — runs in the browser ([live demo](https://yesint.github.io/molar_vis/));
   WebGPU with a WebGL2 fallback; in-browser structure + trajectory loading.
+- **Python module** (native, Linux/Windows) — `import molar_vis`, build molecules/selections with
+  the re-exported pymolar API, `spawn()` a live viewer and drive it (`add_mol`/`add_rep`/property
+  setters); coordinate edits (`sel.translate(…)`) render live, zero-copy. See
+  [Scripting it from Python](#scripting-it-from-python).
 
 **In progress / not done:**
 - Browser trajectory loading reads the whole file into memory (fine for typical sizes); true
   random-access disk streaming for very large trajectories is a possible future addition.
+- The Python viewer runs on a background thread (Linux/Windows); **macOS** (main-thread event loop)
+  and a coordinate-version stamp to skip re-rendering unchanged live frames are planned.
 
 This is a young project under active development; expect rough edges.
 

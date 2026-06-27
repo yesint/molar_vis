@@ -1098,7 +1098,7 @@ impl SceneRenderer {
         ];
         let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
         for mol in &scene.molecules {
-            let box_vecs = mol.system.state().pbox.as_ref().map(|pb| {
+            let box_vecs = mol.data.state().pbox.as_ref().map(|pb| {
                 let m = pb.get_matrix();
                 // Columns of the box matrix are the lattice vectors a, b, c (nm).
                 [

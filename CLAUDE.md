@@ -18,7 +18,23 @@ cargo run -p molar_vis -- a.pdb a.xtc               # VMD-style: a.pdb + a.xtc t
 cargo run -p molar_vis -- -m a.pdb a.xtc -m b.pdb   # `-m` starts a new molecule → two molecules
 cargo test -p molar_vis_core
 cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
+cargo build -p molar_vis_py                                     # native Python module (compile check)
 ```
+
+**Native Python module** (`crates/molar_vis_py`, M26): `import molar_vis` to drive the viewer
+from Python/Jupyter (see that crate + the *Native Python module* notes below). Build/install with
+maturin into an active venv (pyo3 0.27 builds for CPython up to 3.14 via
+`PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`):
+
+```sh
+python -m venv .venv && source .venv/bin/activate && pip install maturin numpy
+cd crates/molar_vis_py && maturin develop --release   # builds + installs as `molar_vis`
+python -c "import molar_vis as mv; s=mv.System('tests/2lao.pdb'); v=mv.spawn(); m=v.add_mol(s); m.add_rep(s('protein'), style='cartoon', color='ss'); import time; time.sleep(30)"
+```
+
+Headless verification on this dev box used a scratch venv + `spectacle -b -n -a -o out.png` to
+screenshot the window opened from Python. NB: `pkill -f molar_vis-ui` matches its own shell command
+line — kill the python process by PID instead.
 
 - Test assets in `tests/`: `2lao.pdb` (1911 atoms), `2lao_cg.pdb` (238-residue martinized 2lao,
   mixed α/β — the committed **CG cartoon** fixture; regenerate per `tests/README.md` with
@@ -89,7 +105,9 @@ glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **
 molar **1.4** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 `default-features=false` → `Float=f32`; pulls `powersasa` transitively from git),
 rhai **1** (`default-features=false, features=["std"]` — pure-Rust embedded scripting
-language for the console; builds for wasm). GROMACS 2026.1 available as `gmx`.
+language for the console; builds for wasm). **`molar_vis_py` only** (native Python module, M26):
+pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
+built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
 **Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
 `[patch]`). `Cargo.lock` pins the resolved git revisions. To develop molar/powersasa
@@ -99,9 +117,11 @@ and/or point `molar` at a local path — but don't commit those.
 ## Workspace & modules
 
 `crates/molar_vis_core` (library, WASM-safe, all logic) + `crates/molar_vis` (native bin:
-argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
+argv + logging) + `crates/molar_vis_web` (wasm bin) + `crates/molar_vis_py` (native PyO3 module —
+M26, see below). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 
-- `lib.rs` — module decls, `run`/`App` re-exports.
+- `lib.rs` — module decls, `run`/`App` re-exports. Also re-exports the seam the native Python
+  module needs: `App`, `AppJob`, `MolData`, `SharedSource`, `EvalError`.
 - `launch.rs` — `AppLaunch` (startup files, **grouped per molecule** as `Vec<Vec<PathBuf>>`),
   eframe bootstrap (`Renderer::Wgpu`), and **`parse_file_args`** — the VMD-style command-line file
   grouping (pure logic, WASM-safe, unit-tested): `-m`/`--molecule` starts a new molecule; within a
@@ -233,8 +253,22 @@ argv + logging). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.
   (crisp flat tape) rather than the elliptical normal, which fans ~180° across the broad face and
   shades the ribbon like a domed lens (foreshortened helix turns then read as solid blobs); round
   cross-sections (coil tube) keep the smooth ellipse.
-- `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (molar `System` +
-  guessed `bonds` + bbox + `reps`; the `System` is the single source of per-atom data),
+- `moldata.rs` — **`MolData`**, a molecule's topology+coordinates backend (M26): `Owned(System)`
+  for the standalone app / wasm / drawing editor, or `Shared(Box<dyn SharedSource>)` for a molecule
+  rendered **by reference** from an external owner (a pymolar `System`, via `molar_vis_py`). Kept as
+  a directly-borrowable `Molecule.data` field (not behind `Molecule` methods) so rebuild loops can
+  split-borrow it alongside `&mut reps`. Methods: `topology`/`state` (borrow), `bind`/`bind_with_state`
+  (→ `SelBoundParts`, via molar's `Sel::bind_to` for the shared case), `select_all`, `evaluate`,
+  `is_shared`, `system`/`system_mut` (owned-only escape hatches — save + the drawing editor), and the
+  owned-only mutators (`set_state`/`append_atom`/`remove`/`select_all_bound_mut`, `unimplemented!`
+  on the shared arm). `SharedSource` (pyo3-free trait: `topology`/`state`/`evaluate`) is implemented
+  only in `molar_vis_py`. `bind` returns `SelBoundParts` for both backends; the only `SelBound`-needing
+  path (file save → `SaveTopologyState`) is owned-only and routes through `system()`.
+- `scene.rs` — `Scene { molecules, selected_mol, trash }`, `Molecule` (a `data: MolData` backend —
+  owned `System` or shared external source, [[moldata.rs]] — + guessed `bonds` + bbox + `reps`;
+  `data` is the single source of per-atom data, read by reference). `Molecule::new` (owned, from a
+  `RawMolecule`) and `Molecule::new_shared` (from a `SharedSource` — guesses bonds/bbox from its
+  topology/state) share a private `from_parts`; `Scene::add`/`Scene::add_shared` assign the `MolId`.
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
   (compiled) / `sel: Sel` (evaluated) / `periodic: PeriodicParams` (image counts + Self/Box,
   in `EditState`) / visible / dirty flags / `RepGpu`), `evaluate()`
@@ -1102,6 +1136,51 @@ History labels via `describe_change` ("edit selection", "change coloring",
   gating it), 62 tests pass, app-module clippy clean, the save→load→save **session round-trip stays
   byte-identical**, `SAVE_MOL` writes 1911 atoms, and a screenshot shows the app rendering + the
   console-applied script working.
+- ✅ M26 **Native Python module — drive the viewer from Python/Jupyter (zero-copy)** — the
+  "molar_vis becomes a proper Python module" half of the dual-host scripting plan (see the
+  [[scripting-dual-host-architecture]] memory). `import molar_vis as mv; s = mv.System('p.pdb');
+  vis = mv.spawn(); mol = vis.add_mol(s); rep = mol.add_rep(s('protein'), style='cartoon',
+  color='ss'); sel.translate([1,0,0])  # live; for r in vis.mols[0].reps: r.style='lines'`. The
+  viewer renders **directly from the pymolar `System`** (no copy), on a **background thread** so the
+  Python REPL stays responsive. Three layers:
+  - **`crates/molar_vis_py`** (new cdylib `name = "molar_vis"`, pyo3 0.27 + maturin; deps
+    molar_vis_core + molar_python (rlib) + molar): `PySystemSource { sys: Py<System>, top/st: *const`
+    raw ptrs `}` impls `SharedSource` — `new(py, sys)` caches `r_top()`/`r_st()` pointers under the
+    GIL, `topology()`/`state()` deref them (the pymolar `UnsafeCell`-under-GIL model; `unsafe impl
+    Send`), `evaluate()` uses `(&SelectionExpr).into_sel_index(systempy, None)`. `spawn() ->
+    Visualizer` runs `eframe::run_native` on a `std::thread` with winit `with_any_thread(true)`
+    (Wayland+X11/Windows; macOS pending) + a `Sender<AppJob>` to the GUI thread. `Visualizer`/
+    `MolHandle`/`RepHandle` pyclasses: `add_mol(Py<System>)`, `add_rep(sel=,style=,color=,material=)`,
+    `mols`/`reps` getters, `rep.style/color/material` `#[setter]`s, `rep.select(sel)`. Append-only
+    structure tracked in a shared `Arc<Mutex<Vec<usize>>>` (rep count per mol) — no query channel.
+    The `#[pymodule]` calls `molar_python::register_molar(m)` so `System`/`Sel`/… are re-exported with
+    one consistent PyO3 type identity across the analysis + viewer APIs.
+  - **`molar_vis_core` seam**: `MolData::Shared` + `SharedSource` ([[moldata.rs]]); `App` gained an
+    external job channel — `pub type AppJob = Box<dyn FnOnce(&mut App) + Send>`, `jobs_rx` field,
+    `set_jobs(rx)`, `run_external_jobs()` drained at the top of `ui()` (and while connected the
+    viewport `request_repaint_after(16ms)` to poll, since egui only calls `ui` on input/repaint);
+    `mark_shared_dirty()` re-marks shared molecules `coords_dirty` each frame so a Python-side
+    `sel.translate()` (in-place coord edit) renders live (reused trajectory `coords_dirty` path, no
+    DSSP). `pub` App methods the jobs call: `add_shared_molecule`, `add_rep_default`,
+    `set_rep_{style,color,material,selection}` (selection via `pick::index_selection_string`).
+  - **molar changes** (pushed to master, rev `abf6592`): `Sel::bind_to(&top,&st) -> SelBoundParts`
+    (the disjoint parts-bind the shared backend needs); `SystemPy`/`SelPy` `r_top`/`r_st`/`py_*`/
+    `index` accessors made `pub`; molar_python now `crate-type=["cdylib","rlib"]` + re-exports
+    `System`/`Sel`/`State`/`Topology` + a reusable `pub fn register_molar(m)`; also fixed pre-existing
+    molar_python `Bond`-type drift (`&[usize;2]`→`&Bond`). molar_vis pins molar @ `abf6592`.
+  - **Dep note**: molar wants nalgebra 0.35, numpy 0.27 (in molar_python) wants 0.34 → workspace
+    pinned to nalgebra 0.34.2 (`cargo update -p nalgebra@0.35.0 --precise 0.34.2`). pyo3 0.27.2 builds
+    for CPython 3.14 with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
+  - **Verified at runtime** (maturin + python3.14 + display on the dev box): `import molar_vis`, load
+    2lao (1911 atoms), `s('protein')` 1822, spawn opens the real window on the bg thread (61 fps,
+    REPL live), add_mol+add_rep renders the **SS-colored cartoon** (screenshot), `vis.mols[0].reps`
+    enumerates reps, `rep.style='lines'` flips live, and `sel.translate()` of `resid 1:120` (904
+    atoms) visibly deforms the cartoon live. Native build 0 warnings, 63 core tests pass, wasm 4
+    pre-existing warnings. **Deferred**: macOS main-thread loop; a coords version stamp to skip
+    re-rendering unchanged live frames (currently shared mols re-render every frame); GIL-discipline
+    on the render-time raw-ptr reads (in-place edits are at worst a 1-frame glitch, never UB; only a
+    Python-side `System.state` *reassignment* could dangle — documented limitation); two-way edits
+    *from* the viewer back to pymolar; the web JS-API/anywidget half of the dual-host plan.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed
