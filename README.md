@@ -208,21 +208,32 @@ on-disk **settings/session** files are native-only (the browser has no filesyste
 
 `molar_vis` also builds as a **native Python module** (see
 [Scripting it from Python](#scripting-it-from-python)). Build and install it with
-[maturin](https://www.maturin.rs) into the active virtualenv / conda environment:
+[maturin](https://www.maturin.rs), which installs into the **active** virtualenv /
+conda environment:
 
 ```sh
-pip install maturin
+# from the repo root
+python3 -m venv .venv && source .venv/bin/activate    # maturin needs an active env
+pip install maturin numpy                             # numpy: used by sel.translate(), etc.
+
 cd crates/molar_vis_py
 maturin develop --release        # build the extension + install it as `molar_vis`
+cd ../..
 ```
 
-A Rust toolchain is required (maturin invokes `cargo`). The module **re-exports
-[pymolar](https://github.com/yesint/molar)** (molar's Python bindings), so a single
-`import molar_vis` gives you both molar's full analysis API *and* the viewer, with one
-consistent set of types. Native only — a GPU/windowing extension can't target the
-browser (use the [WebAssembly build](#webassembly--run-it-in-the-browser) there). The
-viewer window runs on a background thread, which works on **Linux and Windows**; macOS
-(which requires the GUI on the main thread) isn't wired up yet.
+A Rust toolchain is required (maturin invokes `cargo`). Re-run `maturin develop` after
+pulling code changes.
+
+> **Python 3.14+:** pyo3 0.27 is tested up to CPython 3.13, so on a newer interpreter
+> prefix the build with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` (e.g.
+> `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release`).
+
+The module **re-exports [pymolar](https://github.com/yesint/molar)** (molar's Python
+bindings), so a single `import molar_vis` gives you both molar's full analysis API *and*
+the viewer, with one consistent set of types. Native only — a GPU/windowing extension
+can't target the browser (use the [WebAssembly build](#webassembly--run-it-in-the-browser)
+there). The viewer window runs on a background thread, which works on **Linux and
+Windows**; macOS (which requires the GUI on the main thread) isn't wired up yet.
 
 ## Scripting it from Python
 
@@ -246,6 +257,20 @@ sel.translate([1.0, 0.0, 0.0])      # move atoms in Python → the view updates 
 
 for rep in vis.mols[0].reps:        # introspect the scene…
     rep.style = "lines"             # …property setters apply live
+```
+
+**Running it.** Activate the venv you built into, and run **from the repo root** so
+relative paths like `tests/2lao.pdb` resolve. Interactively — IPython, Jupyter, or
+`python -i` — the window stays open and updates as you type. In a plain
+`python script.py` the process exits at the end and the window closes with it, so keep
+it alive:
+
+```python
+import molar_vis as mv
+s = mv.System("tests/2lao.pdb")
+vis = mv.spawn(); mol = vis.add_mol(s)
+mol.add_rep(s("protein"), style="cartoon", color="ss")
+input("viewer open — press Enter to quit\n")   # or a loop / time.sleep(...)
 ```
 
 Because the viewer shares the molecule's memory with Python, anything you do to it —
