@@ -28,7 +28,42 @@ use pyo3::prelude::*;
 use molar::prelude::{Sel, SelectionDef, SelectionExpr, State, Topology};
 use molar_python::{Sel as PySel, System as PySystem};
 use molar_vis_core::eframe;
-use molar_vis_core::{App, AppJob, AppLaunch, EvalError, SharedSource};
+use molar_vis_core::{App, AppJob, AppLaunch, Corner, CueMode, EvalError, Projection, SharedSource};
+
+use pyo3::exceptions::PyValueError;
+
+fn parse_projection(s: &str) -> PyResult<Projection> {
+    match s.to_ascii_lowercase().as_str() {
+        "perspective" | "persp" | "p" => Ok(Projection::Perspective),
+        "orthographic" | "ortho" | "o" => Ok(Projection::Orthographic),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown projection {s:?} (use 'perspective' or 'orthographic')"
+        ))),
+    }
+}
+
+fn parse_corner(s: &str) -> PyResult<Corner> {
+    match s.to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
+        "top_left" | "tl" => Ok(Corner::TopLeft),
+        "top_right" | "tr" => Ok(Corner::TopRight),
+        "bottom_left" | "bl" => Ok(Corner::BottomLeft),
+        "bottom_right" | "br" => Ok(Corner::BottomRight),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown corner {s:?} (top_left/top_right/bottom_left/bottom_right)"
+        ))),
+    }
+}
+
+fn parse_cue_mode(s: &str) -> PyResult<CueMode> {
+    match s.to_ascii_lowercase().as_str() {
+        "linear" => Ok(CueMode::Linear),
+        "exp" => Ok(CueMode::Exp),
+        "exp2" | "exp²" => Ok(CueMode::Exp2),
+        _ => Err(PyValueError::new_err(format!(
+            "unknown depth-cue mode {s:?} (linear/exp/exp2, or 'none' to disable)"
+        ))),
+    }
+}
 
 /// A [`SharedSource`] backed by a pymolar `System` — the viewer renders its topology
 /// and live coordinates **by reference**.
@@ -148,6 +183,93 @@ impl Visualizer {
         (0..n)
             .map(|mol| MolHandle { mol, jobs: self.jobs.clone(), state: self.state.clone() })
             .collect()
+    }
+
+    // --- View controls (mirror the view-settings UI). All apply live. ---
+
+    /// Orbit the camera by absolute angles in degrees (yaw about up, pitch about right).
+    fn rotate(&self, yaw: f32, pitch: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.rotate_view(yaw, pitch)))
+    }
+
+    /// Roll the camera about the view axis by an angle in degrees.
+    fn roll(&self, angle: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.roll_view(angle)))
+    }
+
+    /// Pan by a fraction of the viewport height (`+x` right, `+y` up).
+    fn pan(&self, dx: f32, dy: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.pan_view(dx, dy)))
+    }
+
+    /// Zoom by a factor (`>1` closer, `<1` farther).
+    fn zoom(&self, factor: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.zoom_view(factor)))
+    }
+
+    /// Re-frame all molecules (zoom-to-fit), keeping projection/background/lighting.
+    fn reset_view(&self) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(|app| app.reset_view()))
+    }
+
+    /// Set the projection: `"perspective"` or `"orthographic"`.
+    fn projection(&self, mode: &str) -> PyResult<()> {
+        let p = parse_projection(mode)?;
+        send_job(&self.jobs, Box::new(move |app| app.set_projection(p)))
+    }
+
+    /// Flat background color, RGB in 0–1.
+    fn background(&self, r: f32, g: f32, b: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.set_background_solid([r, g, b])))
+    }
+
+    /// Vertical gradient background; `top`/`bottom` are `(r, g, b)` in 0–1.
+    fn background_gradient(&self, top: (f32, f32, f32), bottom: (f32, f32, f32)) -> PyResult<()> {
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                app.set_background_gradient([top.0, top.1, top.2], [bottom.0, bottom.1, bottom.2])
+            }),
+        )
+    }
+
+    /// Show/hide the orientation-axes gizmo, optionally setting its `corner`
+    /// (`"top_left"` / `"top_right"` / `"bottom_left"` / `"bottom_right"`).
+    #[pyo3(signature = (show=true, corner=None))]
+    fn axes(&self, show: bool, corner: Option<&str>) -> PyResult<()> {
+        let c = corner.map(parse_corner).transpose()?;
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                app.show_axes(show);
+                if let Some(c) = c {
+                    app.set_axes_corner(c);
+                }
+            }),
+        )
+    }
+
+    /// Depth cueing (fog): `mode` is `"linear"`/`"exp"`/`"exp2"` (or `"none"` to
+    /// disable); `strength` = opacity at the back, `start` = where it begins (0–1).
+    #[pyo3(signature = (enabled=true, mode="linear", strength=0.55, start=0.3))]
+    fn depth_cue(&self, enabled: bool, mode: &str, strength: f32, start: f32) -> PyResult<()> {
+        let (enabled, mode) = match mode.to_ascii_lowercase().as_str() {
+            "none" | "off" => (false, CueMode::Linear),
+            other => (enabled, parse_cue_mode(other)?),
+        };
+        send_job(&self.jobs, Box::new(move |app| app.set_depth_cue(enabled, mode, strength, start)))
+    }
+
+    /// Screen-space ambient occlusion: `strength` darkening, `radius` in nm.
+    #[pyo3(signature = (enabled=true, strength=0.9, radius=0.4))]
+    fn ambient_occlusion(&self, enabled: bool, strength: f32, radius: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.set_ambient_occlusion(enabled, strength, radius)))
+    }
+
+    /// Real-time cast shadows: `strength` scales how dark shadowed areas get.
+    #[pyo3(signature = (enabled=true, strength=0.6))]
+    fn shadows(&self, enabled: bool, strength: f32) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(move |app| app.set_shadows(enabled, strength)))
     }
 
     fn __repr__(&self) -> String {

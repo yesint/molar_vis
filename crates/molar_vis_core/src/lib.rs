@@ -26,7 +26,10 @@ mod suggest;
 mod theme;
 mod trajectory;
 
-pub use app::{App, AppJob};
+pub use app::{App, AppJob, Corner};
+// View-setting enums the native Python module parses (projection / depth-cue mode /
+// axes corner) when driving the camera + scene.
+pub use camera::{CueMode, Projection};
 // The per-molecule data backend + the shared-source seam, exposed so the native
 // `molar_vis_py` crate can render directly from a pymolar `System` (zero-copy).
 // `EvalError` rides along because it's in `SharedSource::evaluate`'s signature.

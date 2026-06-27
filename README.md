@@ -295,6 +295,25 @@ DSSP, geometric selections, …), so you analyze and visualize in one session.
 `"licorice"`, `"ballstick"`, `"cartoon"`, `"surface"`; `"element"`, `"chain"`, `"resid"`,
 `"ss"`; `"Opaque"`, `"Transparent"`, `"Glossy"`, `"Glass"`, …
 
+**View & camera** — everything in the view-settings menu is scriptable on the
+`Visualizer`; all apply live:
+
+```python
+vis.rotate(yaw, pitch)            # orbit, degrees   ·  vis.roll(angle)
+vis.pan(dx, dy)                   # fraction of the viewport (+x right, +y up)
+vis.zoom(1.5)                     # >1 closer, <1 farther
+vis.reset_view()                  # re-frame all molecules (zoom-to-fit)
+
+vis.projection("orthographic")   # or "perspective"
+vis.background(0.0, 0.0, 0.05)   # solid RGB (0–1)
+vis.background_gradient((0.1, 0.12, 0.3), (0.0, 0.0, 0.0))   # top, bottom
+
+vis.axes(True, corner="top_left")            # orientation gizmo; corner optional
+vis.depth_cue(mode="exp2", strength=0.6, start=0.3)   # or mode="none" to disable
+vis.ambient_occlusion(True, strength=0.9, radius=0.4)
+vis.shadows(True, strength=0.6)
+```
+
 > **Note.** Live updates are change-detected via a coordinate version counter on the
 > shared state, so a *static* molecule costs nothing — the viewer only re-renders when
 > you actually move atoms. The window runs on a background thread (Linux / Windows;

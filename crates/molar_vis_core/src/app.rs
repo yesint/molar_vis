@@ -12,7 +12,7 @@ use molar::prelude::{AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, S
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
-use crate::camera::{BgKind, Camera, CueMode, Projection};
+use crate::camera::{Ao, Background, BgKind, Camera, CueMode, DepthCue, Projection, Shadow};
 use crate::color::ColorMethod;
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
@@ -382,6 +382,102 @@ impl App {
             rep: crate::script::RepRef::Index(rep),
             text,
         })
+    }
+
+    // --- View controls (mirror the view-settings UI), for the Python API. Camera
+    // mutations re-render automatically (Camera `PartialEq` vs `last_render_camera`);
+    // `view_dirty` also covers the non-camera `axes_on`. ---
+
+    /// Orbit the camera by absolute angles in degrees (yaw about up, pitch about right).
+    pub fn rotate_view(&mut self, yaw_deg: f32, pitch_deg: f32) {
+        self.camera.rotate_deg(yaw_deg, pitch_deg);
+        self.view_dirty = true;
+    }
+
+    /// Roll the camera about the view axis by an absolute angle (degrees).
+    pub fn roll_view(&mut self, deg: f32) {
+        self.camera.roll_deg(deg);
+        self.view_dirty = true;
+    }
+
+    /// Pan by a fraction of the viewport height (`+x` right, `+y` up).
+    pub fn pan_view(&mut self, dx: f32, dy: f32) {
+        self.camera.pan_fraction(dx, dy);
+        self.view_dirty = true;
+    }
+
+    /// Zoom by a factor (`>1` closer, `<1` farther).
+    pub fn zoom_view(&mut self, factor: f32) {
+        self.camera.zoom_by(factor);
+        self.view_dirty = true;
+    }
+
+    /// Re-frame all molecules (zoom-to-fit + default orientation), keeping the current
+    /// projection / background / lighting settings.
+    pub fn reset_view(&mut self) {
+        if let Some((min, max)) = self.scene.bbox() {
+            let framed = Camera::frame_bbox(min, max, self.settings.view.fill);
+            self.camera.target = framed.target;
+            self.camera.distance = framed.distance;
+            self.camera.scene_radius = framed.scene_radius;
+            self.camera.orientation = framed.orientation;
+        }
+        self.view_dirty = true;
+    }
+
+    /// Perspective or orthographic projection.
+    pub fn set_projection(&mut self, projection: Projection) {
+        self.camera.projection = projection;
+        self.view_dirty = true;
+    }
+
+    /// Flat background color (RGB, 0–1).
+    pub fn set_background_solid(&mut self, rgb: [f32; 3]) {
+        self.camera.background.kind = BgKind::Solid;
+        self.camera.background.color = [rgb[0], rgb[1], rgb[2], 1.0];
+        self.view_dirty = true;
+    }
+
+    /// Vertical gradient background (top/bottom RGB, 0–1).
+    pub fn set_background_gradient(&mut self, top: [f32; 3], bottom: [f32; 3]) {
+        self.camera.background = Background {
+            kind: BgKind::Gradient,
+            top: [top[0], top[1], top[2], 1.0],
+            bottom: [bottom[0], bottom[1], bottom[2], 1.0],
+            ..self.camera.background
+        };
+        self.view_dirty = true;
+    }
+
+    /// Show/hide the orientation-axes gizmo.
+    pub fn show_axes(&mut self, on: bool) {
+        self.axes_on = on;
+        self.view_dirty = true;
+    }
+
+    /// Which viewport corner the axes gizmo sits in.
+    pub fn set_axes_corner(&mut self, corner: Corner) {
+        self.axes_corner = corner;
+        self.view_dirty = true;
+    }
+
+    /// Depth cueing (fog): falloff `mode`, plus `strength` (back-of-scene opacity) and
+    /// `start` (where it begins, as a fraction of scene depth). `enabled = false` off.
+    pub fn set_depth_cue(&mut self, enabled: bool, mode: CueMode, strength: f32, start: f32) {
+        self.camera.depth_cue = DepthCue { enabled, start, strength, mode };
+        self.view_dirty = true;
+    }
+
+    /// Screen-space ambient occlusion: `strength` darkening, `radius` in nm.
+    pub fn set_ambient_occlusion(&mut self, enabled: bool, strength: f32, radius: f32) {
+        self.camera.ao = Ao { enabled, strength, radius };
+        self.view_dirty = true;
+    }
+
+    /// Real-time cast shadows: `strength` scales how dark shadowed areas get.
+    pub fn set_shadows(&mut self, enabled: bool, strength: f32) {
+        self.camera.shadow = Shadow { enabled, strength };
+        self.view_dirty = true;
     }
 
     /// Recompile dirty selections and rebuild/reupload dirty geometry. Returns

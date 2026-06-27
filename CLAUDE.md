@@ -1153,6 +1153,13 @@ History labels via `describe_change` ("edit selection", "change coloring",
     `MolHandle`/`RepHandle` pyclasses: `add_mol(Py<System>)`, `add_rep(sel=,style=,color=,material=)`,
     `mols`/`reps` getters, `rep.style/color/material` `#[setter]`s, `rep.select(sel)`. Append-only
     structure tracked in a shared `Arc<Mutex<Vec<usize>>>` (rep count per mol) — no query channel.
+    `Visualizer` also has the full **view-controls** surface (mirrors the view-settings UI):
+    `rotate`/`roll`/`pan`/`zoom`/`reset_view`, `projection`, `background`/`background_gradient`,
+    `axes`, `depth_cue`, `ambient_occlusion`, `shadows` — each parses its string enum args
+    (`Projection`/`CueMode`/`Corner`, re-exported from core) then sends a job to a `pub` `App`
+    view method (`rotate_view`/`set_projection`/`set_background_*`/`show_axes`/`set_depth_cue`/…),
+    which mutate `Camera`/`axes_*` (Camera `PartialEq` re-renders automatically). Camera grew
+    angle/fraction/factor nav helpers (`rotate_deg`/`roll_deg`/`pan_fraction`/`zoom_by`).
     The `#[pymodule]` calls `molar_python::register_molar(m)` so `System`/`Sel`/… are re-exported with
     one consistent PyO3 type identity across the analysis + viewer APIs.
   - **`molar_vis_core` seam**: `MolData::Shared` + `SharedSource` ([[moldata.rs]]); `App` gained an

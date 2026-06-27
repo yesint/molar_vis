@@ -340,6 +340,37 @@ impl Camera {
         self.orientation = (q * self.orientation).normalize();
     }
 
+    // --- Programmatic nav in intuitive units (for the Python/scripting API) ---
+
+    /// Orbit by absolute angles (degrees): `yaw` about the view-up axis, `pitch`
+    /// about the view-right axis. Same trackball convention as [`orbit`](Self::orbit).
+    pub fn rotate_deg(&mut self, yaw: f32, pitch: f32) {
+        let q = Quat::from_axis_angle(self.up(), -yaw.to_radians())
+            * Quat::from_axis_angle(self.right(), -pitch.to_radians());
+        self.orientation = (q * self.orientation).normalize();
+    }
+
+    /// Roll about the view axis by an absolute angle (degrees).
+    pub fn roll_deg(&mut self, deg: f32) {
+        let axis = self.orientation * Vec3::Z;
+        let q = Quat::from_axis_angle(axis, deg.to_radians());
+        self.orientation = (q * self.orientation).normalize();
+    }
+
+    /// Pan by a fraction of the viewport height (`1.0` = one screen-height), so it
+    /// needs no pixel/viewport context. `+dx` moves the view right, `+dy` up.
+    pub fn pan_fraction(&mut self, dx: f32, dy: f32) {
+        let h = self.distance * 2.0 * (self.fov_y * 0.5).tan();
+        self.target += -self.right() * dx * h + self.up() * dy * h;
+    }
+
+    /// Zoom by a multiplicative factor: `>1` moves closer (zoom in), `<1` farther.
+    /// Clamped to the same range as the interactive zoom.
+    pub fn zoom_by(&mut self, factor: f32) {
+        self.distance = (self.distance / factor.max(1e-3))
+            .clamp(self.scene_radius * 0.05, self.scene_radius * 20.0);
+    }
+
     /// Pan (middle-drag): slide `target` in the camera plane so the molecule
     /// tracks the cursor. `viewport_h` is the viewport height in points.
     pub fn pan(&mut self, dx: f32, dy: f32, viewport_h: f32) {
