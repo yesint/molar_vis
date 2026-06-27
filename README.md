@@ -270,10 +270,10 @@ DSSP, geometric selections, …), so you analyze and visualize in one session.
 `"licorice"`, `"ballstick"`, `"cartoon"`, `"surface"`; `"element"`, `"chain"`, `"resid"`,
 `"ss"`; `"Opaque"`, `"Transparent"`, `"Glossy"`, `"Glass"`, …
 
-> **Note.** Live coordinate updates re-render the shared molecule every frame while the
-> window is open (great for interactive work and animation; for very large systems a
-> coordinate-version stamp to skip unchanged frames is a planned optimization). The window
-> runs on a background thread (Linux / Windows; macOS support is pending).
+> **Note.** Live updates are change-detected via a coordinate version counter on the
+> shared state, so a *static* molecule costs nothing — the viewer only re-renders when
+> you actually move atoms. The window runs on a background thread (Linux / Windows;
+> macOS support is pending).
 
 ## Selections
 
@@ -355,7 +355,7 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 - Browser trajectory loading reads the whole file into memory (fine for typical sizes); true
   random-access disk streaming for very large trajectories is a possible future addition.
 - The Python viewer runs on a background thread (Linux/Windows); **macOS** (main-thread event loop)
-  and a coordinate-version stamp to skip re-rendering unchanged live frames are planned.
+  support is planned.
 
 This is a young project under active development; expect rough edges.
 

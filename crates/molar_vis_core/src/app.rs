@@ -274,17 +274,24 @@ impl App {
         }
     }
 
-    /// Mark every shared (pymolar-backed) molecule's geometry as coords-dirty, so the
-    /// render loop re-reads its externally-owned coordinates this frame. That's how a
-    /// Python-side `sel.translate(...)` (which mutates the shared `State` in place)
-    /// shows up live. Cheap rebuild (reuses the cached secondary structure, no DSSP);
-    /// a coords version stamp would let us skip unchanged frames, but isn't needed for
-    /// interactive sizes. Only runs while the external (Python) channel is connected.
+    /// For each shared (pymolar-backed) molecule whose external coordinates changed
+    /// since we last rendered, mark its geometry coords-dirty so the render loop
+    /// re-reads them. That's how a Python-side `sel.translate(...)` (which mutates the
+    /// shared `State` in place) shows up live. Change is detected by polling the
+    /// source's coordinate version counter (lock-free, no GIL) and comparing it to the
+    /// last-rendered value — so a *static* shared molecule costs nothing and the
+    /// viewer's "idle = 0 GPU" still holds. Cheap rebuild (reuses the cached secondary
+    /// structure, no DSSP). Only runs while the external (Python) channel is connected.
     fn mark_shared_dirty(&mut self) {
         for mol in &mut self.scene.molecules {
             if !mol.data.is_shared() {
                 continue;
             }
+            let version = mol.data.coords_version();
+            if version == mol.shared_coords_version {
+                continue; // coordinates unchanged since the last render
+            }
+            mol.shared_coords_version = version;
             for rep in &mut mol.reps {
                 rep.coords_dirty = true;
             }

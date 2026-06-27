@@ -1159,15 +1159,23 @@ History labels via `describe_change` ("edit selection", "change coloring",
     external job channel — `pub type AppJob = Box<dyn FnOnce(&mut App) + Send>`, `jobs_rx` field,
     `set_jobs(rx)`, `run_external_jobs()` drained at the top of `ui()` (and while connected the
     viewport `request_repaint_after(16ms)` to poll, since egui only calls `ui` on input/repaint);
-    `mark_shared_dirty()` re-marks shared molecules `coords_dirty` each frame so a Python-side
-    `sel.translate()` (in-place coord edit) renders live (reused trajectory `coords_dirty` path, no
-    DSSP). `pub` App methods the jobs call: `add_shared_molecule`, `add_rep_default`,
+    `mark_shared_dirty()` re-marks a shared molecule `coords_dirty` so a Python-side `sel.translate()`
+    (in-place coord edit) renders live (reused trajectory `coords_dirty` path, no DSSP) — but **only
+    when its coordinates actually changed**, detected by polling a coordinate **version counter** (see
+    below) and comparing to `Molecule.shared_coords_version`; a static shared molecule costs nothing
+    (idle = 0 GPU preserved). `SharedSource::coords_version()` + `MolData::coords_version()` expose it.
+    `pub` App methods the jobs call: `add_shared_molecule`, `add_rep_default`,
     `set_rep_{style,color,material,selection}` (selection via `pick::index_selection_string`).
-  - **molar changes** (pushed to master, rev `abf6592`): `Sel::bind_to(&top,&st) -> SelBoundParts`
+  - **molar changes** (pushed to master, rev `ae3b3d8`): `Sel::bind_to(&top,&st) -> SelBoundParts`
     (the disjoint parts-bind the shared backend needs); `SystemPy`/`SelPy` `r_top`/`r_st`/`py_*`/
     `index` accessors made `pub`; molar_python now `crate-type=["cdylib","rlib"]` + re-exports
-    `System`/`Sel`/`State`/`Topology` + a reusable `pub fn register_molar(m)`; also fixed pre-existing
-    molar_python `Bond`-type drift (`&[usize;2]`→`&Bond`). molar_vis pins molar @ `abf6592`.
+    `System`/`Sel`/`State`/`Topology` + a reusable `pub fn register_molar(m)`; fixed pre-existing
+    molar_python `Bond`-type drift (`&[usize;2]`→`&Bond`); and (ae3b3d8) a **coords version counter**:
+    `StatePy` carries an `AtomicU64` bumped (`Release`) by every in-place coord mutator
+    (`Sel.translate`/`apply_transform`/`unwrap_simple`, the `coords` setter, `Particle.pos`/`x`/`y`/`z`),
+    read via `coords_version_atomic()`; `PySystemSource` caches `*const AtomicU64` and loads it
+    (`Acquire`) lock-free per frame (no GIL). ~free + unread for standalone pymolar. molar_vis pins
+    molar @ `ae3b3d8`.
   - **Dep note**: molar wants nalgebra 0.35, numpy 0.27 (in molar_python) wants 0.34 → workspace
     pinned to nalgebra 0.34.2 (`cargo update -p nalgebra@0.35.0 --precise 0.34.2`). pyo3 0.27.2 builds
     for CPython 3.14 with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`.
@@ -1176,8 +1184,7 @@ History labels via `describe_change` ("edit selection", "change coloring",
     REPL live), add_mol+add_rep renders the **SS-colored cartoon** (screenshot), `vis.mols[0].reps`
     enumerates reps, `rep.style='lines'` flips live, and `sel.translate()` of `resid 1:120` (904
     atoms) visibly deforms the cartoon live. Native build 0 warnings, 63 core tests pass, wasm 4
-    pre-existing warnings. **Deferred**: macOS main-thread loop; a coords version stamp to skip
-    re-rendering unchanged live frames (currently shared mols re-render every frame); GIL-discipline
+    pre-existing warnings. **Deferred**: macOS main-thread loop; GIL-discipline
     on the render-time raw-ptr reads (in-place edits are at worst a 1-frame glitch, never UB; only a
     Python-side `System.state` *reassignment* could dangle — documented limitation); two-way edits
     *from* the viewer back to pymolar; the web JS-API/anywidget half of the dual-host plan.

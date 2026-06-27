@@ -44,6 +44,9 @@ struct PySystemSource {
     sys: Py<PySystem>,
     top: *const Topology,
     st: *const State,
+    /// The backing `State`'s coordinate generation counter (inside `StatePy`, kept
+    /// alive by `sys`). Polled lock-free by the viewer to detect external coord edits.
+    version: *const std::sync::atomic::AtomicU64,
 }
 
 // The pointers reference GIL-guarded, `Py`-kept-alive memory; the source is moved to
@@ -55,7 +58,8 @@ impl PySystemSource {
         let sp = sys.bind(py).get();
         let top = sp.r_top() as *const Topology;
         let st = sp.r_st() as *const State;
-        Self { sys, top, st }
+        let version = sp.py_st().get().coords_version_atomic() as *const std::sync::atomic::AtomicU64;
+        Self { sys, top, st, version }
     }
 }
 
@@ -67,6 +71,13 @@ impl SharedSource for PySystemSource {
 
     fn state(&self) -> &State {
         unsafe { &*self.st }
+    }
+
+    fn coords_version(&self) -> u64 {
+        // SAFETY: the atomic lives in the `StatePy` kept alive by `self.sys`; an
+        // atomic load needs no GIL. `Acquire` pairs with pymolar's `Release` bump so
+        // we observe the coordinate writes that preceded the version we read.
+        unsafe { (*self.version).load(std::sync::atomic::Ordering::Acquire) }
     }
 
     fn evaluate(&self, text: &str) -> Result<(SelectionExpr, Sel), EvalError> {

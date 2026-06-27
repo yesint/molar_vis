@@ -397,6 +397,11 @@ pub struct Molecule {
     /// Lazily-built spatial grid of this molecule's atoms (over the displayed frame),
     /// for the lens's ray-neighborhood query. Invalidated (`None`) on a frame change.
     pub hover_grid: Option<crate::spatial::AtomGrid>,
+    /// Last `MolData::coords_version` the viewer rendered, for a **shared** molecule —
+    /// when the external (pymolar) coordinates change, this differs from the source's
+    /// current version and the render loop re-reads the coords (see
+    /// `App::mark_shared_dirty`). Always 0 / unused for an owned molecule.
+    pub shared_coords_version: u64,
     /// GPU pick geometry: one id-stamped sphere impostor per **pickable** atom (the
     /// atoms CPU `pick` ray-casts: eligible atoms of visible reps, at their displayed
     /// position and effective radius). Rendered into the id-buffer for GPU picking.
@@ -518,6 +523,7 @@ impl Molecule {
             hover_detail_gpu: RepGpu::default(),
             hover_detail_dirty: false,
             hover_grid: None,
+            shared_coords_version: 0,
             #[cfg(not(target_arch = "wasm32"))]
             pick_gpu: RepGpu::default(),
             #[cfg(not(target_arch = "wasm32"))]

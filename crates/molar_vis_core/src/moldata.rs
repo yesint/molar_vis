@@ -43,6 +43,11 @@ pub trait SharedSource {
     /// because a full selection needs bond/molecule providers the bare
     /// `SelBoundParts` lacks, but the pymolar `System` supplies).
     fn evaluate(&self, text: &str) -> Result<(SelectionExpr, Sel), EvalError>;
+
+    /// A monotonic counter that increases whenever the source's coordinates are
+    /// mutated externally. The viewer polls it (lock-free) to re-render the shared
+    /// molecule only when it actually changes, instead of every frame.
+    fn coords_version(&self) -> u64;
 }
 
 /// Where a molecule's topology + coordinates live.
@@ -58,9 +63,19 @@ pub enum MolData {
 impl MolData {
     /// Whether this molecule renders from an external shared source (pymolar). Such
     /// molecules have their coordinates mutated from outside the viewer, so the
-    /// render loop re-reads them every polled frame (see `App::mark_shared_dirty`).
+    /// render loop polls [`coords_version`](Self::coords_version) to re-read them when
+    /// they change (see `App::mark_shared_dirty`).
     pub fn is_shared(&self) -> bool {
         matches!(self, MolData::Shared(_))
+    }
+
+    /// The shared source's coordinate generation counter (0 for an owned molecule —
+    /// owned coordinates only change through the viewer's own dirty flags).
+    pub fn coords_version(&self) -> u64 {
+        match self {
+            MolData::Owned(_) => 0,
+            MolData::Shared(s) => s.coords_version(),
+        }
     }
 
     /// Borrow the topology (per-atom identities, bonds metadata).
