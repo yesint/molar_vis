@@ -55,8 +55,9 @@ const IDX_MASK: u32 = 0x3fffffffu;
 const KEY_INTENSITY: f32 = 0.8;
 const AMBIENT_FILL: f32 = 0.45;
 const AMBIENT_FLOOR: f32 = 0.1;
-// Shadow-ray cone half-angle (radians): jittering it per sample gives a soft penumbra.
-const SHADOW_SOFTNESS: f32 = 0.05;
+// Shadow-ray cone half-angle (radians) at softness = 1; the per-sample jitter over this
+// cone gives a soft penumbra. The actual cone = `shadow.softness` (0..1) × this.
+const MAX_SHADOW_CONE: f32 = 0.15;
 
 fn pcg(v_in: u32) -> u32 {
     let state = v_in * 747796405u + 2891336453u;
@@ -326,7 +327,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ndotl = max(dot(nrm, light), 0.0);
         var shadow_vis = 1.0;
         if (U.shadow.z > 0.5 && ndotl > 0.0) {
-            let ldir = jitter_cone(light, SHADOW_SOFTNESS, rand(&seed), rand(&seed));
+            let ldir = jitter_cone(light, U.shadow.w * MAX_SHADOW_CONE, rand(&seed), rand(&seed));
             if (any_hit(p + nrm * U.shadow.y, ldir, T_MAX)) { shadow_vis = 1.0 - U.shadow.x; }
         }
         let hv = normalize(light + view_dir);

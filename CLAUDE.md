@@ -771,9 +771,12 @@ is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anc
     `enabled=false`) + **Strength** / **Start** rows, each a `slider_with_edit` (a `Slider` + a
     `DragValue` edit box).
   - **Lighting**: **Ambient occlusion** (enable + Strength/Radius; `Camera::ao`) + **Cast shadows**
-    (enable + Strength; `Camera::shadow`) + a **Ray tracing** group — a **Ray-traced viewport**
-    checkbox (`Camera::raytrace_inplace`, default on, greyed without a compute-capable device) that
-    progressively ray-traces the idle view in place (the AO/shadow controls feed it).
+    (enable + Strength + **Softness**; `Camera::shadow` — Softness rides `shadow_uniform`'s 4th slot
+    and is used only by the ray tracer's soft penumbra) + a **Ray tracing** group — a **Ray-traced
+    viewport** checkbox (`Camera::raytrace_inplace`, default on, greyed without a compute-capable
+    device) that progressively ray-traces the idle view in place. The AO/shadow controls feed the
+    trace, and changing any of them re-traces (the viewport requests a follow-up frame after a
+    settings change so the trace re-engages from idle — see `app/viewport.rs`).
   - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`,
     hand-laid-out: a rectangle showing a **live mini downsampled render of the scene** (the
     `renderer.texture_id()` painted into the rect), an on/off **checkbox in its center** (on a

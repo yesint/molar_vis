@@ -164,6 +164,14 @@ impl App {
                 self.last_render_camera = Some(self.camera);
                 self.last_size = size_px;
                 self.rt_reset = true; // restart the progressive trace once the view settles
+                if rt_eligible {
+                    // Schedule a follow-up frame so the now-settled view re-engages the
+                    // ray tracer. Without this, a one-shot change from an idle state — an
+                    // AO/shadow toggle, a settings tweak — would leave the rasterized frame
+                    // on screen (egui requests no repaint after it), so the trace would
+                    // never re-run and the change would look like it did nothing.
+                    ui.ctx().request_repaint();
+                }
             } else if rt_eligible && !ui.ctx().egui_is_using_pointer() {
                 // Steady view: progressively refine into the dedicated 1× ray-trace target
                 // (PyMOL-`ray` style). Trace only while still refining; once converged, keep

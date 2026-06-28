@@ -281,6 +281,10 @@ impl App {
                         ui.label("Strength");
                         slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
                         ui.end_row();
+                        ui.label("Softness")
+                            .on_hover_text("Soft shadow edges (ray-traced view only)");
+                        slider_with_edit(ui, &mut sh.softness, 0.0..=1.0, sh.enabled);
+                        ui.end_row();
                     });
             });
         });

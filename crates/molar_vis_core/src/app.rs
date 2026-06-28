@@ -12,7 +12,7 @@ use molar::prelude::{AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, S
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
-use crate::camera::{Ao, Background, BgKind, Camera, CueMode, DepthCue, Projection, Shadow};
+use crate::camera::{Ao, Background, BgKind, Camera, CueMode, DepthCue, Projection};
 use crate::color::ColorMethod;
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
@@ -497,7 +497,8 @@ impl App {
 
     /// Real-time cast shadows: `strength` scales how dark shadowed areas get.
     pub fn set_shadows(&mut self, enabled: bool, strength: f32) {
-        self.camera.shadow = Shadow { enabled, strength };
+        self.camera.shadow.enabled = enabled;
+        self.camera.shadow.strength = strength;
         self.view_dirty = true;
     }
 

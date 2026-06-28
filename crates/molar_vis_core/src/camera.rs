@@ -87,11 +87,20 @@ impl Default for Ao {
 pub struct Shadow {
     pub enabled: bool,
     pub strength: f32,
+    /// Edge softness in [0,1] (0 = hard). Only the ray tracer uses it (soft penumbra via
+    /// a jittered shadow ray); the rasterized shadow map ignores it. `#[serde(default)]`
+    /// so older sessions still load.
+    #[serde(default = "default_shadow_softness")]
+    pub softness: f32,
+}
+
+fn default_shadow_softness() -> f32 {
+    0.4
 }
 
 impl Default for Shadow {
     fn default() -> Self {
-        Self { enabled: false, strength: 0.6 }
+        Self { enabled: false, strength: 0.6, softness: default_shadow_softness() }
     }
 }
 
@@ -279,11 +288,12 @@ impl Camera {
         [self.ao.radius.max(1e-3), 0.015, self.ao.strength, enabled]
     }
 
-    /// Shadow parameters for the renderer: `[strength, bias, enabled, _]`
-    /// (`enabled == 0` skips the shadow map + test).
+    /// Shadow parameters for the renderer: `[strength, bias, enabled, softness]`
+    /// (`enabled == 0` skips the shadow map + test; `softness` is used only by the ray
+    /// tracer's soft shadow).
     pub fn shadow_uniform(&self) -> [f32; 4] {
         let enabled = if self.shadow.enabled { 1.0 } else { 0.0 };
-        [self.shadow.strength, 0.0025, enabled, 0.0]
+        [self.shadow.strength, 0.0025, enabled, self.shadow.softness.clamp(0.0, 1.0)]
     }
 
     /// Eye-space distance range `[front, back]` (positive, away from the camera)
