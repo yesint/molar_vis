@@ -27,14 +27,19 @@ mod theme;
 mod trajectory;
 
 pub use app::{App, AppJob, Corner};
-// View-setting enums the native Python module parses (projection / depth-cue mode /
-// axes corner) when driving the camera + scene.
+// View-setting enums the external hosts parse (projection / depth-cue mode / axes
+// corner) when driving the camera + scene.
 pub use camera::{CueMode, Projection};
+// String→enum parsers shared by the external hosts that drive the camera with string
+// arguments (the native Python module + the wasm JavaScript API).
+pub use script::command::{parse_corner, parse_cue_mode, parse_projection};
 // The per-molecule data backend + the shared-source seam, exposed so the native
-// `molar_vis_py` crate can render directly from a pymolar `System` (zero-copy).
-// `EvalError` rides along because it's in `SharedSource::evaluate`'s signature.
+// `molar_vis_py` crate (pymolar `System`) and the wasm `molar_vis_js` crate (`Rc<System>`)
+// can render a molecule by reference (zero-copy). `EvalError` rides along because it's
+// in `SharedSource::evaluate`'s signature; `evaluate` so a shared source can compile +
+// run a selection against an owned `System`.
 pub use moldata::{MolData, SharedSource};
-pub use scene::EvalError;
+pub use scene::{evaluate, EvalError};
 pub use launch::{parse_file_args, AppLaunch};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::run;

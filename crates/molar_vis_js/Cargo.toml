@@ -1,0 +1,31 @@
+[package]
+name = "molar_vis_js"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wasm-bindgen JavaScript API driving the molar_vis viewer from a web page"
+
+[lib]
+# The JS module name (wasm-pack emits `molar_vis.js` + `molar_vis_bg.wasm`). The
+# wasm-bindgen face of the viewer, mirroring `molar_vis_py` (the PyO3 face): the
+# viewer-control surface (System/Sel/Visualizer/MolHandle/RepHandle) re-emitted for JS.
+name = "molar_vis"
+crate-type = ["cdylib"]
+
+# All deps are wasm-only: the crate is empty on non-wasm targets (its content is gated
+# behind `#![cfg(target_arch = "wasm32")]`), so a plain native `cargo build` of the
+# workspace produces an empty cdylib and pulls nothing extra. Built for the browser with
+# `wasm-pack build crates/molar_vis_js --target web`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+molar_vis_core = { path = "../molar_vis_core" }
+# Same molar as the workspace (rev-pinned, default-features => Float = f32) so the
+# molar types unify with molar_vis_core's across the graph.
+molar = { workspace = true }
+log = { workspace = true }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log = "0.2"
+web-sys = { version = "0.3", features = ["Document", "Window", "Element", "HtmlCanvasElement"] }

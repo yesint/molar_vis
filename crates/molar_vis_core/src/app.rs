@@ -194,20 +194,28 @@ pub struct App {
     /// Persistent Rhai REPL backing the console: keeps the engine + a `Scope` alive
     /// across input lines so `let` bindings survive between lines (see `script.rs`).
     script: crate::script::ScriptSession,
-    /// External command channel for the native Python module (`molar_vis_py`): jobs
-    /// queued from the Python thread are drained + run with `&mut App` at the top of
-    /// each `ui()`, so Python can drive the running viewer. `None` for the standalone
-    /// app and wasm. See [`AppJob`].
+    /// External command channel for the native Python module (`molar_vis_py`) and the
+    /// wasm JavaScript API (`molar_vis_js`): jobs queued from the host are drained + run
+    /// with `&mut App` at the top of each `ui()`, so an external driver can control the
+    /// running viewer. `None` for the standalone app (native + the trunk web demo);
+    /// connected by `molar_vis_py::spawn` / `molar_vis_js::start`. See [`AppJob`].
     jobs_rx: Option<std::sync::mpsc::Receiver<AppJob>>,
 }
 
 
 /// A unit of work run on the viewer (UI) thread with mutable [`App`] access. The
-/// native Python module sends these over a channel from the Python thread (e.g. "add
-/// this shared molecule", "set this rep's style"); they're drained at the top of each
-/// [`App::ui`]. The closure is `Send` so it can cross the thread boundary (it may
-/// capture pyo3 `Py<_>` handles, which are `Send`).
+/// native Python module (and the wasm JavaScript API) send these over a channel (e.g.
+/// "add this shared molecule", "set this rep's style"); they're drained at the top of
+/// each [`App::ui`].
+///
+/// Native: the closure is `Send` so it can cross the Python→UI thread boundary (it may
+/// capture pyo3 `Py<_>` handles, which are `Send`). Wasm is single-threaded — the
+/// channel never crosses a thread — so the `Send` bound is dropped there, which lets a
+/// closure capture non-`Send` data like the `Rc<System>` the JS `Visualizer` shares.
+#[cfg(not(target_arch = "wasm32"))]
 pub type AppJob = Box<dyn FnOnce(&mut App) + Send>;
+#[cfg(target_arch = "wasm32")]
+pub type AppJob = Box<dyn FnOnce(&mut App)>;
 
 
 /// Tabs in the top-bar "view settings" (hamburger) menu.

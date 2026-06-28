@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>molar_vis — JS API demo</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #050510;
+      }
+      /* eframe renders into this canvas; fill the window. */
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      /* Simple centred loading text shown until the viewer paints. */
+      #loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #8ab4ff;
+        font: 16px system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="molar_vis_canvas"></canvas>
+    <div id="loading">Loading molar_vis…</div>
+
+    <!--
+      This page is both the GitHub Pages demo *and* the canonical usage example: it
+      drives the viewer entirely through the public JavaScript API (the same surface an
+      embedding host would use), so the API can't silently rot. It imports the
+      wasm-pack-built ES module from ./pkg/ and fetches the bundled 2lao.pdb.
+    -->
+    <script type="module">
+      import init, { start, System } from "./pkg/molar_vis.js";
+
+      async function main() {
+        // 1. Instantiate the wasm module (downloads + compiles the .wasm).
+        await init();
+
+        // 2. Boot the viewer onto the canvas already in the page.
+        const vis = start("molar_vis_canvas");
+
+        // 3. Fetch a structure and parse it (bytes -> a molar System).
+        const buf = await (await fetch("./2lao.pdb")).arrayBuffer();
+        const sys = System.from_bytes("2lao.pdb", new Uint8Array(buf));
+
+        // 4. Render it, then add an SS-colored cartoon over the protein.
+        const mol = vis.add_mol(sys);
+        const rep = mol.add_rep(sys.select("protein"), "cartoon", "ss");
+
+        // 5. A couple of view tweaks, just to exercise the controls.
+        vis.background_gradient([0.02, 0.02, 0.06], [0.10, 0.12, 0.20]);
+        vis.projection("perspective");
+
+        // Console oracle for the headless smoke test (see the crate README / plan).
+        console.log(`molar_vis demo: ${sys.name} (${sys.numAtoms} atoms), ` +
+                    `protein = ${sys.select("protein").numAtoms} atoms; ` +
+                    `mols=${vis.mols.length}, reps=${vis.mols[0].reps.length}`);
+
+        // Expose handles for interactive poking from the devtools console.
+        Object.assign(window, { vis, sys, mol, rep });
+
+        // Drop the loading text once the canvas has been laid out / painted.
+        const obs = new ResizeObserver(() => {
+          document.getElementById("loading")?.remove();
+          obs.disconnect();
+        });
+        obs.observe(document.getElementById("molar_vis_canvas"));
+      }
+
+      main().catch((e) => {
+        console.error(e);
+        const el = document.getElementById("loading");
+        if (el) el.textContent = "molar_vis failed to start: " + e;
+      });
+    </script>
+  </body>
+</html>

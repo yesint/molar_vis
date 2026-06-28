@@ -28,42 +28,12 @@ use pyo3::prelude::*;
 use molar::prelude::{Sel, SelectionDef, SelectionExpr, State, Topology};
 use molar_python::{Sel as PySel, System as PySystem};
 use molar_vis_core::eframe;
-use molar_vis_core::{App, AppJob, AppLaunch, Corner, CueMode, EvalError, Projection, SharedSource};
+use molar_vis_core::{
+    parse_corner, parse_cue_mode, parse_projection, App, AppJob, AppLaunch, CueMode, EvalError,
+    SharedSource,
+};
 
 use pyo3::exceptions::PyValueError;
-
-fn parse_projection(s: &str) -> PyResult<Projection> {
-    match s.to_ascii_lowercase().as_str() {
-        "perspective" | "persp" | "p" => Ok(Projection::Perspective),
-        "orthographic" | "ortho" | "o" => Ok(Projection::Orthographic),
-        _ => Err(PyValueError::new_err(format!(
-            "unknown projection {s:?} (use 'perspective' or 'orthographic')"
-        ))),
-    }
-}
-
-fn parse_corner(s: &str) -> PyResult<Corner> {
-    match s.to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
-        "top_left" | "tl" => Ok(Corner::TopLeft),
-        "top_right" | "tr" => Ok(Corner::TopRight),
-        "bottom_left" | "bl" => Ok(Corner::BottomLeft),
-        "bottom_right" | "br" => Ok(Corner::BottomRight),
-        _ => Err(PyValueError::new_err(format!(
-            "unknown corner {s:?} (top_left/top_right/bottom_left/bottom_right)"
-        ))),
-    }
-}
-
-fn parse_cue_mode(s: &str) -> PyResult<CueMode> {
-    match s.to_ascii_lowercase().as_str() {
-        "linear" => Ok(CueMode::Linear),
-        "exp" => Ok(CueMode::Exp),
-        "exp2" | "exp²" => Ok(CueMode::Exp2),
-        _ => Err(PyValueError::new_err(format!(
-            "unknown depth-cue mode {s:?} (linear/exp/exp2, or 'none' to disable)"
-        ))),
-    }
-}
 
 /// A [`SharedSource`] backed by a pymolar `System` — the viewer renders its topology
 /// and live coordinates **by reference**.
@@ -214,7 +184,7 @@ impl Visualizer {
 
     /// Set the projection: `"perspective"` or `"orthographic"`.
     fn projection(&self, mode: &str) -> PyResult<()> {
-        let p = parse_projection(mode)?;
+        let p = parse_projection(mode).map_err(PyValueError::new_err)?;
         send_job(&self.jobs, Box::new(move |app| app.set_projection(p)))
     }
 
@@ -237,7 +207,7 @@ impl Visualizer {
     /// (`"top_left"` / `"top_right"` / `"bottom_left"` / `"bottom_right"`).
     #[pyo3(signature = (show=true, corner=None))]
     fn axes(&self, show: bool, corner: Option<&str>) -> PyResult<()> {
-        let c = corner.map(parse_corner).transpose()?;
+        let c = corner.map(parse_corner).transpose().map_err(PyValueError::new_err)?;
         send_job(
             &self.jobs,
             Box::new(move |app| {
@@ -255,7 +225,7 @@ impl Visualizer {
     fn depth_cue(&self, enabled: bool, mode: &str, strength: f32, start: f32) -> PyResult<()> {
         let (enabled, mode) = match mode.to_ascii_lowercase().as_str() {
             "none" | "off" => (false, CueMode::Linear),
-            other => (enabled, parse_cue_mode(other)?),
+            other => (enabled, parse_cue_mode(other).map_err(PyValueError::new_err)?),
         };
         send_job(&self.jobs, Box::new(move |app| app.set_depth_cue(enabled, mode, strength, start)))
     }

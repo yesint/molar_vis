@@ -1,9 +1,11 @@
 name: Deploy web demo to GitHub Pages
 
-# Build the wasm/browser app with trunk and publish it to GitHub Pages.
-# Project site, so assets are served under /<repo>/ — set --public-url to match.
-# Only deploys on a pushed **version tag** (e.g. v0.1.0), so day-to-day commits to
-# main don't redeploy; `workflow_dispatch` still allows a manual redeploy.
+# Build the embeddable JavaScript module (`molar_vis_js`) with wasm-pack and publish a
+# demo page that drives the viewer through that public JS API, to GitHub Pages.
+# wasm-pack `--target web` emits an ES module with relative imports, so it resolves under
+# the project subpath (https://<owner>.github.io/molar_vis/) with no public-url rewrite.
+# Only deploys on a pushed **version tag** (e.g. v0.1.0), so day-to-day commits to main
+# don't redeploy; `workflow_dispatch` still allows a manual redeploy.
 on:
   push:
     tags:
@@ -21,7 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  TRUNK_VERSION: "0.21.14"
+  WASM_PACK_VERSION: "0.13.1"
 
 jobs:
   build:
@@ -44,22 +46,30 @@ jobs:
         with:
           enablement: true
 
-      - name: Install trunk
+      - name: Install wasm-pack
         run: |
-          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-            | tar -xzf - -C "$HOME/.cargo/bin"
+          curl -fsSL "https://github.com/rustwasm/wasm-pack/releases/download/v${WASM_PACK_VERSION}/wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xzf - --strip-components=1 -C "$HOME/.cargo/bin" \
+              "wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl/wasm-pack"
 
-      # Release build (wasm-opt -Oz via the index.html data-wasm-opt attr). The
-      # public URL must be the repo subpath so the injected JS/wasm resolve on
-      # Pages (https://<owner>.github.io/molar_vis/).
-      - name: Build
-        working-directory: crates/molar_vis_web
-        run: trunk build --release --public-url "/${GITHUB_REPOSITORY#*/}/"
+      # Emit the importable ES module into crates/molar_vis_js/web/pkg/ (next to the
+      # demo's index.html, which imports `./pkg/molar_vis.js`).
+      - name: Build JS module
+        run: wasm-pack build crates/molar_vis_js --target web --release --out-dir web/pkg
+
+      # Assemble the Pages site: the demo page + its pkg/ module + the bundled structure
+      # the demo fetches.
+      - name: Assemble dist
+        run: |
+          mkdir -p dist
+          cp crates/molar_vis_js/web/index.html dist/
+          cp -r crates/molar_vis_js/web/pkg dist/pkg
+          cp tests/2lao.pdb dist/2lao.pdb
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: crates/molar_vis_web/dist
+          path: dist
 
   deploy:
     needs: build

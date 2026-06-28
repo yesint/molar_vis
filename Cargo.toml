@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/molar_vis_core", "crates/molar_vis", "crates/molar_vis_web", "crates/molar_vis_py"]
+members = ["crates/molar_vis_core", "crates/molar_vis", "crates/molar_vis_web", "crates/molar_vis_py", "crates/molar_vis_js"]
 resolver = "2"
 
 [workspace.package]

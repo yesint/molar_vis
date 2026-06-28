@@ -7,6 +7,10 @@
 # Trunk (wasm/browser) build output
 /crates/molar_vis_web/dist
 
+# wasm-pack output for the JS-API demo + the assembled Pages dist (CI builds these)
+/crates/molar_vis_js/web/pkg
+/dist
+
 # Large generated test system (regenerate with gmx genconf; see tests/README.md)
 /tests/large_375k.gro
 

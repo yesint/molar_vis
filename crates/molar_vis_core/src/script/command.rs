@@ -12,6 +12,8 @@
 
 use std::path::PathBuf;
 
+use crate::app::Corner;
+use crate::camera::{CueMode, Projection};
 use crate::color::{ColorMethod, DEFAULT_SOLID};
 use crate::material::Material;
 
@@ -70,4 +72,45 @@ pub fn parse_color(s: &str) -> Option<ColorMethod> {
 pub fn parse_material(s: &str) -> Option<Material> {
     let s = s.trim();
     Material::ALL.into_iter().find(|m| m.label().eq_ignore_ascii_case(s))
+}
+
+// The view-enum parsers below are shared by the external hosts that drive the camera
+// with string arguments — the native Python module (`molar_vis_py`) and the wasm
+// JavaScript API (`molar_vis_js`). They return `String` errors; each binding maps that
+// to its own error type (`PyValueError` / `JsError`).
+
+/// Parse a projection name: `"perspective"`/`"persp"`/`"p"` or `"orthographic"`/`"ortho"`/`"o"`.
+pub fn parse_projection(s: &str) -> Result<Projection, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "perspective" | "persp" | "p" => Ok(Projection::Perspective),
+        "orthographic" | "ortho" | "o" => Ok(Projection::Orthographic),
+        _ => Err(format!("unknown projection {s:?} (use 'perspective' or 'orthographic')")),
+    }
+}
+
+/// Parse an axes-gizmo corner: `"top_left"`/`"top_right"`/`"bottom_left"`/`"bottom_right"`
+/// (or the `tl`/`tr`/`bl`/`br` shorthands; spaces and dashes normalize to underscores).
+pub fn parse_corner(s: &str) -> Result<Corner, String> {
+    match s.to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
+        "top_left" | "tl" => Ok(Corner::TopLeft),
+        "top_right" | "tr" => Ok(Corner::TopRight),
+        "bottom_left" | "bl" => Ok(Corner::BottomLeft),
+        "bottom_right" | "br" => Ok(Corner::BottomRight),
+        _ => Err(format!(
+            "unknown corner {s:?} (top_left/top_right/bottom_left/bottom_right)"
+        )),
+    }
+}
+
+/// Parse a depth-cue falloff mode: `"linear"`/`"exp"`/`"exp2"`. (The `"none"`/`"off"`
+/// disable case is handled by the caller, which also owns the `enabled` flag.)
+pub fn parse_cue_mode(s: &str) -> Result<CueMode, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "linear" => Ok(CueMode::Linear),
+        "exp" => Ok(CueMode::Exp),
+        "exp2" | "exp²" => Ok(CueMode::Exp2),
+        _ => Err(format!(
+            "unknown depth-cue mode {s:?} (linear/exp/exp2, or 'none' to disable)"
+        )),
+    }
 }

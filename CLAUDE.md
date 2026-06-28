@@ -19,6 +19,7 @@ cargo run -p molar_vis -- -m a.pdb a.xtc -m b.pdb   # `-m` starts a new molecule
 cargo test -p molar_vis_core
 cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
 cargo build -p molar_vis_py                                     # native Python module (compile check)
+wasm-pack build crates/molar_vis_js --target web --out-dir web/pkg   # browser JS API (M27)
 ```
 
 **Native Python module** (`crates/molar_vis_py`, M26): `import molar_vis` to drive the viewer
@@ -35,6 +36,17 @@ python -c "import molar_vis as mv; s=mv.System('tests/2lao.pdb'); v=mv.spawn(); 
 Headless verification on this dev box used a scratch venv + `spectacle -b -n -a -o out.png` to
 screenshot the window opened from Python. NB: `pkill -f molar_vis-ui` matches its own shell command
 line — kill the python process by PID instead.
+
+**Browser JavaScript API** (`crates/molar_vis_js`, M27): the wasm-bindgen face of the viewer — the
+web half of the dual-host plan, mirroring `molar_vis_py` so the same script reads almost identically
+in Python and JS. A surrounding web page does `import init, { start, System } from "./pkg/molar_vis.js"`,
+`await init()`, `const vis = start("canvas_id")`, then the same `add_mol`/`add_rep`/setters/view-controls
+as Python. Built with **wasm-pack** (not trunk — a bin can't export an importable ES module). Headless
+verification on this dev box used **chromium**: serve a host page + the `pkg/` over `python -m http.server`
+(ES modules + wasm need HTTP, not `file://`), run `chromium-browser --headless --no-sandbox --disable-gpu
+--virtual-time-budget=25000 --dump-dom <url>`, and read a result the page writes into the DOM (the API
+surface — init/start/parse/select/add_mol/add_rep/setters — runs synchronously, independent of the async
+WebGL render, so it's verifiable headlessly even without a GPU; only the pixels need a human glance).
 
 - Test assets in `tests/`: `2lao.pdb` (1911 atoms), `2lao_cg.pdb` (238-residue martinized 2lao,
   mixed α/β — the committed **CG cartoon** fixture; regenerate per `tests/README.md` with
@@ -117,8 +129,10 @@ and/or point `molar` at a local path — but don't commit those.
 ## Workspace & modules
 
 `crates/molar_vis_core` (library, WASM-safe, all logic) + `crates/molar_vis` (native bin:
-argv + logging) + `crates/molar_vis_web` (wasm bin) + `crates/molar_vis_py` (native PyO3 module —
-M26, see below). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
+argv + logging) + `crates/molar_vis_web` (wasm bin, the trunk demo) + `crates/molar_vis_py` (native
+PyO3 module — M26, see below) + `crates/molar_vis_js` (wasm-bindgen JS API — M27, the browser face
+of the viewer, a cdylib built with wasm-pack; content gated to wasm32 so a native build compiles it
+empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 
 - `lib.rs` — module decls, `run`/`App` re-exports. Also re-exports the seam the native Python
   module needs: `App`, `AppJob`, `MolData`, `SharedSource`, `EvalError`.
@@ -1195,6 +1209,51 @@ History labels via `describe_change` ("edit selection", "change coloring",
     on the render-time raw-ptr reads (in-place edits are at worst a 1-frame glitch, never UB; only a
     Python-side `System.state` *reassignment* could dangle — documented limitation); two-way edits
     *from* the viewer back to pymolar; the web JS-API/anywidget half of the dual-host plan.
+- ✅ M27 **Browser JavaScript API — drive the viewer from a web page (wasm-bindgen)** — the
+  **web half** of the dual-host plan (the deferred M26 item). A surrounding page controls the
+  running wasm viewer through a surface that mirrors `molar_vis_py` almost line-for-line:
+  `import init, { start, System } from "./pkg/molar_vis.js"; await init(); const vis =
+  start("molar_vis_canvas"); const sys = System.from_bytes("p.pdb", bytes); const mol =
+  vis.add_mol(sys); const rep = mol.add_rep(sys.select("protein"), "cartoon", "ss"); rep.style =
+  "lines"; vis.rotate(30,15); vis.projection("perspective");`. Three layers:
+  - **`crates/molar_vis_js`** (new cdylib `name = "molar_vis"`, wasm-bindgen, built with **wasm-pack
+    `--target web`**): the JS face mirroring `molar_vis_py` — `System`/`Sel`/`Visualizer`/`MolHandle`/
+    `RepHandle` + `start()`, the same handle bookkeeping (`Rc<RefCell<Vec<usize>>>` rep counts, the
+    single-threaded analog of `_py`'s `Arc<Mutex<…>>`), the same view-control surface. Content gated
+    to `#![cfg(target_arch = "wasm32")]` so a native `cargo build` compiles it to an empty cdylib (only
+    wasm-pack builds it for real). The handles push [`AppJob`] closures onto a channel drained in
+    `App::ui` (the M26 seam reused verbatim — no `ui()` change); `start()` boots `eframe::WebRunner`
+    via `spawn_local` with `app.set_jobs(rx)` (no demo auto-load), returns the `Visualizer`
+    synchronously (commands buffer in the channel until the App drains them — same pattern as
+    `_py::spawn`). One viewer per page (a `thread_local` guard).
+  - **The data model** — unlike `_py` (which shares pymolar memory via raw pointers under the GIL),
+    the browser **owns** its data: a JS `System` holds an `Rc<System>`, shared into the scene by
+    reference via a **`WebSystemSource`** (a `SharedSource` impl, [[moldata.rs]]) with **plain safe
+    borrows** (`self.system.topology()`/`.state()` tied to `&self` through the `Rc`) — no raw
+    pointers, no `unsafe`, no GIL. `evaluate` calls the core `evaluate(&System, text)` directly.
+    `System.from_bytes` parses via molar `FileHandler::from_reader` (bonds/bbox guessed at add time
+    in `Molecule::new_shared`); `select` → `Sel` (a frozen `Vec<usize>` from `Sel::get_index_slice`).
+    v1 coordinates are **static after load** (`coords_version` constant); live JS coord edits deferred.
+  - **`molar_vis_core` seam** (minimal): the **`AppJob` alias is cfg-split** — `Box<dyn FnOnce(&mut
+    App) + Send>` on native, **`Box<dyn FnOnce(&mut App)>` (no `Send`) on wasm**, since the browser is
+    single-threaded (the channel never crosses a thread) and a job captures the non-`Send` `Rc<System>`.
+    The three view-enum parsers (`parse_projection`/`parse_corner`/`parse_cue_mode`) were **hoisted**
+    from `_py` into `script/command.rs` (return `Result<_, String>`; each binding maps to its own error
+    type) and re-exported alongside `scene::evaluate`. No new render branch.
+  - **Demo + CI (dogfood)** — the GitHub Pages demo (`crates/molar_vis_js/web/index.html`) now drives
+    the viewer through the **public JS API** (fetch `2lao.pdb` → `System.from_bytes` → `add_mol` →
+    `add_rep`), so the surface can't silently rot; `.github/workflows/pages.yml` builds with wasm-pack
+    and assembles `dist/` (index.html + `pkg/` + `2lao.pdb`). `crates/molar_vis_web` (trunk bin) stays
+    for `trunk serve` local dev but is no longer the published artifact.
+  - **Verified**: native build green + 63 core tests pass; `molar_vis_py` still green (parser hoist);
+    `cargo build -p molar_vis_core --target wasm32-unknown-unknown` green; `wasm-pack build` emits
+    `pkg/molar_vis.js` with all six named exports (+ correct `.d.ts`); and a **headless chromium** run
+    of the demo executed the full API path end-to-end — `total=1911 protein=1822 mols=1 reps=2` (the
+    1822 protein count matches the M26 runtime verification). Only the rendered pixels need a human
+    glance (same `add_shared_molecule`/`rebuild_dirty` path already verified for `_py` + the app).
+    **Deferred**: the anywidget/Jupyter wrapper (the same `pkg/` + a thin `_esm`); multi-viewer per
+    page; live JS-driven coordinate edits (needs interior mutability + a `SharedSource::state` change);
+    camelCase method aliases (snake_case kept canonical for pymolar parity).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

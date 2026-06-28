@@ -2167,6 +2167,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "molar_vis_js"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "console_log",
+ "log",
+ "molar",
+ "molar_vis_core",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "molar_vis_py"
 version = "0.1.0"
 dependencies = [
