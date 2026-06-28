@@ -199,7 +199,9 @@ struct Targets {
     accum_view: wgpu::TextureView,
     reveal_view: wgpu::TextureView,
     oit_bind_group: wgpu::BindGroup,
-    _color_tex: wgpu::Texture,
+    /// The color texture itself, kept so a "Save image" capture can read it back
+    /// (`copy_texture_to_buffer`); the on-screen path only uses `color_view`.
+    color_tex: wgpu::Texture,
     _depth_tex: wgpu::Texture,
 }
 
@@ -229,7 +231,13 @@ impl Targets {
         };
         let attach_sample =
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let color_tex = make("scene-color", color_format, attach_sample);
+        // The color target additionally allows COPY_SRC so "Save image" can read it
+        // back; this is a free capability flag (no per-frame cost).
+        let color_tex = make(
+            "scene-color",
+            color_format,
+            attach_sample | wgpu::TextureUsages::COPY_SRC,
+        );
         // The depth target is sampled by the SSAO pass, so it also needs TEXTURE_BINDING.
         let depth_tex = make("scene-depth", DEPTH_FORMAT, attach_sample);
         let accum_tex = make("oit-accum", ACCUM_FORMAT, attach_sample);
@@ -261,8 +269,76 @@ impl Targets {
             accum_view,
             reveal_view,
             oit_bind_group,
-            _color_tex: color_tex,
+            color_tex,
             _depth_tex: depth_tex,
+        }
+    }
+}
+
+/// An in-flight "Save image" GPU→CPU readback (from [`SceneRenderer::capture_begin`]):
+/// the copy of the rendered color target has been submitted and `map_async` requested.
+/// Native callers `device.poll(PollType::Wait)` then [`read`](Self::read) immediately;
+/// wasm callers poll [`is_ready`](Self::is_ready) each frame (the browser drives the map)
+/// before reading.
+pub struct CaptureReadback {
+    buffer: wgpu::Buffer,
+    /// Final output size (the image returned by `read`).
+    out: [u32; 2],
+    /// Render size = `out * ssaa` (downsampled to `out` in `read`).
+    render: [u32; 2],
+    /// Padded bytes-per-row in `buffer` (256-byte aligned).
+    padded_bpr: u32,
+    /// Whether the color format is BGRA (swizzle B↔R into RGBA on read).
+    bgra: bool,
+    /// Set by the `map_async` callback; only *read* on wasm (`is_ready`), since native
+    /// drives the map with a blocking `device.poll(Wait)` instead.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl CaptureReadback {
+    /// Whether the map has completed (wasm polls this before `read`).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// De-pad the readback rows, swizzle BGRA→RGBA if needed, and downsample the
+    /// supersampled render to the requested output size. Consumes the readback (unmaps
+    /// the buffer). Call only once the map has completed.
+    pub fn read(self) -> image::RgbaImage {
+        let data = self.buffer.slice(..).get_mapped_range();
+        let (rw, rh) = (self.render[0] as usize, self.render[1] as usize);
+        let row = rw * 4;
+        let mut rgba = vec![0u8; row * rh];
+        for y in 0..rh {
+            let base = y * self.padded_bpr as usize;
+            let src = &data[base..base + row];
+            let dst = &mut rgba[y * row..y * row + row];
+            if self.bgra {
+                for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                    d[3] = s[3];
+                }
+            } else {
+                dst.copy_from_slice(src);
+            }
+        }
+        drop(data);
+        self.buffer.unmap();
+        let full = image::RgbaImage::from_raw(self.render[0], self.render[1], rgba)
+            .expect("readback buffer matches render size");
+        if self.render == self.out {
+            full
+        } else {
+            image::imageops::resize(
+                &full,
+                self.out[0],
+                self.out[1],
+                image::imageops::FilterType::Triangle,
+            )
         }
     }
 }
@@ -1051,7 +1127,6 @@ impl SceneRenderer {
         glow_pulse: f32,
         scene: &Scene,
     ) -> TextureId {
-        let clear = background.clear_color();
         // Render into SSAA× targets (clamped to the device's max texture size),
         // then let egui's linear filter downsample to the (1×) image rect.
         let max_dim = rs.device.limits().max_texture_dimension_2d;
@@ -1077,6 +1152,37 @@ impl SceneRenderer {
                 self.egui_texture,
             );
         }
+
+        self.render_core(
+            rs, size_px, render_size, view, proj, perspective, cue, ao, shadow, background,
+            depth_range, glow_pulse, scene,
+        );
+        self.egui_texture
+    }
+
+    /// Record the whole scene into `self.targets` — the live targets, or a temporary
+    /// capture target swapped in by [`capture_begin`]. Splitting this out of
+    /// `render_scene` (which owns the target (re)allocation + egui-texture update) lets
+    /// the "Save image" path reuse the *exact* pass sequence at a different resolution
+    /// without disturbing the on-screen view.
+    #[allow(clippy::too_many_arguments)]
+    fn render_core(
+        &mut self,
+        rs: &RenderState,
+        size_px: [u32; 2],
+        render_size: [u32; 2],
+        view: Mat4,
+        proj: Mat4,
+        perspective: bool,
+        cue: [f32; 4],
+        ao: [f32; 4],
+        shadow: [f32; 4],
+        background: crate::camera::Background,
+        depth_range: [f32; 2],
+        glow_pulse: f32,
+        scene: &Scene,
+    ) {
+        let clear = background.clear_color();
 
         // Build the camera entries. Entry 0 = the base camera; periodic images add
         // one entry each, its view post-multiplied by a lattice translation
@@ -1455,8 +1561,121 @@ impl SceneRenderer {
         }
 
         rs.queue.submit(std::iter::once(encoder.finish()));
+    }
 
-        self.egui_texture
+    /// Render the scene at `out_w × out_h` (× SSAA internally) into a throwaway target
+    /// and kick off a GPU→CPU readback of the color, for "Save image". Returns a
+    /// [`CaptureReadback`]: on native, `rs.device.poll(PollType::Wait)` then call
+    /// [`CaptureReadback::read`]; on wasm the browser drives the map, so poll
+    /// [`CaptureReadback::is_ready`] each frame before reading.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture_begin(
+        &mut self,
+        rs: &RenderState,
+        out_w: u32,
+        out_h: u32,
+        view: Mat4,
+        proj: Mat4,
+        perspective: bool,
+        cue: [f32; 4],
+        ao: [f32; 4],
+        shadow: [f32; 4],
+        background: crate::camera::Background,
+        depth_range: [f32; 2],
+        scene: &Scene,
+    ) -> CaptureReadback {
+        let max_dim = rs.device.limits().max_texture_dimension_2d;
+        let render_size = [
+            (out_w * self.ssaa).clamp(1, max_dim),
+            (out_h * self.ssaa).clamp(1, max_dim),
+        ];
+
+        // Swap a temporary target (+ a matching SSAO bind group bound to its depth) in
+        // for the live `self.targets`, render into it (no glow pulse for a still), then
+        // swap the live targets back. The copy below is submitted *before* the swap-back,
+        // so the temp texture stays alive — wgpu retains resources used by submitted work
+        // until it completes — even though its Rust handle is dropped here.
+        let temp = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
+        let temp_ssao = make_ssao_bind_group(
+            &rs.device,
+            &self.ssao_bgl,
+            &temp.depth_view,
+            &self.ssao_buf,
+            &self.shadow_depth_view,
+            &self.shadow_sampler,
+        );
+        let saved_targets = std::mem::replace(&mut self.targets, temp);
+        let saved_ssao = std::mem::replace(&mut self.ssao_bind_group, temp_ssao);
+
+        self.render_core(
+            rs,
+            [out_w, out_h],
+            render_size,
+            view,
+            proj,
+            perspective,
+            cue,
+            ao,
+            shadow,
+            background,
+            depth_range,
+            0.0,
+            scene,
+        );
+
+        // Copy the rendered color into a mappable buffer; rows are padded to the
+        // 256-byte `copy_texture_to_buffer` alignment (de-padded again in `read`).
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bpr = (render_size[0] * 4).div_ceil(align) * align;
+        let buffer = rs.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture-readback"),
+            size: (padded_bpr * render_size[1]) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = rs
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture-copy") });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.targets.color_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bpr),
+                    rows_per_image: Some(render_size[1]),
+                },
+            },
+            wgpu::Extent3d {
+                width: render_size[0],
+                height: render_size[1],
+                depth_or_array_layers: 1,
+            },
+        );
+        rs.queue.submit(std::iter::once(encoder.finish()));
+
+        // Restore the live targets (the temp is now only referenced by the submitted copy).
+        self.targets = saved_targets;
+        self.ssao_bind_group = saved_ssao;
+
+        let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ready.clone();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
+            if res.is_ok() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+            }
+        });
+
+        let bgra = matches!(
+            self.color_format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        CaptureReadback { buffer, out: [out_w, out_h], render: render_size, padded_bpr, bgra, ready }
     }
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /

@@ -39,6 +39,7 @@ mod build;
 mod console;
 mod draw;
 mod draw_input;
+mod export;
 mod init;
 mod loaders;
 mod overlay;
@@ -115,6 +116,13 @@ pub struct App {
     /// dropdowns), applied after the panel is drawn.
     pending_undo_n: Option<usize>,
     pending_redo_n: Option<usize>,
+    /// Pending "Save image" request: the supersampling scale (× the viewport). Set by the
+    /// menu, serviced after `draw_viewport` (where the wgpu render state is available).
+    export_request: Option<u32>,
+    /// Wasm only: an in-flight image readback + its download filename, polled each frame
+    /// until the GPU→CPU map resolves (native exports synchronously, so it needs no slot).
+    #[cfg(target_arch = "wasm32")]
+    pending_capture: Option<(crate::render::CaptureReadback, String)>,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).
@@ -865,6 +873,15 @@ impl eframe::App for App {
         // the central viewport so the 3D view fills the space above it.
         self.draw_console(ui);
         self.draw_viewport(ui, frame);
+
+        // Service a pending "Save image" request here: `frame` (the wgpu render state) is
+        // available, and `draw_viewport` has just refreshed `last_size`. Native saves
+        // synchronously; wasm stashes the readback for `poll_export` to finish + download.
+        if let Some(scale) = self.export_request.take() {
+            self.export_image(frame, scale);
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.poll_export(&ctx);
 
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
         let settled = !ctx.egui_is_using_pointer() && !ctx.egui_wants_keyboard_input();

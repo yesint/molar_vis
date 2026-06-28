@@ -359,8 +359,9 @@ impl App {
                 }
             }).response);
 
-            // — Session — (New / Save / Load the whole visualization state)
-            #[cfg(not(target_arch = "wasm32"))]
+            // — Session — New starts an empty scene (pure in-memory, so available
+            // everywhere); Save/Load persist the whole visualization state but reload
+            // molecules from disk, so they're native-only.
             menu_buttons.push(ui.menu_button("Session", |ui| {
                 if ui
                     .button(format!("{}  New", icon::FILE))
@@ -370,21 +371,42 @@ impl App {
                     self.new_session();
                     ui.close();
                 }
-                if ui
-                    .button(format!("{}  Save…", icon::FLOPPY_DISK))
-                    .on_hover_text("Save the visualization state (molecules, representations, camera)")
-                    .clicked()
+                #[cfg(not(target_arch = "wasm32"))]
                 {
-                    self.save_session();
-                    ui.close();
+                    if ui
+                        .button(format!("{}  Save…", icon::FLOPPY_DISK))
+                        .on_hover_text("Save the visualization state (molecules, representations, camera)")
+                        .clicked()
+                    {
+                        self.save_session();
+                        ui.close();
+                    }
+                    if ui
+                        .button(format!("{}  Load…", icon::ARCHIVE_BOX))
+                        .on_hover_text("Load a saved visualization state, replacing the current scene")
+                        .clicked()
+                    {
+                        self.load_session();
+                        ui.close();
+                    }
                 }
-                if ui
-                    .button(format!("{}  Load…", icon::ARCHIVE_BOX))
-                    .on_hover_text("Load a saved visualization state, replacing the current scene")
-                    .clicked()
+            }).response);
+
+            // — Render — output the current view to an image file (native: save dialog;
+            // wasm: a browser download). Rendered at a multiple of the viewport for crisp
+            // figures. Future high-quality / raytraced renders will live here too.
+            menu_buttons.push(ui.menu_button("Render", |ui| {
+                ui.label("Save image (PNG)");
+                for (label, scale) in
+                    [("Viewport (1×)", 1u32), ("2× viewport", 2), ("4× viewport", 4)]
                 {
-                    self.load_session();
-                    ui.close();
+                    if ui
+                        .button(format!("{}  {label}", icon::IMAGE))
+                        .clicked()
+                    {
+                        self.export_request = Some(scale);
+                        ui.close();
+                    }
                 }
             }).response);
 

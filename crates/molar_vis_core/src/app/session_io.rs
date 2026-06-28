@@ -40,7 +40,6 @@ impl App {
     /// in-flight trajectory loaders, and clear transient editing/dialog state.
     /// Shared by [`Self::new_session`] (start empty) and [`Self::apply_session`]
     /// (start empty, then reload from a file).
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn reset_document(&mut self) {
         self.scene.molecules.clear();
         self.scene.trash.clear();
@@ -54,7 +53,8 @@ impl App {
 
     /// Start a new, empty visualization state: remove every molecule, reset the
     /// camera, and clear the undo history (a new document is its own baseline).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Pure in-memory (no filesystem), so it's available on wasm too — unlike
+    /// session save/load, which reload molecules from disk.
     pub(super) fn new_session(&mut self) {
         self.reset_document();
         self.scene.selected_mol = None;

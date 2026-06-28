@@ -385,6 +385,9 @@ impl App {
             view_dirty: true,
             status,
             history,
+            export_request: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_capture: None,
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,
@@ -441,6 +444,45 @@ impl App {
                     match save_displayed(mol, std::path::Path::new(&path), None) {
                         Ok(()) => log::info!("debug: saved molecule to {path}"),
                         Err(e) => log::error!("debug save molecule failed: {e}"),
+                    }
+                }
+            }
+            // MOLAR_VIS_DEBUG_SAVE_IMAGE=<path> renders the startup scene to a PNG
+            // headlessly — exercising the offscreen render → GPU readback → PNG-encode
+            // path without a window/screenshot. Size from _W/_H (default 800×600). We
+            // first run `rebuild_dirty` to build + upload geometry (it isn't built until
+            // the first `ui()` frame), then capture + block on the readback + save.
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_IMAGE") {
+                if let Some(rs) = cc.wgpu_render_state.as_ref() {
+                    let dim = |k: &str, d: u32| {
+                        std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+                    };
+                    let (w, h) = (
+                        dim("MOLAR_VIS_DEBUG_SAVE_IMAGE_W", 800),
+                        dim("MOLAR_VIS_DEBUG_SAVE_IMAGE_H", 600),
+                    );
+                    app.rebuild_dirty(rs);
+                    let aspect = w as f32 / h as f32;
+                    let view = app.camera.view();
+                    let proj = app.camera.proj(aspect);
+                    let cap = app.renderer.capture_begin(
+                        rs,
+                        w,
+                        h,
+                        view,
+                        proj,
+                        app.camera.is_perspective(),
+                        app.camera.cue_uniform(),
+                        app.camera.ao_uniform(),
+                        app.camera.shadow_uniform(),
+                        app.camera.background,
+                        app.camera.eye_depth_range(),
+                        &app.scene,
+                    );
+                    let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                    match cap.read().save(std::path::Path::new(&path)) {
+                        Ok(()) => log::info!("debug: saved image ({w}x{h}) to {path}"),
+                        Err(e) => log::error!("debug save image failed: {e}"),
                     }
                 }
             }

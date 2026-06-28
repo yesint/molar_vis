@@ -97,6 +97,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   can be screenshot headlessly — pair with `MOLAR_VIS_DEBUG_SEL`) +
   `MOLAR_VIS_DEBUG_SAVE_MOL=<path>` (write mol 0 to a structure file at startup — exercises the
   molar `FileHandler` write + displayed-frame swap path headlessly) +
+  `MOLAR_VIS_DEBUG_SAVE_IMAGE=<path>` (+ optional `_W`/`_H`, default 800×600) — render the startup
+  scene to a PNG at startup (builds geometry via `rebuild_dirty`, then offscreen render → GPU
+  readback → encode), so the "Save image" path is verifiable headlessly without a window +
   `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|reps|behavior]` (open the program-settings
@@ -402,7 +405,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   box at entry 0), `texture_id()`. Plus `render/{sphere,cylinder,line,mesh,camera_uniform}.rs` and
   `render/shaders/*.wgsl` (incl. `oit_composite.wgsl`; lit shaders carry `fs_main` + `fs_oit` +
   `fs_glow`; the `build_pipeline`s take `depth_compare`). The cartoon mesh writes real depth and
-  interleaves correctly with the impostors.
+  interleaves correctly with the impostors. **Render to file** (the "Save image" feature): the pass
+  sequence is split out of `render_scene` (which owns the target (re)allocation + egui-texture
+  update) into a private `render_core` that records into `self.targets`; `capture_begin` swaps a
+  **temporary** target in for `self.targets`, runs `render_core` at an arbitrary `out×ssaa`
+  resolution (window-independent), `copy_texture_to_buffer`s the color into a mappable buffer
+  (256-byte row align), swaps the live target back (wgpu keeps the temp alive until the submitted
+  copy completes), and returns a `CaptureReadback`. `CaptureReadback::read` de-pads rows, swizzles
+  BGRA→RGBA, and downsamples `out×ssaa → out` (`image::imageops`) → an `RgbaImage`. Native drives the
+  map with `device.poll(wait)` then reads; wasm polls `is_ready` each frame (the browser drives the
+  map). The color target carries `COPY_SRC`. UI/IO lives in `app/export.rs` (see the Render menu).
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
@@ -648,10 +660,16 @@ next frame). The menus —
   `selectable_label`) · **Load…** (`App::open_structure` — native `rfd` picker / wasm file picker
   filtered to topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
   molecule, frames the camera on the first one, undoable via the normal checkpoint).
-- **Session** (`STACK`; native only — the wasm build has no filesystem to reload molecule sources
-  from) — **New** (`App::new_session` — drop all molecules + reset camera/history to an empty
-  document), **Save…** (`App::save_session`), **Load…** (`App::load_session`), saving/loading the
-  whole visualization state as a JSON session (see `session.rs`).
+- **Session** — **New** (`App::new_session` — drop all molecules + reset camera/history to an empty
+  document; **pure in-memory, so available on wasm too**) · **Save…** (`App::save_session`) ·
+  **Load…** (`App::load_session`) — saving/loading the whole visualization state as a JSON session
+  (see `session.rs`). **Save/Load are native-only** (they reload molecules from disk source paths);
+  only **New** shows on wasm.
+- **Render** — **Save image (PNG)**: render the current view to an image file at a multiple of the
+  viewport (`Viewport (1×)` / `2×` / `4×`), via `App::export_request` → `export_image`
+  (`app/export.rs`). Native pops an `rfd` save dialog; **wasm triggers a browser download** (Blob →
+  object URL → `<a download>`). Available on both. (Future high-quality / raytraced renders land
+  here too — see the roadmap.)
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
