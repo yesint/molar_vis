@@ -1739,6 +1739,7 @@ impl SceneRenderer {
             shadow: camera.shadow_uniform(),
             bg: [bg[0], bg[1], bg[2], 1.0],
             dims: [w, h, samples.max(1), frame_seed],
+            accum: [0, 0, 0, 0], // set by Raytracer::render
         }
     }
 
@@ -1769,8 +1770,34 @@ impl SceneRenderer {
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self.raytracer.as_mut().unwrap().render(rs, &view, [out_w, out_h], uniform);
+        // One converged step (reset + all samples at once).
+        self.raytracer.as_mut().unwrap().render(rs, &view, [out_w, out_h], uniform, true, samples);
         Some(self.begin_readback(rs, &tex, [out_w, out_h], [out_w, out_h]))
+    }
+
+    /// In-place incremental ray trace: trace `spp` more sample-paths into the running
+    /// average and resolve it into the **live** scene color target (the texture egui
+    /// paints), so the viewport progressively refines while the camera is idle. `reset`
+    /// clears the average (called on a camera/scene change). Returns the total samples
+    /// accumulated so far (the caller stops repainting once it's converged). No-op /
+    /// returns 0 if the ray tracer is unavailable or no scene is uploaded.
+    pub fn render_raytrace_inplace(
+        &mut self,
+        rs: &RenderState,
+        camera: &crate::camera::Camera,
+        reset: bool,
+        spp: u32,
+    ) -> u32 {
+        if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
+            return 0;
+        }
+        let size = self.targets.size;
+        let uniform = Self::rt_uniform(camera, size[0], size[1], spp, 0);
+        // Render into the live color target; egui paints `texture_id()` either way, so
+        // this just replaces what the raster pass would have written — no texture swap.
+        let rt = self.raytracer.as_mut().unwrap();
+        rt.render(rs, &self.targets.color_view, size, uniform, reset, spp);
+        rt.samples()
     }
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /

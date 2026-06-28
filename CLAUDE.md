@@ -434,9 +434,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
   `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
-  Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace` reuses the `CaptureReadback`
-  readback). 4 BVH unit tests. **Build status: file render done (all rep types); in-place incremental
-  viewport + global-illumination tier are pending.**
+  Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace`, reusing the `CaptureReadback`
+  readback) **and the in-place incremental viewport**: the accumulator is **ping-pong `Rgba32Float`**
+  holding a **running average** (`render` takes `reset` + `spp`; file render = one `reset` step at N
+  samples, in-place = a few `spp`/idle-frame accumulating until converged). `app/viewport.rs` runs the
+  controller — on a steady "just viewing" frame (no camera/scene/size change, not using the pointer, no
+  draw/pending/hover overlay) it calls `render_raytrace_inplace` into the **live** color target (so egui
+  paints it with no texture swap) and `request_repaint`s until `RT_INPLACE_TARGET` samples, then idles;
+  any change drops back to the realtime raster (`rt_reset`/`rt_scene_dirty` on `App`). 4 BVH unit tests.
+  **Build status: file render + in-place viewport done (all rep types); the global-illumination tier
+  (`Camera::gi`, field present, unwired) is the remaining follow-on.**
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
@@ -693,7 +700,9 @@ next frame). The menus —
   object URL → `<a download>`). Available on both. **On a compute-capable device (WebGPU/native) this
   is a full GPU ray trace** (ray-traced AO + shadows + Blinn-Phong, all rep types — see the
   `render/raytrace.rs` bullet); **WebGL2 falls back to a high-res capture of the rasterized view**.
-  (In-place incremental ray tracing in the viewport + global-illumination tier are roadmap follow-ons.)
+  The viewport itself also **progressively ray-traces in place** when idle (PyMOL-`ray` style;
+  opt-out toggle in the View-settings Lighting tab, default on; see `render/raytrace.rs`).
+  (A global-illumination tier is a roadmap follow-on.)
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
@@ -757,7 +766,9 @@ is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anc
     `enabled=false`) + **Strength** / **Start** rows, each a `slider_with_edit` (a `Slider` + a
     `DragValue` edit box).
   - **Lighting**: **Ambient occlusion** (enable + Strength/Radius; `Camera::ao`) + **Cast shadows**
-    (enable + Strength; `Camera::shadow`).
+    (enable + Strength; `Camera::shadow`) + a **Ray tracing** group — a **Ray-traced viewport**
+    checkbox (`Camera::raytrace_inplace`, default on, greyed without a compute-capable device) that
+    progressively ray-traces the idle view in place (the AO/shadow controls feed it).
   - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`,
     hand-laid-out: a rectangle showing a **live mini downsampled render of the scene** (the
     `renderer.texture_id()` painted into the rect), an on/off **checkbox in its center** (on a

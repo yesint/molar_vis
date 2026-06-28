@@ -388,6 +388,8 @@ impl App {
             export_request: None,
             #[cfg(target_arch = "wasm32")]
             pending_capture: None,
+            rt_scene_dirty: true,
+            rt_reset: true,
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,

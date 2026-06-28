@@ -391,7 +391,7 @@ fn build_bvh(aabbs: &[Aabb]) -> (Vec<BvhNode>, Vec<u32>) {
 // ===========================================================================
 
 /// Per-render uniform for the tracer. Mirrors `RtUniform` in `raytrace.wgsl`
-/// (mat4x4 + 6×vec4 = 160 bytes, 16-byte aligned).
+/// (mat4x4 + 7×vec4 = 176 bytes, 16-byte aligned).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct RtUniform {
@@ -406,8 +406,10 @@ pub struct RtUniform {
     pub shadow: [f32; 4],
     /// background color (linear), w unused.
     pub bg: [f32; 4],
-    /// width, height, samples, frame_seed.
+    /// width, height, samples-this-step, frame_seed. Set by `render`.
     pub dims: [u32; 4],
+    /// Progressive accumulation: prior_total_samples, reset(0/1), _, _. Set by `render`.
+    pub accum: [u32; 4],
 }
 
 /// GPU ray-tracing resources (compute tracer + fullscreen resolve). Created only on a
@@ -427,9 +429,14 @@ pub struct Raytracer {
     nodes: Option<wgpu::Buffer>,
     prim_indices: Option<wgpu::Buffer>,
     has_scene: bool,
-    // Linear HDR accumulator (recreated on size change).
-    accum: Option<(wgpu::Texture, wgpu::TextureView)>,
+    // Linear HDR accumulators (ping-pong: read one, write the other, swap). Each holds the
+    // running *average* radiance. Recreated on size change.
+    accum: Option<[(wgpu::Texture, wgpu::TextureView); 2]>,
     accum_size: [u32; 2],
+    /// Which accumulator is the current (latest) one to read from / resolve.
+    read_idx: usize,
+    /// Samples accumulated so far (the running-average weight). Reset on camera change.
+    total_samples: u32,
 }
 
 impl Raytracer {
@@ -490,6 +497,18 @@ impl Raytracer {
                         access: wgpu::StorageTextureAccess::WriteOnly,
                         format: wgpu::TextureFormat::Rgba32Float,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                // Previous accumulator (the running average to extend) — read as a sampled
+                // texture for the ping-pong; ignored when the reset flag is set.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
                     count: None,
                 },
@@ -576,6 +595,8 @@ impl Raytracer {
             has_scene: false,
             accum: None,
             accum_size: [0, 0],
+            read_idx: 0,
+            total_samples: 0,
         })
     }
 
@@ -612,35 +633,52 @@ impl Raytracer {
 
     fn ensure_accum(&mut self, device: &wgpu::Device, size: [u32; 2]) {
         if self.accum.is_none() || self.accum_size != size {
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("rt-accum"),
-                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba32Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.accum = Some((tex, view));
+            let mk = || {
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("rt-accum"),
+                    size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                (tex, view)
+            };
+            self.accum = Some([mk(), mk()]);
             self.accum_size = size;
+            self.read_idx = 0;
+            self.total_samples = 0;
         }
     }
 
-    /// Trace the scene into the accumulator at `size`, then resolve (tonemap) into
-    /// `target` (the scene color target view). No-op if no scene is uploaded.
+    /// Trace `spp` more sample-paths into the running-average accumulator at `size`, then
+    /// resolve (tonemap) the current average into `target`. `reset` clears the average
+    /// (camera/scene change); pass `reset = true, spp = N` for a one-shot converged file
+    /// render. No-op if no scene is uploaded.
     pub fn render(
         &mut self,
         rs: &RenderState,
         target: &wgpu::TextureView,
         size: [u32; 2],
-        uniform: RtUniform,
+        mut uniform: RtUniform,
+        reset: bool,
+        spp: u32,
     ) {
         if !self.has_scene {
             return;
         }
         self.ensure_accum(&rs.device, size);
+        if reset {
+            self.total_samples = 0;
+            self.read_idx = 0;
+        }
+        let spp = spp.max(1);
+        uniform.dims[2] = spp;
+        uniform.dims[3] = self.total_samples; // varies the RNG per accumulation step
+        uniform.accum = [self.total_samples, u32::from(reset), 0, 0];
         rs.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
 
         let spheres = self.spheres.as_ref().unwrap();
@@ -649,7 +687,10 @@ impl Raytracer {
         let triangles = self.triangles.as_ref().unwrap();
         let nodes = self.nodes.as_ref().unwrap();
         let prim_indices = self.prim_indices.as_ref().unwrap();
-        let accum_view = &self.accum.as_ref().unwrap().1;
+        let accums = self.accum.as_ref().unwrap();
+        let read_view = &accums[self.read_idx].1;
+        let write_idx = 1 - self.read_idx;
+        let write_view = &accums[write_idx].1;
 
         let trace_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rt-trace-bg"),
@@ -662,7 +703,8 @@ impl Raytracer {
                 wgpu::BindGroupEntry { binding: 4, resource: triangles.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: prim_indices.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(accum_view) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(write_view) },
+                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(read_view) },
             ],
         });
         let resolve_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -670,7 +712,7 @@ impl Raytracer {
             layout: &self.resolve_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 8,
-                resource: wgpu::BindingResource::TextureView(accum_view),
+                resource: wgpu::BindingResource::TextureView(write_view),
             }],
         });
 
@@ -708,6 +750,14 @@ impl Raytracer {
             pass.draw(0..3, 0..1);
         }
         rs.queue.submit(std::iter::once(encoder.finish()));
+        self.total_samples += spp;
+        self.read_idx = write_idx; // the just-written average is next frame's source
+    }
+
+    /// Samples accumulated into the current average (for the progressive in-place loop to
+    /// know when it has converged).
+    pub fn samples(&self) -> u32 {
+        self.total_samples
     }
 }
 

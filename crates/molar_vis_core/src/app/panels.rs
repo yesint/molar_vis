@@ -284,6 +284,27 @@ impl App {
                     });
             });
         });
+        ui.add_space(6.0);
+        // Ray tracing (WebGPU/native only): progressively ray-trace the idle viewport
+        // with true AO + shadows, and an optional global-illumination tier.
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            let supported = self.renderer.raytrace_supported();
+            ui.add_enabled_ui(supported, |ui| {
+                ui.checkbox(&mut self.camera.raytrace_inplace, "Ray-traced viewport")
+                    .on_hover_text(
+                        "Progressively ray-trace the view when the camera is idle \
+                         (ray-traced ambient occlusion + shadows); drops to the realtime \
+                         view while moving. The AO/shadow controls above apply.",
+                    );
+            });
+            if !supported {
+                ui.label(
+                    egui::RichText::new("Ray tracing needs WebGPU (unavailable on this device)")
+                        .weak()
+                        .small(),
+                );
+            }
+        });
     }
 
     /// Scene tab: orientation axes + background.

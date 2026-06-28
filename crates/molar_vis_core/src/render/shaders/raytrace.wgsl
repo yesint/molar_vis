@@ -30,7 +30,8 @@ struct RtUniform {
     ao: vec4<f32>,              // radius (nm), bias, strength, enabled
     shadow: vec4<f32>,          // strength, bias, enabled, _
     bg: vec4<f32>,              // background (linear)
-    dims: vec4<u32>,            // width, height, samples, frame_seed
+    dims: vec4<u32>,            // width, height, samples-this-step, frame_seed
+    accum: vec4<u32>,           // prior_total_samples, reset(0/1), _, _
 };
 
 @group(0) @binding(0) var<uniform> U: RtUniform;
@@ -41,6 +42,7 @@ struct RtUniform {
 @group(0) @binding(5) var<storage, read> nodes: array<BvhNode>;
 @group(0) @binding(6) var<storage, read> prim_indices: array<u32>;    // (type<<30)|index
 @group(0) @binding(7) var accum: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(9) var accum_prev: texture_2d<f32>; // running average to extend (ping-pong)
 
 const PI: f32 = 3.14159265359;
 const T_MAX: f32 = 1e30;
@@ -317,8 +319,16 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         color = color + base * (mat.x * ao_vis + mat.y * ndotl * shadow_vis) + vec3<f32>(spec) * shadow_vis;
     }
 
-    color = color / f32(max(samples, 1u));
-    textureStore(accum, vec2<i32>(gid.xy), vec4<f32>(color, 1.0));
+    // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the
+    // running average: avg' = (avg·prior + sum) / (prior + samples). `reset` starts fresh.
+    let prior = U.accum.x;
+    let new_total = prior + samples;
+    var prev = vec3<f32>(0.0);
+    if (U.accum.y == 0u) {
+        prev = textureLoad(accum_prev, vec2<i32>(gid.xy), 0).xyz;
+    }
+    let avg = (prev * f32(prior) + color) / f32(max(new_total, 1u));
+    textureStore(accum, vec2<i32>(gid.xy), vec4<f32>(avg, 1.0));
 }
 
 // ---- Resolve: fullscreen triangle, tonemap the accumulator into the sRGB target ----

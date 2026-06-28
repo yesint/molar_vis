@@ -2,6 +2,11 @@
 use super::*;
 use super::overlay::*;
 
+/// In-place progressive ray tracing: sample-paths added per idle frame, and the total
+/// at which it's considered converged (then repainting stops → idle = 0 GPU).
+const RT_INPLACE_SPP: u32 = 2;
+const RT_INPLACE_TARGET: u32 = 220;
+
 impl App {
 
     /// Central panel: rebuild dirty geometry, route VMD-style mouse navigation,
@@ -114,7 +119,28 @@ impl App {
 
             let cam_changed = self.last_render_camera != Some(self.camera);
             let size_changed = size_px != self.last_size;
-            if geom_changed || cam_changed || size_changed || self.view_dirty || pulsing {
+            let raster_dirty = geom_changed || cam_changed || size_changed || self.view_dirty || pulsing;
+
+            // In-place ray tracing is eligible on a steady "just viewing" frame: the
+            // opt-out setting is on, the device is compute-capable, the scene is non-empty,
+            // and no interactive overlay (draw mode / pending selection / hover) needs the
+            // realtime raster. When it isn't, we render the raster as before.
+            let rt_eligible = self.camera.raytrace_inplace
+                && self.renderer.raytrace_supported()
+                && !self.scene.molecules.is_empty()
+                && self.draw.is_none()
+                && !self
+                    .scene
+                    .molecules
+                    .iter()
+                    .any(|m| m.pending.is_some() || m.hover.is_some());
+
+            if geom_changed {
+                self.rt_scene_dirty = true; // re-gather the tracer's scene next settle
+            }
+
+            if raster_dirty {
+                // Camera / scene / size changed (or animating / pulsing): realtime raster.
                 let aspect = size_px[0] as f32 / size_px[1] as f32;
                 let view = self.camera.view();
                 let proj = self.camera.proj(aspect);
@@ -134,6 +160,26 @@ impl App {
                 );
                 self.last_render_camera = Some(self.camera);
                 self.last_size = size_px;
+                self.rt_reset = true; // restart the progressive trace once the view settles
+            } else if rt_eligible && !ui.ctx().egui_is_using_pointer() {
+                // Steady view: progressively refine into the *live* color target with the
+                // ray tracer (PyMOL-`ray` style), then go idle once it has converged.
+                let dashed = self.settings.behavior.dashed_pbc_bonds;
+                if self.rt_scene_dirty {
+                    self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
+                    self.rt_scene_dirty = false;
+                    self.rt_reset = true;
+                }
+                let total = self.renderer.render_raytrace_inplace(
+                    render_state,
+                    &self.camera,
+                    self.rt_reset,
+                    RT_INPLACE_SPP,
+                );
+                self.rt_reset = false;
+                if total < RT_INPLACE_TARGET {
+                    ui.ctx().request_repaint(); // keep accumulating; stop at the target → idle = 0 GPU
+                }
             }
             self.view_dirty = false;
 

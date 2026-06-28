@@ -182,10 +182,22 @@ pub struct Camera {
     /// `#[serde(default)]` so older sessions still load.
     #[serde(default = "default_fill")]
     pub fill: f32,
+    /// Progressively ray-trace the viewport when the camera is idle (PyMOL-`ray`-style),
+    /// dropping to the realtime raster while moving. Opt-out (default on); only takes
+    /// effect on a compute-capable device.
+    #[serde(default = "default_true")]
+    pub raytrace_inplace: bool,
+    /// Use full path-traced global illumination in the ray tracer (tier 2). Off by default.
+    #[serde(default)]
+    pub gi: bool,
 }
 
 fn default_fill() -> f32 {
     0.9
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Camera {
@@ -222,6 +234,8 @@ impl Camera {
             shadow: Shadow::default(),
             background: Background::default(),
             fill,
+            raytrace_inplace: true,
+            gi: false,
         }
     }
 

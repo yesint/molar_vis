@@ -123,6 +123,11 @@ pub struct App {
     /// until the GPU→CPU map resolves (native exports synchronously, so it needs no slot).
     #[cfg(target_arch = "wasm32")]
     pending_capture: Option<(crate::render::CaptureReadback, String)>,
+    /// In-place ray-trace controller: scene geometry changed since the tracer last
+    /// uploaded it (needs a re-gather), and whether to restart the progressive
+    /// accumulation (set on any camera/scene/size change).
+    rt_scene_dirty: bool,
+    rt_reset: bool,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).
