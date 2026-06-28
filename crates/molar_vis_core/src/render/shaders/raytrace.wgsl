@@ -48,6 +48,16 @@ const PI: f32 = 3.14159265359;
 const T_MAX: f32 = 1e30;
 const IDX_MASK: u32 = 0x3fffffffu;
 
+// Lighting model (tier 1, Tachyon/PyMOL-`ray`-like): a directional key light (occluded by
+// a soft shadow) plus a hemispheric ambient fill that ambient occlusion occludes. The
+// ambient FLOOR keeps deep crevices / shadowed faces from going black (softens shadows);
+// the FILL is what AO darkens (so AO is clearly visible, not lost in a tiny ambient term).
+const KEY_INTENSITY: f32 = 0.8;
+const AMBIENT_FILL: f32 = 0.45;
+const AMBIENT_FLOOR: f32 = 0.1;
+// Shadow-ray cone half-angle (radians): jittering it per sample gives a soft penumbra.
+const SHADOW_SOFTNESS: f32 = 0.05;
+
 fn pcg(v_in: u32) -> u32 {
     let state = v_in * 747796405u + 2891336453u;
     let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
@@ -239,6 +249,16 @@ fn cosine_hemisphere(n: vec3<f32>, u1: f32, u2: f32) -> vec3<f32> {
     return normalize(r * cos(phi) * t + r * sin(phi) * b + sqrt(max(0.0, 1.0 - u1)) * n);
 }
 
+// Perturb `dir` within a small cone of half-angle ~`softness` (a soft area light).
+fn jitter_cone(dir: vec3<f32>, softness: f32, u1: f32, u2: f32) -> vec3<f32> {
+    var t: vec3<f32>;
+    var b: vec3<f32>;
+    onb(dir, &t, &b);
+    let r = softness * sqrt(u1);
+    let phi = 2.0 * PI * u2;
+    return normalize(dir + r * (cos(phi) * t + sin(phi) * b));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = U.dims.x;
@@ -300,27 +320,33 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
         if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
 
-        // Direct key light + hard shadow.
+        // Directional key light with a SOFT shadow: jitter the shadow ray within a small
+        // cone per sample, so the penumbra softens as samples accumulate (vs a razor-hard
+        // single-ray shadow).
         let ndotl = max(dot(nrm, light), 0.0);
         var shadow_vis = 1.0;
         if (U.shadow.z > 0.5 && ndotl > 0.0) {
-            if (any_hit(p + nrm * U.shadow.y, light, T_MAX)) { shadow_vis = 1.0 - U.shadow.x; }
+            let ldir = jitter_cone(light, SHADOW_SOFTNESS, rand(&seed), rand(&seed));
+            if (any_hit(p + nrm * U.shadow.y, ldir, T_MAX)) { shadow_vis = 1.0 - U.shadow.x; }
         }
         let hv = normalize(light + view_dir);
         let spec = mat.z * pow(max(dot(nrm, hv), 0.0), 2.0 + mat.w * 128.0);
 
-        // Ambient occlusion: one cosine-weighted hemisphere ray per sample.
+        // Ambient occlusion: one cosine-weighted hemisphere ray per sample, occluding the
+        // hemispheric *fill* light below.
         var ao_vis = 1.0;
         if (U.ao.w > 0.5) {
             let dir = cosine_hemisphere(nrm, rand(&seed), rand(&seed));
             if (any_hit(p + nrm * U.ao.y, dir, U.ao.x)) { ao_vis = 1.0 - U.ao.z; }
         }
 
-        // AO darkens the whole shaded result (like the rasterized SSAO's per-pixel
-        // multiply), not just the small ambient term — otherwise it's swamped by the
-        // diffuse and effectively invisible.
-        let lit = base * (mat.x + mat.y * ndotl * shadow_vis) + vec3<f32>(spec) * shadow_vis;
-        color = color + lit * ao_vis;
+        // Hemisphere ambient (a meaningful fill the AO occludes, plus a floor so crevices
+        // and shadowed faces aren't black) + directional key (occluded by the soft shadow)
+        // + specular. AO occludes the FILL — clearly visible — without washing out the
+        // directly-lit areas.
+        let ambient = AMBIENT_FLOOR + AMBIENT_FILL * ao_vis;
+        let key = KEY_INTENSITY * ndotl * shadow_vis;
+        color = color + base * (ambient + key) + vec3<f32>(spec) * shadow_vis;
     }
 
     // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the
