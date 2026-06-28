@@ -1740,11 +1740,19 @@ impl SceneRenderer {
         // World-space key light (same direction the shadow map uses).
         let light = view.inverse().transform_vector3(SHADOW_LIGHT_DIR_VIEW).normalize();
         let bg = camera.background.clear_color();
+        // Ray-traced AO uses a **scene-relative** occlusion distance, not the raw
+        // atom-scale nm radius SSAO uses. Molecular cavities/folds (cartoon ribbons,
+        // surface dimples) are far larger than the ~0.4 nm atom-contact scale, so a
+        // fixed small radius lets every hemisphere ray escape → no occluders → AO is
+        // invisible (the user's bug). Scaling by the bounding-sphere radius makes the
+        // AO reach real cavities at any rep/zoom, matching VMD-Tachyon / PyMOL-ray.
+        let mut ao = camera.ao_uniform();
+        ao[0] = (camera.scene_radius * camera.ao.radius).clamp(0.3, 6.0);
         raytrace::RtUniform {
             inv_view_proj: inv_vp.to_cols_array_2d(),
             eye: [eye.x, eye.y, eye.z, persp],
             light_dir: [light.x, light.y, light.z, 0.0],
-            ao: camera.ao_uniform(),
+            ao,
             shadow: camera.shadow_uniform(),
             bg: [bg[0], bg[1], bg[2], 1.0],
             dims: [w, h, samples.max(1), frame_seed],

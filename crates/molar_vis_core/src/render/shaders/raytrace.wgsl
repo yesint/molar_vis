@@ -56,8 +56,11 @@ const KEY_INTENSITY: f32 = 0.8;
 const AMBIENT_FILL: f32 = 0.45;
 const AMBIENT_FLOOR: f32 = 0.1;
 // Shadow-ray cone half-angle (radians) at softness = 1; the per-sample jitter over this
-// cone gives a soft penumbra. The actual cone = `shadow.softness` (0..1) × this.
-const MAX_SHADOW_CONE: f32 = 0.15;
+// cone gives a soft penumbra. The actual cone = `shadow.softness` (0..1) × this. Wide
+// enough (~26°) that the Softness slider has clearly visible range — softness 0 is a
+// razor-hard edge, softness 1 a broad diffuse penumbra (the user found 0.15 rad too
+// subtle to tell apart, and the hard shadows "too harsh").
+const MAX_SHADOW_CONE: f32 = 0.45;
 
 fn pcg(v_in: u32) -> u32 {
     let state = v_in * 747796405u + 2891336453u;

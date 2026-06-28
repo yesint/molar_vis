@@ -64,7 +64,8 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2` (set the depth-cue falloff curve + bump strength so it
   shows in a screenshot),
   `MOLAR_VIS_DEBUG_AO[=strength]` (enable screen-space ambient occlusion),
-  `MOLAR_VIS_DEBUG_SHADOW[=strength]` (enable real-time cast shadows),
+  `MOLAR_VIS_DEBUG_SHADOW[=strength]` (enable real-time cast shadows) +
+  `MOLAR_VIS_DEBUG_SHADOW_SOFT=<0..1>` (set shadow softness — only visible in the ray-traced render),
   `MOLAR_VIS_DEBUG_BG=gradient|white` (set a gradient / white viewport background),
   `MOLAR_VIS_DEBUG_PERSP=1` (force perspective projection) +
   `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor`),
@@ -429,11 +430,21 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   **compute** pass (`cs_trace`) reads the prims + BVH from storage buffers and, per pixel, accumulates
   `samples` paths (camera ray via `inv(proj·view)` unproject — persp+ortho; explicit-stack BVH
   traversal w/ robust slab test; analytic ray-sphere/ray-cylinder lifted from the impostor shaders +
-  Möller–Trumbore; per hit: Blinn-Phong + 1 shadow ray toward the **world-space key light**
-  (`inv_view·SHADOW_LIGHT_DIR_VIEW`) + 1 cosine-hemisphere AO ray; sub-pixel jitter = AA; PCG RNG)
+  Möller–Trumbore; per hit: Blinn-Phong + 1 **cone-jittered** shadow ray toward the **world-space
+  key light** (`inv_view·SHADOW_LIGHT_DIR_VIEW`; the per-sample cone = `shadow.softness × MAX_SHADOW_CONE`
+  (0.45 rad ≈ 26°) gives a soft penumbra that accumulates — softness 0 razor-hard, 1 broad/diffuse) +
+  1 cosine-hemisphere AO ray; sub-pixel jitter = AA; PCG RNG)
   into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
   `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
+  **AO occlusion distance is scene-relative** (`rt_uniform`: `scene_radius × ao.radius`, clamped
+  0.3–6 nm) — *not* the raw atom-scale nm radius the SSAO pass uses: molecular cavities/folds
+  (cartoon ribbons, surface dimples) are far larger than the ~0.4 nm atom-contact scale, so a fixed
+  small radius lets every hemisphere ray escape and AO becomes invisible (was a bug — AO did nothing
+  on cartoon/mesh); scaling by the bounding-sphere radius makes AO reach real cavities at any
+  rep/zoom (VMD-Tachyon / PyMOL-ray behavior). The lighting model is a key light + a hemispheric
+  ambient *fill* (which AO occludes) over a small ambient *floor* (so crevices/shadowed faces aren't
+  black), so AO is clearly visible without washing out the directly-lit areas.
   Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace`, reusing the `CaptureReadback`
   readback) **and the in-place incremental viewport**: the accumulator is **ping-pong `Rgba32Float`**
   holding a **running average** (`render` takes `reset` + `spp`; file render = one `reset` step at N

@@ -253,7 +253,10 @@ impl App {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             let ao = &mut self.camera.ao;
             ui.checkbox(&mut ao.enabled, "Ambient occlusion")
-                .on_hover_text("Darken creases and contact points (screen-space AO)");
+                .on_hover_text(
+                    "Darken creases and cavities (true hemisphere AO in the ray-traced view, \
+                     screen-space AO in the realtime view)",
+                );
             ui.add_enabled_ui(ao.enabled, |ui| {
                 egui::Grid::new("ao_opts")
                     .num_columns(2)
@@ -262,7 +265,11 @@ impl App {
                         ui.label("Strength");
                         slider_with_edit(ui, &mut ao.strength, 0.0..=1.0, ao.enabled);
                         ui.end_row();
-                        ui.label("Radius");
+                        ui.label("Radius").on_hover_text(
+                            "Occlusion reach. In the ray-traced view this scales with the \
+                             molecule size (a fraction of the scene), so AO finds cavities at \
+                             any scale.",
+                        );
                         slider_with_edit(ui, &mut ao.radius, 0.1..=1.0, ao.enabled);
                         ui.end_row();
                     });
