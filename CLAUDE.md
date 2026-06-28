@@ -472,7 +472,13 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   **stops dispatching + repainting → idle = 0 GPU** (this is what keeps a heavy surface from pegging the
   GPU). Any camera/scene/size change drops back to the realtime raster and resets the accumulation
   (`rt_reset`/`rt_scene_dirty` on `App`); the AO/shadow controls feed the trace uniform, so toggling them
-  re-traces with the new values. 4 BVH unit tests.
+  re-traces with the new values. **Size gate** (`RT_INPLACE_MAX_ATOMS`, 30k): above ~30k *visible*
+  atoms the in-place trace is **not** eligible — the per-frame trace refines at only a few fps on a
+  large VDW system, so after every camera stop the viewport would feel laggy for seconds (and the
+  per-frame `request_repaint` keeps it from idling); past the cap the viewport stays on the fast
+  rasterized view and idles instantly, exactly as before ray tracing existed. The full **Save image**
+  ray trace is unaffected (offline, any size). Gauged by summed `mol.n_atoms` of visible molecules
+  (cheap; computed *before* gathering so a huge scene never even builds the BVH). 4 BVH unit tests.
   **Build status: file render + in-place viewport done (all rep types); the global-illumination tier
   (`Camera::gi`, field present, unwired) is the remaining follow-on.**
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +

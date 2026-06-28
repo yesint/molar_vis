@@ -305,7 +305,9 @@ impl App {
                     .on_hover_text(
                         "Progressively ray-trace the view when the camera is idle \
                          (ray-traced ambient occlusion + shadows); drops to the realtime \
-                         view while moving. The AO/shadow controls above apply.",
+                         view while moving. The AO/shadow controls above apply. \
+                         Automatically skipped for very large scenes (kept responsive); \
+                         use Render ▸ Save image for a full ray trace at any size.",
                     );
             });
             if !supported {

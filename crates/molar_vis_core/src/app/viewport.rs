@@ -7,6 +7,11 @@ use super::overlay::*;
 /// Rendered at 1× viewport resolution (not SSAA×) so each step is cheap.
 const RT_INPLACE_SPP: u32 = 2;
 const RT_INPLACE_TARGET: u32 = 96;
+/// Max visible atoms for which the idle viewport auto-ray-traces in place. Past this the
+/// per-frame trace is too slow to refine smoothly (a large VDW system drops to a few fps),
+/// so the viewport stays on the fast rasterized view; "Save image" still ray-traces at any
+/// size. See the size-gate note in `rt_eligible`.
+const RT_INPLACE_MAX_ATOMS: usize = 30_000;
 
 impl App {
 
@@ -126,9 +131,26 @@ impl App {
             // opt-out setting is on, the device is compute-capable, the scene is non-empty,
             // and no interactive overlay (draw mode / pending selection / hover) needs the
             // realtime raster. When it isn't, we render the raster as before.
+            //
+            // Size gate: above ~`RT_INPLACE_MAX_ATOMS` visible atoms the per-frame trace
+            // refines at only a few fps (a large VDW system traces ~5 fps), so after every
+            // camera stop the viewport would feel laggy for seconds before converging —
+            // whereas the rasterized view stays smooth and idles instantly. Past the cap we
+            // skip in-place tracing entirely (never even gather the scene / build the BVH,
+            // which itself stalls on a big system); "Save image" still does a full offline
+            // trace at any size. Gauged by total atoms of *visible* molecules (cheap; the
+            // common heavy case is VDW of a large system, where displayed ≈ total atoms).
+            let visible_atoms: usize = self
+                .scene
+                .molecules
+                .iter()
+                .filter(|m| m.visible)
+                .map(|m| m.n_atoms)
+                .sum();
             let rt_eligible = self.camera.raytrace_inplace
                 && self.renderer.raytrace_supported()
                 && !self.scene.molecules.is_empty()
+                && visible_atoms <= RT_INPLACE_MAX_ATOMS
                 && self.draw.is_none()
                 && !self
                     .scene
