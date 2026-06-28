@@ -12,6 +12,7 @@ mod camera_uniform;
 mod cylinder;
 mod line;
 mod mesh;
+mod raytrace;
 mod sphere;
 mod ssao;
 
@@ -557,6 +558,9 @@ pub struct SceneRenderer {
     /// False on WebGL2: transparent reps then render with plain alpha blending in the
     /// opaque pass, and the OIT/composite passes are skipped.
     oit_enabled: bool,
+    /// GPU ray tracer (compute + storage buffers); `None` on WebGL2 (no compute). Drives
+    /// the raytraced "Save image" and the in-place incremental render.
+    raytracer: Option<raytrace::Raytracer>,
 
     // GPU atom picking (native only — needs a synchronous readback, which WebGPU
     // can't do, and integer render targets WebGL2 may not support): sphere impostors
@@ -663,6 +667,14 @@ impl SceneRenderer {
             .get_downlevel_capabilities()
             .flags
             .contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND);
+        // The GPU ray tracer needs compute + storage buffers (WebGL2 has neither).
+        let raytracer = rs
+            .adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            .then(|| raytrace::Raytracer::new(rs, color_format))
+            .flatten();
         if !oit_enabled {
             log::warn!(
                 "device lacks INDEPENDENT_BLEND (e.g. WebGL2): order-independent \
@@ -865,6 +877,7 @@ impl SceneRenderer {
             bg_pipeline,
             bg_bind_group,
             oit_enabled,
+            raytracer,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1623,13 +1636,31 @@ impl SceneRenderer {
             scene,
         );
 
-        // Copy the rendered color into a mappable buffer; rows are padded to the
-        // 256-byte `copy_texture_to_buffer` alignment (de-padded again in `read`).
+        // The rendered color now lives in the temp target (`self.targets.color_tex`);
+        // kick off its readback, then restore the live targets (the temp stays alive
+        // until the submitted copy completes).
+        let cap = self.begin_readback(rs, &self.targets.color_tex, render_size, [out_w, out_h]);
+        self.targets = saved_targets;
+        self.ssao_bind_group = saved_ssao;
+        cap
+    }
+
+    /// Copy `color_tex` into a mappable buffer (rows padded to the 256-byte
+    /// `copy_texture_to_buffer` alignment) and request the async map → a
+    /// [`CaptureReadback`] that `read`s back at output size `out` (downsampling from the
+    /// `render` size if they differ). Shared by the rasterized and raytraced captures.
+    fn begin_readback(
+        &self,
+        rs: &RenderState,
+        color_tex: &wgpu::Texture,
+        render: [u32; 2],
+        out: [u32; 2],
+    ) -> CaptureReadback {
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded_bpr = (render_size[0] * 4).div_ceil(align) * align;
+        let padded_bpr = (render[0] * 4).div_ceil(align) * align;
         let buffer = rs.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("capture-readback"),
-            size: (padded_bpr * render_size[1]) as u64,
+            size: (padded_bpr * render[1]) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1638,7 +1669,7 @@ impl SceneRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture-copy") });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.targets.color_tex,
+                texture: color_tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -1648,20 +1679,12 @@ impl SceneRenderer {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bpr),
-                    rows_per_image: Some(render_size[1]),
+                    rows_per_image: Some(render[1]),
                 },
             },
-            wgpu::Extent3d {
-                width: render_size[0],
-                height: render_size[1],
-                depth_or_array_layers: 1,
-            },
+            wgpu::Extent3d { width: render[0], height: render[1], depth_or_array_layers: 1 },
         );
         rs.queue.submit(std::iter::once(encoder.finish()));
-
-        // Restore the live targets (the temp is now only referenced by the submitted copy).
-        self.targets = saved_targets;
-        self.ssao_bind_group = saved_ssao;
 
         let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = ready.clone();
@@ -1670,12 +1693,84 @@ impl SceneRenderer {
                 flag.store(true, std::sync::atomic::Ordering::Release);
             }
         });
-
         let bgra = matches!(
             self.color_format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
-        CaptureReadback { buffer, out: [out_w, out_h], render: render_size, padded_bpr, bgra, ready }
+        CaptureReadback { buffer, out, render, padded_bpr, bgra, ready }
+    }
+
+    /// Whether the GPU ray tracer is available (WebGPU/native; not WebGL2).
+    pub fn raytrace_supported(&self) -> bool {
+        self.raytracer.is_some()
+    }
+
+    /// Gather the scene's primitives + build the BVH and upload them to the ray tracer.
+    /// Call when geometry changes (or before a file render). No-op without a ray tracer.
+    pub fn prepare_raytrace(&mut self, rs: &RenderState, scene: &Scene, dashed_pbc: bool) {
+        if let Some(rt) = self.raytracer.as_mut() {
+            let rt_scene = raytrace::RtScene::gather(scene, dashed_pbc);
+            rt.upload(rs, &rt_scene);
+        }
+    }
+
+    /// Build the per-render ray-tracing uniform from the camera + output size.
+    fn rt_uniform(
+        camera: &crate::camera::Camera,
+        w: u32,
+        h: u32,
+        samples: u32,
+        frame_seed: u32,
+    ) -> raytrace::RtUniform {
+        let aspect = w as f32 / h.max(1) as f32;
+        let view = camera.view();
+        let proj = camera.proj(aspect);
+        let inv_vp = (proj * view).inverse();
+        let eye = camera.eye();
+        let persp = if camera.is_perspective() { 1.0 } else { 0.0 };
+        // World-space key light (same direction the shadow map uses).
+        let light = view.inverse().transform_vector3(SHADOW_LIGHT_DIR_VIEW).normalize();
+        let bg = camera.background.clear_color();
+        raytrace::RtUniform {
+            inv_view_proj: inv_vp.to_cols_array_2d(),
+            eye: [eye.x, eye.y, eye.z, persp],
+            light_dir: [light.x, light.y, light.z, 0.0],
+            ao: camera.ao_uniform(),
+            shadow: camera.shadow_uniform(),
+            bg: [bg[0], bg[1], bg[2], 1.0],
+            dims: [w, h, samples.max(1), frame_seed],
+        }
+    }
+
+    /// Raytraced "Save image": trace the scene to `samples` paths/pixel at `out_w × out_h`,
+    /// resolve into a throwaway color target, and kick off its readback. Returns `None`
+    /// if the ray tracer is unavailable or no scene is uploaded (caller falls back to the
+    /// rasterized capture).
+    pub fn capture_begin_raytrace(
+        &mut self,
+        rs: &RenderState,
+        out_w: u32,
+        out_h: u32,
+        camera: &crate::camera::Camera,
+        samples: u32,
+    ) -> Option<CaptureReadback> {
+        if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
+            return None;
+        }
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0);
+        let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rt-capture-color"),
+            size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        self.raytracer.as_mut().unwrap().render(rs, &view, [out_w, out_h], uniform);
+        Some(self.begin_readback(rs, &tex, [out_w, out_h], [out_w, out_h]))
     }
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /

@@ -486,6 +486,38 @@ impl App {
                     }
                 }
             }
+            // MOLAR_VIS_DEBUG_RAYTRACE=<path> renders the startup scene with the GPU ray
+            // tracer (AO + shadows) to a PNG headlessly — exercises the trace → readback →
+            // encode path. _W/_H (default 800×600) and _SAMPLES (default 128) tune it.
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_RAYTRACE") {
+                if let Some(rs) = cc.wgpu_render_state.as_ref() {
+                    let dim = |k: &str, d: u32| {
+                        std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d)
+                    };
+                    let (w, h) = (
+                        dim("MOLAR_VIS_DEBUG_RAYTRACE_W", 800),
+                        dim("MOLAR_VIS_DEBUG_RAYTRACE_H", 600),
+                    );
+                    let samples = dim("MOLAR_VIS_DEBUG_RAYTRACE_SAMPLES", 128);
+                    app.rebuild_dirty(rs);
+                    app.renderer
+                        .prepare_raytrace(rs, &app.scene, app.settings.behavior.dashed_pbc_bonds);
+                    match app.renderer.capture_begin_raytrace(rs, w, h, &app.camera, samples) {
+                        Some(cap) => {
+                            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                            match cap.read().save(std::path::Path::new(&path)) {
+                                Ok(()) => log::info!(
+                                    "debug: saved raytraced image ({w}x{h}, {samples} spp) to {path}"
+                                ),
+                                Err(e) => log::error!("debug raytrace save failed: {e}"),
+                            }
+                        }
+                        None => log::error!(
+                            "debug raytrace: unavailable (needs a compute-capable device) or empty scene"
+                        ),
+                    }
+                }
+            }
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_SETTINGS=1 (or =appearance|rendering|

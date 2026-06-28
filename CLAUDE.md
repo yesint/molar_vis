@@ -100,6 +100,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_SAVE_IMAGE=<path>` (+ optional `_W`/`_H`, default 800×600) — render the startup
   scene to a PNG at startup (builds geometry via `rebuild_dirty`, then offscreen render → GPU
   readback → encode), so the "Save image" path is verifiable headlessly without a window +
+  `MOLAR_VIS_DEBUG_RAYTRACE=<path>` (+ optional `_W`/`_H`/`_SAMPLES`, default 800×600/128) — same but
+  through the **GPU ray tracer** (pair with `MOLAR_VIS_DEBUG_AO=1`/`_SHADOW=1` to see the ray-traced
+  AO/shadows) +
   `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|reps|behavior]` (open the program-settings
@@ -415,6 +418,25 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   BGRA→RGBA, and downsamples `out×ssaa → out` (`image::imageops`) → an `RgbaImage`. Native drives the
   map with `device.poll(wait)` then reads; wasm polls `is_ready` each frame (the browser drives the
   map). The color target carries `COPY_SRC`. UI/IO lives in `app/export.rs` (see the Render menu).
+- `render/raytrace.rs` + `render/shaders/raytrace.wgsl` — **GPU ray tracer** (Tachyon / PyMOL-`ray`
+  quality: ray-traced ambient occlusion + shadows + Blinn-Phong, all rep types). **WebGPU/native
+  only** (needs compute + storage buffers; gated on `DownlevelFlags::COMPUTE_SHADERS` → `Option<Raytracer>`
+  on `SceneRenderer`, `None` on WebGL2). **CPU side**: `RtScene::gather` re-runs `geometry::build` per
+  visible rep (same displayed frame/smoothing as `rebuild_dirty`) into flat GPU-friendly primitive
+  arrays — analytic **spheres** + **cylinders** and shared-vertex **triangles** (cartoon/surface) —
+  then a hand-rolled **binned-SAH BVH** over all of them (32-byte SoA nodes, `count==0`⇒interior with
+  contiguous children, leaves carry **type-tagged** `(type<<30)|index` prim refs). **GPU side**: a
+  **compute** pass (`cs_trace`) reads the prims + BVH from storage buffers and, per pixel, accumulates
+  `samples` paths (camera ray via `inv(proj·view)` unproject — persp+ortho; explicit-stack BVH
+  traversal w/ robust slab test; analytic ray-sphere/ray-cylinder lifted from the impostor shaders +
+  Möller–Trumbore; per hit: Blinn-Phong + 1 shadow ray toward the **world-space key light**
+  (`inv_view·SHADOW_LIGHT_DIR_VIEW`) + 1 cosine-hemisphere AO ray; sub-pixel jitter = AA; PCG RNG)
+  into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
+  sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
+  `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
+  Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace` reuses the `CaptureReadback`
+  readback). 4 BVH unit tests. **Build status: file render done (all rep types); in-place incremental
+  viewport + global-illumination tier are pending.**
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
@@ -668,8 +690,10 @@ next frame). The menus —
 - **Render** — **Save image (PNG)**: render the current view to an image file at a multiple of the
   viewport (`Viewport (1×)` / `2×` / `4×`), via `App::export_request` → `export_image`
   (`app/export.rs`). Native pops an `rfd` save dialog; **wasm triggers a browser download** (Blob →
-  object URL → `<a download>`). Available on both. (Future high-quality / raytraced renders land
-  here too — see the roadmap.)
+  object URL → `<a download>`). Available on both. **On a compute-capable device (WebGPU/native) this
+  is a full GPU ray trace** (ray-traced AO + shadows + Blinn-Phong, all rep types — see the
+  `render/raytrace.rs` bullet); **WebGL2 falls back to a high-res capture of the rasterized view**.
+  (In-place incremental ray tracing in the viewport + global-illumination tier are roadmap follow-ons.)
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`

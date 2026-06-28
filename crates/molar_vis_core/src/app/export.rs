@@ -9,6 +9,10 @@
 
 use super::App;
 
+/// Paths per pixel for the file (converged) ray trace. Each path contributes one AO +
+/// one shadow sample, so this is also the AO/shadow sample count.
+const RT_FILE_SAMPLES: u32 = 192;
+
 impl App {
     /// Render the current view at `scale ×` the viewport and save it as a PNG.
     pub(super) fn export_image(&mut self, frame: &mut eframe::Frame, scale: u32) {
@@ -20,24 +24,36 @@ impl App {
 
         let [vw, vh] = self.last_size;
         let (out_w, out_h) = (vw.max(1) * scale.max(1), vh.max(1) * scale.max(1));
-        let aspect = out_w as f32 / out_h as f32;
-        let view = self.camera.view();
-        let proj = self.camera.proj(aspect);
 
-        let cap = self.renderer.capture_begin(
-            &rs,
-            out_w,
-            out_h,
-            view,
-            proj,
-            self.camera.is_perspective(),
-            self.camera.cue_uniform(),
-            self.camera.ao_uniform(),
-            self.camera.shadow_uniform(),
-            self.camera.background,
-            self.camera.eye_depth_range(),
-            &self.scene,
-        );
+        // Prefer a full ray trace (the real "Render"); fall back to a high-res capture of
+        // the rasterized view on WebGL2 (no compute) or when there's nothing to trace.
+        let dashed = self.settings.behavior.dashed_pbc_bonds;
+        let cap = if self.renderer.raytrace_supported() {
+            self.renderer.prepare_raytrace(&rs, &self.scene, dashed);
+            self.renderer
+                .capture_begin_raytrace(&rs, out_w, out_h, &self.camera, RT_FILE_SAMPLES)
+        } else {
+            None
+        };
+        let cap = cap.unwrap_or_else(|| {
+            let aspect = out_w as f32 / out_h as f32;
+            let view = self.camera.view();
+            let proj = self.camera.proj(aspect);
+            self.renderer.capture_begin(
+                &rs,
+                out_w,
+                out_h,
+                view,
+                proj,
+                self.camera.is_perspective(),
+                self.camera.cue_uniform(),
+                self.camera.ao_uniform(),
+                self.camera.shadow_uniform(),
+                self.camera.background,
+                self.camera.eye_depth_range(),
+                &self.scene,
+            )
+        });
 
         #[cfg(not(target_arch = "wasm32"))]
         {
