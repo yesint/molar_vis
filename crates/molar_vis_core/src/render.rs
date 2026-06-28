@@ -561,6 +561,12 @@ pub struct SceneRenderer {
     /// GPU ray tracer (compute + storage buffers); `None` on WebGL2 (no compute). Drives
     /// the raytraced "Save image" and the in-place incremental render.
     raytracer: Option<raytrace::Raytracer>,
+    /// In-place ray-trace output, kept **separate** from the SSAA raster target and sized
+    /// to the **1× viewport** (not SSAA×) so the per-frame trace is cheap. `rt_egui` is its
+    /// egui texture id — what the viewport paints while the ray-traced view is shown.
+    rt_color: Option<(wgpu::Texture, wgpu::TextureView)>,
+    rt_egui: Option<egui::TextureId>,
+    rt_color_size: [u32; 2],
 
     // GPU atom picking (native only — needs a synchronous readback, which WebGPU
     // can't do, and integer render targets WebGL2 may not support): sphere impostors
@@ -878,6 +884,9 @@ impl SceneRenderer {
             bg_bind_group,
             oit_enabled,
             raytracer,
+            rt_color: None,
+            rt_egui: None,
+            rt_color_size: [0, 0],
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1776,28 +1785,71 @@ impl SceneRenderer {
     }
 
     /// In-place incremental ray trace: trace `spp` more sample-paths into the running
-    /// average and resolve it into the **live** scene color target (the texture egui
-    /// paints), so the viewport progressively refines while the camera is idle. `reset`
-    /// clears the average (called on a camera/scene change). Returns the total samples
-    /// accumulated so far (the caller stops repainting once it's converged). No-op /
-    /// returns 0 if the ray tracer is unavailable or no scene is uploaded.
+    /// average and resolve it into a **dedicated 1× texture** (painted via
+    /// [`rt_texture_id`](Self::rt_texture_id)), so the viewport progressively refines
+    /// while the camera is idle — at viewport resolution, not SSAA×, to keep each frame
+    /// cheap. `reset` clears the average (camera/scene change). `size` is the 1× viewport
+    /// size in physical pixels. Returns the total samples accumulated (the caller stops
+    /// once converged). No-op / returns 0 if the ray tracer is unavailable / no scene.
     pub fn render_raytrace_inplace(
         &mut self,
         rs: &RenderState,
         camera: &crate::camera::Camera,
+        size: [u32; 2],
         reset: bool,
         spp: u32,
     ) -> u32 {
         if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
             return 0;
         }
-        let size = self.targets.size;
+        let size = [size[0].max(1), size[1].max(1)];
+        // (Re)create the 1× output texture + its egui registration on size change.
+        if self.rt_color.is_none() || self.rt_color_size != size {
+            let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("rt-inplace-color"),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.color_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            match self.rt_egui {
+                Some(id) => rs.renderer.write().update_egui_texture_from_wgpu_texture(
+                    &rs.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                    id,
+                ),
+                None => {
+                    self.rt_egui = Some(rs.renderer.write().register_native_texture(
+                        &rs.device,
+                        &view,
+                        wgpu::FilterMode::Linear,
+                    ));
+                }
+            }
+            self.rt_color = Some((tex, view));
+            self.rt_color_size = size;
+        }
+
         let uniform = Self::rt_uniform(camera, size[0], size[1], spp, 0);
-        // Render into the live color target; egui paints `texture_id()` either way, so
-        // this just replaces what the raster pass would have written — no texture swap.
+        let view = &self.rt_color.as_ref().unwrap().1;
         let rt = self.raytracer.as_mut().unwrap();
-        rt.render(rs, &self.targets.color_view, size, uniform, reset, spp);
+        rt.render(rs, view, size, uniform, reset, spp);
         rt.samples()
+    }
+
+    /// The egui texture id of the in-place ray-trace output, if one has been rendered.
+    pub fn rt_texture_id(&self) -> Option<egui::TextureId> {
+        self.rt_egui
+    }
+
+    /// Samples accumulated in the current in-place trace (0 if no tracer / nothing traced).
+    pub fn raytrace_samples(&self) -> u32 {
+        self.raytracer.as_ref().map_or(0, |rt| rt.samples())
     }
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /

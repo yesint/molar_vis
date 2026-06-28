@@ -3,9 +3,10 @@ use super::*;
 use super::overlay::*;
 
 /// In-place progressive ray tracing: sample-paths added per idle frame, and the total
-/// at which it's considered converged (then repainting stops → idle = 0 GPU).
+/// at which it's considered converged (then tracing + repainting stop → idle = 0 GPU).
+/// Rendered at 1× viewport resolution (not SSAA×) so each step is cheap.
 const RT_INPLACE_SPP: u32 = 2;
-const RT_INPLACE_TARGET: u32 = 220;
+const RT_INPLACE_TARGET: u32 = 96;
 
 impl App {
 
@@ -139,6 +140,8 @@ impl App {
                 self.rt_scene_dirty = true; // re-gather the tracer's scene next settle
             }
 
+            // Whether to paint the ray-traced output (vs the rasterized target) this frame.
+            let mut paint_rt = false;
             if raster_dirty {
                 // Camera / scene / size changed (or animating / pulsing): realtime raster.
                 let aspect = size_px[0] as f32 / size_px[1] as f32;
@@ -162,28 +165,37 @@ impl App {
                 self.last_size = size_px;
                 self.rt_reset = true; // restart the progressive trace once the view settles
             } else if rt_eligible && !ui.ctx().egui_is_using_pointer() {
-                // Steady view: progressively refine into the *live* color target with the
-                // ray tracer (PyMOL-`ray` style), then go idle once it has converged.
+                // Steady view: progressively refine into the dedicated 1× ray-trace target
+                // (PyMOL-`ray` style). Trace only while still refining; once converged, keep
+                // painting the finished image with no further dispatch/repaint → idle = 0 GPU.
                 let dashed = self.settings.behavior.dashed_pbc_bonds;
                 if self.rt_scene_dirty {
                     self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
                     self.rt_scene_dirty = false;
                     self.rt_reset = true;
                 }
-                let total = self.renderer.render_raytrace_inplace(
-                    render_state,
-                    &self.camera,
-                    self.rt_reset,
-                    RT_INPLACE_SPP,
-                );
-                self.rt_reset = false;
-                if total < RT_INPLACE_TARGET {
-                    ui.ctx().request_repaint(); // keep accumulating; stop at the target → idle = 0 GPU
+                if self.rt_reset || self.renderer.raytrace_samples() < RT_INPLACE_TARGET {
+                    let total = self.renderer.render_raytrace_inplace(
+                        render_state,
+                        &self.camera,
+                        size_px,
+                        self.rt_reset,
+                        RT_INPLACE_SPP,
+                    );
+                    self.rt_reset = false;
+                    if total < RT_INPLACE_TARGET {
+                        ui.ctx().request_repaint();
+                    }
                 }
+                paint_rt = self.renderer.rt_texture_id().is_some();
             }
             self.view_dirty = false;
 
-            let texture_id = self.renderer.texture_id();
+            // Paint the ray-traced output while it's showing, else the rasterized scene.
+            let texture_id = match (paint_rt, self.renderer.rt_texture_id()) {
+                (true, Some(id)) => id,
+                _ => self.renderer.texture_id(),
+            };
             egui::Image::new(egui::load::SizedTexture::new(texture_id, rect.size()))
                 .paint_at(ui, rect);
 

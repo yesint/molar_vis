@@ -439,9 +439,14 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   holding a **running average** (`render` takes `reset` + `spp`; file render = one `reset` step at N
   samples, in-place = a few `spp`/idle-frame accumulating until converged). `app/viewport.rs` runs the
   controller — on a steady "just viewing" frame (no camera/scene/size change, not using the pointer, no
-  draw/pending/hover overlay) it calls `render_raytrace_inplace` into the **live** color target (so egui
-  paints it with no texture swap) and `request_repaint`s until `RT_INPLACE_TARGET` samples, then idles;
-  any change drops back to the realtime raster (`rt_reset`/`rt_scene_dirty` on `App`). 4 BVH unit tests.
+  draw/pending/hover overlay) it calls `render_raytrace_inplace`, which traces into a **dedicated 1×
+  viewport-resolution texture** (`rt_color`/`rt_egui` on `SceneRenderer`, NOT the SSAA× raster target —
+  ~SSAA²× cheaper per step) that the viewport paints (`rt_texture_id`) while the trace is shown. It
+  traces only while `samples < RT_INPLACE_TARGET` (`request_repaint`ing during that); once converged it
+  **stops dispatching + repainting → idle = 0 GPU** (this is what keeps a heavy surface from pegging the
+  GPU). Any camera/scene/size change drops back to the realtime raster and resets the accumulation
+  (`rt_reset`/`rt_scene_dirty` on `App`); the AO/shadow controls feed the trace uniform, so toggling them
+  re-traces with the new values. 4 BVH unit tests.
   **Build status: file render + in-place viewport done (all rep types); the global-illumination tier
   (`Camera::gi`, field present, unwired) is the remaining follow-on.**
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
