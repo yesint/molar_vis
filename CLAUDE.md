@@ -433,18 +433,25 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   Möller–Trumbore; per hit: Blinn-Phong + 1 **cone-jittered** shadow ray toward the **world-space
   key light** (`inv_view·SHADOW_LIGHT_DIR_VIEW`; the per-sample cone = `shadow.softness × MAX_SHADOW_CONE`
   (0.45 rad ≈ 26°) gives a soft penumbra that accumulates — softness 0 razor-hard, 1 broad/diffuse) +
-  1 cosine-hemisphere AO ray; sub-pixel jitter = AA; PCG RNG)
+  `AO_RAYS` (4) cosine-hemisphere AO rays; sub-pixel jitter = AA; PCG RNG)
   into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
   `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
-  **AO occlusion distance is scene-relative** (`rt_uniform`: `scene_radius × ao.radius`, clamped
-  0.3–6 nm) — *not* the raw atom-scale nm radius the SSAO pass uses: molecular cavities/folds
-  (cartoon ribbons, surface dimples) are far larger than the ~0.4 nm atom-contact scale, so a fixed
-  small radius lets every hemisphere ray escape and AO becomes invisible (was a bug — AO did nothing
-  on cartoon/mesh); scaling by the bounding-sphere radius makes AO reach real cavities at any
-  rep/zoom (VMD-Tachyon / PyMOL-ray behavior). The lighting model is a key light + a hemispheric
-  ambient *fill* (which AO occludes) over a small ambient *floor* (so crevices/shadowed faces aren't
-  black), so AO is clearly visible without washing out the directly-lit areas.
+  **AO is tuned to read as strongly as the realtime SSAO pass** (the user's reference) — three things
+  matter, all calibrated by rendering VDW/cartoon both ways and matching molecule-region brightness:
+  (1) **scene-relative occlusion distance** (`rt_uniform`: `scene_radius × ao.radius`, clamped
+  0.3–6 nm), *not* the raw atom-scale nm radius — molecular cavities/folds (cartoon ribbons, surface
+  dimples) are far larger than the ~0.4 nm atom-contact scale, so a fixed small radius lets every
+  hemisphere ray escape and AO becomes invisible (was a bug — AO did nothing on cartoon/mesh).
+  (2) **whole-color multiply**: AO multiplies the *entire* shaded color (ambient + key + specular),
+  exactly like the SSAO pass multiplies the rasterized color — occluding only the ambient term left
+  the key light un-occluded and read far too light. (3) **contrast-boosted occlusion fraction**:
+  cos-weighted hemisphere AO is physically "correct" but light (most surface points see only ~10–20 %
+  occlusion), so the per-sample fraction over `AO_RAYS` rays is raised to `pow(frac, AO_CONTRAST=0.55)`
+  before scaling by strength — turning that modest occlusion into the strong edge/contact darkening
+  SSAO shows. (`AO_RAYS≥3` is needed for the per-sample fraction to be non-binary so the curve
+  applies.) Result: ray-traced AoEdgy VDW now matches the SSAO render's brightness, and cartoon AO is
+  clearly visible.
   Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace`, reusing the `CaptureReadback`
   readback) **and the in-place incremental viewport**: the accumulator is **ping-pong `Rgba32Float`**
   holding a **running average** (`render` takes `reset` + `spp`; file render = one `reset` step at N

@@ -61,6 +61,14 @@ const AMBIENT_FLOOR: f32 = 0.1;
 // razor-hard edge, softness 1 a broad diffuse penumbra (the user found 0.15 rad too
 // subtle to tell apart, and the hard shadows "too harsh").
 const MAX_SHADOW_CONE: f32 = 0.45;
+// AO rays per sample (a per-sample occlusion fraction, so the contrast curve below can be
+// applied locally) and the contrast exponent. cos-weighted hemisphere AO reads physically
+// "correct" but light — most surface points see only ~10–20 % occlusion, so they barely
+// darken, whereas screen-space AO over-darkens the whole bumpy surface. `pow(frac, <1)`
+// boosts that modest occlusion into the strong edge/contact darkening SSAO shows (e.g. 0.2
+// → 0.38 at 0.6), making the ray-traced AO visually comparable to the realtime SSAO.
+const AO_RAYS: u32 = 4u;
+const AO_CONTRAST: f32 = 0.55;
 
 fn pcg(v_in: u32) -> u32 {
     let state = v_in * 747796405u + 2891336453u;
@@ -336,21 +344,30 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         let hv = normalize(light + view_dir);
         let spec = mat.z * pow(max(dot(nrm, hv), 0.0), 2.0 + mat.w * 128.0);
 
-        // Ambient occlusion: one cosine-weighted hemisphere ray per sample, occluding the
-        // hemispheric *fill* light below.
+        // Ambient occlusion: AO_RAYS cosine-weighted hemisphere rays per sample → a local
+        // occlusion fraction, contrast-boosted (pow) then scaled by strength, so it reads
+        // as strongly as SSAO instead of a faint physically-correct estimate.
         var ao_vis = 1.0;
         if (U.ao.w > 0.5) {
-            let dir = cosine_hemisphere(nrm, rand(&seed), rand(&seed));
-            if (any_hit(p + nrm * U.ao.y, dir, U.ao.x)) { ao_vis = 1.0 - U.ao.z; }
+            var occ = 0.0;
+            for (var i = 0u; i < AO_RAYS; i = i + 1u) {
+                let dir = cosine_hemisphere(nrm, rand(&seed), rand(&seed));
+                if (any_hit(p + nrm * U.ao.y, dir, U.ao.x)) { occ = occ + 1.0; }
+            }
+            let frac = pow(occ / f32(AO_RAYS), AO_CONTRAST);
+            ao_vis = 1.0 - U.ao.z * frac;
         }
 
-        // Hemisphere ambient (a meaningful fill the AO occludes, plus a floor so crevices
-        // and shadowed faces aren't black) + directional key (occluded by the soft shadow)
-        // + specular. AO occludes the FILL — clearly visible — without washing out the
-        // directly-lit areas.
-        let ambient = AMBIENT_FLOOR + AMBIENT_FILL * ao_vis;
+        // Shade normally (ambient fill + floor, key light, specular), then let AO multiply
+        // the WHOLE shaded color — exactly what the screen-space-AO pass does (it multiplies
+        // the rasterized color toward black). `ao_vis` is binary per sample (hit →
+        // 1-strength, miss → 1) and averages over samples to (1 - strength·occluded_frac),
+        // so a deep contact reaches ~(1-strength) ≈ 5% brightness, matching SSAO's strong
+        // edge/contact darkening (occluding only the ambient term read far too light).
+        let ambient = AMBIENT_FLOOR + AMBIENT_FILL;
         let key = KEY_INTENSITY * ndotl * shadow_vis;
-        color = color + base * (ambient + key) + vec3<f32>(spec) * shadow_vis;
+        let shaded = base * (ambient + key) + vec3<f32>(spec) * shadow_vis;
+        color = color + shaded * ao_vis;
     }
 
     // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the
