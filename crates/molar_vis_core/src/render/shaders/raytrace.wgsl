@@ -316,7 +316,11 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (any_hit(p + nrm * U.ao.y, dir, U.ao.x)) { ao_vis = 1.0 - U.ao.z; }
         }
 
-        color = color + base * (mat.x * ao_vis + mat.y * ndotl * shadow_vis) + vec3<f32>(spec) * shadow_vis;
+        // AO darkens the whole shaded result (like the rasterized SSAO's per-pixel
+        // multiply), not just the small ambient term — otherwise it's swamped by the
+        // diffuse and effectively invisible.
+        let lit = base * (mat.x + mat.y * ndotl * shadow_vis) + vec3<f32>(spec) * shadow_vis;
+        color = color + lit * ao_vis;
     }
 
     // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the
