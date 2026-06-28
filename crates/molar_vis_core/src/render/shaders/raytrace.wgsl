@@ -26,7 +26,8 @@ struct BvhNode {
 struct RtUniform {
     inv_view_proj: mat4x4<f32>,
     eye: vec4<f32>,             // xyz eye world, w = perspective flag
-    light_dir: vec4<f32>,       // xyz world dir toward the key light
+    light_dir: vec4<f32>,       // xyz world dir toward the key light (shadow ray)
+    head_dir: vec4<f32>,        // xyz world dir toward the shading headlight
     ao: vec4<f32>,              // radius (nm), bias, strength, enabled
     shadow: vec4<f32>,          // strength, bias, enabled, _
     bg: vec4<f32>,              // background (linear)
@@ -48,13 +49,11 @@ const PI: f32 = 3.14159265359;
 const T_MAX: f32 = 1e30;
 const IDX_MASK: u32 = 0x3fffffffu;
 
-// Lighting model (tier 1, Tachyon/PyMOL-`ray`-like): a directional key light (occluded by
-// a soft shadow) plus a hemispheric ambient fill that ambient occlusion occludes. The
-// ambient FLOOR keeps deep crevices / shadowed faces from going black (softens shadows);
-// the FILL is what AO darkens (so AO is clearly visible, not lost in a tiny ambient term).
-const KEY_INTENSITY: f32 = 0.8;
-const AMBIENT_FILL: f32 = 0.45;
-const AMBIENT_FLOOR: f32 = 0.1;
+// Lighting model (tier 1, Tachyon/PyMOL-`ray`-like): Blinn-Phong from a view-space
+// headlight (using each material's own ambient/diffuse coefficients, so it matches the
+// rasterizer's `shade_material` when AO/shadows are off) × a soft cast shadow from a
+// separate key light × ambient occlusion — both applied as deferred whole-color multiplies,
+// exactly as the realtime SSAO/shadow pass does.
 // Shadow-ray cone half-angle (radians) at softness = 1; the per-sample jitter over this
 // cone gives a soft penumbra. The actual cone = `shadow.softness` (0..1) × this. Wide
 // enough (~26°) that the Softness slider has clearly visible range — softness 0 is a
@@ -301,12 +300,12 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         var nrm: vec3<f32>;
         var base: vec3<f32>;
-        var mat: vec4<f32>;
+        var mat_raw: u32;
         if (typ == 0u) {
             let sp = spheres[idx];
             nrm = normalize(p - sp.c.xyz);
             base = unpack_color(sp.m.x);
-            mat = unpack_mat(sp.m.y);
+            mat_raw = sp.m.y;
         } else if (typ == 1u) {
             let cy = cylinders[idx];
             let axis = cy.c1.xyz - cy.c0.xyz;
@@ -315,7 +314,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ap = cy.c0.xyz + ua * clamp(dot(p - cy.c0.xyz, ua), 0.0, seg);
             nrm = normalize(p - ap);
             base = unpack_color(cy.m.x);
-            mat = unpack_mat(cy.m.y);
+            mat_raw = cy.m.y;
         } else {
             let tri = triangles[idx];
             let a = mesh_verts[tri.x];
@@ -326,23 +325,42 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             base = wt * unpack_color(bitcast<u32>(a.p.w))
                  + hit.uv.x * unpack_color(bitcast<u32>(b.p.w))
                  + hit.uv.y * unpack_color(bitcast<u32>(c.p.w));
-            mat = unpack_mat(bitcast<u32>(a.n.w));
+            mat_raw = bitcast<u32>(a.n.w);
         }
+        let mat = unpack_mat(mat_raw);
 
         let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
         if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
 
-        // Directional key light with a SOFT shadow: jitter the shadow ray within a small
-        // cone per sample, so the penumbra softens as samples accumulate (vs a razor-hard
-        // single-ray shadow).
-        let ndotl = max(dot(nrm, light), 0.0);
-        var shadow_vis = 1.0;
-        if (U.shadow.z > 0.5 && ndotl > 0.0) {
-            let ldir = jitter_cone(light, U.shadow.w * MAX_SHADOW_CONE, rand(&seed), rand(&seed));
-            if (any_hit(p + nrm * U.shadow.y, ldir, T_MAX)) { shadow_vis = 1.0 - U.shadow.x; }
-        }
-        let hv = normalize(light + view_dir);
+        // Base shading mirrors the rasterizer's `shade_material` EXACTLY so the ray trace
+        // matches the realtime view when AO/shadows are off: a Blinn-Phong matte + white
+        // specular lit by the same view-space HEADLIGHT (U.head_dir) using the material's
+        // own ambient (mat.x) and diffuse (mat.y) coefficients — the previous fixed 0.55
+        // ambient (vs Opaque's 0.10) made the trace ~55 % too bright.
+        let head = U.head_dir.xyz;
+        let ndotl = max(dot(nrm, head), 0.0);
+        let hv = normalize(head + view_dir);
         let spec = mat.z * pow(max(dot(nrm, hv), 0.0), 2.0 + mat.w * 128.0);
+        var shaded = base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
+        // VMD "Outline" (top bit of the shininess byte): darken grazing-angle fragments,
+        // matching the raster's `apply_outline` (AoEdgy etc.).
+        if (((mat_raw >> 31u) & 1u) == 1u) {
+            let edge = pow(1.0 - abs(dot(nrm, view_dir)), 2.0);
+            shaded = shaded * (1.0 - 0.9 * edge);
+        }
+
+        // SHADOW: a soft shadow ray toward the separate KEY light (the direction the raster
+        // shadow map uses — decoupled from the shading headlight, exactly like the raster).
+        // Back faces (away from the key light) are shadowed without a ray.
+        var shadow_vis = 1.0;
+        if (U.shadow.z > 0.5) {
+            if (dot(nrm, light) <= 0.0) {
+                shadow_vis = 1.0 - U.shadow.x;
+            } else {
+                let ldir = jitter_cone(light, U.shadow.w * MAX_SHADOW_CONE, rand(&seed), rand(&seed));
+                if (any_hit(p + nrm * U.shadow.y, ldir, T_MAX)) { shadow_vis = 1.0 - U.shadow.x; }
+            }
+        }
 
         // Ambient occlusion: AO_RAYS cosine-weighted hemisphere rays per sample → a local
         // occlusion fraction, contrast-boosted (pow) then scaled by strength, so it reads
@@ -358,16 +376,10 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             ao_vis = 1.0 - U.ao.z * frac;
         }
 
-        // Shade normally (ambient fill + floor, key light, specular), then let AO multiply
-        // the WHOLE shaded color — exactly what the screen-space-AO pass does (it multiplies
-        // the rasterized color toward black). `ao_vis` is binary per sample (hit →
-        // 1-strength, miss → 1) and averages over samples to (1 - strength·occluded_frac),
-        // so a deep contact reaches ~(1-strength) ≈ 5% brightness, matching SSAO's strong
-        // edge/contact darkening (occluding only the ambient term read far too light).
-        let ambient = AMBIENT_FLOOR + AMBIENT_FILL;
-        let key = KEY_INTENSITY * ndotl * shadow_vis;
-        let shaded = base * (ambient + key) + vec3<f32>(spec) * shadow_vis;
-        color = color + shaded * ao_vis;
+        // Shadow + AO both multiply the WHOLE shaded color — the same deferred multiply the
+        // raster's AO/shadow pass does (output = color × ao × shadow). So with both off,
+        // color == the raster shading; with them on, contacts/cavities/shadows darken.
+        color = color + shaded * shadow_vis * ao_vis;
     }
 
     // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the

@@ -398,8 +398,10 @@ pub struct RtUniform {
     pub inv_view_proj: [[f32; 4]; 4],
     /// xyz = eye world pos; w = perspective flag (1 persp / 0 ortho).
     pub eye: [f32; 4],
-    /// xyz = world-space direction toward the key light.
+    /// xyz = world-space direction toward the key light (shadow ray).
     pub light_dir: [f32; 4],
+    /// xyz = world-space direction toward the shading headlight.
+    pub head_dir: [f32; 4],
     /// radius (nm), bias, strength, enabled.
     pub ao: [f32; 4],
     /// strength, bias, enabled, _.

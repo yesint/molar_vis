@@ -430,22 +430,30 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   **compute** pass (`cs_trace`) reads the prims + BVH from storage buffers and, per pixel, accumulates
   `samples` paths (camera ray via `inv(proj·view)` unproject — persp+ortho; explicit-stack BVH
   traversal w/ robust slab test; analytic ray-sphere/ray-cylinder lifted from the impostor shaders +
-  Möller–Trumbore; per hit: Blinn-Phong + 1 **cone-jittered** shadow ray toward the **world-space
-  key light** (`inv_view·SHADOW_LIGHT_DIR_VIEW`; the per-sample cone = `shadow.softness × MAX_SHADOW_CONE`
-  (0.45 rad ≈ 26°) gives a soft penumbra that accumulates — softness 0 razor-hard, 1 broad/diffuse) +
-  `AO_RAYS` (4) cosine-hemisphere AO rays; sub-pixel jitter = AA; PCG RNG)
+  Möller–Trumbore; per hit: Blinn-Phong shading × a cast shadow × AO; sub-pixel jitter = AA; PCG RNG)
   into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
   `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
+  **The shading deliberately mirrors the rasterizer's `shade_material` so the trace matches the
+  realtime view** (the user's reference, esp. with AO/shadows OFF — a fixed inflated ambient made the
+  trace ~55 % too bright): Blinn-Phong `base·(mat.x + mat.y·N·L) + spec` lit by the **same view-space
+  headlight** (`head_dir = inv_view·(0.3,0.4,1)`) using each **material's own** ambient/diffuse
+  coefficients (`unpack_mat`), + VMD outline (top shininess bit, like the raster `apply_outline`).
+  Shadows and AO are **deferred whole-color multiplies** (`color × shadow_vis × ao_vis`), exactly as
+  the raster's SSAO/shadow pass does — so AO-off + shadow-off == the raster shading. The shadow is a
+  **cone-jittered** ray toward a *separate* **world-space key light** (`inv_view·SHADOW_LIGHT_DIR_VIEW`
+  — decoupled from the shading headlight, again like the raster, whose shadow map uses the key light;
+  back faces shadow without a ray; per-sample cone = `shadow.softness × MAX_SHADOW_CONE` (0.45 rad ≈
+  26°) → softness 0 razor-hard, 1 broad/diffuse).
   **AO is tuned to read as strongly as the realtime SSAO pass** (the user's reference) — three things
   matter, all calibrated by rendering VDW/cartoon both ways and matching molecule-region brightness:
   (1) **scene-relative occlusion distance** (`rt_uniform`: `scene_radius × ao.radius`, clamped
   0.3–6 nm), *not* the raw atom-scale nm radius — molecular cavities/folds (cartoon ribbons, surface
   dimples) are far larger than the ~0.4 nm atom-contact scale, so a fixed small radius lets every
   hemisphere ray escape and AO becomes invisible (was a bug — AO did nothing on cartoon/mesh).
-  (2) **whole-color multiply**: AO multiplies the *entire* shaded color (ambient + key + specular),
-  exactly like the SSAO pass multiplies the rasterized color — occluding only the ambient term left
-  the key light un-occluded and read far too light. (3) **contrast-boosted occlusion fraction**:
+  (2) **whole-color multiply** (above): AO multiplies the *entire* shaded color, like the SSAO pass —
+  occluding only the ambient term left the key light un-occluded and read far too light.
+  (3) **contrast-boosted occlusion fraction**:
   cos-weighted hemisphere AO is physically "correct" but light (most surface points see only ~10–20 %
   occlusion), so the per-sample fraction over `AO_RAYS` rays is raised to `pow(frac, AO_CONTRAST=0.55)`
   before scaling by strength — turning that modest occlusion into the strong edge/contact darkening
