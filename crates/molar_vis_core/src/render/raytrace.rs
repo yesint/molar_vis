@@ -756,6 +756,148 @@ impl Raytracer {
         self.read_idx = write_idx; // the just-written average is next frame's source
     }
 
+    /// Tiled, multi-submit file render: trace `total_samples` paths/pixel by sweeping the
+    /// image in `TILE`×`TILE` blocks over many short GPU submits (a bounded sample-chunk per
+    /// block, polling between submits), then resolve once into `target`. Keeping each submit
+    /// well under the driver's command-timeout is what stops a huge scene from hanging a
+    /// single whole-image dispatch and **losing the device** (the reported crash). Used by the
+    /// "Save image" path; the in-place viewport uses [`render`](Self::render) (single
+    /// full-image submit, gated to small scenes, so a tiny per-frame cost).
+    pub fn render_tiled(
+        &mut self,
+        rs: &RenderState,
+        target: &wgpu::TextureView,
+        size: [u32; 2],
+        base_uniform: RtUniform,
+        total_samples: u32,
+    ) {
+        if !self.has_scene {
+            return;
+        }
+        self.ensure_accum(&rs.device, size);
+        self.total_samples = 0;
+        self.read_idx = 0;
+        let [w, h] = size;
+        let total = total_samples.max(1);
+
+        // Block dimension + per-submit sample chunk: bound each submit to ~`RAY_BUDGET`
+        // *BVH-ray traversals* so its GPU time stays well under the watchdog/TDR, even on a
+        // big scene. Crucially this must account for the rays cast PER sample: AO (`AO_RAYS`,
+        // matching the shader) + a shadow ray are incoherent BVH traversals that dominate the
+        // cost, so an AO+shadow submit does ~6× the work of a primary-only one — ignoring that
+        // is what still lost the device on a large scene with AO/shadows on.
+        const TILE: u32 = 256;
+        const AO_RAYS: u32 = 4; // must match raytrace.wgsl
+        const RAY_BUDGET: u32 = 2_000_000;
+        let ao_on = base_uniform.ao[3] > 0.5;
+        let shadow_on = base_uniform.shadow[2] > 0.5;
+        let rays_per_sample = 1 + if ao_on { AO_RAYS } else { 0 } + u32::from(shadow_on);
+        let chunk_cap = (RAY_BUDGET / (TILE * TILE * rays_per_sample)).max(1);
+
+        let mut done = 0u32;
+        while done < total {
+            let reset = done == 0;
+            let prior = self.total_samples;
+            let chunk = chunk_cap.min(total - done);
+            let read_idx = self.read_idx;
+            let write_idx = 1 - read_idx;
+
+            // One trace bind group per chunk (read ← read_idx, write → write_idx); the
+            // per-tile origin rides the uniform, rewritten before each submit.
+            let trace_bg = {
+                let accums = self.accum.as_ref().unwrap();
+                rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rt-trace-bg-tiled"),
+                    layout: &self.trace_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.spheres.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.cylinders.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: self.mesh_verts.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: self.triangles.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: self.nodes.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: self.prim_indices.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&accums[write_idx].1) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&accums[read_idx].1) },
+                    ],
+                })
+            };
+
+            let mut oy = 0u32;
+            while oy < h {
+                let th = TILE.min(h - oy);
+                let mut ox = 0u32;
+                while ox < w {
+                    let tw = TILE.min(w - ox);
+                    let mut u = base_uniform;
+                    u.dims = [w, h, chunk, prior];
+                    u.accum = [prior, u32::from(reset), ox, oy];
+                    rs.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+
+                    let mut encoder = rs.device.create_command_encoder(
+                        &wgpu::CommandEncoderDescriptor { label: Some("rt-tile-encoder") },
+                    );
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("rt-tile-pass"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&self.trace_pipeline);
+                        pass.set_bind_group(0, &trace_bg, &[]);
+                        pass.dispatch_workgroups(tw.div_ceil(8), th.div_ceil(8), 1);
+                    }
+                    rs.queue.submit(std::iter::once(encoder.finish()));
+                    // Block until this submit finishes, so each command buffer's GPU time
+                    // stays bounded (no pile-up) — fine on the offline file-render path.
+                    let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                    ox += TILE;
+                }
+                oy += TILE;
+            }
+            self.total_samples += chunk;
+            self.read_idx = write_idx;
+            done += chunk;
+        }
+
+        // Resolve the finished average (read_idx) into the target, once.
+        let resolve_bg = {
+            let accums = self.accum.as_ref().unwrap();
+            rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rt-resolve-bg-tiled"),
+                layout: &self.resolve_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&accums[self.read_idx].1),
+                }],
+            })
+        };
+        let mut encoder = rs
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-resolve-tiled") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rt-resolve-pass-tiled"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.resolve_pipeline);
+            pass.set_bind_group(0, &resolve_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        rs.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// Samples accumulated into the current average (for the progressive in-place loop to
     /// know when it has converged).
     pub fn samples(&self) -> u32 {

@@ -1792,8 +1792,9 @@ impl SceneRenderer {
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        // One converged step (reset + all samples at once).
-        self.raytracer.as_mut().unwrap().render(rs, &view, [out_w, out_h], uniform, true, samples);
+        // Trace tiled over many short submits (block sweep × sample chunks) so a huge scene
+        // can't hang one giant dispatch and lose the GPU device; resolves once at the end.
+        self.raytracer.as_mut().unwrap().render_tiled(rs, &view, [out_w, out_h], uniform, samples);
         Some(self.begin_readback(rs, &tex, [out_w, out_h], [out_w, out_h]))
     }
 

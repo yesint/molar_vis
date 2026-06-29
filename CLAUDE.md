@@ -462,8 +462,17 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   clearly visible.
   Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace`, reusing the `CaptureReadback`
   readback) **and the in-place incremental viewport**: the accumulator is **ping-pong `Rgba32Float`**
-  holding a **running average** (`render` takes `reset` + `spp`; file render = one `reset` step at N
-  samples, in-place = a few `spp`/idle-frame accumulating until converged). `app/viewport.rs` runs the
+  holding a **running average**. The **file render is tiled** (`Raytracer::render_tiled`): it sweeps the
+  image in `TILE`×`TILE` (256²) blocks over many short GPU submits — a bounded sample-chunk per block,
+  polling between submits — then resolves once. This is **mandatory on big scenes**: a single
+  whole-image dispatch of all samples hangs the GPU watchdog and **loses the device** (the reported
+  crash). The per-submit chunk is bounded by *BVH-ray traversals*, **counting the rays cast per sample**
+  — AO (`AO_RAYS`) + a shadow ray are incoherent traversals that dominate cost, so an AO+shadow submit
+  does ~6× a primary-only one; ignoring that still lost the device with AO/shadows on (a tile origin
+  rides `accum.zw`; the shader's pixel = tile origin + local id, so the in-place path is just one
+  full-image tile at origin 0,0 and is unchanged). The in-place path uses `render` (single full-image
+  submit, gated to ≤30k atoms, so a tiny per-frame cost). (`render` takes `reset` + `spp`;
+  in-place = a few `spp`/idle-frame accumulating until converged.) `app/viewport.rs` runs the
   controller — on a steady "just viewing" frame (no camera/scene/size change, not using the pointer, no
   draw/pending/hover overlay) it calls `render_raytrace_inplace`, which traces into a **dedicated 1×
   viewport-resolution texture** (`rt_color`/`rt_egui` on `SceneRenderer`, NOT the SSAA× raster target —

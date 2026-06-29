@@ -274,16 +274,22 @@ fn jitter_cone(dir: vec3<f32>, softness: f32, u1: f32, u2: f32) -> vec3<f32> {
 fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = U.dims.x;
     let h = U.dims.y;
-    if (gid.x >= w || gid.y >= h) { return; }
+    // Pixel coord in the FULL image = tile origin (accum.zw) + local invocation id. The file
+    // render sweeps the image in blocks over many short submits to dodge the GPU watchdog/TDR
+    // on big scenes; the in-place path uses one full-image tile (origin 0,0), so it's unchanged.
+    let gx = U.accum.z + gid.x;
+    let gy = U.accum.w + gid.y;
+    if (gx >= w || gy >= h) { return; }
+    let pix = vec2<i32>(i32(gx), i32(gy));
     let samples = U.dims.z;
     let light = normalize(U.light_dir.xyz);
     let persp = U.eye.w > 0.5;
     var color = vec3<f32>(0.0);
 
     for (var s = 0u; s < samples; s = s + 1u) {
-        var seed = pcg(gid.x + gid.y * w + (s + U.dims.w) * 9781u + 0x9e3779b9u);
-        let px = (f32(gid.x) + rand(&seed)) / f32(w);
-        let py = (f32(gid.y) + rand(&seed)) / f32(h);
+        var seed = pcg(gx + gy * w + (s + U.dims.w) * 9781u + 0x9e3779b9u);
+        let px = (f32(gx) + rand(&seed)) / f32(w);
+        let py = (f32(gy) + rand(&seed)) / f32(h);
         let ndc = vec2<f32>(px * 2.0 - 1.0, 1.0 - py * 2.0);
         var ro: vec3<f32>;
         var rd: vec3<f32>;
@@ -388,10 +394,10 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let new_total = prior + samples;
     var prev = vec3<f32>(0.0);
     if (U.accum.y == 0u) {
-        prev = textureLoad(accum_prev, vec2<i32>(gid.xy), 0).xyz;
+        prev = textureLoad(accum_prev, pix, 0).xyz;
     }
     let avg = (prev * f32(prior) + color) / f32(max(new_total, 1u));
-    textureStore(accum, vec2<i32>(gid.xy), vec4<f32>(avg, 1.0));
+    textureStore(accum, pix, vec4<f32>(avg, 1.0));
 }
 
 // ---- Resolve: fullscreen triangle, tonemap the accumulator into the sRGB target ----
