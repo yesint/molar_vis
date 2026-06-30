@@ -18,6 +18,56 @@ use super::RtJob;
 const SAVE_STEP_SUBMITS: u32 = 4;
 
 impl App {
+    /// The **Render ▸ Image…** save dialog: pick the output size (× the viewport) and format
+    /// (PNG only for now), then **Save** to render + write the file. Cross-platform (it just
+    /// stages `export_request`, which `ui` services right after this).
+    pub(super) fn draw_image_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dlg) = self.image_dialog.as_mut() else { return };
+        let [vw, vh] = self.last_size;
+        let mut save_scale: Option<u32> = None;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("render_image_dialog")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.heading("Render image");
+            ui.add_space(8.0);
+            ui.label("Output size");
+            for (label, scale) in [("Viewport (1×)", 1u32), ("2× viewport", 2), ("4× viewport", 4)] {
+                let (w, h) = (vw.max(1) * scale, vh.max(1) * scale);
+                ui.radio_value(&mut dlg.scale, scale, format!("{label}   ({w} × {h} px)"));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Format");
+                egui::ComboBox::from_id_salt("render_image_format")
+                    .selected_text("PNG")
+                    .show_ui(ui, |ui| {
+                        let mut png = true;
+                        ui.selectable_value(&mut png, true, "PNG");
+                    });
+            });
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save…").clicked() {
+                    save_scale = Some(dlg.scale);
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if let Some(scale) = save_scale {
+            self.image_dialog = None;
+            self.export_request = Some(scale);
+        } else if cancel {
+            self.image_dialog = None;
+        }
+    }
+
     /// Render the current view at `scale ×` the viewport and save it as a PNG.
     pub(super) fn export_image(&mut self, frame: &mut eframe::Frame, scale: u32) {
         let Some(rs) = frame.wgpu_render_state() else {
@@ -30,23 +80,21 @@ impl App {
         let (out_w, out_h) = (vw.max(1) * scale.max(1), vh.max(1) * scale.max(1));
 
         // Native + compute device: a full ray trace, **pumped across frames** so the app stays
-        // responsive (with a "Saving…" overlay) instead of freezing. `service_rt_save` advances
-        // it each frame and writes the PNG when done.
+        // responsive (with a "Saving…" overlay) instead of freezing. Started deferred via
+        // `rt_warm` — the viewport controller shows the overlay one frame, then runs the gather
+        // + `save_begin`; `service_rt_save` advances it and writes the PNG when done. A Save
+        // shares the tracer with the R-key still, so cancel any running/pending still.
         #[cfg(not(target_arch = "wasm32"))]
         if self.renderer.raytrace_supported() {
-            let dashed = self.settings.behavior.dashed_pbc_bonds;
-            self.renderer.prepare_raytrace(&rs, &self.scene, dashed);
-            // A Save trace shares the tracer with the R-key still — cancel any running still.
             if matches!(self.rt_job, Some(RtJob::Still)) {
                 self.renderer.rt_trace_cancel();
+                self.rt_job = None;
             }
             self.rt_still = false;
-            let samples = self.camera.rt_sample_target();
-            if self.renderer.save_begin(&rs, &self.camera, out_w, out_h, samples) {
-                self.rt_job = Some(RtJob::Save { out: [out_w, out_h], reading: None });
-                self.status = "rendering image…".into();
-                return;
-            }
+            self.rt_warm = Some(super::RtKind::Save { scale: scale.max(1) });
+            self.rt_warm_shown = false;
+            self.status = "rendering image…".into();
+            return;
         }
 
         // Fallback: high-res capture of the rasterized view (WebGL2 / no compute), or the wasm

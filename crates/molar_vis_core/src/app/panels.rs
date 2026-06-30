@@ -435,20 +435,12 @@ impl App {
             }).response);
 
             // — Render — output the current view to an image file (native: save dialog;
-            // wasm: a browser download). Rendered at a multiple of the viewport for crisp
-            // figures. Future high-quality / raytraced renders will live here too.
+            // wasm: a browser download). **Image…** opens a dialog to pick the output size +
+            // format, then saves (ray-traced on a compute device — see `render/raytrace.rs`).
             menu_buttons.push(ui.menu_button("Render", |ui| {
-                ui.label("Save image (PNG)");
-                for (label, scale) in
-                    [("Viewport (1×)", 1u32), ("2× viewport", 2), ("4× viewport", 4)]
-                {
-                    if ui
-                        .button(format!("{}  {label}", icon::IMAGE))
-                        .clicked()
-                    {
-                        self.export_request = Some(scale);
-                        ui.close();
-                    }
+                if ui.button(format!("{}  Image…", icon::IMAGE)).clicked() {
+                    self.image_dialog = Some(ImageDialog { scale: 1 });
+                    ui.close();
                 }
             }).response);
 

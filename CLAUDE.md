@@ -51,8 +51,8 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 - Test assets in `tests/`: `2lao.pdb` (1911 atoms), `2lao_cg.pdb` (238-residue martinized 2lao,
   mixed α/β — the committed **CG cartoon** fixture; regenerate per `tests/README.md` with
   `martinize2`), `large_375k.gro` (375,548 atoms, generated — **not in git**; regenerate per
-  `tests/README.md` with `gmx genconf`). `cg.pdb` (a Martini membrane bundle, all-helix) is a handy
-  CG check but **not in git** (~4 MB, user-supplied).
+  `tests/README.md` with `gmx genconf`). `cg.pdb` (a Martini membrane bundle, all-helix; ~4 MB) is a
+  committed CG check fixture.
 - Dev machine is **Wayland**; screenshot a running window with `spectacle -b -n -a -o out.png`
   (**`-a` = active window — use this**; `-f` full-screen captures blank on this compositor).
 - Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon|surface`
@@ -479,16 +479,22 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   24 / 48 respectively (a few refinement passes) instead of a fixed large count — past convergence, more samples just burn time
   without changing the image.
   **Viewport ray tracing is the explicit R key (PyMOL-`ray` style — no automatic trace-on-idle):**
-  pressing **R** (not while a text field has focus, not in draw/selection modes) starts an `RtJob::Still`
-  that frame-pumps `SceneRenderer::rt_still_*` into a **dedicated 1× texture** (`rt_color`/`rt_egui`,
-  painted via `rt_texture_id` once the first chunk lands) and **holds the still until the camera/scene/
-  size changes**, then drops to the realtime raster. **R honors the lighting settings including GI**
-  (GI strength from `Camera::gi`). No continuous repaint when idle → **idle = 0 GPU** (the old auto-idle
-  trace + its per-frame `request_repaint` + the 30k-atom size gate are all gone). The **Save image** path
-  is an `RtJob::Save` driven by `App::service_rt_save` (native): pump `save_step` into an offscreen
-  COPY_SRC target, then `save_finish` → async readback (`PollType::Poll` each frame) → write the PNG —
-  no UI freeze. (WebGL2 wasm has no compute → ray tracer absent → Save falls back to the rasterized
-  capture.) 4 BVH unit tests.
+  pressing **R** (not while a text field has focus, not in draw mode) frame-pumps `rt_still_*` into a
+  **dedicated 1× texture** (`rt_color`/`rt_egui`, painted via `rt_texture_id` once the first chunk lands)
+  and **holds the still until the camera/scene/size changes**, then drops to the realtime raster. **R
+  honors the lighting incl. GI** (GI strength from `Camera::gi`). **Deferred start** (`rt_warm`/`RtKind`
+  on `App`): a press/menu sets `rt_warm`, the controller paints the **"Ray tracing…/Saving…" overlay one
+  frame**, then runs the (possibly blocking) scene gather + trace begin — so the overlay appears
+  *immediately* instead of after the gather. **Works with an active selection**: a pending/hover
+  selection glow is **suppressed while a still is warming/running/held** (`glow_pulse = 0`, its pulse no
+  longer forces a redraw) — the glow isn't part of the trace (the gather ignores it) and the still shows
+  no glow; it returns when the still is dropped. No continuous repaint when idle → **idle = 0 GPU** (the
+  old auto-idle trace + its per-frame `request_repaint` + the 30k-atom size gate are all gone). The
+  **Save image** path is an `RtJob::Save` (also deferred via `rt_warm`) driven by `App::service_rt_save`
+  (native): pump `save_step` into an offscreen COPY_SRC target, then `save_finish` → async readback
+  (`PollType::Poll` each frame) → write the PNG — no UI freeze; the live viewport (and its glow) stays
+  interactive meanwhile. (WebGL2 wasm has no compute → ray tracer absent → Save falls back to the
+  rasterized capture.) 4 BVH unit tests.
   **Global illumination (tier 2, `Camera::gi` = a 0..1 *strength*):** when `gi > 0` the trace
   path-traces (`shade_gi` in `raytrace.wgsl`) instead of tier-1 direct shading — per hit: direct key
   light (soft-shadowed) + `GI_BOUNCES` (3) cosine-weighted diffuse bounces, Russian-roulette terminated,
@@ -761,17 +767,18 @@ next frame). The menus —
   **Load…** (`App::load_session`) — saving/loading the whole visualization state as a JSON session
   (see `session.rs`). **Save/Load are native-only** (they reload molecules from disk source paths);
   only **New** shows on wasm.
-- **Render** — **Save image (PNG)**: render the current view to an image file at a multiple of the
-  viewport (`Viewport (1×)` / `2×` / `4×`), via `App::export_request` → `export_image`
-  (`app/export.rs`). Native pops an `rfd` save dialog; **wasm triggers a browser download** (Blob →
-  object URL → `<a download>`). Available on both. **On a compute-capable device (WebGPU/native) this
-  is a full GPU ray trace** (ray-traced AO + shadows + Blinn-Phong, all rep types — see the
-  `render/raytrace.rs` bullet), **frame-pumped with a "Saving…" overlay so the UI stays responsive**
-  (no freeze); **WebGL2 falls back to a high-res capture of the rasterized view**. With the
-  View-settings **Global illumination** slider > 0, the trace is **path-traced GI** (soft sky-dome
-  ambient + indirect colour bleeding, ACES tonemap — see the GI bullet under `render/raytrace.rs`).
-  Separately, pressing **R** in the viewport ray-traces the current view in place (PyMOL-`ray` style;
-  honors AO/shadows + GI) and holds it until the camera moves; see `render/raytrace.rs`.
+- **Render** — **Image…** opens a small **save dialog** (`App::image_dialog` / `draw_image_dialog` in
+  `app/export.rs`): pick the **output size** (`Viewport (1×)` / `2×` / `4×`, each labelled with the
+  resulting px) + **format** (PNG only for now), then **Save** → `App::export_request` → `export_image`.
+  Native pops an `rfd` save dialog; **wasm triggers a browser download** (Blob → object URL →
+  `<a download>`). **On a compute-capable device (WebGPU/native) this is a full GPU ray trace**
+  (ray-traced AO + shadows + Blinn-Phong, all rep types — see the `render/raytrace.rs` bullet),
+  **frame-pumped with a "Saving…" overlay so the UI stays responsive** (no freeze); **WebGL2 falls
+  back to a high-res capture of the rasterized view**. With the View-settings **Global illumination**
+  slider > 0, the trace is **path-traced GI** (soft sky-dome ambient + indirect colour bleeding, ACES
+  tonemap — see the GI bullet under `render/raytrace.rs`). Separately, pressing **R** in the viewport
+  ray-traces the current view in place (PyMOL-`ray` style; honors AO/shadows + GI) and holds it until
+  the camera moves; see `render/raytrace.rs`.
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`

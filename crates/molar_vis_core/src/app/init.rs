@@ -399,6 +399,9 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             pending_capture: None,
             rt_scene_dirty: true,
+            rt_warm: None,
+            rt_warm_shown: false,
+            image_dialog: None,
             rt_job: None,
             rt_still: false,
             pending_undo_n: None,

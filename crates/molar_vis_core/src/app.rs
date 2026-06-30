@@ -124,11 +124,15 @@ pub struct App {
     #[cfg(target_arch = "wasm32")]
     pending_capture: Option<(crate::render::CaptureReadback, String)>,
     /// Ray-tracing controller. `rt_scene_dirty` = scene geometry changed since the tracer last
-    /// uploaded it (re-gather before the next trace). `rt_job` = a trace in progress, pumped a
-    /// few tile-submits per frame so the UI stays responsive (the **R**-key viewport still, or
-    /// a "Save image" file render). `rt_still` = a finished R-key still is showing (held until
-    /// any camera/scene/size change drops back to the realtime view).
+    /// uploaded it (re-gather before the next trace). `rt_warm` = a trace was just requested but
+    /// not yet started — its "Ray tracing…/Saving…" overlay is shown for `rt_warm_shown`'s frame
+    /// first, then the (possibly blocking) scene gather + trace begin run, so the overlay appears
+    /// immediately. `rt_job` = a trace in progress, pumped a few tile-submits per frame so the UI
+    /// stays responsive. `rt_still` = a finished R-key still is showing (held until any
+    /// camera/scene/size change drops back to the realtime view).
     rt_scene_dirty: bool,
+    rt_warm: Option<RtKind>,
+    rt_warm_shown: bool,
     rt_job: Option<RtJob>,
     rt_still: bool,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
@@ -137,6 +141,8 @@ pub struct App {
     load_dialog: Option<LoadDialog>,
     /// Open "delete trajectory frames" dialog, if any.
     delete_frames_dialog: Option<DeleteFramesDialog>,
+    /// Open "Render ▸ Image…" save dialog (the chosen output scale), if any.
+    image_dialog: Option<ImageDialog>,
     /// Open "rename molecule" dialog: the target molecule + the edit buffer.
     rename_mol: Option<(MolId, String)>,
     /// In-flight background trajectory loaders, keyed by molecule (so they
@@ -267,6 +273,17 @@ pub enum Corner {
 }
 
 
+/// A just-requested ray trace, held one frame so its overlay paints before the (blocking)
+/// scene gather, then turned into the matching [`RtJob`].
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Clone, Copy)]
+enum RtKind {
+    /// The R-key viewport still.
+    Still,
+    /// A "Save image" file render at `scale ×` the viewport.
+    Save { scale: u32 },
+}
+
 /// An in-progress ray trace, pumped a few tile-submits per frame so the UI stays responsive.
 /// At most one runs at a time (they share the tracer's accumulator + cursor).
 // The ray tracer needs compute (WebGPU/native); on the WebGL2 wasm build it never runs, so
@@ -279,6 +296,13 @@ enum RtJob {
     /// A "Save image" file render at `out` resolution (native): trace, then read back + write
     /// the PNG. `reading` holds the GPU→CPU readback once the trace has converged.
     Save { out: [u32; 2], reading: Option<crate::render::CaptureReadback> },
+}
+
+/// The Render ▸ Image… save dialog: the chosen output size (a multiple of the viewport).
+/// Format is PNG-only for now (a disabled dropdown, room to grow).
+struct ImageDialog {
+    /// Output size as a multiple of the viewport (1× / 2× / 4×).
+    scale: u32,
 }
 
 /// How a lasso gesture combines with the molecule's existing active selection.
@@ -852,6 +876,7 @@ impl eframe::App for App {
         self.draw_load_dialog(&ctx);
         self.draw_delete_frames_dialog(&ctx);
         self.draw_rename_dialog(&ctx);
+        self.draw_image_dialog(&ctx);
         self.draw_settings_dialog(&ctx, frame);
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
