@@ -103,7 +103,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   readback → encode), so the "Save image" path is verifiable headlessly without a window +
   `MOLAR_VIS_DEBUG_RAYTRACE=<path>` (+ optional `_W`/`_H`/`_SAMPLES`, default 800×600/128) — same but
   through the **GPU ray tracer** (pair with `MOLAR_VIS_DEBUG_AO=1`/`_SHADOW=1` to see the ray-traced
-  AO/shadows) +
+  AO/shadows, or `MOLAR_VIS_DEBUG_GI=1` for the path-traced global-illumination tier) +
   `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
   `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|reps|behavior]` (open the program-settings
@@ -460,34 +460,27 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   SSAO shows. (`AO_RAYS≥3` is needed for the per-sample fraction to be non-binary so the curve
   applies.) Result: ray-traced AoEdgy VDW now matches the SSAO render's brightness, and cartoon AO is
   clearly visible.
-  Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace`, reusing the `CaptureReadback`
-  readback) **and the in-place incremental viewport**: the accumulator is **ping-pong `Rgba32Float`**
-  holding a **running average**. The **file render is tiled** (`Raytracer::render_tiled`): it sweeps the
-  image in `TILE`×`TILE` (256²) blocks over many short GPU submits — a bounded sample-chunk per block,
-  polling between submits — then resolves once. This is **mandatory on big scenes**: a single
-  whole-image dispatch of all samples hangs the GPU watchdog and **loses the device** (the reported
-  crash). The per-submit chunk is bounded by *BVH-ray traversals*, **counting the rays cast per sample**
-  — AO (`AO_RAYS`) + a shadow ray are incoherent traversals that dominate cost, so an AO+shadow submit
-  does ~6× a primary-only one; ignoring that still lost the device with AO/shadows on (a tile origin
-  rides `accum.zw`; the shader's pixel = tile origin + local id, so the in-place path is just one
-  full-image tile at origin 0,0 and is unchanged). The in-place path uses `render` (single full-image
-  submit, gated to ≤30k atoms, so a tiny per-frame cost). (`render` takes `reset` + `spp`;
-  in-place = a few `spp`/idle-frame accumulating until converged.) `app/viewport.rs` runs the
-  controller — on a steady "just viewing" frame (no camera/scene/size change, not using the pointer, no
-  draw/pending/hover overlay) it calls `render_raytrace_inplace`, which traces into a **dedicated 1×
-  viewport-resolution texture** (`rt_color`/`rt_egui` on `SceneRenderer`, NOT the SSAA× raster target —
-  ~SSAA²× cheaper per step) that the viewport paints (`rt_texture_id`) while the trace is shown. It
-  traces only while `samples < RT_INPLACE_TARGET` (`request_repaint`ing during that); once converged it
-  **stops dispatching + repainting → idle = 0 GPU** (this is what keeps a heavy surface from pegging the
-  GPU). Any camera/scene/size change drops back to the realtime raster and resets the accumulation
-  (`rt_reset`/`rt_scene_dirty` on `App`); the AO/shadow controls feed the trace uniform, so toggling them
-  re-traces with the new values. **Size gate** (`RT_INPLACE_MAX_ATOMS`, 30k): above ~30k *visible*
-  atoms the in-place trace is **not** eligible — the per-frame trace refines at only a few fps on a
-  large VDW system, so after every camera stop the viewport would feel laggy for seconds (and the
-  per-frame `request_repaint` keeps it from idling); past the cap the viewport stays on the fast
-  rasterized view and idles instantly, exactly as before ray tracing existed. The full **Save image**
-  ray trace is unaffected (offline, any size). Gauged by summed `mol.n_atoms` of visible molecules
-  (cheap; computed *before* gathering so a huge scene never even builds the BVH). 4 BVH unit tests.
+  Drives the raytraced "Save image" (`render.rs` `capture_begin_raytrace`) **and the R-key viewport
+  still**: the accumulator is **ping-pong `Rgba32Float`** holding a **running average**, and the **sole
+  trace entry point is tiled** (`Raytracer::render_tiled`) — it sweeps the image in `TILE`×`TILE` (256²)
+  blocks over many short GPU submits (a bounded sample-chunk per block, polling between), then resolves
+  once. This is **mandatory on big scenes**: a single whole-image dispatch of all samples hangs the GPU
+  watchdog and **loses the device** (the reported crash). The per-submit chunk is bounded by *BVH-ray
+  traversals*, **counting the rays cast per sample** — AO (`AO_RAYS`) + a shadow ray are incoherent
+  traversals that dominate cost, so an AO+shadow submit does ~6× a primary-only one; ignoring that lost
+  the device with AO/shadows on. A tile origin rides `accum.zw`; the shader's pixel = tile origin +
+  local id.
+  **Viewport ray tracing is the explicit R key (PyMOL-`ray` style — there is no automatic
+  trace-on-idle):** pressing **R** in the viewport (not while a text field has focus, not in
+  draw/selection modes) ray-traces the current view and **holds the still until the camera/scene/size
+  changes**, then drops back to the realtime raster. `app/viewport.rs` runs the two-phase controller
+  (`rt_request`→`rt_pending`→`rt_still` on `App`): phase 1 paints the raster + a "Ray tracing…" overlay
+  and defers a frame; phase 2 calls `SceneRenderer::render_raytrace_still`, which `render_tiled`s a
+  converged tier-1 image (`RT_STILL_SAMPLES`, AO+shadows, GI is Save-image-only) into a **dedicated 1×
+  viewport-resolution texture** (`rt_color`/`rt_egui`, painted via `rt_texture_id`) — blocking, but tiled
+  so even a large scene completes without a device loss. No continuous repaint → **idle = 0 GPU** (the
+  auto-idle trace + its per-frame `request_repaint` + the 30k-atom size gate it needed are all gone).
+  4 BVH unit tests.
   **Global illumination (tier 2, `Camera::gi`, Save-image only):** when `gi` is on, the file render
   runs a **diffuse path tracer** (`shade_gi` in `raytrace.wgsl`) instead of tier-1 direct shading —
   per hit: direct key light (soft-shadowed) + `RT_GI_BOUNCES` (3) cosine-weighted diffuse bounces,
@@ -757,9 +750,9 @@ next frame). The menus —
   `render/raytrace.rs` bullet); **WebGL2 falls back to a high-res capture of the rasterized view**.
   With the View-settings **Global illumination** checkbox on, the Save-image trace is **path-traced
   GI** (soft sky-dome ambient + indirect colour bleeding, ACES tonemap — see the GI bullet under
-  `render/raytrace.rs`). The viewport itself also **progressively ray-traces in place** when idle
-  (PyMOL-`ray` style; opt-out toggle in the View-settings Lighting tab, default on; see
-  `render/raytrace.rs`).
+  `render/raytrace.rs`). Separately, pressing **R** in the viewport ray-traces the current view in
+  place (PyMOL-`ray` style, tier-1 AO+shadows) and holds it until the camera moves; see
+  `render/raytrace.rs`.
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
@@ -824,11 +817,11 @@ is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anc
     `DragValue` edit box).
   - **Lighting**: **Ambient occlusion** (enable + Strength/Radius; `Camera::ao`) + **Cast shadows**
     (enable + Strength + **Softness**; `Camera::shadow` — Softness rides `shadow_uniform`'s 4th slot
-    and is used only by the ray tracer's soft penumbra) + a **Ray tracing** group — a **Ray-traced
-    viewport** checkbox (`Camera::raytrace_inplace`, default on, greyed without a compute-capable
-    device) that progressively ray-traces the idle view in place. The AO/shadow controls feed the
-    trace, and changing any of them re-traces (the viewport requests a follow-up frame after a
-    settings change so the trace re-engages from idle — see `app/viewport.rs`).
+    and is used only by the ray tracer's soft penumbra) + a **Ray tracing** group — a "Press R to
+    ray-trace the view" hint (the viewport still is the **R key**, PyMOL-`ray` style; greyed without a
+    compute-capable device) + a **Global illumination (Save image)** checkbox (`Camera::gi`, off by
+    default — path-traced GI for the offline Save-image render only). The AO/shadow controls feed both
+    the R-key still and Save image.
   - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`,
     hand-laid-out: a rectangle showing a **live mini downsampled render of the scene** (the
     `renderer.texture_id()` painted into the rect), an on/off **checkbox in its center** (on a

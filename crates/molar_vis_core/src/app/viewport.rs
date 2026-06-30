@@ -2,16 +2,9 @@
 use super::*;
 use super::overlay::*;
 
-/// In-place progressive ray tracing: sample-paths added per idle frame, and the total
-/// at which it's considered converged (then tracing + repainting stop → idle = 0 GPU).
-/// Rendered at 1× viewport resolution (not SSAA×) so each step is cheap.
-const RT_INPLACE_SPP: u32 = 2;
-const RT_INPLACE_TARGET: u32 = 96;
-/// Max visible atoms for which the idle viewport auto-ray-traces in place. Past this the
-/// per-frame trace is too slow to refine smoothly (a large VDW system drops to a few fps),
-/// so the viewport stays on the fast rasterized view; "Save image" still ray-traces at any
-/// size. See the size-gate note in `rt_eligible`.
-const RT_INPLACE_MAX_ATOMS: usize = 30_000;
+/// Samples per pixel for the **R**-key ray-traced still (converged in one shot, at 1×
+/// viewport resolution). Tier-1 AO+shadows are clean by ~this count; higher just costs more.
+const RT_STILL_SAMPLES: u32 = 96;
 
 impl App {
 
@@ -127,42 +120,38 @@ impl App {
             let size_changed = size_px != self.last_size;
             let raster_dirty = geom_changed || cam_changed || size_changed || self.view_dirty || pulsing;
 
-            // In-place ray tracing is eligible on a steady "just viewing" frame: the
-            // opt-out setting is on, the device is compute-capable, the scene is non-empty,
-            // and no interactive overlay (draw mode / pending selection / hover) needs the
-            // realtime raster. When it isn't, we render the raster as before.
-            //
-            // Size gate: above ~`RT_INPLACE_MAX_ATOMS` visible atoms the per-frame trace
-            // refines at only a few fps (a large VDW system traces ~5 fps), so after every
-            // camera stop the viewport would feel laggy for seconds before converging —
-            // whereas the rasterized view stays smooth and idles instantly. Past the cap we
-            // skip in-place tracing entirely (never even gather the scene / build the BVH,
-            // which itself stalls on a big system); "Save image" still does a full offline
-            // trace at any size. Gauged by total atoms of *visible* molecules (cheap; the
-            // common heavy case is VDW of a large system, where displayed ≈ total atoms).
-            let visible_atoms: usize = self
-                .scene
-                .molecules
-                .iter()
-                .filter(|m| m.visible)
-                .map(|m| m.n_atoms)
-                .sum();
-            let rt_eligible = self.camera.raytrace_inplace
-                && self.renderer.raytrace_supported()
+            if geom_changed {
+                self.rt_scene_dirty = true; // re-gather the tracer's scene before the next "R"
+            }
+
+            // Ray-traced still (PyMOL-`ray` style): pressing **R** ray-traces the current view
+            // and holds it until the camera/scene/size changes. No automatic tracing on idle.
+            // Eligible only with a compute device, a non-empty scene, and no interactive overlay
+            // (draw / pending selection / hover) that needs the realtime raster; the key is
+            // ignored while a text field has focus (so typing "r" in a selection doesn't fire).
+            let rt_ok = self.renderer.raytrace_supported()
                 && !self.scene.molecules.is_empty()
-                && visible_atoms <= RT_INPLACE_MAX_ATOMS
                 && self.draw.is_none()
                 && !self
                     .scene
                     .molecules
                     .iter()
                     .any(|m| m.pending.is_some() || m.hover.is_some());
-
-            if geom_changed {
-                self.rt_scene_dirty = true; // re-gather the tracer's scene next settle
+            if rt_ok
+                && !ui.ctx().egui_wants_keyboard_input()
+                && ui.input(|i| i.key_pressed(egui::Key::R))
+            {
+                self.rt_request = true;
+                ui.ctx().request_repaint();
+            }
+            // Any camera/scene/size change drops a showing/pending still back to the raster.
+            if raster_dirty {
+                self.rt_still = false;
+                self.rt_request = false;
+                self.rt_pending = false;
             }
 
-            // Whether to paint the ray-traced output (vs the rasterized target) this frame.
+            // Whether to paint the ray-traced still (vs the rasterized target) this frame.
             let mut paint_rt = false;
             if raster_dirty {
                 // Camera / scene / size changed (or animating / pulsing): realtime raster.
@@ -185,39 +174,29 @@ impl App {
                 );
                 self.last_render_camera = Some(self.camera);
                 self.last_size = size_px;
-                self.rt_reset = true; // restart the progressive trace once the view settles
-                if rt_eligible {
-                    // Schedule a follow-up frame so the now-settled view re-engages the
-                    // ray tracer. Without this, a one-shot change from an idle state — an
-                    // AO/shadow toggle, a settings tweak — would leave the rasterized frame
-                    // on screen (egui requests no repaint after it), so the trace would
-                    // never re-run and the change would look like it did nothing.
-                    ui.ctx().request_repaint();
-                }
-            } else if rt_eligible && !ui.ctx().egui_is_using_pointer() {
-                // Steady view: progressively refine into the dedicated 1× ray-trace target
-                // (PyMOL-`ray` style). Trace only while still refining; once converged, keep
-                // painting the finished image with no further dispatch/repaint → idle = 0 GPU.
+            } else if self.rt_pending {
+                // Phase 2: the "Ray tracing…" hint painted last frame; now run the (blocking)
+                // converged trace into the 1× ray-trace target and show it. Tiled internally,
+                // so even a large scene completes without losing the GPU device.
                 let dashed = self.settings.behavior.dashed_pbc_bonds;
                 if self.rt_scene_dirty {
                     self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
                     self.rt_scene_dirty = false;
-                    self.rt_reset = true;
                 }
-                if self.rt_reset || self.renderer.raytrace_samples() < RT_INPLACE_TARGET {
-                    let total = self.renderer.render_raytrace_inplace(
-                        render_state,
-                        &self.camera,
-                        size_px,
-                        self.rt_reset,
-                        RT_INPLACE_SPP,
-                    );
-                    self.rt_reset = false;
-                    if total < RT_INPLACE_TARGET {
-                        ui.ctx().request_repaint();
-                    }
-                }
-                paint_rt = self.renderer.rt_texture_id().is_some();
+                self.renderer
+                    .render_raytrace_still(render_state, &self.camera, size_px, RT_STILL_SAMPLES);
+                self.rt_pending = false;
+                self.rt_still = true;
+                paint_rt = true;
+            } else if self.rt_request {
+                // Phase 1: defer the trace one frame so the "Ray tracing…" hint shows first
+                // (egui keeps the last painted frame on screen during the blocking phase 2).
+                self.rt_request = false;
+                self.rt_pending = true;
+                ui.ctx().request_repaint();
+            } else if self.rt_still {
+                // Holding the finished still (view unchanged): keep painting it, no re-trace.
+                paint_rt = true;
             }
             self.view_dirty = false;
 
@@ -577,6 +556,19 @@ impl App {
                 if let Some((glyph, text, color)) = hint {
                     draw_modifier_hint_overlay(ui, rect, glyph, text, color);
                 }
+            }
+
+            // "Ray tracing…" hint while an R-key still is being prepared. It's painted on
+            // the phase-1 frame and stays on screen during the (blocking) phase-2 trace, so
+            // the user gets feedback instead of an apparent freeze.
+            if self.rt_pending {
+                draw_modifier_hint_overlay(
+                    ui,
+                    rect,
+                    icon::CUBE_TRANSPARENT,
+                    "Ray tracing…",
+                    egui::Color32::from_rgb(150, 190, 230),
+                );
             }
         });
     }

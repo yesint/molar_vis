@@ -399,7 +399,9 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             pending_capture: None,
             rt_scene_dirty: true,
-            rt_reset: true,
+            rt_request: false,
+            rt_pending: false,
+            rt_still: false,
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,

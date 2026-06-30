@@ -670,116 +670,14 @@ impl Raytracer {
         }
     }
 
-    /// Trace `spp` more sample-paths into the running-average accumulator at `size`, then
-    /// resolve (tonemap) the current average into `target`. `reset` clears the average
-    /// (camera/scene change); pass `reset = true, spp = N` for a one-shot converged file
-    /// render. No-op if no scene is uploaded.
-    pub fn render(
-        &mut self,
-        rs: &RenderState,
-        target: &wgpu::TextureView,
-        size: [u32; 2],
-        mut uniform: RtUniform,
-        reset: bool,
-        spp: u32,
-    ) {
-        if !self.has_scene {
-            return;
-        }
-        self.ensure_accum(&rs.device, size);
-        if reset {
-            self.total_samples = 0;
-            self.read_idx = 0;
-        }
-        let spp = spp.max(1);
-        uniform.dims[2] = spp;
-        uniform.dims[3] = self.total_samples; // varies the RNG per accumulation step
-        uniform.accum = [self.total_samples, u32::from(reset), 0, 0];
-        rs.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
 
-        let spheres = self.spheres.as_ref().unwrap();
-        let cylinders = self.cylinders.as_ref().unwrap();
-        let mesh_verts = self.mesh_verts.as_ref().unwrap();
-        let triangles = self.triangles.as_ref().unwrap();
-        let nodes = self.nodes.as_ref().unwrap();
-        let prim_indices = self.prim_indices.as_ref().unwrap();
-        let accums = self.accum.as_ref().unwrap();
-        let read_view = &accums[self.read_idx].1;
-        let write_idx = 1 - self.read_idx;
-        let write_view = &accums[write_idx].1;
-
-        let trace_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rt-trace-bg"),
-            layout: &self.trace_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: spheres.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: cylinders.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: mesh_verts.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: triangles.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: nodes.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: prim_indices.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(write_view) },
-                wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(read_view) },
-            ],
-        });
-        let resolve_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rt-resolve-bg"),
-            layout: &self.resolve_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(write_view),
-                },
-            ],
-        });
-
-        let mut encoder = rs
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-encoder") });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("rt-trace-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.trace_pipeline);
-            pass.set_bind_group(0, &trace_bg, &[]);
-            pass.dispatch_workgroups(size[0].div_ceil(8), size[1].div_ceil(8), 1);
-        }
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("rt-resolve-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.resolve_pipeline);
-            pass.set_bind_group(0, &resolve_bg, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        rs.queue.submit(std::iter::once(encoder.finish()));
-        self.total_samples += spp;
-        self.read_idx = write_idx; // the just-written average is next frame's source
-    }
-
-    /// Tiled, multi-submit file render: trace `total_samples` paths/pixel by sweeping the
+    /// Tiled, multi-submit converged render: trace `total_samples` paths/pixel by sweeping the
     /// image in `TILE`×`TILE` blocks over many short GPU submits (a bounded sample-chunk per
     /// block, polling between submits), then resolve once into `target`. Keeping each submit
     /// well under the driver's command-timeout is what stops a huge scene from hanging a
-    /// single whole-image dispatch and **losing the device** (the reported crash). Used by the
-    /// "Save image" path; the in-place viewport uses [`render`](Self::render) (single
-    /// full-image submit, gated to small scenes, so a tiny per-frame cost).
+    /// single whole-image dispatch and **losing the device** (the reported crash). The sole
+    /// trace entry point — drives both the "Save image" file render and the R-key viewport
+    /// still (`SceneRenderer::render_raytrace_still`).
     pub fn render_tiled(
         &mut self,
         rs: &RenderState,
@@ -918,11 +816,6 @@ impl Raytracer {
         rs.queue.submit(std::iter::once(encoder.finish()));
     }
 
-    /// Samples accumulated into the current average (for the progressive in-place loop to
-    /// know when it has converged).
-    pub fn samples(&self) -> u32 {
-        self.total_samples
-    }
 }
 
 #[cfg(test)]

@@ -123,11 +123,16 @@ pub struct App {
     /// until the GPU→CPU map resolves (native exports synchronously, so it needs no slot).
     #[cfg(target_arch = "wasm32")]
     pending_capture: Option<(crate::render::CaptureReadback, String)>,
-    /// In-place ray-trace controller: scene geometry changed since the tracer last
-    /// uploaded it (needs a re-gather), and whether to restart the progressive
-    /// accumulation (set on any camera/scene/size change).
+    /// Ray-traced-still controller (PyMOL-`ray` style, triggered by the **R** key):
+    /// `rt_scene_dirty` = scene geometry changed since the tracer last uploaded it (needs a
+    /// re-gather before the next trace); `rt_request` = R was pressed (render the still next
+    /// frame, after the "Ray tracing…" hint paints); `rt_pending` = the hint is up and the
+    /// blocking trace runs this frame; `rt_still` = a finished ray-traced still is showing
+    /// (held until any camera/scene/size change drops back to the realtime view).
     rt_scene_dirty: bool,
-    rt_reset: bool,
+    rt_request: bool,
+    rt_pending: bool,
+    rt_still: bool,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).

@@ -296,27 +296,29 @@ impl App {
             });
         });
         ui.add_space(6.0);
-        // Ray tracing (WebGPU/native only): progressively ray-trace the idle viewport
-        // with true AO + shadows, and an optional global-illumination tier.
+        // Ray tracing (WebGPU/native only): press R to ray-trace the current view (PyMOL-
+        // `ray` style) + an optional global-illumination tier for Save image.
         egui::Frame::group(ui.style()).show(ui, |ui| {
             let supported = self.renderer.raytrace_supported();
-            ui.add_enabled_ui(supported, |ui| {
-                ui.checkbox(&mut self.camera.raytrace_inplace, "Ray-traced viewport")
-                    .on_hover_text(
-                        "Progressively ray-trace the view when the camera is idle \
-                         (ray-traced ambient occlusion + shadows); drops to the realtime \
-                         view while moving. The AO/shadow controls above apply. \
-                         Automatically skipped for very large scenes (kept responsive); \
-                         use Render ▸ Save image for a full ray trace at any size.",
-                    );
+            if supported {
+                ui.label("Ray tracing").on_hover_text(
+                    "Press R in the viewport to ray-trace the current view (ambient occlusion \
+                     + shadows); it holds until you move the camera. Render ▸ Save image \
+                     ray-traces to a file at any resolution.",
+                );
+                ui.label(
+                    egui::RichText::new("Press R to ray-trace the view")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(2.0);
                 ui.checkbox(&mut self.camera.gi, "Global illumination (Save image)")
                     .on_hover_text(
                         "Path-traced global illumination — soft sky-dome ambient + indirect \
                          colour bleeding, for the offline Render ▸ Save image only (too heavy \
                          for the live viewport). Needs more samples to converge.",
                     );
-            });
-            if !supported {
+            } else {
                 ui.label(
                     egui::RichText::new("Ray tracing needs WebGPU (unavailable on this device)")
                         .weak()

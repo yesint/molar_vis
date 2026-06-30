@@ -1807,73 +1807,68 @@ impl SceneRenderer {
         Some(self.begin_readback(rs, &tex, [out_w, out_h], [out_w, out_h]))
     }
 
-    /// In-place incremental ray trace: trace `spp` more sample-paths into the running
-    /// average and resolve it into a **dedicated 1× texture** (painted via
-    /// [`rt_texture_id`](Self::rt_texture_id)), so the viewport progressively refines
-    /// while the camera is idle — at viewport resolution, not SSAA×, to keep each frame
-    /// cheap. `reset` clears the average (camera/scene change). `size` is the 1× viewport
-    /// size in physical pixels. Returns the total samples accumulated (the caller stops
-    /// once converged). No-op / returns 0 if the ray tracer is unavailable / no scene.
-    pub fn render_raytrace_inplace(
+    /// (Re)create the dedicated 1× ray-trace output texture + its egui registration on a
+    /// size change. Painted via [`rt_texture_id`](Self::rt_texture_id).
+    fn ensure_rt_color(&mut self, rs: &RenderState, size: [u32; 2]) {
+        if self.rt_color.is_some() && self.rt_color_size == size {
+            return;
+        }
+        let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rt-still-color"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        match self.rt_egui {
+            Some(id) => rs.renderer.write().update_egui_texture_from_wgpu_texture(
+                &rs.device,
+                &view,
+                wgpu::FilterMode::Linear,
+                id,
+            ),
+            None => {
+                self.rt_egui = Some(rs.renderer.write().register_native_texture(
+                    &rs.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                ));
+            }
+        }
+        self.rt_color = Some((tex, view));
+        self.rt_color_size = size;
+    }
+
+    /// Ray-trace a **converged still** of the current view (PyMOL-`ray` style, triggered by
+    /// the R key) into the dedicated 1× texture, painted via
+    /// [`rt_texture_id`](Self::rt_texture_id) until the camera moves. Tier-1 (AO + shadows;
+    /// GI is Save-image-only). Tiled internally (`render_tiled`), so even a large scene
+    /// completes without losing the GPU device. Blocks until the trace finishes. No-op if
+    /// the ray tracer is unavailable / no scene.
+    pub fn render_raytrace_still(
         &mut self,
         rs: &RenderState,
         camera: &crate::camera::Camera,
         size: [u32; 2],
-        reset: bool,
-        spp: u32,
-    ) -> u32 {
+        samples: u32,
+    ) {
         if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
-            return 0;
+            return;
         }
         let size = [size[0].max(1), size[1].max(1)];
-        // (Re)create the 1× output texture + its egui registration on size change.
-        if self.rt_color.is_none() || self.rt_color_size != size {
-            let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("rt-inplace-color"),
-                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.color_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            match self.rt_egui {
-                Some(id) => rs.renderer.write().update_egui_texture_from_wgpu_texture(
-                    &rs.device,
-                    &view,
-                    wgpu::FilterMode::Linear,
-                    id,
-                ),
-                None => {
-                    self.rt_egui = Some(rs.renderer.write().register_native_texture(
-                        &rs.device,
-                        &view,
-                        wgpu::FilterMode::Linear,
-                    ));
-                }
-            }
-            self.rt_color = Some((tex, view));
-            self.rt_color_size = size;
-        }
-
-        // The in-place / "r" viewport trace is always tier-1 (GI is Save-image-only).
-        let uniform = Self::rt_uniform(camera, size[0], size[1], spp, 0, 0);
+        self.ensure_rt_color(rs, size);
+        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, 0);
         let view = &self.rt_color.as_ref().unwrap().1;
-        let rt = self.raytracer.as_mut().unwrap();
-        rt.render(rs, view, size, uniform, reset, spp);
-        rt.samples()
+        self.raytracer.as_mut().unwrap().render_tiled(rs, view, size, uniform, samples);
     }
 
-    /// The egui texture id of the in-place ray-trace output, if one has been rendered.
+    /// The egui texture id of the ray-traced still, if one has been rendered.
     pub fn rt_texture_id(&self) -> Option<egui::TextureId> {
         self.rt_egui
-    }
-
-    /// Samples accumulated in the current in-place trace (0 if no tracer / nothing traced).
-    pub fn raytrace_samples(&self) -> u32 {
-        self.raytracer.as_ref().map_or(0, |rt| rt.samples())
     }
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /
