@@ -143,6 +143,29 @@ fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
 
     var out: VsOut;
     out.clip = camera.proj * vec4<f32>(pos, 1.0);
+    // Conservative near-depth for `@early_depth_test(greater_equal)`. Keep clip.xy /
+    // clip.w — hence the screen coverage, near-plane clipping, AND the interpolated
+    // `view_pos` the fragment uses for the ray — identical to the plain billboard, so
+    // the rendered image is byte-for-byte unchanged. Override only clip.z to a lower
+    // bound on the hit depth: pull this vertex ~one radius toward the camera and use
+    // that point's depth. The whole cylinder lies within `radius` of its axis and this
+    // quad passes through the axis line, so the pulled point sits at/in front of the
+    // nearest surface. **Perspective**: pull along the vertex's eye-ray (scale toward
+    // the origin) — eye-rays diverge, so a fixed +Z under-bounds off-axis and wrongly
+    // culls. **Orthographic**: rays are parallel along −Z, so toward-eye is +Z. The 3×
+    // factor covers the depth interpolation across the quad vs. the curved surface
+    // (smaller factors left a few mis-culled silhouette pixels). The fragment still
+    // writes the true analytic depth, so the depth buffer stays exact.
+    var near_pos = pos;
+    let pull = inst.radius * 3.0;
+    if (camera.params.x > 0.5) {
+        let l = length(pos);
+        near_pos = pos * max(1.0 - pull / l, 0.0);
+    } else {
+        near_pos.z = pos.z + pull;
+    }
+    let near_c = camera.proj * vec4<f32>(near_pos, 1.0);
+    out.clip.z = (near_c.z / near_c.w) * out.clip.w;
     out.view_pos = pos;
     out.base = a0;
     out.axis = d;

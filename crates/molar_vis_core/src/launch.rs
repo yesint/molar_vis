@@ -50,12 +50,62 @@ where
     groups
 }
 
+/// eframe wgpu configuration that opts the device into conservative early
+/// depth-test when the adapter supports it. The sphere/cylinder fragment shaders
+/// write analytic `frag_depth`, which normally forces late-Z → every overlapping
+/// fragment is shaded (heavy overdraw on close-up VDW/licorice). The
+/// `SHADER_EARLY_DEPTH_TEST` feature (native, Vulkan/GLES 3.1+) lets them keep
+/// early-Z via `@early_depth_test(greater_equal)`; we request it **only when the
+/// adapter advertises it**, and the renderer injects the attribute only when the
+/// device ended up with the feature — so unsupported adapters (and WebGL2/wasm,
+/// which never run this path) fall back to the plain late-Z shaders. We mirror
+/// eframe's default limits (incl. the `max_texture_dimension_2d = 8192` bump) so
+/// nothing else about device creation changes. Shared by the native binary and the
+/// Python module (both spawn the viewer with `eframe::run_native`).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn early_z_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
+    use eframe::wgpu;
+    use std::sync::Arc;
+
+    WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
+            device_descriptor: Arc::new(|adapter: &wgpu::Adapter| {
+                let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                };
+                let mut required_features = wgpu::Features::empty();
+                if adapter
+                    .features()
+                    .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST)
+                {
+                    required_features |= wgpu::Features::SHADER_EARLY_DEPTH_TEST;
+                }
+                wgpu::DeviceDescriptor {
+                    label: Some("molar_vis wgpu device"),
+                    required_features,
+                    required_limits: wgpu::Limits {
+                        max_texture_dimension_2d: 8192,
+                        ..base_limits
+                    },
+                    ..Default::default()
+                }
+            }),
+            ..WgpuSetupCreateNew::without_display_handle()
+        }),
+        ..Default::default()
+    }
+}
+
 /// Launch the native viewer window. Returns once the window is closed.
 /// Native-only: the web build uses `eframe::WebRunner` from a wasm entry point.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run(launch: AppLaunch) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: early_z_wgpu_options(),
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("molar_vis")
             .with_inner_size([1200.0, 800.0]),

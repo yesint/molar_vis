@@ -114,12 +114,26 @@ fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
 
     let view_center = (camera.view * vec4<f32>(inst.center, 1.0)).xyz;
     // Oversize slightly so the perspective silhouette is fully covered; extra
-    // fragments are discarded by the ray test.
+    // fragments are discarded by the ray test. Billboard sits on the sphere's center
+    // plane — the *original* placement, so screen coverage and near-plane clipping are
+    // byte-for-byte unchanged (moving it toward the camera altered both at the frame
+    // edge in perspective close-ups).
     let r = inst.radius * 1.25;
     let view_pos = view_center + vec3<f32>(corner * r, 0.0);
 
     var out: VsOut;
     out.clip = camera.proj * vec4<f32>(view_pos, 1.0);
+    // Conservative near-depth for `@early_depth_test(greater_equal)`: override the
+    // *interpolated* depth to the sphere's near pole (one radius toward the camera) so
+    // it is a lower bound on the analytic hit depth, WITHOUT moving the geometry. The
+    // sphere's minimum depth is exactly at the near pole and depth depends only on
+    // view-z, so this per-instance constant makes the interpolated z_ndc equal it
+    // across the whole quad (clip.z = z_ndc·w; w cancels in the divide). The fragment
+    // shader still writes the true analytic depth, so the depth buffer stays exact —
+    // only the GPU's early reject sees the (tight, correct) lower bound. Inert without
+    // the attribute except for the degenerate camera-inside-the-sphere case.
+    let near_c = camera.proj * vec4<f32>(view_center.x, view_center.y, view_center.z + inst.radius, 1.0);
+    out.clip.z = (near_c.z / near_c.w) * out.clip.w;
     out.view_pos = view_pos;
     out.view_center = view_center;
     out.radius = inst.radius;

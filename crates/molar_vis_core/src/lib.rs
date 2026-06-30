@@ -42,7 +42,7 @@ pub use moldata::{MolData, SharedSource};
 pub use scene::{evaluate, EvalError};
 pub use launch::{parse_file_args, AppLaunch};
 #[cfg(not(target_arch = "wasm32"))]
-pub use launch::run;
+pub use launch::{early_z_wgpu_options, run};
 #[cfg(target_arch = "wasm32")]
 pub use launch::run_web;
 

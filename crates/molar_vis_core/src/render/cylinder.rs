@@ -74,10 +74,14 @@ pub fn build_pipeline(
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
     fs_entry: &str,
+    early_z: bool,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("cylinder-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cylinder.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(super::inject_early_z(
+            include_str!("shaders/cylinder.wgsl"),
+            early_z,
+        )),
     });
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

@@ -79,6 +79,28 @@ fn camera_binding_size() -> Option<std::num::NonZeroU64> {
     std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
 }
 
+/// Inject the conservative early-depth-test attribute onto an impostor shader's
+/// opaque `fs_main` entry. The sphere/cylinder fragments write analytic
+/// `frag_depth`, which normally disables early-Z so every overlapping fragment is
+/// shaded — deep overdraw on close-up VDW/licorice. Their billboards are placed at
+/// the geometry's *near point*, so the rasterized depth is a conservative lower
+/// bound on the true hit depth; `@early_depth_test(greater_equal)` then lets the GPU
+/// reject occluded fragments before the ray-cast + shading. Gated on the
+/// `SHADER_EARLY_DEPTH_TEST` device feature (native, Vulkan/GLES 3.1+) — when
+/// `enable` is false the source passes through unchanged (plain late-Z), so WebGL2/
+/// wasm and unsupported adapters keep working. Only `fs_main` is tagged: the OIT/
+/// glow/pick entries are untouched.
+fn inject_early_z(src: &'static str, enable: bool) -> std::borrow::Cow<'static, str> {
+    if enable {
+        std::borrow::Cow::Owned(src.replace(
+            "@fragment\nfn fs_main",
+            "@fragment @early_depth_test(greater_equal)\nfn fs_main",
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(src)
+    }
+}
+
 /// (Re)create the camera bind group over `buf` with a dynamic-offset binding.
 fn make_camera_bind_group(
     device: &wgpu::Device,
@@ -691,6 +713,16 @@ impl SceneRenderer {
                  transparency disabled; transparent reps use plain alpha blending"
             );
         }
+        // Conservative early depth-test for the impostor opaque pass (kills close-up
+        // sphere/cylinder overdraw). Native + adapter-gated; requested in `launch.rs`
+        // and only present here if the device actually got it (WebGL2/wasm never do).
+        let early_z = device
+            .features()
+            .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST)
+            && std::env::var_os("MOLAR_VIS_NO_EARLY_Z").is_none();
+        if early_z {
+            log::info!("SHADER_EARLY_DEPTH_TEST enabled: impostors use early-Z (greater_equal)");
+        }
 
         // Opaque pass: single alpha-blended target, depth-write on, `fs_main`.
         // OIT pass: accum+reveal targets, depth-write off (test on), `fs_oit`.
@@ -716,11 +748,13 @@ impl SceneRenderer {
                 b(&glow_t, false, lequal, "fs_glow"),
             ]
         };
+        // Early-Z applies only to the opaque pass (`fs_main`); the OIT/glow slots
+        // keep late-Z (depth-write off there anyway).
         let sphere_pipeline = triple(&|t, dw, dc, fs| {
-            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, early_z && fs == "fs_main")
         });
         let cylinder_pipeline = triple(&|t, dw, dc, fs| {
-            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, early_z && fs == "fs_main")
         });
         let line_pipeline = triple(&|t, dw, dc, fs| {
             line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)

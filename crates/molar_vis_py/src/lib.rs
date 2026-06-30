@@ -389,6 +389,9 @@ fn spawn() -> PyResult<Visualizer> {
         .spawn(move || {
             let native_options = eframe::NativeOptions {
                 renderer: eframe::Renderer::Wgpu,
+                // Same early-Z device opt-in as the standalone binary (kills close-up
+                // impostor overdraw when the adapter supports it).
+                wgpu_options: molar_vis_core::early_z_wgpu_options(),
                 event_loop_builder: Some(Box::new(|builder| {
                     // Permit the event loop on this non-main thread.
                     #[cfg(target_os = "linux")]

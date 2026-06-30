@@ -594,6 +594,29 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   perpendicular to the segment by `width` px in `line.wgsl` (uses the viewport size carried
   in the camera uniform's `params.yz`); width stays constant in pixels at any zoom, like VMD.
   Half-bond coloring = two half-segments per bond, colored by each endpoint atom.
+  **Early-Z (conservative depth) for the impostor opaque pass** — writing analytic
+  `frag_depth` normally disables early depth-test, so on a screen-filling close-up every
+  overlapping sphere/cylinder is shaded (deep overdraw, the reported close-up slowdown).
+  When the device advertises the **`SHADER_EARLY_DEPTH_TEST`** feature (native, Vulkan/GLES
+  3.1+; requested in `launch::early_z_wgpu_options`, the shared eframe device descriptor used
+  by both the native bin and `molar_vis_py`, **only when the adapter supports it**), the
+  renderer injects `@early_depth_test(greater_equal)` onto the opaque `fs_main` of
+  `sphere.wgsl`/`cylinder.wgsl` (`render::inject_early_z`; OIT/glow/pick entries untouched),
+  letting the GPU reject occluded impostor fragments **before** the ray-cast + shading. The
+  attribute requires the rasterized depth to be a *lower bound* on the true hit depth, so each
+  shader keeps its billboard at the **original** position (coverage + near-plane clipping
+  byte-for-byte unchanged) and overrides only the **interpolated `clip.z`** to the geometry's
+  *near point* (sphere: the near pole, a per-instance constant → constant `z_ndc` across the
+  quad; cylinder: each vertex pulled ~3·radius toward the camera — perspective along the
+  vertex's eye-ray, ortho along +Z — and that point's depth written, the 3× covering the
+  depth-interpolation slack vs. the curved surface). The fragment still writes the true
+  analytic depth, so the depth buffer is exact and the **rendered image is identical** —
+  verified byte-for-byte (AE=0) vs. the pre-feature build across VDW/licorice/ball-and-stick in
+  fit / perspective close-up / ortho close-up, and early-Z ON==OFF likewise. WebGL2/wasm and
+  adapters without the feature never get the attribute (the injection is a no-op) and fall back
+  to plain late-Z, unchanged. **Surfaces/cartoon** are plain meshes (no `frag_depth`) so the GPU
+  already early-Zs them — no change needed. Set `MOLAR_VIS_NO_EARLY_Z=1` to force the feature
+  off (the A/B verification + escape hatch).
 - **Depth cueing (fog)** — fog fades all geometry toward the background (`BG` in
   `render.rs`, also the clear color) by eye-space distance, with three VMD-style falloff
   **`CueMode`s** (matching the OpenGL fog equations): **Linear**, **Exp** (`1−e^(−k·t)`), **Exp²**
