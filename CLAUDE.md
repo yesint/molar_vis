@@ -475,8 +475,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   mid-sweep is seam-free. `render_tiled` is now just a blocking begin+step-to-completion wrapper (the
   headless debug hook). The sample target is **lighting-dependent** (`Camera::rt_sample_target`): the
   image converges fast when there's little stochastic noise (measured — sub-pixel AA only settles by
-  ~16–24 samples, AO + soft shadows ~48–64, GI is path-traced → many more), so it traces only 32 /
-  64 / 192 respectively instead of a fixed large count — past convergence, more samples just burn time
+  ~16–24 samples, AO + soft shadows ~48–64, GI is path-traced → many more), so it traces only 12 /
+  24 / 48 respectively (a few refinement passes) instead of a fixed large count — past convergence, more samples just burn time
   without changing the image.
   **Viewport ray tracing is the explicit R key (PyMOL-`ray` style — no automatic trace-on-idle):**
   pressing **R** (not while a text field has focus, not in draw/selection modes) starts an `RtJob::Still`

@@ -288,18 +288,19 @@ impl Camera {
         [self.shadow.strength, 0.0025, enabled, self.shadow.softness.clamp(0.0, 1.0)]
     }
 
-    /// Sample-paths/pixel a ray trace needs to *converge* for the current lighting — tracing
-    /// past this just burns time without changing the image (measured: with no stochastic
-    /// effects only sub-pixel AA varies → settles by ~16-24 samples; AO + soft shadows need
-    /// ~48-64; GI is path-traced → wants many more). Used for both the R-key still and the
-    /// "Save image" render so neither over-iterates.
+    /// Sample-paths/pixel a ray trace runs before it stops — tuned to where the image stops
+    /// *visibly* changing (a few refinement passes), not to numerical convergence: with no
+    /// stochastic effects only sub-pixel AA varies (a handful of samples is plenty); AO + soft
+    /// shadows need a bit more; GI is path-traced so wants the most. Past these the picture
+    /// doesn't change perceptibly, so more samples just burn time/iterations. Used for both the
+    /// R-key still and the "Save image" render.
     pub fn rt_sample_target(&self) -> u32 {
         if self.gi {
-            192
+            48
         } else if self.ao.enabled || self.shadow.enabled {
-            64
+            24
         } else {
-            32
+            12
         }
     }
 
