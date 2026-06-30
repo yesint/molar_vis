@@ -312,11 +312,11 @@ impl App {
                         .small(),
                 );
                 ui.add_space(2.0);
-                ui.checkbox(&mut self.camera.gi, "Global illumination (Save image)")
+                ui.checkbox(&mut self.camera.gi, "Global illumination")
                     .on_hover_text(
                         "Path-traced global illumination — soft sky-dome ambient + indirect \
-                         colour bleeding, for the offline Render ▸ Save image only (too heavy \
-                         for the live viewport). Needs more samples to converge.",
+                         colour bleeding. Applies to both the R-key ray trace and Render ▸ Save \
+                         image. Heavier (more bounces), so it takes longer to converge.",
                     );
             } else {
                 ui.label(

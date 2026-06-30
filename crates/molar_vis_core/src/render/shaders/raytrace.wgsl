@@ -273,7 +273,7 @@ fn jitter_cone(dir: vec3<f32>, softness: f32, u1: f32, u2: f32) -> vec3<f32> {
 // Uniform sky-dome radiance gathered by GI bounce rays that escape the scene (the ambient/
 // indirect fill). Decoupled from the visible background (`U.bg`) so a dark backdrop still
 // lights the molecule; cavities self-shadow because their bounces hit geometry instead.
-const GI_SKY: vec3<f32> = vec3<f32>(0.85, 0.85, 0.85);
+const GI_SKY: vec3<f32> = vec3<f32>(0.38, 0.38, 0.38);
 
 // A decoded ray hit: world position, eye-facing normal, base colour, unpacked material
 // (ambient, diffuse, specular, shininess) + the raw material word (for the outline bit).

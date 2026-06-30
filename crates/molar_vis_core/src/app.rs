@@ -123,15 +123,13 @@ pub struct App {
     /// until the GPU→CPU map resolves (native exports synchronously, so it needs no slot).
     #[cfg(target_arch = "wasm32")]
     pending_capture: Option<(crate::render::CaptureReadback, String)>,
-    /// Ray-traced-still controller (PyMOL-`ray` style, triggered by the **R** key):
-    /// `rt_scene_dirty` = scene geometry changed since the tracer last uploaded it (needs a
-    /// re-gather before the next trace); `rt_request` = R was pressed (render the still next
-    /// frame, after the "Ray tracing…" hint paints); `rt_pending` = the hint is up and the
-    /// blocking trace runs this frame; `rt_still` = a finished ray-traced still is showing
-    /// (held until any camera/scene/size change drops back to the realtime view).
+    /// Ray-tracing controller. `rt_scene_dirty` = scene geometry changed since the tracer last
+    /// uploaded it (re-gather before the next trace). `rt_job` = a trace in progress, pumped a
+    /// few tile-submits per frame so the UI stays responsive (the **R**-key viewport still, or
+    /// a "Save image" file render). `rt_still` = a finished R-key still is showing (held until
+    /// any camera/scene/size change drops back to the realtime view).
     rt_scene_dirty: bool,
-    rt_request: bool,
-    rt_pending: bool,
+    rt_job: Option<RtJob>,
     rt_still: bool,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
@@ -268,6 +266,20 @@ pub enum Corner {
     BottomRight,
 }
 
+
+/// An in-progress ray trace, pumped a few tile-submits per frame so the UI stays responsive.
+/// At most one runs at a time (they share the tracer's accumulator + cursor).
+// The ray tracer needs compute (WebGPU/native); on the WebGL2 wasm build it never runs, so
+// this is dead there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+enum RtJob {
+    /// The R-key viewport still: traces into the 1× display texture; on completion the result
+    /// is held (`rt_still`) until the camera moves.
+    Still,
+    /// A "Save image" file render at `out` resolution (native): trace, then read back + write
+    /// the PNG. `reading` holds the GPU→CPU readback once the trace has converged.
+    Save { out: [u32; 2], reading: Option<crate::render::CaptureReadback> },
+}
 
 /// How a lasso gesture combines with the molecule's existing active selection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -890,6 +902,13 @@ impl eframe::App for App {
         // synchronously; wasm stashes the readback for `poll_export` to finish + download.
         if let Some(scale) = self.export_request.take() {
             self.export_image(frame, scale);
+        }
+        // Drive an in-progress frame-pumped "Save image" ray trace (native), and keep
+        // repainting while any trace job runs so it advances each frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.service_rt_save(frame);
+        if self.rt_job.is_some() {
+            ctx.request_repaint();
         }
         #[cfg(target_arch = "wasm32")]
         self.poll_export(&ctx);

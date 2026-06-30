@@ -2,9 +2,12 @@
 use super::*;
 use super::overlay::*;
 
-/// Samples per pixel for the **R**-key ray-traced still (converged in one shot, at 1×
-/// viewport resolution). Tier-1 AO+shadows are clean by ~this count; higher just costs more.
-const RT_STILL_SAMPLES: u32 = 96;
+/// Samples per pixel for the **R**-key ray-traced still (at 1× viewport resolution). Tier-1
+/// AO+shadows are clean by ~this count; GI wants the headroom too.
+const RT_STILL_SAMPLES: u32 = 128;
+/// Tile-submits to issue per frame while pumping a trace. Keeps each frame's GPU work bounded
+/// (so the UI stays responsive) while the trace refines progressively over several frames.
+const RT_STEP_SUBMITS: u32 = 4;
 
 impl App {
 
@@ -138,17 +141,28 @@ impl App {
                     .iter()
                     .any(|m| m.pending.is_some() || m.hover.is_some());
             if rt_ok
+                && self.rt_job.is_none()
                 && !ui.ctx().egui_wants_keyboard_input()
                 && ui.input(|i| i.key_pressed(egui::Key::R))
             {
-                self.rt_request = true;
-                ui.ctx().request_repaint();
+                if self.rt_scene_dirty {
+                    let dashed = self.settings.behavior.dashed_pbc_bonds;
+                    self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
+                    self.rt_scene_dirty = false;
+                }
+                self.renderer.rt_still_begin(render_state, &self.camera, size_px, RT_STILL_SAMPLES);
+                self.rt_job = Some(RtJob::Still);
+                self.rt_still = false;
             }
-            // Any camera/scene/size change drops a showing/pending still back to the raster.
+            // Any camera/scene/size change drops a showing still and aborts an in-progress
+            // **Still** trace back to the realtime view. (A Save trace renders offscreen at its
+            // own captured view, so it keeps going.)
             if raster_dirty {
                 self.rt_still = false;
-                self.rt_request = false;
-                self.rt_pending = false;
+                if matches!(self.rt_job, Some(RtJob::Still)) {
+                    self.renderer.rt_trace_cancel();
+                    self.rt_job = None;
+                }
             }
 
             // Whether to paint the ray-traced still (vs the rasterized target) this frame.
@@ -174,26 +188,18 @@ impl App {
                 );
                 self.last_render_camera = Some(self.camera);
                 self.last_size = size_px;
-            } else if self.rt_pending {
-                // Phase 2: the "Ray tracing…" hint painted last frame; now run the (blocking)
-                // converged trace into the 1× ray-trace target and show it. Tiled internally,
-                // so even a large scene completes without losing the GPU device.
-                let dashed = self.settings.behavior.dashed_pbc_bonds;
-                if self.rt_scene_dirty {
-                    self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
-                    self.rt_scene_dirty = false;
+            } else if matches!(self.rt_job, Some(RtJob::Still)) {
+                // Pump the still trace a few tiles per frame (responsive + progressive). Paint
+                // it once the first sample-chunk has landed; keep repainting until converged,
+                // then hold the finished still.
+                let done = self.renderer.rt_still_step(render_state, RT_STEP_SUBMITS);
+                paint_rt = self.renderer.raytrace_samples() > 0;
+                if done {
+                    self.rt_job = None;
+                    self.rt_still = true;
+                } else {
+                    ui.ctx().request_repaint();
                 }
-                self.renderer
-                    .render_raytrace_still(render_state, &self.camera, size_px, RT_STILL_SAMPLES);
-                self.rt_pending = false;
-                self.rt_still = true;
-                paint_rt = true;
-            } else if self.rt_request {
-                // Phase 1: defer the trace one frame so the "Ray tracing…" hint shows first
-                // (egui keeps the last painted frame on screen during the blocking phase 2).
-                self.rt_request = false;
-                self.rt_pending = true;
-                ui.ctx().request_repaint();
             } else if self.rt_still {
                 // Holding the finished still (view unchanged): keep painting it, no re-trace.
                 paint_rt = true;
@@ -558,15 +564,19 @@ impl App {
                 }
             }
 
-            // "Ray tracing…" hint while an R-key still is being prepared. It's painted on
-            // the phase-1 frame and stays on screen during the (blocking) phase-2 trace, so
-            // the user gets feedback instead of an apparent freeze.
-            if self.rt_pending {
+            // Progress hint while a trace is running (the R-key still or a Save image), so the
+            // user sees it's working as the image refines over frames.
+            let rt_hint = match &self.rt_job {
+                Some(RtJob::Still) => Some("Ray tracing…"),
+                Some(RtJob::Save { .. }) => Some("Saving…"),
+                None => None,
+            };
+            if let Some(text) = rt_hint {
                 draw_modifier_hint_overlay(
                     ui,
                     rect,
                     icon::CUBE_TRANSPARENT,
-                    "Ray tracing…",
+                    text,
                     egui::Color32::from_rgb(150, 190, 230),
                 );
             }

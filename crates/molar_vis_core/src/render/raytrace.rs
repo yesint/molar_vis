@@ -439,7 +439,25 @@ pub struct Raytracer {
     read_idx: usize,
     /// Samples accumulated so far (the running-average weight). Reset on camera change.
     total_samples: u32,
+    /// In-progress tiled trace (a resumable cursor); `None` when idle. Driven a bounded
+    /// number of tile-submits per frame so the trace spreads across frames (responsive UI +
+    /// progressive refinement) instead of one blocking dispatch.
+    cursor: Option<TraceCursor>,
 }
+
+/// Resumable state for a tiled trace: the target sample count + the tile sweep position.
+#[derive(Clone, Copy)]
+struct TraceCursor {
+    size: [u32; 2],
+    uniform: RtUniform,
+    total: u32,
+    chunk_cap: u32,
+    ox: u32,
+    oy: u32,
+}
+
+/// Block (tile) dimension for the tiled trace; one tile × one sample-chunk is one GPU submit.
+const TRACE_TILE: u32 = 256;
 
 impl Raytracer {
     /// Build the ray-tracing pipelines, or `None` if the device can't support them
@@ -613,6 +631,7 @@ impl Raytracer {
             accum_size: [0, 0],
             read_idx: 0,
             total_samples: 0,
+            cursor: None,
         })
     }
 
@@ -678,123 +697,28 @@ impl Raytracer {
     /// single whole-image dispatch and **losing the device** (the reported crash). The sole
     /// trace entry point — drives both the "Save image" file render and the R-key viewport
     /// still (`SceneRenderer::render_raytrace_still`).
-    pub fn render_tiled(
-        &mut self,
-        rs: &RenderState,
-        target: &wgpu::TextureView,
-        size: [u32; 2],
-        base_uniform: RtUniform,
-        total_samples: u32,
-    ) {
-        if !self.has_scene {
-            return;
-        }
-        self.ensure_accum(&rs.device, size);
-        self.total_samples = 0;
-        self.read_idx = 0;
-        let [w, h] = size;
-        let total = total_samples.max(1);
-
-        // Block dimension + per-submit sample chunk: bound each submit to ~`RAY_BUDGET`
-        // *BVH-ray traversals* so its GPU time stays well under the watchdog/TDR, even on a
-        // big scene. Crucially this must account for the rays cast PER sample: AO (`AO_RAYS`,
-        // matching the shader) + a shadow ray are incoherent BVH traversals that dominate the
-        // cost, so an AO+shadow submit does ~6× the work of a primary-only one — ignoring that
-        // is what still lost the device on a large scene with AO/shadows on.
-        const TILE: u32 = 256;
-        const AO_RAYS: u32 = 4; // must match raytrace.wgsl
-        const RAY_BUDGET: u32 = 2_000_000;
-        let ao_on = base_uniform.ao[3] > 0.5;
-        let shadow_on = base_uniform.shadow[2] > 0.5;
-        let rays_per_sample = 1 + if ao_on { AO_RAYS } else { 0 } + u32::from(shadow_on);
-        let chunk_cap = (RAY_BUDGET / (TILE * TILE * rays_per_sample)).max(1);
-
-        let mut done = 0u32;
-        while done < total {
-            let reset = done == 0;
-            let prior = self.total_samples;
-            let chunk = chunk_cap.min(total - done);
-            let read_idx = self.read_idx;
-            let write_idx = 1 - read_idx;
-
-            // One trace bind group per chunk (read ← read_idx, write → write_idx); the
-            // per-tile origin rides the uniform, rewritten before each submit.
-            let trace_bg = {
-                let accums = self.accum.as_ref().unwrap();
-                rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("rt-trace-bg-tiled"),
-                    layout: &self.trace_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.spheres.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.cylinders.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: self.mesh_verts.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: self.triangles.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: self.nodes.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: self.prim_indices.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&accums[write_idx].1) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&accums[read_idx].1) },
-                    ],
-                })
-            };
-
-            let mut oy = 0u32;
-            while oy < h {
-                let th = TILE.min(h - oy);
-                let mut ox = 0u32;
-                while ox < w {
-                    let tw = TILE.min(w - ox);
-                    let mut u = base_uniform;
-                    u.dims = [w, h, chunk, prior];
-                    u.accum = [prior, u32::from(reset), ox, oy];
-                    rs.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
-
-                    let mut encoder = rs.device.create_command_encoder(
-                        &wgpu::CommandEncoderDescriptor { label: Some("rt-tile-encoder") },
-                    );
-                    {
-                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("rt-tile-pass"),
-                            timestamp_writes: None,
-                        });
-                        pass.set_pipeline(&self.trace_pipeline);
-                        pass.set_bind_group(0, &trace_bg, &[]);
-                        pass.dispatch_workgroups(tw.div_ceil(8), th.div_ceil(8), 1);
-                    }
-                    rs.queue.submit(std::iter::once(encoder.finish()));
-                    // Block until this submit finishes, so each command buffer's GPU time
-                    // stays bounded (no pile-up) — fine on the offline file-render path.
-                    let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
-                    ox += TILE;
-                }
-                oy += TILE;
-            }
-            self.total_samples += chunk;
-            self.read_idx = write_idx;
-            done += chunk;
-        }
-
-        // Resolve the finished average (read_idx) into the target, once.
-        let resolve_bg = {
-            let accums = self.accum.as_ref().unwrap();
-            rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("rt-resolve-bg-tiled"),
-                layout: &self.resolve_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::TextureView(&accums[self.read_idx].1),
-                    },
-                ],
-            })
-        };
+    /// Resolve the current running average (`read_idx`) into `target`, tonemapped per the GI
+    /// flag (`fs_resolve`). The accumulator at `read_idx` always holds a *complete* image (the
+    /// last finished sample-chunk), so this is seam-free even mid-chunk.
+    fn resolve_into(&self, rs: &RenderState, target: &wgpu::TextureView) {
+        let accums = self.accum.as_ref().unwrap();
+        let resolve_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rt-resolve-bg"),
+            layout: &self.resolve_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&accums[self.read_idx].1),
+                },
+            ],
+        });
         let mut encoder = rs
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-resolve-tiled") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-resolve") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("rt-resolve-pass-tiled"),
+                label: Some("rt-resolve-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
@@ -816,6 +740,150 @@ impl Raytracer {
         rs.queue.submit(std::iter::once(encoder.finish()));
     }
 
+    /// Begin a tiled converged trace of `total_samples` paths/pixel at `size`. Drive it with
+    /// [`trace_step`](Self::trace_step) (a bounded number of tile-submits per frame) until it
+    /// returns `true`. Spreading the submits across frames keeps the UI responsive and the
+    /// image refines progressively, while each submit's GPU time stays bounded — so no submit
+    /// trips the watchdog (a single whole-image dispatch on a big scene loses the device).
+    pub fn trace_begin(
+        &mut self,
+        rs: &RenderState,
+        size: [u32; 2],
+        uniform: RtUniform,
+        total_samples: u32,
+    ) {
+        if !self.has_scene {
+            return;
+        }
+        self.ensure_accum(&rs.device, size);
+        self.total_samples = 0;
+        self.read_idx = 0;
+        // Per-submit sample chunk, bounded by *BVH-ray traversals* counting the rays cast per
+        // sample: AO (`AO_RAYS`, matching the shader) + a shadow ray + GI bounces are incoherent
+        // traversals that dominate cost, so e.g. an AO+shadow submit does ~6× a primary-only one.
+        const AO_RAYS: u32 = 4; // must match raytrace.wgsl
+        const RAY_BUDGET: u32 = 2_000_000;
+        let ao_on = uniform.ao[3] > 0.5;
+        let shadow_on = uniform.shadow[2] > 0.5;
+        let gi_bounces = uniform.bg[3].max(0.0) as u32;
+        let rays_per_sample =
+            (1 + if ao_on { AO_RAYS } else { 0 } + u32::from(shadow_on)) * (1 + gi_bounces);
+        let chunk_cap = (RAY_BUDGET / (TRACE_TILE * TRACE_TILE * rays_per_sample)).max(1);
+        self.cursor = Some(TraceCursor {
+            size,
+            uniform,
+            total: total_samples.max(1),
+            chunk_cap,
+            ox: 0,
+            oy: 0,
+        });
+    }
+
+    /// Advance the in-progress trace by up to `max_submits` tile dispatches, then resolve the
+    /// current (complete) average into `target`. Returns `true` once the sample target is
+    /// reached (the cursor is then cleared); `true` immediately if no trace is in progress.
+    pub fn trace_step(&mut self, rs: &RenderState, target: &wgpu::TextureView, max_submits: u32) -> bool {
+        let Some(mut cur) = self.cursor.take() else {
+            return true;
+        };
+        let [w, h] = cur.size;
+        let mut submits = 0u32;
+        while self.total_samples < cur.total && submits < max_submits.max(1) {
+            let prior = self.total_samples;
+            let chunk = cur.chunk_cap.min(cur.total - prior);
+            let reset = prior == 0;
+            let read_idx = self.read_idx;
+            let write_idx = 1 - read_idx;
+            let trace_bg = {
+                let accums = self.accum.as_ref().unwrap();
+                rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rt-trace-bg"),
+                    layout: &self.trace_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.spheres.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.cylinders.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: self.mesh_verts.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: self.triangles.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: self.nodes.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: self.prim_indices.as_ref().unwrap().as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&accums[write_idx].1) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&accums[read_idx].1) },
+                    ],
+                })
+            };
+            let tw = TRACE_TILE.min(w - cur.ox);
+            let th = TRACE_TILE.min(h - cur.oy);
+            let mut u = cur.uniform;
+            u.dims = [w, h, chunk, prior];
+            u.accum = [prior, u32::from(reset), cur.ox, cur.oy];
+            rs.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+            let mut encoder = rs
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-tile-encoder") });
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("rt-tile-pass"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.trace_pipeline);
+                pass.set_bind_group(0, &trace_bg, &[]);
+                pass.dispatch_workgroups(tw.div_ceil(8), th.div_ceil(8), 1);
+            }
+            rs.queue.submit(std::iter::once(encoder.finish()));
+            submits += 1;
+            // Advance the tile sweep; completing the last tile finishes this sample-chunk
+            // (bump the running total + swap the ping-pong) and restarts the sweep.
+            cur.ox += TRACE_TILE;
+            if cur.ox >= w {
+                cur.ox = 0;
+                cur.oy += TRACE_TILE;
+                if cur.oy >= h {
+                    cur.oy = 0;
+                    self.total_samples += chunk;
+                    self.read_idx = write_idx;
+                }
+            }
+        }
+        // Show the latest *complete* chunk (skip until the first one lands → no garbage frame).
+        if self.total_samples > 0 {
+            self.resolve_into(rs, target);
+        }
+        let done = self.total_samples >= cur.total;
+        if !done {
+            self.cursor = Some(cur);
+        }
+        done
+    }
+
+    /// Samples accumulated into the current average (0 until the first chunk completes). The
+    /// driver paints the still only once this is > 0, so no pre-first-chunk garbage shows.
+    pub fn samples(&self) -> u32 {
+        self.total_samples
+    }
+
+    /// Abort an in-progress trace (e.g. the camera moved): drop the cursor so no more submits
+    /// are issued. The accumulator is left as-is and overwritten by the next `trace_begin`.
+    pub fn trace_cancel(&mut self) {
+        self.cursor = None;
+    }
+
+    /// Blocking tiled render — begin + step to completion (used by the headless debug hook,
+    /// where a frozen frame is fine). Polls between batches so the queue can't pile up.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn render_tiled(
+        &mut self,
+        rs: &RenderState,
+        target: &wgpu::TextureView,
+        size: [u32; 2],
+        uniform: RtUniform,
+        total_samples: u32,
+    ) {
+        self.trace_begin(rs, size, uniform, total_samples);
+        while !self.trace_step(rs, target, 32) {
+            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+    }
 }
 
 #[cfg(test)]

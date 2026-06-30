@@ -8,10 +8,18 @@
 //! download (no filesystem).
 
 use super::App;
+#[cfg(not(target_arch = "wasm32"))]
+use super::RtJob;
 
 /// Paths per pixel for the file (converged) ray trace. Each path contributes one AO +
-/// one shadow sample, so this is also the AO/shadow sample count.
+/// one shadow sample, so this is also the AO/shadow sample count. (Ray tracing needs compute
+/// → native/WebGPU only; the WebGL2 wasm build uses the rasterized capture fallback.)
+#[cfg(not(target_arch = "wasm32"))]
 const RT_FILE_SAMPLES: u32 = 192;
+/// Tile-submits per frame while pumping a Save trace (bounded per-frame GPU work → the UI
+/// stays responsive with a "Saving…" overlay instead of freezing).
+#[cfg(not(target_arch = "wasm32"))]
+const SAVE_STEP_SUBMITS: u32 = 4;
 
 impl App {
     /// Render the current view at `scale ×` the viewport and save it as a PNG.
@@ -25,39 +33,48 @@ impl App {
         let [vw, vh] = self.last_size;
         let (out_w, out_h) = (vw.max(1) * scale.max(1), vh.max(1) * scale.max(1));
 
-        // Prefer a full ray trace (the real "Render"); fall back to a high-res capture of
-        // the rasterized view on WebGL2 (no compute) or when there's nothing to trace.
-        let dashed = self.settings.behavior.dashed_pbc_bonds;
-        let cap = if self.renderer.raytrace_supported() {
+        // Native + compute device: a full ray trace, **pumped across frames** so the app stays
+        // responsive (with a "Saving…" overlay) instead of freezing. `service_rt_save` advances
+        // it each frame and writes the PNG when done.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.renderer.raytrace_supported() {
+            let dashed = self.settings.behavior.dashed_pbc_bonds;
             self.renderer.prepare_raytrace(&rs, &self.scene, dashed);
-            self.renderer
-                .capture_begin_raytrace(&rs, out_w, out_h, &self.camera, RT_FILE_SAMPLES)
-        } else {
-            None
-        };
-        let cap = cap.unwrap_or_else(|| {
-            let aspect = out_w as f32 / out_h as f32;
-            let view = self.camera.view();
-            let proj = self.camera.proj(aspect);
-            self.renderer.capture_begin(
-                &rs,
-                out_w,
-                out_h,
-                view,
-                proj,
-                self.camera.is_perspective(),
-                self.camera.cue_uniform(),
-                self.camera.ao_uniform(),
-                self.camera.shadow_uniform(),
-                self.camera.background,
-                self.camera.eye_depth_range(),
-                &self.scene,
-            )
-        });
+            // A Save trace shares the tracer with the R-key still — cancel any running still.
+            if matches!(self.rt_job, Some(RtJob::Still)) {
+                self.renderer.rt_trace_cancel();
+            }
+            self.rt_still = false;
+            if self.renderer.save_begin(&rs, &self.camera, out_w, out_h, RT_FILE_SAMPLES) {
+                self.rt_job = Some(RtJob::Save { out: [out_w, out_h], reading: None });
+                self.status = "rendering image…".into();
+                return;
+            }
+        }
+
+        // Fallback: high-res capture of the rasterized view (WebGL2 / no compute), or the wasm
+        // path (GI/ray tracing needs compute, unavailable on WebGL2).
+        let aspect = out_w as f32 / out_h as f32;
+        let view = self.camera.view();
+        let proj = self.camera.proj(aspect);
+        let cap = self.renderer.capture_begin(
+            &rs,
+            out_w,
+            out_h,
+            view,
+            proj,
+            self.camera.is_perspective(),
+            self.camera.cue_uniform(),
+            self.camera.ao_uniform(),
+            self.camera.shadow_uniform(),
+            self.camera.background,
+            self.camera.eye_depth_range(),
+            &self.scene,
+        );
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Drive the map to completion, then save synchronously.
+            // Raster capture is cheap → drive the map to completion and save synchronously.
             let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
             self.save_png_native(cap.read());
         }
@@ -65,6 +82,47 @@ impl App {
         {
             // The browser drives the map; `poll_export` (each frame) finishes + downloads.
             self.pending_capture = Some((cap, "molar_vis.png".to_string()));
+        }
+    }
+
+    /// Drive an in-progress frame-pumped "Save image" ray trace (native): advance the tiled
+    /// trace a few tiles per frame, then read back + write the PNG once it converges. Keeps the
+    /// UI responsive (a "Saving…" overlay shows meanwhile, drawn by the viewport).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn service_rt_save(&mut self, frame: &mut eframe::Frame) {
+        let Some(RtJob::Save { out, reading }) = self.rt_job.as_ref() else {
+            return;
+        };
+        let out = *out;
+        let reading_active = reading.is_some();
+        let Some(rs) = frame.wgpu_render_state() else { return };
+        let rs = rs.clone();
+
+        if !reading_active {
+            // Phase 1: pump the trace; when converged, kick off the GPU→CPU readback.
+            if self.renderer.save_step(&rs, SAVE_STEP_SUBMITS) {
+                match self.renderer.save_finish(&rs, out[0], out[1]) {
+                    Some(rb) => {
+                        if let Some(RtJob::Save { reading, .. }) = self.rt_job.as_mut() {
+                            *reading = Some(rb);
+                        }
+                    }
+                    None => self.rt_job = None,
+                }
+            }
+            return;
+        }
+
+        // Phase 2: poll the readback (non-blocking); save when it lands.
+        let _ = rs.device.poll(wgpu::PollType::Poll);
+        let ready = matches!(
+            self.rt_job.as_ref(),
+            Some(RtJob::Save { reading: Some(rb), .. }) if rb.is_ready()
+        );
+        if ready {
+            if let Some(RtJob::Save { reading: Some(rb), .. }) = self.rt_job.take() {
+                self.save_png_native(rb.read());
+            }
         }
     }
 

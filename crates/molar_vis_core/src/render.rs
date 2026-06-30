@@ -571,6 +571,10 @@ pub struct SceneRenderer {
     rt_color: Option<(wgpu::Texture, wgpu::TextureView)>,
     rt_egui: Option<egui::TextureId>,
     rt_color_size: [u32; 2],
+    /// Offscreen target for an in-progress "Save image" ray trace (COPY_SRC, at the output
+    /// resolution), held across the frames the trace is pumped over, then read back.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    save_target: Option<(wgpu::Texture, wgpu::TextureView)>,
 
     // GPU atom picking (native only — needs a synchronous readback, which WebGPU
     // can't do, and integer render targets WebGL2 may not support): sphere impostors
@@ -891,6 +895,7 @@ impl SceneRenderer {
             rt_color: None,
             rt_egui: None,
             rt_color_size: [0, 0],
+            save_target: None,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1775,6 +1780,7 @@ impl SceneRenderer {
     /// resolve into a throwaway color target, and kick off its readback. Returns `None`
     /// if the ray tracer is unavailable or no scene is uploaded (caller falls back to the
     /// rasterized capture).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn capture_begin_raytrace(
         &mut self,
         rs: &RenderState,
@@ -1843,13 +1849,17 @@ impl SceneRenderer {
         self.rt_color_size = size;
     }
 
-    /// Ray-trace a **converged still** of the current view (PyMOL-`ray` style, triggered by
-    /// the R key) into the dedicated 1× texture, painted via
-    /// [`rt_texture_id`](Self::rt_texture_id) until the camera moves. Tier-1 (AO + shadows;
-    /// GI is Save-image-only). Tiled internally (`render_tiled`), so even a large scene
-    /// completes without losing the GPU device. Blocks until the trace finishes. No-op if
-    /// the ray tracer is unavailable / no scene.
-    pub fn render_raytrace_still(
+    /// GI bounce count for a trace, from the camera's GI opt-in (0 = tier-1 direct shading).
+    fn gi_bounces(camera: &crate::camera::Camera) -> u32 {
+        if camera.gi { RT_GI_BOUNCES } else { 0 }
+    }
+
+    /// Begin a **viewport ray-traced still** (PyMOL-`ray`, R key): set up the 1× output
+    /// texture and start a tiled trace of `samples` paths into it. Honors the camera's AO /
+    /// shadows / GI. Drive with [`rt_still_step`](Self::rt_still_step) each frame; paint via
+    /// [`rt_texture_id`](Self::rt_texture_id) once [`raytrace_samples`](Self::raytrace_samples)
+    /// > 0. No-op if the ray tracer is unavailable / no scene.
+    pub fn rt_still_begin(
         &mut self,
         rs: &RenderState,
         camera: &crate::camera::Camera,
@@ -1861,14 +1871,89 @@ impl SceneRenderer {
         }
         let size = [size[0].max(1), size[1].max(1)];
         self.ensure_rt_color(rs, size);
-        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, 0);
-        let view = &self.rt_color.as_ref().unwrap().1;
-        self.raytracer.as_mut().unwrap().render_tiled(rs, view, size, uniform, samples);
+        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, Self::gi_bounces(camera));
+        self.raytracer.as_mut().unwrap().trace_begin(rs, size, uniform, samples);
+    }
+
+    /// Advance the in-progress still by up to `max_submits` tile dispatches and resolve into
+    /// the 1× texture. Returns `true` when converged. No-op (returns true) if none in progress.
+    pub fn rt_still_step(&mut self, rs: &RenderState, max_submits: u32) -> bool {
+        // Disjoint field borrows: the raytracer (mut) traces into rt_color's view (shared).
+        let Self { raytracer, rt_color, .. } = self;
+        let (Some(rt), Some((_, view))) = (raytracer.as_mut(), rt_color.as_ref()) else {
+            return true;
+        };
+        rt.trace_step(rs, view, max_submits)
+    }
+
+    /// Samples accumulated in the in-progress / finished still (0 until the first chunk lands).
+    pub fn raytrace_samples(&self) -> u32 {
+        self.raytracer.as_ref().map_or(0, |rt| rt.samples())
+    }
+
+    /// Abort an in-progress trace (the camera moved): stop issuing submits.
+    pub fn rt_trace_cancel(&mut self) {
+        if let Some(rt) = self.raytracer.as_mut() {
+            rt.trace_cancel();
+        }
     }
 
     /// The egui texture id of the ray-traced still, if one has been rendered.
     pub fn rt_texture_id(&self) -> Option<egui::TextureId> {
         self.rt_egui
+    }
+
+    /// Begin a **"Save image" ray trace** into an offscreen `out_w × out_h` target (honoring
+    /// AO / shadows / GI), pumped across frames with [`save_step`](Self::save_step) so the UI
+    /// stays responsive, then read back with [`save_finish`](Self::save_finish). Returns
+    /// `false` (nothing started) if the ray tracer is unavailable / no scene — the caller then
+    /// falls back to the rasterized capture. Tiled, so any resolution is safe.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn save_begin(
+        &mut self,
+        rs: &RenderState,
+        camera: &crate::camera::Camera,
+        out_w: u32,
+        out_h: u32,
+        samples: u32,
+    ) -> bool {
+        if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
+            return false;
+        }
+        let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("rt-save-target"),
+            size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, Self::gi_bounces(camera));
+        self.raytracer.as_mut().unwrap().trace_begin(rs, [out_w, out_h], uniform, samples);
+        self.save_target = Some((tex, view));
+        true
+    }
+
+    /// Advance the in-progress save trace by up to `max_submits` tile dispatches. Returns
+    /// `true` when the trace has converged (then call [`save_finish`](Self::save_finish)).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn save_step(&mut self, rs: &RenderState, max_submits: u32) -> bool {
+        let Self { raytracer, save_target, .. } = self;
+        let (Some(rt), Some((_, view))) = (raytracer.as_mut(), save_target.as_ref()) else {
+            return true;
+        };
+        rt.trace_step(rs, view, max_submits)
+    }
+
+    /// Read back the finished save trace (call once `save_step` returns true). Releases the
+    /// offscreen target. Returns `None` if there was no in-progress save.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn save_finish(&mut self, rs: &RenderState, out_w: u32, out_h: u32) -> Option<CaptureReadback> {
+        let (tex, _) = self.save_target.take()?;
+        Some(self.begin_readback(rs, &tex, [out_w, out_h], [out_w, out_h]))
     }
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /

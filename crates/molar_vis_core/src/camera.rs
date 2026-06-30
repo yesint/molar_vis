@@ -76,7 +76,7 @@ pub struct Ao {
 
 impl Default for Ao {
     fn default() -> Self {
-        Self { enabled: false, strength: 0.9, radius: 0.4 }
+        Self { enabled: false, strength: 0.5, radius: 0.4 }
     }
 }
 
@@ -100,7 +100,7 @@ fn default_shadow_softness() -> f32 {
 
 impl Default for Shadow {
     fn default() -> Self {
-        Self { enabled: false, strength: 0.6, softness: default_shadow_softness() }
+        Self { enabled: false, strength: 0.25, softness: default_shadow_softness() }
     }
 }
 
