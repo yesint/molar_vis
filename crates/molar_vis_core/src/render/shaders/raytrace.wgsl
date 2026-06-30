@@ -82,6 +82,12 @@ fn rand(seed: ptr<function, u32>) -> f32 {
 fn unpack_color(c: u32) -> vec3<f32> {
     return vec3<f32>(f32(c & 0xffu), f32((c >> 8u) & 0xffu), f32((c >> 16u) & 0xffu)) / 255.0;
 }
+
+// Alpha byte = material opacity (geometry::build folds the material's opacity into the
+// per-element colour alpha). 1 = opaque.
+fn unpack_opacity(c: u32) -> f32 {
+    return f32((c >> 24u) & 0xffu) / 255.0;
+}
 // (ambient, diffuse, specular, shininess); top bit of shininess byte = outline (ignored).
 fn unpack_mat(m: u32) -> vec4<f32> {
     return vec4<f32>(
@@ -285,6 +291,7 @@ struct Surf {
     base: vec3<f32>,
     mat: vec4<f32>,
     mat_raw: u32,
+    opacity: f32,
 };
 
 fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
@@ -294,11 +301,13 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     var nrm: vec3<f32>;
     var base: vec3<f32>;
     var mat_raw: u32;
+    var opacity: f32;
     if (typ == 0u) {
         let sp = spheres[idx];
         nrm = normalize(p - sp.c.xyz);
         base = unpack_color(sp.m.x);
         mat_raw = sp.m.y;
+        opacity = unpack_opacity(sp.m.x);
     } else if (typ == 1u) {
         let cy = cylinders[idx];
         let axis = cy.c1.xyz - cy.c0.xyz;
@@ -308,6 +317,7 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         nrm = normalize(p - ap);
         base = unpack_color(cy.m.x);
         mat_raw = cy.m.y;
+        opacity = unpack_opacity(cy.m.x);
     } else {
         let tri = triangles[idx];
         let a = mesh_verts[tri.x];
@@ -315,14 +325,16 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         let c = mesh_verts[tri.z];
         let wt = 1.0 - hit.uv.x - hit.uv.y;
         nrm = normalize(wt * a.n.xyz + hit.uv.x * b.n.xyz + hit.uv.y * c.n.xyz);
-        base = wt * unpack_color(bitcast<u32>(a.p.w))
-             + hit.uv.x * unpack_color(bitcast<u32>(b.p.w))
-             + hit.uv.y * unpack_color(bitcast<u32>(c.p.w));
+        let ca = bitcast<u32>(a.p.w);
+        let cb = bitcast<u32>(b.p.w);
+        let cc = bitcast<u32>(c.p.w);
+        base = wt * unpack_color(ca) + hit.uv.x * unpack_color(cb) + hit.uv.y * unpack_color(cc);
+        opacity = wt * unpack_opacity(ca) + hit.uv.x * unpack_opacity(cb) + hit.uv.y * unpack_opacity(cc);
         mat_raw = bitcast<u32>(a.n.w);
     }
     let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
     if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
-    return Surf(p, nrm, base, unpack_mat(mat_raw), mat_raw);
+    return Surf(p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity);
 }
 
 // Soft cast shadow toward the KEY light (cone-jittered → penumbra over samples). Returns
@@ -425,12 +437,25 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         var rd: vec3<f32>;
         camera_ray(ndc, &ro, &rd);
 
-        let hit = closest_hit(ro, rd);
-        if (hit.prim == 0xffffffffu) {
+        // Stochastic transparency: walk along the primary ray, accepting each surface with
+        // probability = its opacity (else pass through to what's behind). Averaged over the
+        // accumulated samples this is correct, order-independent alpha — so transparent reps
+        // (Glass/Ghost/Transparent…) show through instead of reading as solid. Opaque
+        // surfaces (opacity 1) are always accepted at the first hit, so they're unaffected.
+        var ro_t = ro;
+        var s: Surf;
+        var got = false;
+        for (var k = 0u; k < 32u; k = k + 1u) {
+            let hit = closest_hit(ro_t, rd);
+            if (hit.prim == 0xffffffffu) { break; }
+            s = surface_at(hit, ro_t, rd, persp);
+            if (rand(&seed) < s.opacity) { got = true; break; }
+            ro_t = s.p + rd * 1e-3; // pass through; resume just past this surface
+        }
+        if (!got) {
             color = color + U.bg.xyz;
             continue;
         }
-        let s = surface_at(hit, ro, rd, persp);
         // GI strength rides U.bg.w (0 = tier-1 direct shading, matching the realtime view).
         // GI **blends** with tier-1 by the strength (not an abrupt switch), so a tiny strength
         // barely changes the look and it ramps up continuously to full path-traced GI.

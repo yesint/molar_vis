@@ -504,6 +504,13 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   **and the R-key still** (both read `Camera::gi`); the Lighting-tab **Global illumination slider** +
   `MOLAR_VIS_DEBUG_GI=<strength>` drive it. Default **0 (off)** — GI is the heaviest trace (more
   iterations), so it's opt-in via the slider.
+  **Transparency (stochastic):** the primary ray walks through surfaces, accepting each with
+  probability = its **opacity** (the colour's alpha byte, `unpack_opacity`), else passing through to
+  what's behind; averaged over the accumulated samples this is correct, order-independent alpha — so
+  transparent materials (Glass/Ghost/Transparent…) show through instead of reading as solid (they were
+  opaque in the trace before). Opaque surfaces (opacity 1) are always accepted at the first hit, so
+  they're unchanged. Shadow/AO/GI-bounce rays still treat transparent geometry as opaque (a minor v1
+  approximation — transparent things cast a full shadow).
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
