@@ -458,6 +458,8 @@ struct TraceCursor {
 
 /// Block (tile) dimension for the tiled trace; one tile × one sample-chunk is one GPU submit.
 const TRACE_TILE: u32 = 256;
+/// Diffuse path-tracing bounces when GI is on (must match `GI_BOUNCES` in `raytrace.wgsl`).
+const GI_BOUNCES: u32 = 3;
 
 impl Raytracer {
     /// Build the ray-tracing pipelines, or `None` if the device can't support them
@@ -765,7 +767,8 @@ impl Raytracer {
         const RAY_BUDGET: u32 = 2_000_000;
         let ao_on = uniform.ao[3] > 0.5;
         let shadow_on = uniform.shadow[2] > 0.5;
-        let gi_bounces = uniform.bg[3].max(0.0) as u32;
+        // bg.w is the GI strength (0 = off); GI path-traces `GI_BOUNCES` extra bounces.
+        let gi_bounces = if uniform.bg[3] > 0.001 { GI_BOUNCES } else { 0 };
         let rays_per_sample =
             (1 + if ao_on { AO_RAYS } else { 0 } + u32::from(shadow_on)) * (1 + gi_bounces);
         let chunk_cap = (RAY_BUDGET / (TRACE_TILE * TRACE_TILE * rays_per_sample)).max(1);

@@ -483,24 +483,27 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   that frame-pumps `SceneRenderer::rt_still_*` into a **dedicated 1× texture** (`rt_color`/`rt_egui`,
   painted via `rt_texture_id` once the first chunk lands) and **holds the still until the camera/scene/
   size changes**, then drops to the realtime raster. **R honors the lighting settings including GI**
-  (`gi_bounces` from `Camera::gi`). No continuous repaint when idle → **idle = 0 GPU** (the old auto-idle
+  (GI strength from `Camera::gi`). No continuous repaint when idle → **idle = 0 GPU** (the old auto-idle
   trace + its per-frame `request_repaint` + the 30k-atom size gate are all gone). The **Save image** path
   is an `RtJob::Save` driven by `App::service_rt_save` (native): pump `save_step` into an offscreen
   COPY_SRC target, then `save_finish` → async readback (`PollType::Poll` each frame) → write the PNG —
   no UI freeze. (WebGL2 wasm has no compute → ray tracer absent → Save falls back to the rasterized
   capture.) 4 BVH unit tests.
-  **Global illumination (tier 2, `Camera::gi`):** when `gi` is on, the trace path-traces
-  (`shade_gi` in `raytrace.wgsl`) instead of tier-1 direct shading — per hit: direct key light
-  (soft-shadowed) + `RT_GI_BOUNCES` (3) cosine-weighted diffuse bounces, Russian-roulette terminated,
-  gathering a uniform **sky dome** (`GI_SKY` ≈ 0.38 — kept modest so GI isn't washed out, and decoupled
-  from the visible background so a dark backdrop still lights the molecule) on a ray miss — so cavities
-  self-shadow (true AO) and colour bleeds between surfaces. Converges over the same progressive
-  accumulation (just wants more samples). The GI bounce count rides `U.bg.w` (0 = tier-1); the resolve
-  tonemaps GI's HDR with **ACES** (`fs_resolve` branches on `bg.w`; tier-1 stays a near-identity clamp so
-  it keeps matching the raster). The surface decode + tier-1/GI shading are factored into shared shader
-  fns (`surface_at`/`shadow_at`/`shade_tier1`/`shade_gi`). GI applies to **both** the Save-image render
-  **and the R-key still** (both read `Camera::gi`); the Lighting-tab "Global illumination" checkbox +
-  `MOLAR_VIS_DEBUG_GI=1` drive it.
+  **Global illumination (tier 2, `Camera::gi` = a 0..1 *strength*):** when `gi > 0` the trace
+  path-traces (`shade_gi` in `raytrace.wgsl`) instead of tier-1 direct shading — per hit: direct key
+  light (soft-shadowed) + `GI_BOUNCES` (3) cosine-weighted diffuse bounces, Russian-roulette terminated,
+  gathering a uniform **sky dome** (`GI_SKY`, decoupled from the visible background so a dark backdrop
+  still lights the molecule) on a ray miss — so cavities self-shadow (true AO) and colour bleeds between
+  surfaces. **`gi` scales the whole indirect** (bounces + sky); the first hit's *direct* key light stays
+  full, so the slider dials GI from a subtle/dramatic fill (low — darker than tier-1, which has an
+  ambient floor GI lacks) up to a bright ambient (1). Converges over the same progressive accumulation.
+  The **GI strength rides `U.bg.w`** (0 = tier-1); the resolve tonemaps GI's HDR with **ACES**
+  (`fs_resolve` branches on `bg.w`; tier-1 stays a near-identity clamp so it keeps matching the raster).
+  The surface decode + tier-1/GI shading are factored into shared shader fns
+  (`surface_at`/`shadow_at`/`shade_tier1`/`shade_gi`). GI applies to **both** the Save-image render
+  **and the R-key still** (both read `Camera::gi`); the Lighting-tab **Global illumination slider** +
+  `MOLAR_VIS_DEBUG_GI=<strength>` drive it. Default **0 (off)** — GI is the heaviest trace (more
+  iterations), so it's opt-in via the slider.
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
@@ -758,7 +761,7 @@ next frame). The menus —
   is a full GPU ray trace** (ray-traced AO + shadows + Blinn-Phong, all rep types — see the
   `render/raytrace.rs` bullet), **frame-pumped with a "Saving…" overlay so the UI stays responsive**
   (no freeze); **WebGL2 falls back to a high-res capture of the rasterized view**. With the
-  View-settings **Global illumination** checkbox on, the trace is **path-traced GI** (soft sky-dome
+  View-settings **Global illumination** slider > 0, the trace is **path-traced GI** (soft sky-dome
   ambient + indirect colour bleeding, ACES tonemap — see the GI bullet under `render/raytrace.rs`).
   Separately, pressing **R** in the viewport ray-traces the current view in place (PyMOL-`ray` style;
   honors AO/shadows + GI) and holds it until the camera moves; see `render/raytrace.rs`.
@@ -828,7 +831,7 @@ is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anc
     (enable + Strength + **Softness**; `Camera::shadow` — Softness rides `shadow_uniform`'s 4th slot
     and is used only by the ray tracer's soft penumbra) + a **Ray tracing** group — a "Press R to
     ray-trace the view" hint (the viewport still is the **R key**, PyMOL-`ray` style; greyed without a
-    compute-capable device) + a **Global illumination** checkbox (`Camera::gi`, off by default —
+    compute-capable device) + a **Global illumination** strength slider (`Camera::gi`, 0..1, 0 = off/default —
     path-traced GI applied to both the R-key still and Save image). The AO/shadow controls feed both
     the R-key still and Save image.
   - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`,

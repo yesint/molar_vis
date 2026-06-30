@@ -74,10 +74,6 @@ const CAMERA_STRIDE: u64 = 256;
 /// separate, flatter fill; this is the shadow-casting key.)
 const SHADOW_LIGHT_DIR_VIEW: glam::Vec3 = glam::Vec3::new(0.45, 0.78, 0.45);
 
-/// Diffuse path-tracing bounces for the GI (global-illumination) "Save image" tier. 3 is
-/// plenty for diffuse molecular scenes (indirect light falls off fast); more just adds cost.
-const RT_GI_BOUNCES: u32 = 3;
-
 /// Bind-group binding size for one camera entry (the actual `CameraUniform`).
 fn camera_binding_size() -> Option<std::num::NonZeroU64> {
     std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
@@ -1739,7 +1735,7 @@ impl SceneRenderer {
         h: u32,
         samples: u32,
         frame_seed: u32,
-        gi_bounces: u32,
+        gi_strength: f32,
     ) -> raytrace::RtUniform {
         let aspect = w as f32 / h.max(1) as f32;
         let view = camera.view();
@@ -1769,8 +1765,9 @@ impl SceneRenderer {
             head_dir: [head.x, head.y, head.z, 0.0],
             ao,
             shadow: camera.shadow_uniform(),
-            // bg.w carries the GI bounce count (0 = tier-1 direct shading; >0 = path-traced GI).
-            bg: [bg[0], bg[1], bg[2], gi_bounces as f32],
+            // bg.w carries the GI strength (0 = tier-1 direct shading; >0 = path-traced GI,
+            // scaling the indirect/sky-ambient contribution).
+            bg: [bg[0], bg[1], bg[2], gi_strength.clamp(0.0, 1.0)],
             dims: [w, h, samples.max(1), frame_seed],
             accum: [0, 0, 0, 0], // set by Raytracer::render
         }
@@ -1792,10 +1789,8 @@ impl SceneRenderer {
         if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
             return None;
         }
-        // The offline "Save image" render honors the GI (global-illumination) opt-in;
-        // RT_GI_BOUNCES diffuse bounces when on, else 0 (tier-1 direct shading).
-        let gi_bounces = if camera.gi { RT_GI_BOUNCES } else { 0 };
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, gi_bounces);
+        // The offline "Save image" render honors the GI (global-illumination) strength slider.
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi);
         let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rt-capture-color"),
             size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
@@ -1849,11 +1844,6 @@ impl SceneRenderer {
         self.rt_color_size = size;
     }
 
-    /// GI bounce count for a trace, from the camera's GI opt-in (0 = tier-1 direct shading).
-    fn gi_bounces(camera: &crate::camera::Camera) -> u32 {
-        if camera.gi { RT_GI_BOUNCES } else { 0 }
-    }
-
     /// Begin a **viewport ray-traced still** (PyMOL-`ray`, R key): set up the 1× output
     /// texture and start a tiled trace of `samples` paths into it. Honors the camera's AO /
     /// shadows / GI. Drive with [`rt_still_step`](Self::rt_still_step) each frame; paint via
@@ -1871,7 +1861,7 @@ impl SceneRenderer {
         }
         let size = [size[0].max(1), size[1].max(1)];
         self.ensure_rt_color(rs, size);
-        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, Self::gi_bounces(camera));
+        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, camera.gi);
         self.raytracer.as_mut().unwrap().trace_begin(rs, size, uniform, samples);
     }
 
@@ -1931,7 +1921,7 @@ impl SceneRenderer {
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, Self::gi_bounces(camera));
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi);
         self.raytracer.as_mut().unwrap().trace_begin(rs, [out_w, out_h], uniform, samples);
         self.save_target = Some((tex, view));
         true

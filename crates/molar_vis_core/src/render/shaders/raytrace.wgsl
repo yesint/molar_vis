@@ -274,6 +274,8 @@ fn jitter_cone(dir: vec3<f32>, softness: f32, u1: f32, u2: f32) -> vec3<f32> {
 // indirect fill). Decoupled from the visible background (`U.bg`) so a dark backdrop still
 // lights the molecule; cavities self-shadow because their bounces hit geometry instead.
 const GI_SKY: vec3<f32> = vec3<f32>(0.38, 0.38, 0.38);
+// Diffuse bounces when GI is on (must match `GI_BOUNCES` in raytrace.rs).
+const GI_BOUNCES: u32 = 3u;
 
 // A decoded ray hit: world position, eye-facing normal, base colour, unpacked material
 // (ambient, diffuse, specular, shininess) + the raw material word (for the outline bit).
@@ -364,7 +366,10 @@ fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, seed: ptr<
 // (soft-shadowed) + a cosine-weighted diffuse bounce that gathers the sky dome on a miss —
 // so cavities self-shadow (true AO) and colour bleeds between surfaces. Russian-roulette
 // terminated. Converges over the same progressive accumulation as tier-1 (just more samples).
-fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
+// `gi_str` (0..1) scales the whole **indirect** contribution (bounces + sky ambient) — the
+// first hit's *direct* key light stays full — so the strength slider dials GI from a subtle
+// fill (low) up to a strong ambient (1), without changing the direct lighting.
+fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, gi_str: f32, seed: ptr<function, u32>) -> vec3<f32> {
     var radiance = vec3<f32>(0.0);
     var throughput = vec3<f32>(1.0);
     var s = first;
@@ -380,8 +385,10 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
             if (rand(seed) > q) { break; }
             throughput = throughput / q;
         }
-        // Cosine-weighted diffuse bounce (cos/pdf cancel → multiply by albedo).
+        // Cosine-weighted diffuse bounce (cos/pdf cancel → multiply by albedo); the first
+        // bounce also folds in the GI strength so all indirect light scales with the slider.
         throughput = throughput * s.base;
+        if (bounce == 0u) { throughput = throughput * gi_str; }
         let ro = s.p + s.nrm * max(U.ao.y, 1e-4);
         let rd = cosine_hemisphere(s.nrm, rand(seed), rand(seed));
         let hit = closest_hit(ro, rd);
@@ -426,11 +433,11 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
         let s = surface_at(hit, ro, rd, persp);
-        // GI bounce count rides U.bg.w (0 = tier-1 direct shading, matching the realtime
-        // view; >0 = tier-2 path-traced global illumination — Save-image only).
-        let gi_bounces = u32(U.bg.w + 0.5);
-        if (gi_bounces > 0u) {
-            color = color + shade_gi(s, persp, light, gi_bounces, &seed);
+        // GI strength rides U.bg.w (0 = tier-1 direct shading, matching the realtime view;
+        // >0 = tier-2 path-traced global illumination, scaled by the strength).
+        let gi_str = U.bg.w;
+        if (gi_str > 0.001) {
+            color = color + shade_gi(s, persp, light, GI_BOUNCES, gi_str, &seed);
         } else {
             color = color + shade_tier1(s, rd, persp, light, &seed);
         }
@@ -475,7 +482,7 @@ fn fs_resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let c = textureLoad(src, vec2<i32>(frag.xy), 0).xyz;
     // Target is sRGB → GPU encodes on store; no manual gamma here. GI (U.bg.w > 0) tonemaps
     // its HDR radiance (ACES); tier-1 is a near-identity clamp so it matches the raster view.
-    if (U.bg.w > 0.5) {
+    if (U.bg.w > 0.001) {
         return vec4<f32>(aces(c), 1.0);
     }
     return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

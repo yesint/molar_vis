@@ -312,12 +312,12 @@ impl App {
                         .small(),
                 );
                 ui.add_space(2.0);
-                ui.checkbox(&mut self.camera.gi, "Global illumination")
-                    .on_hover_text(
-                        "Path-traced global illumination — soft sky-dome ambient + indirect \
-                         colour bleeding. Applies to both the R-key ray trace and Render ▸ Save \
-                         image. Heavier (more bounces), so it takes longer to converge.",
-                    );
+                ui.label("Global illumination").on_hover_text(
+                    "Path-traced GI strength — 0 = off, higher = stronger sky-dome ambient + \
+                     indirect colour bleeding. Applies to the R-key ray trace and Render ▸ Save \
+                     image. Heavier (extra bounces), so it converges slower.",
+                );
+                slider_with_edit(ui, &mut self.camera.gi, 0.0..=1.0, true);
             } else {
                 ui.label(
                     egui::RichText::new("Ray tracing needs WebGPU (unavailable on this device)")

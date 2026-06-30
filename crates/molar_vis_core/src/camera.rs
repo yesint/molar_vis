@@ -191,10 +191,28 @@ pub struct Camera {
     /// `#[serde(default)]` so older sessions still load.
     #[serde(default = "default_fill")]
     pub fill: f32,
-    /// Use full path-traced global illumination for the ray-traced "Save image" (tier 2).
-    /// Off by default. (Viewport ray tracing is the explicit R-key still — not a camera field.)
-    #[serde(default)]
-    pub gi: bool,
+    /// Global-illumination **strength** for ray tracing (tier 2), 0..1. **0 = off** (tier-1
+    /// direct shading); >0 path-traces and scales the indirect/sky-ambient contribution, so
+    /// the slider dials GI from a subtle fill up to full. Off by default (GI is the heaviest
+    /// trace). Applies to both the R-key still and "Save image". `de_gi` also accepts an old
+    /// boolean value (true → full) so pre-slider sessions still load.
+    #[serde(default, deserialize_with = "de_gi")]
+    pub gi: f32,
+}
+
+/// Deserialize `gi` as a float, but tolerate the legacy boolean form (true → 1.0, false → 0.0)
+/// so sessions saved before GI became a strength slider still load.
+fn de_gi<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum GiCompat {
+        Num(f32),
+        Bool(bool),
+    }
+    Ok(match <GiCompat as serde::Deserialize>::deserialize(d)? {
+        GiCompat::Num(n) => n.clamp(0.0, 1.0),
+        GiCompat::Bool(b) => f32::from(b),
+    })
 }
 
 fn default_fill() -> f32 {
@@ -236,7 +254,7 @@ impl Camera {
             shadow: Shadow::default(),
             background: Background::default(),
             fill,
-            gi: false,
+            gi: 0.0,
         }
     }
 
@@ -295,7 +313,7 @@ impl Camera {
     /// doesn't change perceptibly, so more samples just burn time/iterations. Used for both the
     /// R-key still and the "Save image" render.
     pub fn rt_sample_target(&self) -> u32 {
-        if self.gi {
+        if self.gi > 0.0 {
             48
         } else if self.ao.enabled || self.shadow.enabled {
             24

@@ -296,10 +296,10 @@ impl App {
                 camera.ao.strength = s.clamp(0.0, 1.0);
             }
         }
-        // Verification hook: MOLAR_VIS_DEBUG_GI=1 enables the global-illumination tier (only
-        // affects the ray-traced "Save image" / RAYTRACE path).
-        if std::env::var("MOLAR_VIS_DEBUG_GI").is_ok() {
-            camera.gi = true;
+        // Verification hook: MOLAR_VIS_DEBUG_GI[=strength] sets the global-illumination
+        // strength (0..1; bare = full) for the ray-traced "Save image" / RAYTRACE path.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_GI") {
+            camera.gi = v.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0);
         }
         // Verification hook: MOLAR_VIS_DEBUG_SHADOW[=strength] enables cast shadows.
         if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_SHADOW") {
