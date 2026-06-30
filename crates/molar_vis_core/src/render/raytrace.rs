@@ -518,16 +518,30 @@ impl Raytracer {
         });
         let resolve_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rt-resolve-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 8,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+            entries: &[
+                // The uniform (binding 0) so `fs_resolve` can read the GI flag (U.bg.w) and
+                // pick its tonemap (clamp for tier-1, ACES for GI).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let trace_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -712,10 +726,13 @@ impl Raytracer {
         let resolve_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rt-resolve-bg"),
             layout: &self.resolve_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 8,
-                resource: wgpu::BindingResource::TextureView(write_view),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(write_view),
+                },
+            ],
         });
 
         let mut encoder = rs
@@ -865,10 +882,13 @@ impl Raytracer {
             rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("rt-resolve-bg-tiled"),
                 layout: &self.resolve_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&accums[self.read_idx].1),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&accums[self.read_idx].1),
+                    },
+                ],
             })
         };
         let mut encoder = rs

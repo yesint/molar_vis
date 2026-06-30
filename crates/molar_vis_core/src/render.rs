@@ -74,6 +74,10 @@ const CAMERA_STRIDE: u64 = 256;
 /// separate, flatter fill; this is the shadow-casting key.)
 const SHADOW_LIGHT_DIR_VIEW: glam::Vec3 = glam::Vec3::new(0.45, 0.78, 0.45);
 
+/// Diffuse path-tracing bounces for the GI (global-illumination) "Save image" tier. 3 is
+/// plenty for diffuse molecular scenes (indirect light falls off fast); more just adds cost.
+const RT_GI_BOUNCES: u32 = 3;
+
 /// Bind-group binding size for one camera entry (the actual `CameraUniform`).
 fn camera_binding_size() -> Option<std::num::NonZeroU64> {
     std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
@@ -1730,6 +1734,7 @@ impl SceneRenderer {
         h: u32,
         samples: u32,
         frame_seed: u32,
+        gi_bounces: u32,
     ) -> raytrace::RtUniform {
         let aspect = w as f32 / h.max(1) as f32;
         let view = camera.view();
@@ -1759,7 +1764,8 @@ impl SceneRenderer {
             head_dir: [head.x, head.y, head.z, 0.0],
             ao,
             shadow: camera.shadow_uniform(),
-            bg: [bg[0], bg[1], bg[2], 1.0],
+            // bg.w carries the GI bounce count (0 = tier-1 direct shading; >0 = path-traced GI).
+            bg: [bg[0], bg[1], bg[2], gi_bounces as f32],
             dims: [w, h, samples.max(1), frame_seed],
             accum: [0, 0, 0, 0], // set by Raytracer::render
         }
@@ -1780,7 +1786,10 @@ impl SceneRenderer {
         if self.raytracer.as_ref().is_none_or(|rt| !rt.has_scene()) {
             return None;
         }
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0);
+        // The offline "Save image" render honors the GI (global-illumination) opt-in;
+        // RT_GI_BOUNCES diffuse bounces when on, else 0 (tier-1 direct shading).
+        let gi_bounces = if camera.gi { RT_GI_BOUNCES } else { 0 };
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, gi_bounces);
         let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rt-capture-color"),
             size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
@@ -1849,7 +1858,8 @@ impl SceneRenderer {
             self.rt_color_size = size;
         }
 
-        let uniform = Self::rt_uniform(camera, size[0], size[1], spp, 0);
+        // The in-place / "r" viewport trace is always tier-1 (GI is Save-image-only).
+        let uniform = Self::rt_uniform(camera, size[0], size[1], spp, 0, 0);
         let view = &self.rt_color.as_ref().unwrap().1;
         let rt = self.raytracer.as_mut().unwrap();
         rt.render(rs, view, size, uniform, reset, spp);

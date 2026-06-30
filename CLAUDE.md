@@ -488,8 +488,17 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   rasterized view and idles instantly, exactly as before ray tracing existed. The full **Save image**
   ray trace is unaffected (offline, any size). Gauged by summed `mol.n_atoms` of visible molecules
   (cheap; computed *before* gathering so a huge scene never even builds the BVH). 4 BVH unit tests.
-  **Build status: file render + in-place viewport done (all rep types); the global-illumination tier
-  (`Camera::gi`, field present, unwired) is the remaining follow-on.**
+  **Global illumination (tier 2, `Camera::gi`, Save-image only):** when `gi` is on, the file render
+  runs a **diffuse path tracer** (`shade_gi` in `raytrace.wgsl`) instead of tier-1 direct shading —
+  per hit: direct key light (soft-shadowed) + `RT_GI_BOUNCES` (3) cosine-weighted diffuse bounces,
+  Russian-roulette terminated, gathering a uniform **sky dome** (`GI_SKY`, decoupled from the visible
+  background so a dark backdrop still lights the molecule) on a ray miss — so cavities self-shadow
+  (true AO) and colour bleeds between surfaces. Converges over the same progressive accumulation
+  (just wants more samples). The GI bounce count rides `U.bg.w` (0 = tier-1); the resolve tonemaps GI's
+  HDR with **ACES** (`fs_resolve` branches on `bg.w`; tier-1 stays a near-identity clamp so it keeps
+  matching the raster). The surface decode + tier-1/GI shading are factored into shared shader fns
+  (`surface_at`/`shadow_at`/`shade_tier1`/`shade_gi`). GI is **Save-image only** (too heavy for the
+  live viewport); the Lighting-tab "Global illumination" checkbox + `MOLAR_VIS_DEBUG_GI=1` drive it.
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded
@@ -746,9 +755,11 @@ next frame). The menus —
   object URL → `<a download>`). Available on both. **On a compute-capable device (WebGPU/native) this
   is a full GPU ray trace** (ray-traced AO + shadows + Blinn-Phong, all rep types — see the
   `render/raytrace.rs` bullet); **WebGL2 falls back to a high-res capture of the rasterized view**.
-  The viewport itself also **progressively ray-traces in place** when idle (PyMOL-`ray` style;
-  opt-out toggle in the View-settings Lighting tab, default on; see `render/raytrace.rs`).
-  (A global-illumination tier is a roadmap follow-on.)
+  With the View-settings **Global illumination** checkbox on, the Save-image trace is **path-traced
+  GI** (soft sky-dome ambient + indirect colour bleeding, ACES tonemap — see the GI bullet under
+  `render/raytrace.rs`). The viewport itself also **progressively ray-traces in place** when idle
+  (PyMOL-`ray` style; opt-out toggle in the View-settings Lighting tab, default on; see
+  `render/raytrace.rs`).
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`

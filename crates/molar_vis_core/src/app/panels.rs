@@ -309,6 +309,12 @@ impl App {
                          Automatically skipped for very large scenes (kept responsive); \
                          use Render ▸ Save image for a full ray trace at any size.",
                     );
+                ui.checkbox(&mut self.camera.gi, "Global illumination (Save image)")
+                    .on_hover_text(
+                        "Path-traced global illumination — soft sky-dome ambient + indirect \
+                         colour bleeding, for the offline Render ▸ Save image only (too heavy \
+                         for the live viewport). Needs more samples to converge.",
+                    );
             });
             if !supported {
                 ui.label(

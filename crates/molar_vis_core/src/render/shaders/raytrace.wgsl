@@ -270,6 +270,131 @@ fn jitter_cone(dir: vec3<f32>, softness: f32, u1: f32, u2: f32) -> vec3<f32> {
     return normalize(dir + r * (cos(phi) * t + sin(phi) * b));
 }
 
+// Uniform sky-dome radiance gathered by GI bounce rays that escape the scene (the ambient/
+// indirect fill). Decoupled from the visible background (`U.bg`) so a dark backdrop still
+// lights the molecule; cavities self-shadow because their bounces hit geometry instead.
+const GI_SKY: vec3<f32> = vec3<f32>(0.85, 0.85, 0.85);
+
+// A decoded ray hit: world position, eye-facing normal, base colour, unpacked material
+// (ambient, diffuse, specular, shininess) + the raw material word (for the outline bit).
+struct Surf {
+    p: vec3<f32>,
+    nrm: vec3<f32>,
+    base: vec3<f32>,
+    mat: vec4<f32>,
+    mat_raw: u32,
+};
+
+fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
+    let p = ro + rd * hit.t;
+    let typ = hit.prim >> 30u;
+    let idx = hit.prim & IDX_MASK;
+    var nrm: vec3<f32>;
+    var base: vec3<f32>;
+    var mat_raw: u32;
+    if (typ == 0u) {
+        let sp = spheres[idx];
+        nrm = normalize(p - sp.c.xyz);
+        base = unpack_color(sp.m.x);
+        mat_raw = sp.m.y;
+    } else if (typ == 1u) {
+        let cy = cylinders[idx];
+        let axis = cy.c1.xyz - cy.c0.xyz;
+        let seg = length(axis);
+        let ua = axis / max(seg, 1e-9);
+        let ap = cy.c0.xyz + ua * clamp(dot(p - cy.c0.xyz, ua), 0.0, seg);
+        nrm = normalize(p - ap);
+        base = unpack_color(cy.m.x);
+        mat_raw = cy.m.y;
+    } else {
+        let tri = triangles[idx];
+        let a = mesh_verts[tri.x];
+        let b = mesh_verts[tri.y];
+        let c = mesh_verts[tri.z];
+        let wt = 1.0 - hit.uv.x - hit.uv.y;
+        nrm = normalize(wt * a.n.xyz + hit.uv.x * b.n.xyz + hit.uv.y * c.n.xyz);
+        base = wt * unpack_color(bitcast<u32>(a.p.w))
+             + hit.uv.x * unpack_color(bitcast<u32>(b.p.w))
+             + hit.uv.y * unpack_color(bitcast<u32>(c.p.w));
+        mat_raw = bitcast<u32>(a.n.w);
+    }
+    let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
+    if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
+    return Surf(p, nrm, base, unpack_mat(mat_raw), mat_raw);
+}
+
+// Soft cast shadow toward the KEY light (cone-jittered → penumbra over samples). Returns
+// visibility in [1-strength, 1]; back faces shadow without a ray.
+fn shadow_at(s: Surf, light: vec3<f32>, seed: ptr<function, u32>) -> f32 {
+    if (U.shadow.z <= 0.5) { return 1.0; }
+    if (dot(s.nrm, light) <= 0.0) { return 1.0 - U.shadow.x; }
+    let ldir = jitter_cone(light, U.shadow.w * MAX_SHADOW_CONE, rand(seed), rand(seed));
+    if (any_hit(s.p + s.nrm * U.shadow.y, ldir, T_MAX)) { return 1.0 - U.shadow.x; }
+    return 1.0;
+}
+
+// Tier-1 shading: Blinn-Phong from the view-space headlight (matches the rasterizer) ×
+// soft shadow × contrast-boosted hemisphere AO, both as deferred whole-color multiplies.
+fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, seed: ptr<function, u32>) -> vec3<f32> {
+    let view_dir = select(-rd, normalize(U.eye.xyz - s.p), persp);
+    let head = U.head_dir.xyz;
+    let ndotl = max(dot(s.nrm, head), 0.0);
+    let hv = normalize(head + view_dir);
+    let spec = s.mat.z * pow(max(dot(s.nrm, hv), 0.0), 2.0 + s.mat.w * 128.0);
+    var shaded = s.base * (s.mat.x + s.mat.y * ndotl) + vec3<f32>(spec);
+    if (((s.mat_raw >> 31u) & 1u) == 1u) {
+        let edge = pow(1.0 - abs(dot(s.nrm, view_dir)), 2.0);
+        shaded = shaded * (1.0 - 0.9 * edge);
+    }
+    let shadow_vis = shadow_at(s, light, seed);
+    var ao_vis = 1.0;
+    if (U.ao.w > 0.5) {
+        var occ = 0.0;
+        for (var i = 0u; i < AO_RAYS; i = i + 1u) {
+            let dir = cosine_hemisphere(s.nrm, rand(seed), rand(seed));
+            if (any_hit(s.p + s.nrm * U.ao.y, dir, U.ao.x)) { occ = occ + 1.0; }
+        }
+        let frac = pow(occ / f32(AO_RAYS), AO_CONTRAST);
+        ao_vis = 1.0 - U.ao.z * frac;
+    }
+    return shaded * shadow_vis * ao_vis;
+}
+
+// Tier-2 global illumination: a diffuse path tracer. At each hit: direct key light
+// (soft-shadowed) + a cosine-weighted diffuse bounce that gathers the sky dome on a miss —
+// so cavities self-shadow (true AO) and colour bleeds between surfaces. Russian-roulette
+// terminated. Converges over the same progressive accumulation as tier-1 (just more samples).
+fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
+    var radiance = vec3<f32>(0.0);
+    var throughput = vec3<f32>(1.0);
+    var s = first;
+    var bounce = 0u;
+    loop {
+        let ndotl = max(dot(s.nrm, light), 0.0);
+        let shadow_vis = shadow_at(s, light, seed);
+        radiance = radiance + throughput * s.base * (s.mat.y * ndotl * shadow_vis);
+
+        if (bounce >= max_bounces) { break; }
+        if (bounce >= 2u) {
+            let q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 1.0);
+            if (rand(seed) > q) { break; }
+            throughput = throughput / q;
+        }
+        // Cosine-weighted diffuse bounce (cos/pdf cancel → multiply by albedo).
+        throughput = throughput * s.base;
+        let ro = s.p + s.nrm * max(U.ao.y, 1e-4);
+        let rd = cosine_hemisphere(s.nrm, rand(seed), rand(seed));
+        let hit = closest_hit(ro, rd);
+        if (hit.prim == 0xffffffffu) {
+            radiance = radiance + throughput * GI_SKY;
+            break;
+        }
+        s = surface_at(hit, ro, rd, persp);
+        bounce = bounce + 1u;
+    }
+    return radiance;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = U.dims.x;
@@ -300,92 +425,15 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             color = color + U.bg.xyz;
             continue;
         }
-        let p = ro + rd * hit.t;
-        let typ = hit.prim >> 30u;
-        let idx = hit.prim & IDX_MASK;
-
-        var nrm: vec3<f32>;
-        var base: vec3<f32>;
-        var mat_raw: u32;
-        if (typ == 0u) {
-            let sp = spheres[idx];
-            nrm = normalize(p - sp.c.xyz);
-            base = unpack_color(sp.m.x);
-            mat_raw = sp.m.y;
-        } else if (typ == 1u) {
-            let cy = cylinders[idx];
-            let axis = cy.c1.xyz - cy.c0.xyz;
-            let seg = length(axis);
-            let ua = axis / max(seg, 1e-9);
-            let ap = cy.c0.xyz + ua * clamp(dot(p - cy.c0.xyz, ua), 0.0, seg);
-            nrm = normalize(p - ap);
-            base = unpack_color(cy.m.x);
-            mat_raw = cy.m.y;
+        let s = surface_at(hit, ro, rd, persp);
+        // GI bounce count rides U.bg.w (0 = tier-1 direct shading, matching the realtime
+        // view; >0 = tier-2 path-traced global illumination — Save-image only).
+        let gi_bounces = u32(U.bg.w + 0.5);
+        if (gi_bounces > 0u) {
+            color = color + shade_gi(s, persp, light, gi_bounces, &seed);
         } else {
-            let tri = triangles[idx];
-            let a = mesh_verts[tri.x];
-            let b = mesh_verts[tri.y];
-            let c = mesh_verts[tri.z];
-            let wt = 1.0 - hit.uv.x - hit.uv.y;
-            nrm = normalize(wt * a.n.xyz + hit.uv.x * b.n.xyz + hit.uv.y * c.n.xyz);
-            base = wt * unpack_color(bitcast<u32>(a.p.w))
-                 + hit.uv.x * unpack_color(bitcast<u32>(b.p.w))
-                 + hit.uv.y * unpack_color(bitcast<u32>(c.p.w));
-            mat_raw = bitcast<u32>(a.n.w);
+            color = color + shade_tier1(s, rd, persp, light, &seed);
         }
-        let mat = unpack_mat(mat_raw);
-
-        let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
-        if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
-
-        // Base shading mirrors the rasterizer's `shade_material` EXACTLY so the ray trace
-        // matches the realtime view when AO/shadows are off: a Blinn-Phong matte + white
-        // specular lit by the same view-space HEADLIGHT (U.head_dir) using the material's
-        // own ambient (mat.x) and diffuse (mat.y) coefficients — the previous fixed 0.55
-        // ambient (vs Opaque's 0.10) made the trace ~55 % too bright.
-        let head = U.head_dir.xyz;
-        let ndotl = max(dot(nrm, head), 0.0);
-        let hv = normalize(head + view_dir);
-        let spec = mat.z * pow(max(dot(nrm, hv), 0.0), 2.0 + mat.w * 128.0);
-        var shaded = base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
-        // VMD "Outline" (top bit of the shininess byte): darken grazing-angle fragments,
-        // matching the raster's `apply_outline` (AoEdgy etc.).
-        if (((mat_raw >> 31u) & 1u) == 1u) {
-            let edge = pow(1.0 - abs(dot(nrm, view_dir)), 2.0);
-            shaded = shaded * (1.0 - 0.9 * edge);
-        }
-
-        // SHADOW: a soft shadow ray toward the separate KEY light (the direction the raster
-        // shadow map uses — decoupled from the shading headlight, exactly like the raster).
-        // Back faces (away from the key light) are shadowed without a ray.
-        var shadow_vis = 1.0;
-        if (U.shadow.z > 0.5) {
-            if (dot(nrm, light) <= 0.0) {
-                shadow_vis = 1.0 - U.shadow.x;
-            } else {
-                let ldir = jitter_cone(light, U.shadow.w * MAX_SHADOW_CONE, rand(&seed), rand(&seed));
-                if (any_hit(p + nrm * U.shadow.y, ldir, T_MAX)) { shadow_vis = 1.0 - U.shadow.x; }
-            }
-        }
-
-        // Ambient occlusion: AO_RAYS cosine-weighted hemisphere rays per sample → a local
-        // occlusion fraction, contrast-boosted (pow) then scaled by strength, so it reads
-        // as strongly as SSAO instead of a faint physically-correct estimate.
-        var ao_vis = 1.0;
-        if (U.ao.w > 0.5) {
-            var occ = 0.0;
-            for (var i = 0u; i < AO_RAYS; i = i + 1u) {
-                let dir = cosine_hemisphere(nrm, rand(&seed), rand(&seed));
-                if (any_hit(p + nrm * U.ao.y, dir, U.ao.x)) { occ = occ + 1.0; }
-            }
-            let frac = pow(occ / f32(AO_RAYS), AO_CONTRAST);
-            ao_vis = 1.0 - U.ao.z * frac;
-        }
-
-        // Shadow + AO both multiply the WHOLE shaded color — the same deferred multiply the
-        // raster's AO/shadow pass does (output = color × ao × shadow). So with both off,
-        // color == the raster shading; with them on, contacts/cavities/shadows darken.
-        color = color + shaded * shadow_vis * ao_vis;
     }
 
     // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the
@@ -401,7 +449,20 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---- Resolve: fullscreen triangle, tonemap the accumulator into the sRGB target ----
+// `U` (binding 0) is also bound here so the resolve knows whether GI is on (U.bg.w).
 @group(0) @binding(8) var src: texture_2d<f32>;
+
+// ACES filmic tonemap (Narkowicz fit) — compresses GI's HDR radiance into [0,1] with a
+// filmic shoulder. Only used for the GI path; tier-1 stays a near-identity clamp so it keeps
+// matching the rasterized view.
+fn aces(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
 
 @vertex
 fn vs_resolve(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
@@ -412,6 +473,10 @@ fn vs_resolve(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs_resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let c = textureLoad(src, vec2<i32>(frag.xy), 0).xyz;
-    // Tier-1 near-identity tonemap (clamp). Target is sRGB → GPU encodes on store; no gamma here.
+    // Target is sRGB → GPU encodes on store; no manual gamma here. GI (U.bg.w > 0) tonemaps
+    // its HDR radiance (ACES); tier-1 is a near-identity clamp so it matches the raster view.
+    if (U.bg.w > 0.5) {
+        return vec4<f32>(aces(c), 1.0);
+    }
     return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
