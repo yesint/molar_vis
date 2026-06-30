@@ -11,13 +11,9 @@ use super::App;
 #[cfg(not(target_arch = "wasm32"))]
 use super::RtJob;
 
-/// Paths per pixel for the file (converged) ray trace. Each path contributes one AO +
-/// one shadow sample, so this is also the AO/shadow sample count. (Ray tracing needs compute
-/// → native/WebGPU only; the WebGL2 wasm build uses the rasterized capture fallback.)
-#[cfg(not(target_arch = "wasm32"))]
-const RT_FILE_SAMPLES: u32 = 192;
 /// Tile-submits per frame while pumping a Save trace (bounded per-frame GPU work → the UI
-/// stays responsive with a "Saving…" overlay instead of freezing).
+/// stays responsive with a "Saving…" overlay instead of freezing). The sample *count* is the
+/// lighting-dependent converge target ([`Camera::rt_sample_target`]) — same as the R-key still.
 #[cfg(not(target_arch = "wasm32"))]
 const SAVE_STEP_SUBMITS: u32 = 4;
 
@@ -45,7 +41,8 @@ impl App {
                 self.renderer.rt_trace_cancel();
             }
             self.rt_still = false;
-            if self.renderer.save_begin(&rs, &self.camera, out_w, out_h, RT_FILE_SAMPLES) {
+            let samples = self.camera.rt_sample_target();
+            if self.renderer.save_begin(&rs, &self.camera, out_w, out_h, samples) {
                 self.rt_job = Some(RtJob::Save { out: [out_w, out_h], reading: None });
                 self.status = "rendering image…".into();
                 return;

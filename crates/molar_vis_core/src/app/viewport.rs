@@ -2,9 +2,6 @@
 use super::*;
 use super::overlay::*;
 
-/// Samples per pixel for the **R**-key ray-traced still (at 1× viewport resolution). Tier-1
-/// AO+shadows are clean by ~this count; GI wants the headroom too.
-const RT_STILL_SAMPLES: u32 = 128;
 /// Tile-submits to issue per frame while pumping a trace. Keeps each frame's GPU work bounded
 /// (so the UI stays responsive) while the trace refines progressively over several frames.
 const RT_STEP_SUBMITS: u32 = 4;
@@ -150,7 +147,8 @@ impl App {
                     self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
                     self.rt_scene_dirty = false;
                 }
-                self.renderer.rt_still_begin(render_state, &self.camera, size_px, RT_STILL_SAMPLES);
+                let samples = self.camera.rt_sample_target();
+                self.renderer.rt_still_begin(render_state, &self.camera, size_px, samples);
                 self.rt_job = Some(RtJob::Still);
                 self.rt_still = false;
             }
