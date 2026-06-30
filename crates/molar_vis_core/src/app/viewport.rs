@@ -170,7 +170,7 @@ impl App {
             // immediately instead of only after the gather finishes. `force_raster` re-renders
             // the behind-view this frame so its glow is hidden (`glow_pulse = 0`, set above).
             let mut force_raster = false;
-            if let Some(kind) = self.rt_warm {
+            if self.rt_warm.is_some() {
                 if self.rt_warm_shown {
                     if self.rt_scene_dirty {
                         let dashed = self.settings.behavior.dashed_pbc_bonds;
@@ -178,20 +178,19 @@ impl App {
                         self.rt_scene_dirty = false;
                     }
                     let samples = self.camera.rt_sample_target();
-                    match kind {
+                    match self.rt_warm.take().unwrap() {
                         RtKind::Still => {
                             self.renderer.rt_still_begin(render_state, &self.camera, size_px, samples);
                             self.rt_job = Some(RtJob::Still);
                         }
-                        RtKind::Save { scale } => {
+                        RtKind::Save { scale, path } => {
                             let [vw, vh] = self.last_size;
                             let out = [vw.max(1) * scale.max(1), vh.max(1) * scale.max(1)];
                             if self.renderer.save_begin(render_state, &self.camera, out[0], out[1], samples) {
-                                self.rt_job = Some(RtJob::Save { out, reading: None });
+                                self.rt_job = Some(RtJob::Save { out, path, reading: None });
                             }
                         }
                     }
-                    self.rt_warm = None;
                 } else {
                     self.rt_warm_shown = true;
                     force_raster = true;

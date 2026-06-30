@@ -769,8 +769,8 @@ next frame). The menus —
   only **New** shows on wasm.
 - **Render** — **Image…** opens a small **save dialog** (`App::image_dialog` / `draw_image_dialog` in
   `app/export.rs`): pick the **output size** (`Viewport (1×)` / `2×` / `4×`, each labelled with the
-  resulting px) + **format** (PNG only for now), then **Save** → `App::export_request` → `export_image`.
-  Native pops an `rfd` save dialog; **wasm triggers a browser download** (Blob → object URL →
+  resulting px) + **format** (PNG only for now), then **Save** → `App::export_request` → `export_image`, which on **native pops the `rfd` save dialog
+  *first* (before rendering) and renders to the chosen path**; **wasm triggers a browser download** (Blob → object URL →
   `<a download>`). **On a compute-capable device (WebGPU/native) this is a full GPU ray trace**
   (ray-traced AO + shadows + Blinn-Phong, all rep types — see the `render/raytrace.rs` bullet),
   **frame-pumped with a "Saving…" overlay so the UI stays responsive** (no freeze); **WebGL2 falls

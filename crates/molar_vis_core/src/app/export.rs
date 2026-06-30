@@ -79,11 +79,26 @@ impl App {
         let [vw, vh] = self.last_size;
         let (out_w, out_h) = (vw.max(1) * scale.max(1), vh.max(1) * scale.max(1));
 
-        // Native + compute device: a full ray trace, **pumped across frames** so the app stays
-        // responsive (with a "Saving…" overlay) instead of freezing. Started deferred via
-        // `rt_warm` — the viewport controller shows the overlay one frame, then runs the gather
-        // + `save_begin`; `service_rt_save` advances it and writes the PNG when done. A Save
-        // shares the tracer with the R-key still, so cancel any running/pending still.
+        // Native: choose the destination file **first** (before any rendering), so the save
+        // dialog is up front. A cancelled dialog means "don't render". Wasm has no filesystem
+        // (it downloads with a fixed name after the capture).
+        #[cfg(not(target_arch = "wasm32"))]
+        let dest = {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .set_file_name("molar_vis.png")
+                .save_file()
+            else {
+                return;
+            };
+            path
+        };
+
+        // Native + compute device: a full ray trace to `dest`, **pumped across frames** so the
+        // app stays responsive (with a "Saving…" overlay) instead of freezing. Started deferred
+        // via `rt_warm` — the viewport controller shows the overlay one frame, then runs the
+        // gather + `save_begin`; `service_rt_save` advances it and writes the PNG to `dest` when
+        // done. A Save shares the tracer with the R-key still, so cancel any running/pending one.
         #[cfg(not(target_arch = "wasm32"))]
         if self.renderer.raytrace_supported() {
             if matches!(self.rt_job, Some(RtJob::Still)) {
@@ -91,7 +106,7 @@ impl App {
                 self.rt_job = None;
             }
             self.rt_still = false;
-            self.rt_warm = Some(super::RtKind::Save { scale: scale.max(1) });
+            self.rt_warm = Some(super::RtKind::Save { scale: scale.max(1), path: dest });
             self.rt_warm_shown = false;
             self.status = "rendering image…".into();
             return;
@@ -119,9 +134,9 @@ impl App {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // Raster capture is cheap → drive the map to completion and save synchronously.
+            // Raster capture is cheap → drive the map to completion and write to the chosen file.
             let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
-            self.save_png_native(cap.read());
+            self.write_png_native(cap.read(), &dest);
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -135,7 +150,7 @@ impl App {
     /// UI responsive (a "Saving…" overlay shows meanwhile, drawn by the viewport).
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn service_rt_save(&mut self, frame: &mut eframe::Frame) {
-        let Some(RtJob::Save { out, reading }) = self.rt_job.as_ref() else {
+        let Some(RtJob::Save { out, reading, .. }) = self.rt_job.as_ref() else {
             return;
         };
         let out = *out;
@@ -158,30 +173,23 @@ impl App {
             return;
         }
 
-        // Phase 2: poll the readback (non-blocking); save when it lands.
+        // Phase 2: poll the readback (non-blocking); write to the pre-chosen path when it lands.
         let _ = rs.device.poll(wgpu::PollType::Poll);
         let ready = matches!(
             self.rt_job.as_ref(),
             Some(RtJob::Save { reading: Some(rb), .. }) if rb.is_ready()
         );
         if ready {
-            if let Some(RtJob::Save { reading: Some(rb), .. }) = self.rt_job.take() {
-                self.save_png_native(rb.read());
+            if let Some(RtJob::Save { reading: Some(rb), path, .. }) = self.rt_job.take() {
+                self.write_png_native(rb.read(), &path);
             }
         }
     }
 
-    /// Native: pop a save dialog and write the PNG.
+    /// Native: write the PNG to `path` (chosen up front, before the render).
     #[cfg(not(target_arch = "wasm32"))]
-    fn save_png_native(&mut self, img: image::RgbaImage) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG image", &["png"])
-            .set_file_name("molar_vis.png")
-            .save_file()
-        else {
-            return;
-        };
-        match img.save(&path) {
+    fn write_png_native(&mut self, img: image::RgbaImage, path: &std::path::Path) {
+        match img.save(path) {
             Ok(()) => self.status = format!("saved image to {}", path.display()),
             Err(e) => {
                 log::error!("save image: {e}");

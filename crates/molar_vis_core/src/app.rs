@@ -276,12 +276,12 @@ pub enum Corner {
 /// A just-requested ray trace, held one frame so its overlay paints before the (blocking)
 /// scene gather, then turned into the matching [`RtJob`].
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-#[derive(Clone, Copy)]
 enum RtKind {
     /// The R-key viewport still.
     Still,
-    /// A "Save image" file render at `scale ×` the viewport.
-    Save { scale: u32 },
+    /// A "Save image" file render at `scale ×` the viewport to `path` (the destination is
+    /// chosen up front, before the render).
+    Save { scale: u32, path: std::path::PathBuf },
 }
 
 /// An in-progress ray trace, pumped a few tile-submits per frame so the UI stays responsive.
@@ -293,9 +293,14 @@ enum RtJob {
     /// The R-key viewport still: traces into the 1× display texture; on completion the result
     /// is held (`rt_still`) until the camera moves.
     Still,
-    /// A "Save image" file render at `out` resolution (native): trace, then read back + write
-    /// the PNG. `reading` holds the GPU→CPU readback once the trace has converged.
-    Save { out: [u32; 2], reading: Option<crate::render::CaptureReadback> },
+    /// A "Save image" file render at `out` resolution to `path` (native): trace, then read
+    /// back + write the PNG to the pre-chosen `path`. `reading` holds the GPU→CPU readback once
+    /// the trace has converged.
+    Save {
+        out: [u32; 2],
+        path: std::path::PathBuf,
+        reading: Option<crate::render::CaptureReadback>,
+    },
 }
 
 /// The Render ▸ Image… save dialog: the chosen output size (a multiple of the viewport).
