@@ -494,11 +494,11 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   light (soft-shadowed) + `GI_BOUNCES` (3) cosine-weighted diffuse bounces, Russian-roulette terminated,
   gathering a uniform **sky dome** (`GI_SKY`, decoupled from the visible background so a dark backdrop
   still lights the molecule) on a ray miss — so cavities self-shadow (true AO) and colour bleeds between
-  surfaces. **`gi` scales the whole indirect** (bounces + sky); the first hit's *direct* key light stays
-  full, so the slider dials GI from a subtle/dramatic fill (low — darker than tier-1, which has an
-  ambient floor GI lacks) up to a bright ambient (1). Converges over the same progressive accumulation.
-  The **GI strength rides `U.bg.w`** (0 = tier-1); the resolve tonemaps GI's HDR with **ACES**
-  (`fs_resolve` branches on `bg.w`; tier-1 stays a near-identity clamp so it keeps matching the raster).
+  surfaces. GI **blends with tier-1 by the strength** — `mix(tier1, full_gi, gi)` per sample — so a tiny strength
+  barely changes the look and it ramps **continuously** up to full GI (switching shading models at
+  strength→0 made even 0.01 jolt the whole scene). The **strength rides `U.bg.w`** (0 = tier-1); the
+  resolve likewise blends its tonemap `mix(clamp, ACES, gi)` (clamp = tier-1 raster match, ACES = GI's
+  HDR shoulder), so the tonemap has no jump at 0 either.
   The surface decode + tier-1/GI shading are factored into shared shader fns
   (`surface_at`/`shadow_at`/`shade_tier1`/`shade_gi`). GI applies to **both** the Save-image render
   **and the R-key still** (both read `Camera::gi`); the Lighting-tab **Global illumination slider** +
