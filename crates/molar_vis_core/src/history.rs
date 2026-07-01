@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
-use crate::scene::{MolId, Molecule, PeriodicParams, Representation, Scene};
+use crate::scene::{
+    GroupId, MolGroup, MolId, Molecule, MoleculeSource, PeriodicParams, Representation, Scene,
+};
 
 /// The editable state of a single representation — the canonical "document" unit.
 ///
@@ -161,28 +163,61 @@ pub struct MolState {
     pub structure: Option<StructureSnapshot>,
 }
 
+/// The undoable state of a [`MolGroup`]: its membership, group-level visibility, and
+/// the **shared** representations (captured from the shown member's prefix). The
+/// shown-member index is *view state* (like a trajectory frame) and deliberately
+/// **not** captured, so cycling members never lands on the undo stack. Undo-only
+/// (no serde — sessions use [`crate::session::GroupSession`]).
+#[derive(Clone, PartialEq)]
+pub struct GroupState {
+    pub id: GroupId,
+    pub members: Vec<MolId>,
+    pub visible: bool,
+    pub shared_reps: Vec<RepState>,
+}
+
 /// A snapshot of the editable document. `PartialEq` decides whether anything
 /// undoable changed.
 #[derive(Clone, PartialEq, Default)]
 pub struct EditState {
     mols: Vec<MolState>,
+    groups: Vec<GroupState>,
 }
 
 impl EditState {
     pub fn capture(scene: &Scene) -> Self {
-        EditState {
-            mols: scene
-                .molecules
-                .iter()
-                .map(|m| MolState {
+        let mols = scene
+            .molecules
+            .iter()
+            .map(|m| {
+                // Group members' shared reps belong to the group (captured below); a
+                // member's `reps` prefix is `n_shared` shared mirrors — keep only its
+                // own reps here. A grouped member's visibility is fully derived from
+                // the group (shown member ∧ group eye), so capturing the live flag —
+                // which flips on a member switch — would make *cycling* undoable.
+                // Pin it constant so only the group eye (in `GroupState`) is undoable.
+                let ns = m.n_shared.min(m.reps.len());
+                MolState {
                     id: m.id,
-                    visible: m.visible,
-                    reps: m.reps.iter().map(RepState::capture).collect(),
+                    visible: if m.group.is_some() { true } else { m.visible },
+                    reps: m.reps[ns..].iter().map(RepState::capture).collect(),
                     // Only drawn molecules carry a structure snapshot.
                     structure: m.editable.then(|| StructureSnapshot::capture(m)),
-                })
-                .collect(),
-        }
+                }
+            })
+            .collect();
+        let groups = scene
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(gi, g)| GroupState {
+                id: g.id,
+                members: g.members.clone(),
+                visible: g.visible,
+                shared_reps: scene.group_shared_reps(gi),
+            })
+            .collect();
+        EditState { mols, groups }
     }
 
     /// Reconcile the live scene to this snapshot, reusing molecules (by id, from
@@ -197,6 +232,15 @@ impl EditState {
                 continue;
             };
             mol.visible = ms.visible;
+            // Strip any group-shared prefix and reconcile this member's OWN reps only
+            // (`ms.reps`); the shared reps are re-materialized from the group state
+            // below. Clear the group tag — it's re-set when groups are reconciled.
+            let ns = mol.n_shared.min(mol.reps.len());
+            if ns > 0 {
+                mol.reps.drain(0..ns);
+            }
+            mol.n_shared = 0;
+            mol.group = None;
             // Restore the drawn structure first (rebuilds the System, resets atom
             // count), then reconcile reps over it.
             mol.editable = ms.structure.is_some();
@@ -210,6 +254,60 @@ impl EditState {
             scene.trash.insert(id, mol);
         }
         scene.molecules = new_mols;
+
+        // Reconcile groups, mirroring the molecule reconciliation (a group trash keeps
+        // removed groups for redo; the shown-member index / expand state ride along on
+        // the recovered group since they aren't part of the snapshot).
+        let mut gpool: std::collections::HashMap<GroupId, MolGroup> =
+            scene.groups.drain(..).map(|g| (g.id, g)).collect();
+        let mut new_groups = Vec::with_capacity(self.groups.len());
+        for gs in &self.groups {
+            let mut g = gpool
+                .remove(&gs.id)
+                .or_else(|| scene.group_trash.remove(&gs.id))
+                .unwrap_or_else(|| MolGroup {
+                    id: gs.id,
+                    name: String::new(),
+                    source: MoleculeSource::default(),
+                    members: Vec::new(),
+                    current: 0,
+                    visible: true,
+                    expanded: false,
+                });
+            g.members = gs.members.clone();
+            g.visible = gs.visible;
+            if g.current >= g.members.len() {
+                g.current = g.members.len().saturating_sub(1);
+            }
+            new_groups.push(g);
+        }
+        for (id, g) in gpool {
+            scene.group_trash.insert(id, g);
+        }
+        scene.groups = new_groups;
+
+        // Re-tag members and materialize each group's shared reps onto its shown member.
+        for (gi, gs) in self.groups.iter().enumerate() {
+            let members = scene.groups[gi].members.clone();
+            for &id in &members {
+                if let Some(mi) = scene.mol_index(id) {
+                    scene.molecules[mi].group = Some(gs.id);
+                }
+            }
+            let cur = scene.groups[gi].current;
+            if let Some(&cur_id) = members.get(cur) {
+                if let Some(mi) = scene.mol_index(cur_id) {
+                    let live: Vec<Representation> =
+                        gs.shared_reps.iter().map(|s| s.to_representation()).collect();
+                    let n = live.len();
+                    let mol = &mut scene.molecules[mi];
+                    mol.reps.splice(0..0, live);
+                    mol.n_shared = n;
+                }
+            }
+            scene.apply_group_visibility(gi);
+        }
+
         scene.clamp_selection();
     }
 }
@@ -373,6 +471,39 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             }
             if o.smooth_window != n.smooth_window {
                 return "change smoothing".into();
+            }
+        }
+    }
+    // Group-level changes (shared reps, membership, group visibility).
+    match new.groups.len().cmp(&old.groups.len()) {
+        Less => return "delete group".into(),
+        Greater => return "add group".into(),
+        Equal => {}
+    }
+    for ng in &new.groups {
+        let Some(og) = old.groups.iter().find(|g| g.id == ng.id) else {
+            return "add group".into();
+        };
+        if og.visible != ng.visible {
+            return "toggle group".into();
+        }
+        if og.members.len() != ng.members.len() {
+            return "edit group".into();
+        }
+        match ng.shared_reps.len().cmp(&og.shared_reps.len()) {
+            Greater => return "add shared representation".into(),
+            Less => return "delete shared representation".into(),
+            Equal => {}
+        }
+        for (o, n) in og.shared_reps.iter().zip(ng.shared_reps.iter()) {
+            if o.sel_text != n.sel_text {
+                return "edit shared selection".into();
+            }
+            if o.kind != n.kind {
+                return "change shared style".into();
+            }
+            if o != n {
+                return "edit shared representation".into();
             }
         }
     }

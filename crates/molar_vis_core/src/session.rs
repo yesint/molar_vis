@@ -54,8 +54,48 @@ pub struct Session {
     pub version: u32,
     #[serde(default)]
     pub view: ViewState,
+    /// Standalone (non-grouped) molecules. Group members are saved under [`groups`].
     #[serde(default)]
     pub molecules: Vec<MolSession>,
+    /// Molecular groups (multi-molecule SDF), reloaded from their source file by
+    /// record index. `#[serde(default)]` so older sessions (no groups) still load.
+    #[serde(default)]
+    pub groups: Vec<GroupSession>,
+}
+
+/// One molecular group's saved state: where its records came from, the shared
+/// representation document, and each member's own reps + record index.
+#[derive(Serialize, Deserialize)]
+pub struct GroupSession {
+    /// The multi-molecule file to re-open (members are picked out by record index).
+    pub source: MoleculeSource,
+    #[serde(default)]
+    pub name: String,
+    /// Shown member after load (index into `members`).
+    #[serde(default)]
+    pub current: usize,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    /// The shared representation document (applies to every member).
+    #[serde(default)]
+    pub shared_reps: Vec<RepState>,
+    #[serde(default)]
+    pub members: Vec<MemberSession>,
+}
+
+/// One member of a saved group: which `$$$$` record it is, plus its own
+/// (non-shared) representations. Member visibility is derived from the group's
+/// `current`, so it isn't stored.
+#[derive(Serialize, Deserialize)]
+pub struct MemberSession {
+    /// 0-based record index in the group's source file (the load order).
+    #[serde(default)]
+    pub record_index: usize,
+    #[serde(default)]
+    pub name: String,
+    /// This member's own reps only (the shared ones live on the group).
+    #[serde(default)]
+    pub reps: Vec<RepState>,
 }
 
 /// One molecule's saved state: where it came from, the full representation
@@ -128,6 +168,41 @@ impl MolSession {
     }
 }
 
+impl GroupSession {
+    /// Capture group `gi` of `scene` (shared reps from the shown member's prefix,
+    /// each member's own reps + record index).
+    pub fn capture(scene: &Scene, gi: usize) -> Self {
+        let g = &scene.groups[gi];
+        let members = g
+            .members
+            .iter()
+            .enumerate()
+            .filter_map(|(pos, &id)| {
+                let mi = scene.mol_index(id)?;
+                let m = &scene.molecules[mi];
+                let record_index = match &m.source {
+                    MoleculeSource::SdfRecord { index, .. } => *index,
+                    _ => pos,
+                };
+                let ns = m.n_shared.min(m.reps.len());
+                Some(MemberSession {
+                    record_index,
+                    name: m.name.clone(),
+                    reps: m.reps[ns..].iter().map(RepState::capture).collect(),
+                })
+            })
+            .collect();
+        GroupSession {
+            source: g.source.clone(),
+            name: g.name.clone(),
+            current: g.current,
+            visible: g.visible,
+            shared_reps: scene.group_shared_reps(gi),
+            members,
+        }
+    }
+}
+
 impl Session {
     /// Capture the document side (the molecules) from a scene; the caller supplies
     /// the global [`ViewState`] (it lives on `App`, not the scene).
@@ -136,7 +211,14 @@ impl Session {
             format: FORMAT_TAG.to_string(),
             version: VERSION,
             view,
-            molecules: scene.molecules.iter().map(MolSession::capture).collect(),
+            // Standalone molecules only; group members are saved under `groups`.
+            molecules: scene
+                .molecules
+                .iter()
+                .filter(|m| m.group.is_none())
+                .map(MolSession::capture)
+                .collect(),
+            groups: (0..scene.groups.len()).map(|gi| GroupSession::capture(scene, gi)).collect(),
         }
     }
 
@@ -265,5 +347,64 @@ mod tests {
     fn wrong_format_is_rejected() {
         let json = r#"{ "format": "something.else", "molecules": [] }"#;
         assert!(Session::from_json(json).is_err());
+    }
+
+    /// A molecular group round-trips: members are saved under `groups` (not
+    /// `molecules`), with the shared rep document, member record indices, and the
+    /// shown-member index preserved.
+    #[test]
+    fn session_round_trips_group() {
+        use crate::scene::{MolGroup, MoleculeSource};
+        let sdf = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/ligands20.sdf");
+        let records =
+            crate::data::load_records(Path::new(sdf), &crate::data::BondParams::default())
+                .expect("load ligands20.sdf");
+        assert_eq!(records.len(), 20, "20 records expected");
+
+        // Build a group the way `App::add_group` does (hidden members, one shared
+        // Licorice rep on the shown member).
+        let mut scene = Scene::default();
+        let gid = scene.alloc_group_id();
+        let mut members = Vec::new();
+        for raw in records {
+            let id = scene.add(raw, &crate::settings::RepDefaults::default());
+            let mi = scene.mol_index(id).unwrap();
+            let mol = &mut scene.molecules[mi];
+            mol.reps.clear();
+            mol.group = Some(gid);
+            mol.visible = false;
+            mol.n_shared = 0;
+            members.push(id);
+        }
+        // The shared prefix lives on the shown member (here member 3).
+        let shown = 3;
+        let mi = scene.mol_index(members[shown]).unwrap();
+        scene.molecules[mi].reps = vec![Representation::new(RepKind::Licorice)];
+        scene.molecules[mi].n_shared = 1;
+        scene.groups.push(MolGroup {
+            id: gid,
+            name: "ligands20.sdf".to_string(),
+            source: MoleculeSource::File(Path::new(sdf).to_path_buf()),
+            members,
+            current: shown,
+            visible: true,
+            expanded: false,
+        });
+        scene.apply_group_visibility(0);
+
+        let json = Session::capture(&scene, ViewState::default()).to_json().unwrap();
+        let back = Session::from_json(&json).unwrap();
+
+        assert!(back.molecules.is_empty(), "members are saved under groups, not molecules");
+        assert_eq!(back.groups.len(), 1);
+        let g = &back.groups[0];
+        assert_eq!(g.members.len(), 20);
+        assert_eq!(g.current, 3);
+        assert!(g.visible);
+        assert_eq!(g.shared_reps.len(), 1);
+        assert_eq!(g.shared_reps[0].kind, RepKind::Licorice);
+        // Member record indices are the load order; own reps are empty.
+        assert_eq!(g.members[5].record_index, 5);
+        assert!(g.members[5].reps.is_empty());
     }
 }

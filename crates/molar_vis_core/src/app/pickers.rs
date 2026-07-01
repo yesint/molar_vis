@@ -97,7 +97,8 @@ pub(super) fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> 
 pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     let color = ui.visuals().text_color();
     let kind = rep.kind;
-    let resp = picker_button(ui, kind.label(), |p, r| paint_style_icon(p, r, kind, color));
+    let lw = max_label_width(ui, RepKind::ALL.iter().map(|&k| k.label()));
+    let resp = picker_button(ui, kind.label(), lw, |p, r| paint_style_icon(p, r, kind, color));
 
     egui::Popup::menu(&resp).show(|ui| {
         for kind in RepKind::ALL {
@@ -332,7 +333,8 @@ pub(super) fn current_solid(method: ColorMethod) -> [u8; 4] {
 pub(super) fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     use egui::containers::menu::{MenuConfig, SubMenu};
     let method = rep.color;
-    let resp = picker_button(ui, method.label(), |p, r| paint_color_icon(p, r, method));
+    let lw = max_label_width(ui, ColorMethod::ALL.iter().map(|&m| m.label()));
+    let resp = picker_button(ui, method.label(), lw, |p, r| paint_color_icon(p, r, method));
 
     egui::Popup::menu(&resp).show(|ui| {
         // The built-in per-atom schemes: pick one and close.
@@ -575,7 +577,8 @@ pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: boo
 /// change forces a geometry rebuild (opacity/lighting are baked per geometry element).
 pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     let material = rep.material;
-    let resp = picker_button(ui, material.label(), |p, r| paint_material_icon(p, r, material));
+    let lw = max_label_width(ui, Material::ALL.iter().map(|&m| m.label()));
+    let resp = picker_button(ui, material.label(), lw, |p, r| paint_material_icon(p, r, material));
 
     egui::Popup::menu(&resp).show(|ui| {
         egui::Grid::new("material_grid")

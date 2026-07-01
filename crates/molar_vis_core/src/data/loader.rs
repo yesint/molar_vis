@@ -53,6 +53,117 @@ pub fn load_with(path: &Path, bonds: &BondParams) -> Result<RawMolecule, String>
     Ok(assemble(system, name, MoleculeSource::File(path.to_path_buf()), bonds))
 }
 
+/// Load **every** record of a multi-molecule file as a **distinct** molecule:
+/// molar's `FileHandler::read()` returns a fresh `(Topology, State)` for each
+/// `$$$$`-separated SDF record (each its own atoms + bonds), so we loop it to EOF.
+/// Used to build a [`crate::scene::MolGroup`]. Member display names come from each
+/// record's molfile title line when present, else `"{stem} #{n}"`. Errors if the
+/// file can't be opened or a record is malformed; an empty file is an error.
+pub fn load_records(path: &Path, bonds: &BondParams) -> Result<Vec<RawMolecule>, String> {
+    let mut fh = FileHandler::open(path)
+        .map_err(|e| format!("failed to load {}: {e}", path.display()))?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "molecule".to_string());
+    // Titles are a display nicety; read failures just fall back to generated names.
+    let titles = std::fs::read_to_string(path).ok().map(|t| sdf_titles(&t)).unwrap_or_default();
+    let mut out = Vec::new();
+    loop {
+        match fh.read() {
+            Ok((top, st)) => {
+                let i = out.len();
+                let system = System::new(top, st)
+                    .map_err(|e| format!("invalid record {} in {}: {e}", i + 1, path.display()))?;
+                let name = record_name(&titles, i, &stem);
+                out.push(assemble(
+                    system,
+                    name,
+                    MoleculeSource::SdfRecord { path: path.to_path_buf(), index: i },
+                    bonds,
+                ));
+            }
+            Err(e) if matches!(e.kind(), FileFormatError::Eof) => break,
+            Err(e) => {
+                return Err(format!(
+                    "failed to read record {} in {}: {e}",
+                    out.len() + 1,
+                    path.display()
+                ))
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("no molecules found in {}", path.display()));
+    }
+    Ok(out)
+}
+
+/// Multi-record loader over in-memory bytes (the browser path). Members carry a
+/// `Bytes` source (no path to reload from), so a wasm-loaded group can't be saved
+/// to a session — same limitation as any byte-sourced molecule.
+#[cfg(target_arch = "wasm32")]
+pub fn load_records_from_bytes(
+    name: &str,
+    bytes: Vec<u8>,
+    bonds: &BondParams,
+) -> Result<Vec<RawMolecule>, String> {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_string();
+    let titles = std::str::from_utf8(&bytes).ok().map(sdf_titles).unwrap_or_default();
+    let mut fh = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes))
+        .map_err(|e| format!("can't read {name}: {e}"))?;
+    let mut out = Vec::new();
+    loop {
+        match fh.read() {
+            Ok((top, st)) => {
+                let i = out.len();
+                let system = System::new(top, st)
+                    .map_err(|e| format!("invalid record {} in {name}: {e}", i + 1))?;
+                let rname = record_name(&titles, i, &stem);
+                out.push(assemble(
+                    system,
+                    rname.clone(),
+                    MoleculeSource::Bytes { name: rname },
+                    bonds,
+                ));
+            }
+            Err(e) if matches!(e.kind(), FileFormatError::Eof) => break,
+            Err(e) => return Err(format!("failed to read record {} in {name}: {e}", out.len() + 1)),
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("no molecules found in {name}"));
+    }
+    Ok(out)
+}
+
+/// Extract each record's title line (the molfile's first line) from raw SDF/MOL
+/// text: the file's first line, plus the first line after every `$$$$` separator.
+/// Blank titles come back empty (the caller then generates a name).
+fn sdf_titles(text: &str) -> Vec<String> {
+    let mut titles = Vec::new();
+    let mut at_title = true; // the very first line is a title
+    for line in text.lines() {
+        if at_title {
+            titles.push(line.trim().to_string());
+            at_title = false;
+        }
+        if line.trim_end() == "$$$$" {
+            at_title = true; // the next line begins the next record
+        }
+    }
+    titles
+}
+
+/// A member's display name: its molfile title if non-empty, else `"{stem} #{n}"`.
+fn record_name(titles: &[String], i: usize, stem: &str) -> String {
+    match titles.get(i) {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => format!("{stem} #{}", i + 1),
+    }
+}
+
 /// Load a structure from in-memory bytes (the browser path: the file picker reads
 /// a `File`/`Blob` into a `Vec<u8>`). The format is taken from `name`'s extension.
 /// Uses molar's `FileHandler::from_reader`, so no filesystem access is needed.

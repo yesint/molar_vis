@@ -24,13 +24,13 @@ use crate::pick::{self, PickMode, SelectionMode};
 use crate::render::SceneRenderer;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::SphereInstance;
-use crate::scene::{self, MolId, Representation, Scene, SettingsTab};
+use crate::scene::{self, GroupId, MolId, MoleculeSource, Representation, Scene, SettingsTab};
 use crate::secstruct::SsMap;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::session::{Session, ViewState};
 use crate::settings::{RepDefaults, Settings, ThemeMode};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::scene::{MoleculeSource, TrajLoad};
+use crate::scene::{MolGroup, TrajLoad};
 use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
 
 use egui_phosphor::regular as icon;
@@ -560,8 +560,11 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         let structure_changed = self.view_dirty;
         for (_mi, mol) in self.scene.molecules.iter_mut().enumerate() {
+            // Only visible molecules are drawn into the pick id-buffer, so don't build
+            // pick geometry for hidden ones (e.g. the N−1 unshown members of a group).
+            // A hidden molecule made visible later sets `view_dirty`, re-marking it.
             #[cfg(not(target_arch = "wasm32"))]
-            if structure_changed {
+            if structure_changed && mol.visible {
                 mol.pick_dirty = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -816,15 +819,41 @@ impl eframe::App for App {
         #[cfg(target_os = "linux")]
         defuse_broken_ime(&ctx);
 
+        // Camera telemetry (debug): while MOLAR_VIS_DEBUG_CAMERA_LOG=<path> is set,
+        // write the live camera as JSON to <path> each frame, so a bug view positioned
+        // interactively can be reproduced headlessly with MOLAR_VIS_DEBUG_CAMERA=<path>.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = std::env::var_os("MOLAR_VIS_DEBUG_CAMERA_LOG") {
+            if let Ok(json) = serde_json::to_string(&self.camera) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
+
         // Browser file picker results: load each (filename, bytes) the async picker
         // delivered (see `pick_file`) as a new molecule.
         #[cfg(target_arch = "wasm32")]
         while let Ok((name, bytes)) = self.file_rx.try_recv() {
-            match data::load_from_bytes(&name, bytes, &self.settings.behavior.bond_params()) {
-                Ok(raw) => self.add_loaded(raw),
-                Err(e) => {
-                    log::error!("{e}");
-                    self.status = e;
+            let bonds = self.settings.behavior.bond_params();
+            let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+            if matches!(ext.as_str(), "sdf" | "mol") {
+                // A multi-molecule SDF/MOL becomes a group; one record = one molecule.
+                match data::load_records_from_bytes(&name, bytes, &bonds) {
+                    Ok(records) if records.len() >= 2 => {
+                        self.add_group(records, MoleculeSource::Bytes { name: name.clone() }, name);
+                    }
+                    Ok(mut records) => self.add_loaded(records.pop().unwrap()),
+                    Err(e) => {
+                        log::error!("{e}");
+                        self.status = e;
+                    }
+                }
+            } else {
+                match data::load_from_bytes(&name, bytes, &bonds) {
+                    Ok(raw) => self.add_loaded(raw),
+                    Err(e) => {
+                        log::error!("{e}");
+                        self.status = e;
+                    }
                 }
             }
         }

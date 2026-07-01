@@ -16,11 +16,29 @@ pub(super) fn compact_actions(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
 }
 
-/// A dropdown button showing a drawn icon + a text label + a caret. `draw_icon`
-/// paints into the given rect; returns the click response (drive a `Popup` off it).
+/// Widest of `labels` in the picker-button font. A picker button reserves this so it
+/// keeps a **constant width** as the selection changes — a wider label must not grow
+/// the button and reflow/resize the whole panel. Measured once per picker per frame.
+pub(super) fn max_label_width<'a>(ui: &egui::Ui, labels: impl Iterator<Item = &'a str>) -> f32 {
+    let txt = ui.visuals().text_color();
+    labels
+        .map(|l| {
+            ui.painter()
+                .layout_no_wrap(l.to_owned(), egui::FontId::proportional(14.0), txt)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max)
+}
+
+/// A dropdown button showing a drawn icon + a text label + a caret. `label_w` is the
+/// width reserved for the label (pass [`max_label_width`] of all options so the button
+/// doesn't change size with the selection). `draw_icon` paints into the given rect;
+/// returns the click response (drive a `Popup` off it).
 pub(super) fn picker_button(
     ui: &mut egui::Ui,
     label: &str,
+    label_w: f32,
     draw_icon: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     let txt = ui.visuals().text_color();
@@ -28,7 +46,9 @@ pub(super) fn picker_button(
         .painter()
         .layout_no_wrap(label.to_owned(), egui::FontId::proportional(14.0), txt);
     let (icon_w, caret_w, pad, gap) = (26.0_f32, 11.0_f32, 5.0_f32, 5.0_f32);
-    let w = pad + icon_w + gap + galley.size().x + gap + caret_w + pad;
+    // Reserve the widest option's label width (fixed button size); the current label is
+    // drawn left-aligned within it.
+    let w = pad + icon_w + gap + label_w.max(galley.size().x) + gap + caret_w + pad;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click());
     if resp.hovered() {
         ui.painter()

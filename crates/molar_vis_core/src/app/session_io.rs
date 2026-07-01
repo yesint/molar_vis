@@ -42,7 +42,9 @@ impl App {
     /// (start empty, then reload from a file).
     pub(super) fn reset_document(&mut self) {
         self.scene.molecules.clear();
+        self.scene.groups.clear();
         self.scene.trash.clear();
+        self.scene.group_trash.clear();
         self.loaders.clear();
         self.editing_rep = None;
         self.load_dialog = None;
@@ -275,6 +277,81 @@ impl App {
                 mol.apply_current_frame();
             }
             loaded += 1;
+        }
+
+        // Reconstruct molecular groups: re-open each group's source file, pull out the
+        // recorded members by record index, restore their own reps + the shared reps.
+        for gs in &session.groups {
+            let MoleculeSource::File(path) = &gs.source else {
+                errors.push(format!("group “{}” was loaded from memory — cannot reload", gs.name));
+                continue;
+            };
+            let records = match data::load_records(path, &self.settings.behavior.bond_params()) {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(e);
+                    continue;
+                }
+            };
+            // Take records out by index (RawMolecule isn't Clone, members are distinct).
+            let mut records: Vec<Option<data::RawMolecule>> = records.into_iter().map(Some).collect();
+            let gid = self.scene.alloc_group_id();
+            let mut members = Vec::with_capacity(gs.members.len());
+            for ms in &gs.members {
+                let Some(mut raw) = records.get_mut(ms.record_index).and_then(|o| o.take()) else {
+                    errors.push(format!(
+                        "group “{}”: record {} missing in {}",
+                        gs.name,
+                        ms.record_index,
+                        path.display()
+                    ));
+                    continue;
+                };
+                raw.source = MoleculeSource::SdfRecord { path: path.clone(), index: ms.record_index };
+                let id = self.scene.add(raw, &self.rep_defaults);
+                let mi = self.scene.mol_index(id).unwrap();
+                let mol = &mut self.scene.molecules[mi];
+                if !ms.name.is_empty() {
+                    mol.name = ms.name.clone();
+                }
+                mol.group = Some(gid);
+                mol.visible = false;
+                mol.n_shared = 0;
+                mol.reps = ms.reps.iter().map(|r| r.to_representation()).collect();
+                mol.selected_rep = (!mol.reps.is_empty()).then_some(0);
+                members.push(id);
+                loaded += 1;
+            }
+            if members.is_empty() {
+                continue;
+            }
+            let current = gs.current.min(members.len() - 1);
+            // Materialize the shared reps onto the shown member.
+            if let Some(mi) = self.scene.mol_index(members[current]) {
+                let live: Vec<Representation> =
+                    gs.shared_reps.iter().map(|r| r.to_representation()).collect();
+                let n = live.len();
+                let mol = &mut self.scene.molecules[mi];
+                mol.reps.splice(0..0, live);
+                mol.n_shared = n;
+                mol.selected_rep = Some(0);
+            }
+            let name = if gs.name.is_empty() {
+                path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+            } else {
+                gs.name.clone()
+            };
+            self.scene.groups.push(MolGroup {
+                id: gid,
+                name,
+                source: gs.source.clone(),
+                members,
+                current,
+                visible: gs.visible,
+                expanded: false,
+            });
+            let gi = self.scene.groups.len() - 1;
+            self.scene.apply_group_visibility(gi);
         }
 
         self.scene.clamp_selection();

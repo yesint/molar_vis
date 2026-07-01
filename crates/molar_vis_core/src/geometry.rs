@@ -38,7 +38,7 @@ impl RepKind {
         match self {
             RepKind::Vdw => "VDW",
             RepKind::Licorice => "Licorice",
-            RepKind::BallAndStick => "Ball and Stick",
+            RepKind::BallAndStick => "Balls+Sticks",
             RepKind::Lines => "Lines",
             RepKind::Cartoon => "Cartoon",
             RepKind::Surface => "Surface",
@@ -204,8 +204,11 @@ pub fn build(
         },
         RepParams::Licorice { bond_radius } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
+            // Bonds are drawn as capsules (rounded atom ends), which round every bonded
+            // atom; only bondless atoms (ions, lone atoms) still need a ball.
+            let bonded = bonded_mask(bonds, &lut);
             GeometryData {
-                spheres: spheres(bound, &colorizer, |_| bond_radius),
+                spheres: spheres_where(bound, &colorizer, |_| bond_radius, |i| !bonded[i]),
                 cylinders: cylinders(&lut, bonds, bond_radius, pbox),
                 ..Default::default()
             }
@@ -423,8 +426,22 @@ fn spheres(
     colorizer: &Colorizer,
     radius: impl Fn(&Atom) -> f32,
 ) -> Vec<SphereInstance> {
+    spheres_where(bound, colorizer, radius, |_| true)
+}
+
+/// Like [`spheres`] but only for atoms whose global index passes `keep`. Licorice
+/// uses this to draw a ball **only for bondless atoms** — bonded atoms are rounded by
+/// the capsule bond caps, so a separate atom sphere there would poke out and re-create
+/// the dark "crescent" seam at end-on views.
+fn spheres_where(
+    bound: &impl ParticleIterProvider,
+    colorizer: &Colorizer,
+    radius: impl Fn(&Atom) -> f32,
+    keep: impl Fn(usize) -> bool,
+) -> Vec<SphereInstance> {
     bound
         .iter_particle()
+        .filter(|p| keep(p.id))
         .map(|p| SphereInstance {
             center: [p.pos.x, p.pos.y, p.pos.z],
             radius: radius(p.atom),
@@ -433,6 +450,20 @@ fn spheres(
             pick: [0, 0],
         })
         .collect()
+}
+
+/// Which selected atoms have at least one bond (endpoints both in the LUT). Licorice
+/// draws balls only for atoms **without** any bond.
+fn bonded_mask(bonds: &[Bond], lut: &[Option<([f32; 3], u32)>]) -> Vec<bool> {
+    let mut bonded = vec![false; lut.len()];
+    for bond in bonds {
+        let [a, b] = bond.pair();
+        if a < lut.len() && b < lut.len() && lut[a].is_some() && lut[b].is_some() {
+            bonded[a] = true;
+            bonded[b] = true;
+        }
+    }
+    bonded
 }
 
 /// Per-atom (position, color) lookup keyed by global atom index, populated only
@@ -571,29 +602,30 @@ fn cylinders(
 ) -> Vec<CylinderInstance> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
-    // Emit one half-bond stub (solid or PBC-dashed) at a screen-offset lane.
-    // `offset = [slot, gap_nm]`; the shader shifts the strand by `slot*gap` along
-    // the screen-plane perpendicular. `[0,0]` (single bond) → no shift.
-    let mut push = |p0, p1, color, rad: f32, offset: [f32; 2], dashed: bool| {
+    // Emit one strand at a screen-offset lane. `offset = [slot, gap_nm]`; the shader
+    // shifts by `slot*gap` along the screen-plane perpendicular (`[0,0]` = no shift).
+    // A normal strand is a single **two-tone capsule** `pa → pb` (the shader colors the
+    // pa half `color`, the pb half `color1`, and rounds both ends). A PBC-wrapping bond
+    // is instead two single-color dashed stubs.
+    let mut push = |p0, p1, color, color1, rad: f32, offset: [f32; 2], dashed: bool| {
         if dashed {
             for (s, e) in dashes(p0, p1) {
-                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, mat: 0, offset });
+                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, color1, mat: 0, offset });
             }
         } else {
-            v.push(CylinderInstance { p0, radius: rad, p1, color, mat: 0, offset });
+            v.push(CylinderInstance { p0, radius: rad, p1, color, color1, mat: 0, offset });
         }
     };
     for bond in bonds {
         let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
             let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
-            // A bond that wraps a periodic box face is drawn as the single dashed
-            // PBC half-bonds (the rare PBC + multi-order combo falls back to a single
-            // strand — see CLAUDE notes). A normal bond is split by chemical order
-            // into parallel screen-offset strands.
+            // A bond that wraps a periodic box face is drawn as two single-color dashed
+            // stubs (each atom → its partner's nearest image). A normal bond is one
+            // two-tone capsule per chemical-order strand.
             if wrapped {
-                push(pa, a_end, ca, radius, [0.0, 0.0], true);
-                push(pb, b_end, cb, radius, [0.0, 0.0], true);
+                push(pa, a_end, ca, ca, radius, [0.0, 0.0], true);
+                push(pb, b_end, cb, cb, radius, [0.0, 0.0], true);
                 continue;
             }
             let slots = strand_slots(bond.order);
@@ -601,9 +633,7 @@ fn cylinders(
             let rad = if multi { radius * MULTI_SIZE_SCALE } else { radius };
             let gap = if multi { rad * CYL_STRAND_GAP_FACTOR } else { 0.0 };
             for &(slot, dash) in slots {
-                let off = [slot, gap];
-                push(pa, a_end, ca, rad, off, dash);
-                push(pb, b_end, cb, rad, off, dash);
+                push(pa, pb, ca, cb, rad, [slot, gap], dash);
             }
         }
     }

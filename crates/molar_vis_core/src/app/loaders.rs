@@ -135,12 +135,56 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(path) = rfd::FileDialog::new()
-                .add_filter("Structures", &["pdb", "ent", "gro", "xyz", "tpr"])
+                .add_filter("Structures", &["pdb", "ent", "gro", "xyz", "tpr", "sdf", "mol"])
                 .pick_file()
             else {
                 return;
             };
-            match data::load_with(&path, &self.settings.behavior.bond_params()) {
+            self.open_structure_path(&path);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let tx = self.file_tx.clone();
+            pick_file(
+                ".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc,.sdf,.mol",
+                ctx.clone(),
+                move |name, bytes| {
+                    let _ = tx.send((name, bytes));
+                },
+            );
+        }
+    }
+
+    /// Load a structure file from disk (native). A multi-molecule SDF/MOL (≥2 `$$$$`
+    /// records) becomes a [`MolGroup`]; anything else (incl. a single-record SDF) is
+    /// one ordinary molecule. Shared by the Open dialog and the startup path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn open_structure_path(&mut self, path: &std::path::Path) {
+        let bonds = self.settings.behavior.bond_params();
+        let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+        if matches!(ext.as_deref(), Some("sdf") | Some("mol")) {
+            match data::load_records(path, &bonds) {
+                Ok(records) if records.len() >= 2 => {
+                    let name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "group".to_string());
+                    self.add_group(records, MoleculeSource::File(path.to_path_buf()), name);
+                }
+                Ok(mut records) => {
+                    // A single-record SDF is just one molecule; reload it like any
+                    // file (source = File, so the session round-trips it normally).
+                    let mut raw = records.pop().unwrap();
+                    raw.source = MoleculeSource::File(path.to_path_buf());
+                    self.add_loaded(raw);
+                }
+                Err(e) => {
+                    log::error!("{e}");
+                    self.status = e;
+                }
+            }
+        } else {
+            match data::load_with(path, &bonds) {
                 Ok(raw) => self.add_loaded(raw),
                 Err(e) => {
                     log::error!("{e}");
@@ -148,17 +192,37 @@ impl App {
                 }
             }
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let tx = self.file_tx.clone();
-            pick_file(
-                ".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc",
-                ctx.clone(),
-                move |name, bytes| {
-                    let _ = tx.send((name, bytes));
-                },
-            );
+    }
+
+    /// Add a freshly loaded multi-record file as a [`MolGroup`]: each record becomes a
+    /// hidden member molecule, the group gets one default **Licorice** shared rep
+    /// materialized onto the first (shown) member, and the camera frames that member
+    /// if the scene was empty. The add is undoable (end-of-frame checkpoint).
+    pub(super) fn add_group(
+        &mut self,
+        records: Vec<data::RawMolecule>,
+        source: MoleculeSource,
+        name: String,
+    ) {
+        if records.is_empty() {
+            return;
         }
+        let was_empty = self.scene.molecules.is_empty();
+        let rep_defaults = self.rep_defaults.clone();
+        let n = records.len();
+        let Some(first_member) = self.scene.add_group(records, source, name, &rep_defaults) else {
+            return;
+        };
+        self.scene.selected_mol = self.scene.mol_index(first_member);
+        if was_empty {
+            if let Some(mi) = self.scene.mol_index(first_member) {
+                let (min, max) = (self.scene.molecules[mi].bbox_min, self.scene.molecules[mi].bbox_max);
+                self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
+                self.settings.view.seed_camera(&mut self.camera);
+            }
+        }
+        self.status = format!("Loaded group ({n} molecules)");
+        self.view_dirty = true;
     }
 
     /// Add a freshly loaded structure as a new molecule: select it, frame the

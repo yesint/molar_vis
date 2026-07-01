@@ -446,6 +446,57 @@ pub(super) fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
 
     traj.current != before
 }
+
+/// A molecular-**group** cycle bar: first · prev · [member slider] · next · last.
+/// Modeled on the trajectory bar's second row but for choosing which group member is
+/// shown — deliberately **no** play/pause, fps, loop, or step (a group is a set of
+/// distinct molecules, not an animation). Returns the newly chosen member index when
+/// it changes. Caller ensures the group has ≥2 members (disabled otherwise).
+pub(super) fn draw_group_bar(ui: &mut egui::Ui, names: &[String], current: usize) -> Option<usize> {
+    let n_members = names.len();
+    if n_members < 2 {
+        return None;
+    }
+    let last = n_members - 1;
+    let mut cur = current.min(last);
+    ui.horizontal(|ui| {
+        compact_actions(ui);
+        if icon_button(ui, icon::SKIP_BACK, "First molecule").clicked() {
+            cur = 0;
+        }
+        if icon_button(ui, icon::CARET_LEFT, "Previous molecule").clicked() {
+            cur = cur.saturating_sub(1);
+        }
+        // The slider stretches between the flanking step buttons (room reserved for
+        // the trailing next/last buttons + spacing).
+        let reserve = 52.0;
+        ui.spacing_mut().slider_width = (ui.available_width() - reserve).max(40.0);
+        let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
+        // Tooltip anchored **under the knob** (not at the cursor), showing "N/M name"
+        // for the member the knob points at — updates live while dragging.
+        if resp.hovered() || resp.dragged() {
+            let name = names.get(cur).map(|s| s.as_str()).unwrap_or("");
+            let frac = if last > 0 { cur as f32 / last as f32 } else { 0.0 };
+            let knob_x = resp.rect.left() + frac * resp.rect.width();
+            let pos = egui::pos2(knob_x, resp.rect.bottom() + 4.0);
+            egui::Area::new(egui::Id::new("group_cycle_tooltip"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pos)
+                .pivot(egui::Align2::CENTER_TOP)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style())
+                        .show(ui, |ui| ui.label(format!("{}/{} {}", cur + 1, n_members, name)));
+                });
+        }
+        if icon_button(ui, icon::CARET_RIGHT, "Next molecule").clicked() {
+            cur = (cur + 1).min(last);
+        }
+        if icon_button(ui, icon::SKIP_FORWARD, "Last molecule").clicked() {
+            cur = last;
+        }
+    });
+    (cur != current).then_some(cur)
+}
 impl App {
 
     /// Representations of the selected molecule as rich rows: a drag handle
@@ -457,7 +508,22 @@ impl App {
     /// (drag handle · selection · actions / style · color · gear) with
     /// drag-reorder. The "add representation" control lives in the molecule's
     /// header row, not here.
-    pub(super) fn draw_reps_for(&mut self, ui: &mut egui::Ui, mi: usize) -> bool {
+    ///
+    /// Draws only reps in `[start, end)`. For an ordinary molecule that's the whole
+    /// list (`0..len`, `is_shared = false`). For a [`MolGroup`] the prefix
+    /// `0..n_shared` of the shown member is drawn as the **shared** reps under the
+    /// group header (`is_shared = true`), and each member's own reps `n_shared..len`
+    /// below it. `is_shared` keeps the member's `n_shared` boundary correct as shared
+    /// reps are added/removed/reordered, and suppresses the pending-selection UI
+    /// (which belongs to a member, not the shared document).
+    pub(super) fn draw_reps_for(
+        &mut self,
+        ui: &mut egui::Ui,
+        mi: usize,
+        start: usize,
+        end: usize,
+        is_shared: bool,
+    ) -> bool {
         let mut view_dirty = false;
         let editing = self
             .editing_rep
@@ -469,6 +535,8 @@ impl App {
         let mol_id = mol.id;
         // The Periodic tab is only offered when the molecule has a box.
         let has_box = mol.data.state().pbox.is_some();
+        let start = start.min(mol.reps.len());
+        let end = end.min(mol.reps.len());
 
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;
@@ -477,7 +545,7 @@ impl App {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut save_rep: Option<usize> = None;
 
-        for j in 0..mol.reps.len() {
+        for j in start..end {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
             let rep = &mut mol.reps[j];
             // Whether the selection is valid but empty (0 atoms) — flags the field.
@@ -645,7 +713,12 @@ impl App {
                     egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
                 );
                 if let Some(src) = block.dnd_release_payload::<usize>() {
-                    reorder = Some((*src, if before { j } else { j + 1 }));
+                    // Confine reorder to this drawn region (shared vs own): ignore a
+                    // drag that originated in the other list (their payloads share the
+                    // `usize` type), so the `n_shared` boundary can't be crossed.
+                    if (start..end).contains(&*src) {
+                        reorder = Some((*src, if before { j } else { j + 1 }));
+                    }
                 }
             }
 
@@ -658,7 +731,9 @@ impl App {
         // color, or editable selection (those come once it's accepted).
         let mut accept_pending = false;
         let mut discard_pending = false;
-        if mol.pending.is_some() {
+        // The pending selection belongs to the molecule, not the shared document —
+        // only show it in the own-reps pass.
+        if !is_shared && mol.pending.is_some() {
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Label::new(egui::RichText::new("selection").italics())
@@ -697,10 +772,17 @@ impl App {
             let dup = mol.reps[j].duplicate();
             mol.reps.insert(j + 1, dup);
             mol.selected_rep = Some(j + 1);
+            // A duplicated shared rep stays inside the shared prefix.
+            if is_shared {
+                mol.n_shared += 1;
+            }
             view_dirty = true;
         }
         if let Some(j) = delete {
             mol.reps.remove(j);
+            if is_shared {
+                mol.n_shared = mol.n_shared.saturating_sub(1);
+            }
             mol.selected_rep = if mol.reps.is_empty() {
                 None
             } else {

@@ -54,6 +54,41 @@ impl App {
                 Some(parts) => parts,
                 None => continue,
             };
+            // A multi-molecule SDF/MOL as the sole file in the group → a molecular
+            // group (its records are distinct molecules, not trajectory frames).
+            let ext = structure
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
+            if extra.is_empty() && matches!(ext.as_deref(), Some("sdf") | Some("mol")) {
+                match data::load_records(structure, &bond_params) {
+                    Ok(records) if records.len() >= 2 => {
+                        let name = structure
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "group".to_string());
+                        scene.add_group(
+                            records,
+                            crate::scene::MoleculeSource::File(structure.clone()),
+                            name,
+                            &rep_defaults,
+                        );
+                        continue;
+                    }
+                    Ok(mut records) => {
+                        // Single-record SDF: just one molecule (reload like a file).
+                        let mut raw = records.pop().unwrap();
+                        raw.source = crate::scene::MoleculeSource::File(structure.clone());
+                        scene.add(raw, &rep_defaults);
+                        continue;
+                    }
+                    Err(e) => {
+                        log::error!("{e}");
+                        status = e;
+                        continue;
+                    }
+                }
+            }
             let raw = match data::load_with(structure, &bond_params) {
                 Ok(raw) => raw,
                 Err(e) => {
@@ -110,6 +145,37 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             let _ = extra;
         }
+        // Verification hook: MOLAR_VIS_DEBUG_SDF=<path> loads a multi-molecule SDF as
+        // a group (bypassing the file dialog); MOLAR_VIS_DEBUG_GROUP_MEMBER=<n> shows
+        // member n (exercises member-switch); MOLAR_VIS_DEBUG_GROUP_EXPAND=1 expands it.
+        if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SDF") {
+            let p = std::path::PathBuf::from(&path);
+            match data::load_records(&p, &bond_params) {
+                Ok(records) => {
+                    let name = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "group".to_string());
+                    scene.add_group(records, crate::scene::MoleculeSource::File(p), name, &rep_defaults);
+                    let gi = scene.groups.len().saturating_sub(1);
+                    if let Ok(n) = std::env::var("MOLAR_VIS_DEBUG_GROUP_MEMBER") {
+                        if let Ok(n) = n.trim().parse::<usize>() {
+                            scene.switch_group_member(gi, n);
+                        }
+                    }
+                    if std::env::var("MOLAR_VIS_DEBUG_GROUP_EXPAND").is_ok() {
+                        if let Some(g) = scene.groups.get_mut(gi) {
+                            g.expanded = true;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("debug SDF group load failed: {e}");
+                    status = e;
+                }
+            }
+        }
+
         if !scene.molecules.is_empty() {
             scene.selected_mol = Some(0);
             status = format!("{} molecule(s) loaded", scene.molecules.len());
@@ -257,6 +323,16 @@ impl App {
             Some((min, max)) => Camera::frame_bbox(min, max, settings.view.fill),
             None => Camera::default(),
         };
+        // A startup group: frame the *shown* member (members overlap near the origin
+        // and vary wildly in size, so the combined bbox would mis-frame small members).
+        if let Some(g) = scene.groups.first() {
+            if let Some(&id) = g.members.get(g.current) {
+                if let Some(mi) = scene.mol_index(id) {
+                    let (min, max) = scene.molecules[mi].current_bbox();
+                    camera = Camera::frame_bbox(min, max, settings.view.fill);
+                }
+            }
+        }
         // Seed the fresh camera with the user's default view (projection, depth-cue,
         // AO, shadows, background). The debug hooks below override specific fields.
         settings.view.seed_camera(&mut camera);
@@ -329,6 +405,17 @@ impl App {
                     let (min, max) = mol.sel_bbox(&sel);
                     camera.focus_bbox(min, max);
                 }
+            }
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_CAMERA=<path> restores the exact camera
+        // from a JSON file written by MOLAR_VIS_DEBUG_CAMERA_LOG — so a bug view can be
+        // positioned interactively and reproduced headlessly. Overrides framing/ORBIT/
+        // ZOOM/FOCUS (placed after them).
+        if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_CAMERA") {
+            match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Camera>(&s).ok()) {
+                Some(c) => camera = c,
+                None => log::error!("MOLAR_VIS_DEBUG_CAMERA: could not read/parse {path}"),
             }
         }
 

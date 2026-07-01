@@ -203,7 +203,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 - `geometry.rs` — `RepKind`, `RepParams` (**per-style enum**), `GeometryData`/`MeshData`;
   `build(system, sel, bonds, params, color)` binds the `Sel` (`system.bind`), reads
   positions/atoms via `iter_particle` (nothing cached), and dispatches on `params`. Spheres
-  come from the selected atoms; bonds are half-bond split, colored by each atom. Computes a
+  come from the selected atoms; each bond is **one two-tone capsule** (`cylinders`: `p0→p1`,
+  `color`=atom-a / `color1`=atom-b, split at the midpoint in the shader) — the cylinder impostor
+  ray-casts a capped capsule (see the *Impostors* note), so Licorice draws atom balls only for
+  **bondless** atoms (`spheres_where`/`bonded_mask`). Computes a
   `SsMap` once when the rep is Cartoon or colored by SecStruct. **PBC dashed half-bonds** (gated by
   `build`'s `dashed_pbc` arg — the *Dashed wrap-around bonds* setting; when off, `pbox = None` and
   all bonds draw as plain solid half-bonds): the box is read from the bound (`BoxProvider::get_box`).
@@ -593,7 +596,19 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   **instanced** data (stride = 2 verts) and drawn as a `TriangleStrip` quad expanded
   perpendicular to the segment by `width` px in `line.wgsl` (uses the viewport size carried
   in the camera uniform's `params.yz`); width stays constant in pixels at any zoom, like VMD.
-  Half-bond coloring = two half-segments per bond, colored by each endpoint atom.
+  **Cylinders are two-tone capsules** (`cylinder.wgsl` `compute_hit`): **one instance per bond**
+  (not per half-bond) ray-casts a finite wall over `h∈[0,seg_len]` **plus a hemispherical cap at
+  each end** (the two atoms), and colors the `p0` half `color` / the `p1` half `color1` at the
+  midpoint (VMD half-bond coloring, `CylinderInstance` carries both). So a bond is one **continuous
+  smooth capped tube** — no separate atom sphere abutting a capless wall (whose hard occlusion seam
+  showed as a dark "crescent"/gap at end-on views). Licorice therefore draws an atom **ball only for
+  bondless atoms** (`geometry::spheres_where`/`bonded_mask`); bonded atoms are rounded by the capsule
+  caps. The **billboard is built in the screen plane** (axis projected to screen `u` + screen-perp
+  `w`, extents `½·projected-len+r` × `r`, ×1.4 oversize) so it robustly covers the whole capsule
+  **including the caps at any angle** — crucially end-on, where the old `cross(axis,view)` perp
+  degenerated to a thin strip (the atom spheres used to cover the cap there). A subtle **shadowed-side
+  fill light** (`FILL_STRENGTH`, gated by `1−N·L`) in `shade_material` (sphere+cylinder) keeps joint
+  creases/undersides from reading as black gaps without touching the lit side/highlight.
   **Early-Z (conservative depth) for the impostor opaque pass** — writing analytic
   `frag_depth` normally disables early depth-test, so on a screen-filling close-up every
   overlapping sphere/cylinder is shaded (deep overdraw, the reported close-up slowdown).
@@ -604,15 +619,17 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `sphere.wgsl`/`cylinder.wgsl` (`render::inject_early_z`; OIT/glow/pick entries untouched),
   letting the GPU reject occluded impostor fragments **before** the ray-cast + shading. The
   attribute requires the rasterized depth to be a *lower bound* on the true hit depth, so each
-  shader keeps its billboard at the **original** position (coverage + near-plane clipping
-  byte-for-byte unchanged) and overrides only the **interpolated `clip.z`** to the geometry's
-  *near point* (sphere: the near pole, a per-instance constant → constant `z_ndc` across the
-  quad; cylinder: each vertex pulled ~3·radius toward the camera — perspective along the
-  vertex's eye-ray, ortho along +Z — and that point's depth written, the 3× covering the
-  depth-interpolation slack vs. the curved surface). The fragment still writes the true
-  analytic depth, so the depth buffer is exact and the **rendered image is identical** —
-  verified byte-for-byte (AE=0) vs. the pre-feature build across VDW/licorice/ball-and-stick in
-  fit / perspective close-up / ortho close-up, and early-Z ON==OFF likewise. WebGL2/wasm and
+  shader overrides only `clip.z` to a **per-instance constant** conservative depth (a constant
+  can't overshoot the true hyperbolic surface depth the way an *interpolated* per-vertex value does
+  across a foreshortened billboard — that overshoot wrongly-culled fragments as black wedges at
+  grazing close-ups). NDC depth is a function of **eye-z only** (both projections), so the minimum
+  NDC depth is at the maximum eye-z: **sphere** = `center.z + radius`; **cylinder** =
+  `max(a0.z, a1.z) + radius`. Two guards make it safe: **(1)** if the near pole crosses the camera
+  plane (`near_c.w ≤ 0` on extreme close-ups) fall back to depth 0; **(2)** `clamp(z_ndc, 0, 1)` so
+  the overridden `clip.z ∈ [0, w]` never triggers extra **near-plane clipping** of the billboard
+  (an unclamped `z<0` near-clipped the quad → holes/gaps — this was a real regression). The fragment
+  still writes the true analytic depth, so the depth buffer is exact and early-Z ON==OFF (verified
+  numerically across fit / perspective + ortho grazing close-ups). WebGL2/wasm and
   adapters without the feature never get the attribute (the injection is a no-op) and fall back
   to plain late-Z, unchanged. **Surfaces/cartoon** are plain meshes (no `frag_depth`) so the GPU
   already early-Zs them — no change needed. Set `MOLAR_VIS_NO_EARLY_Z=1` to force the feature
@@ -1409,6 +1426,42 @@ History labels via `describe_change` ("edit selection", "change coloring",
     **Deferred**: the anywidget/Jupyter wrapper (the same `pkg/` + a thin `_esm`); multi-viewer per
     page; live JS-driven coordinate edits (needs interior mutability + a `SharedSource::state` change);
     camelCase method aliases (snake_case kept canonical for pymolar parity).
+- ✅ M28 **Molecular groups (multi-molecule SDF)** — a "drug-discovery goodies / SDF reading"
+  roadmap item. molar's SDF handler returns a **fresh `(Topology, State)` per `$$$$` record**
+  (each a distinct molecule with its own atoms+bonds); `data::load_records` (+ wasm bytes variant,
+  `data/loader.rs`) loops `FileHandler::read()` to EOF to load them all. A multi-record SDF/MOL (≥2
+  records) becomes a **`MolGroup`** (`scene.rs`): the members are ordinary `Molecule`s in the flat
+  `scene.molecules` tagged with `Molecule.group: Option<GroupId>`, plus a side `Scene.groups` layer
+  — so the whole render/rebuild/pick/raytrace pipeline (which iterates flatly and gates on
+  `mol.visible`) is **unchanged**. **Only one member is shown at a time** (`MolGroup.current`,
+  enforced by `apply_visibility`: shown member visible ∧ group eye, others hidden). **Shared reps**
+  (apply to every member) are *not* a separate field — the live, editable shared `Representation`s
+  are the **first `Molecule.n_shared` reps of the shown member** (the single source of truth, so the
+  renderer needs no group-awareness); `switch_group_member` strips the prefix off the old member and
+  re-materializes it onto the new one (re-evaluated against its topology). UI (`app/panels.rs`
+  `draw_group_entry` + `app/rep_panel.rs` `draw_group_bar`): a panel entry with a **STACK** icon +
+  file name + expander, a **trajectory-style cycle bar (first/prev/slider/next/last, no play/fps)**
+  to choose the shown member (**partial focus** — cycling or clicking a member name shows it and
+  **centers** the camera on it by panning the target only, keeping the current zoom; the header
+  magnifier is a **full zoom-to-fit**; the slider tooltip is anchored **under the knob** showing
+  "N/M `<name>`"), the shared reps under the header, and — when expanded — each member (real name
+  from the SDF title line, a **clickable label** that partial-focuses it; the **shown member's row is
+  highlighted** with an accent bar; a per-member `LIST` menu → **Delete molecule**) collapsible to its
+  **own** reps (`draw_reps_for` gained a `start,end,is_shared` sub-range). The whole left-panel list
+  scrolls (a single panel-level `ScrollArea`, non-floating scrollbar; fps in a bottom sub-panel).
+  Per-member delete preserves the shared reps (`Scene::remove_grouped_molecule` re-materializes them
+  onto the new shown member). New-group default
+  shared rep = **Licorice** (small organics). **Undo**: `history::GroupState` in `EditState` captures
+  shared reps + membership + group visibility (member-own reps captured for free as the suffix);
+  member-switch is **view state, not undoable** (grouped members' visibility pinned constant in
+  capture so cycling never lands on the stack). **Sessions**: `session::GroupSession`/`MemberSession`
+  (`Session.groups`, all `#[serde(default)]`); capture excludes group members from `molecules`;
+  `apply_session` re-opens the SDF and rebuilds members by record index — group session round-trips.
+  Test fixture **`tests/ligands20.sdf`** (20 ChEMBL drugs via `obabel --gen3d`, sizes
+  metformin→atorvastatin). Headless hooks `MOLAR_VIS_DEBUG_SDF=<path>` (+ `_GROUP_MEMBER=<n>` /
+  `_GROUP_EXPAND=1`). Verified: 68 tests (incl. a group session round-trip), native+wasm+py green,
+  clippy clean; headless renders of member 0 (aspirin) / member 7 (diazepam, camera re-fit) / a
+  reloaded session (member 5, dopamine) + a panel screenshot (group row, cycle bar, member list).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

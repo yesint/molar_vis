@@ -1,19 +1,25 @@
-//! Cylinder impostor: one instance per half-bond, drawn as a camera-facing
-//! billboard whose fragment shader ray-casts a finite (capless) cylinder and
-//! writes analytic depth. Caps are covered by the sphere rep at the joints.
+//! Cylinder impostor: one instance per **bond**, drawn as a camera-facing billboard
+//! whose fragment shader ray-casts a **capsule** (finite cylinder + a hemispherical
+//! cap at each end) and writes analytic depth. The two ends are the two bonded atoms
+//! and the capsule is two-tone (colored by position along the axis), so a bond reads
+//! as one smooth capped tube with VMD half-bond coloring — no separate atom sphere to
+//! seam against (which showed as a dark "crescent" at end-on views).
 
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct CylinderInstance {
-    /// Start point, world space (nm).
+    /// Start point (atom A), world space (nm).
     pub p0: [f32; 3],
     pub radius: f32,
-    /// End point, world space (nm).
+    /// End point (atom B), world space (nm).
     pub p1: [f32; 3],
-    /// RGBA8 packed; alpha carries the material opacity.
+    /// RGBA8 packed color of the **p0 half** (h < mid); alpha carries the opacity.
     pub color: u32,
+    /// RGBA8 packed color of the **p1 half** (h ≥ mid). Equal to `color` for a
+    /// single-colored piece (e.g. a PBC dash stub).
+    pub color1: u32,
     /// Packed material lighting (ambient|diffuse<<8|specular<<16|shininess<<24).
     pub mat: u32,
     /// Multi-order strand offset: `x` = signed slot (−1, 0, +1 …) and `y` = gap
@@ -45,20 +51,27 @@ impl CylinderInstance {
                 shader_location: 2,
                 format: wgpu::VertexFormat::Float32x3,
             },
+            // color (p0 half): u32 @location(3)
             wgpu::VertexAttribute {
                 offset: 28,
                 shader_location: 3,
                 format: wgpu::VertexFormat::Uint32,
             },
-            // mat: u32 @location(4)
+            // color1 (p1 half): u32 @location(6)
             wgpu::VertexAttribute {
                 offset: 32,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Uint32,
+            },
+            // mat: u32 @location(4)
+            wgpu::VertexAttribute {
+                offset: 36,
                 shader_location: 4,
                 format: wgpu::VertexFormat::Uint32,
             },
             // offset: vec2<f32> @location(5) — [slot, gap_nm] for multi-order bonds
             wgpu::VertexAttribute {
-                offset: 36,
+                offset: 40,
                 shader_location: 5,
                 format: wgpu::VertexFormat::Float32x2,
             },

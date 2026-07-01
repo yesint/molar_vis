@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
+use crate::history::RepState;
 use crate::material::Material;
 use crate::minimize::{Bond, BondOrder};
 use crate::moldata::MolData;
@@ -21,6 +22,45 @@ use crate::trajectory::Trajectory;
 /// deletion (a deleted molecule is parked in [`Scene::trash`] by this id).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct MolId(pub u64);
+
+/// Stable per-group identity (parallel to [`MolId`]), so undo/redo and sessions
+/// can reference a [`MolGroup`] across reordering.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct GroupId(pub u64);
+
+/// A **molecular group**: several distinct molecules loaded together (the records
+/// of a multi-molecule SDF) shown one at a time, with representations that are
+/// **shared** across every member. The member molecules are ordinary [`Molecule`]s
+/// living in [`Scene::molecules`] (so the whole render/rebuild/pick pipeline treats
+/// them exactly like any molecule); this struct only adds the grouping layer.
+///
+/// **Shared reps** are not stored here. The live, editable shared
+/// [`Representation`]s are the **first `n_shared` entries** of the *currently shown*
+/// member's `reps` (see [`Molecule::n_shared`]) — that one materialized copy is the
+/// single source of truth, so the renderer draws them with no group-awareness.
+/// Switching members strips the prefix off the old member and re-materializes it
+/// onto the new one ([`Scene::switch_group_member`]); snapshots (undo/session)
+/// carry their own `Vec<RepState>` copies.
+pub struct MolGroup {
+    pub id: GroupId,
+    /// Display name (the source file's name).
+    pub name: String,
+    /// Where the group was loaded from (the `.sdf`/`.mol`), so a session can reload it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub source: MoleculeSource,
+    /// Member molecule ids, in record order. The flat [`Scene::molecules`] holds the
+    /// molecules themselves; this fixes their display order in the group.
+    pub members: Vec<MolId>,
+    /// Index into `members` of the member shown right now (view state, not undoable —
+    /// like [`Trajectory::current`]).
+    pub current: usize,
+    /// Group-level visibility (the header eye). The shown member is visible iff this
+    /// is true; all other members are always hidden.
+    pub visible: bool,
+    /// Transient UI: whether the group is expanded to list its members (like
+    /// [`Molecule::reps_open`]; not undoable).
+    pub expanded: bool,
+}
 
 /// Periodic-image display for a representation: render extra copies of the
 /// selection shifted by integer combinations of the box lattice vectors `a,b,c`.
@@ -75,6 +115,12 @@ impl PeriodicParams {
 pub enum MoleculeSource {
     /// A structure file on disk (native). Reloaded with [`crate::data::load`].
     File(PathBuf),
+    /// One `$$$$` record (0-based `index`) of a multi-molecule file on disk (a
+    /// member of a [`MolGroup`]). A *whole-molecule* standalone reload is ambiguous
+    /// here (the file holds many molecules), so this is treated like [`Bytes`] for
+    /// the standalone "Save molecule"/session-as-molecule paths; the group's
+    /// session reload re-opens the file and walks to `index`.
+    SdfRecord { path: PathBuf, index: usize },
     /// In-memory bytes (the browser file picker, or the bundled demo): there is no
     /// path to reload from, so a session referencing this cannot restore the atoms
     /// in a fresh process. We keep the original name for display/diagnostics.
@@ -346,6 +392,16 @@ pub struct Molecule {
     pub bbox_max: Vec3,
     pub visible: bool,
     pub reps: Vec<Representation>,
+    /// If this molecule is a member of a [`MolGroup`], its group id (else `None`).
+    /// The flat scene treats grouped molecules like any other; only the panel and
+    /// the group machinery consult this. Transient runtime state (groups are
+    /// reconstructed on undo/session load), not serialized on the molecule.
+    pub group: Option<GroupId>,
+    /// Number of leading `reps` that are the group's **shared** reps, materialized
+    /// onto this member because it is the one currently shown (`reps[0..n_shared]` =
+    /// shared mirror, `reps[n_shared..]` = this member's own). `0` for a non-shown
+    /// member or a non-grouped molecule. See [`MolGroup`].
+    pub n_shared: usize,
     pub selected_rep: Option<usize>,
     /// Aromatic rings (atom-index loops) from the last [`Molecule::perceive_aromaticity`],
     /// for the in-ring aromatic-circle overlay in the drawing editor. Transient.
@@ -501,6 +557,8 @@ impl Molecule {
             bbox_max,
             visible: true,
             reps: vec![Representation::from_defaults(rep_defaults)],
+            group: None,
+            n_shared: 0,
             selected_rep: Some(0),
             aromatic_rings: Vec::new(),
             reps_open: true,
@@ -835,10 +893,17 @@ fn is_empty_selection(e: &SelectionError) -> bool {
 #[derive(Default)]
 pub struct Scene {
     pub molecules: Vec<Molecule>,
+    /// Molecular groups (multi-molecule SDF). Members are ordinary entries in
+    /// `molecules` tagged with [`Molecule::group`]; this is the grouping layer.
+    pub groups: Vec<MolGroup>,
     pub selected_mol: Option<usize>,
     /// Molecules removed from the document but retained so a delete can be undone.
     pub trash: HashMap<MolId, Molecule>,
+    /// Groups removed from the document but retained so undo/redo can restore them
+    /// (mirrors [`trash`]; the metadata is tiny — members live in `trash`).
+    pub group_trash: HashMap<GroupId, MolGroup>,
     next_id: u64,
+    next_group_id: u64,
 }
 
 impl Scene {
@@ -867,8 +932,198 @@ impl Scene {
         Ok(id)
     }
 
-    /// Clamp `selected_mol`/`selected_rep` to valid ranges (after add/remove).
+    /// Allocate the next fresh [`GroupId`].
+    pub fn alloc_group_id(&mut self) -> GroupId {
+        let id = GroupId(self.next_group_id);
+        self.next_group_id += 1;
+        id
+    }
+
+    /// Build a [`MolGroup`] from the records of a multi-molecule file: each record
+    /// becomes a **hidden** member molecule, and the group gets one default
+    /// **Licorice** shared rep materialized onto the first (shown) member. Returns
+    /// the first member's id (for camera framing), or `None` if `records` is empty.
+    /// The scene-side half of `App::add_group`, shared with the startup path.
+    pub fn add_group(
+        &mut self,
+        records: Vec<RawMolecule>,
+        source: MoleculeSource,
+        name: String,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Option<MolId> {
+        if records.is_empty() {
+            return None;
+        }
+        let gid = self.alloc_group_id();
+        let mut members = Vec::with_capacity(records.len());
+        for raw in records {
+            let id = self.add(raw, rep_defaults);
+            let mi = self.mol_index(id).unwrap();
+            let mol = &mut self.molecules[mi];
+            // Members carry no own reps; the group's shared rep is what shows.
+            mol.reps.clear();
+            mol.selected_rep = None;
+            mol.group = Some(gid);
+            mol.visible = false;
+            mol.n_shared = 0;
+            // Collapse each member's own-rep block by default so an expanded group
+            // shows a compact list of member names (a 20-record SDF would otherwise be
+            // a wall of "(no own representations)").
+            mol.reps_open = false;
+            members.push(id);
+        }
+        // Default shared rep = Licorice (SDF records are small organics/ligands).
+        let mut licorice = rep_defaults.clone();
+        licorice.kind = RepKind::Licorice;
+        let shared = Representation::from_defaults(&licorice);
+        let first = members[0];
+        if let Some(mi) = self.mol_index(first) {
+            let mol = &mut self.molecules[mi];
+            mol.reps = vec![shared];
+            mol.n_shared = 1;
+            mol.selected_rep = Some(0);
+        }
+        self.groups.push(MolGroup {
+            id: gid,
+            name,
+            source,
+            members,
+            current: 0,
+            visible: true,
+            expanded: false,
+        });
+        let gi = self.groups.len() - 1;
+        self.apply_group_visibility(gi);
+        Some(first)
+    }
+
+    /// Index of a molecule by stable id (live scene only, not `trash`).
+    pub fn mol_index(&self, id: MolId) -> Option<usize> {
+        self.molecules.iter().position(|m| m.id == id)
+    }
+
+    /// Index of a group by stable id.
+    pub fn group_index(&self, id: GroupId) -> Option<usize> {
+        self.groups.iter().position(|g| g.id == id)
+    }
+
+    /// Enforce the group invariant: the shown member (`members[current]`) is visible
+    /// iff `group.visible`; every other member is hidden. Call after any change to a
+    /// group's membership / current / visibility.
+    pub fn apply_group_visibility(&mut self, gi: usize) {
+        let Some(g) = self.groups.get(gi) else { return };
+        let cur_id = g.members.get(g.current).copied();
+        let gvis = g.visible;
+        let members = g.members.clone();
+        for id in members {
+            if let Some(mi) = self.mol_index(id) {
+                self.molecules[mi].visible = Some(id) == cur_id && gvis;
+            }
+        }
+    }
+
+    /// Switch which member of group `gi` is shown to `new_current`: capture the shared
+    /// reps off the old member, strip them, re-materialize them onto the new member
+    /// (so the shared document follows the shown molecule, re-evaluated against its
+    /// topology), and re-apply visibility. Returns `true` if the shown member changed.
+    pub fn switch_group_member(&mut self, gi: usize, new_current: usize) -> bool {
+        let Some(g) = self.groups.get(gi) else { return false };
+        if new_current >= g.members.len() || new_current == g.current {
+            return false;
+        }
+        let old_id = g.members[g.current];
+        let new_id = g.members[new_current];
+        // Capture the shared prefix from the old shown member (as a document), then
+        // strip the live copies off it.
+        let shared: Vec<RepState> = match self.mol_index(old_id) {
+            Some(oi) => {
+                let m = &mut self.molecules[oi];
+                let ns = m.n_shared.min(m.reps.len());
+                let caps: Vec<RepState> = m.reps[..ns].iter().map(RepState::capture).collect();
+                m.reps.drain(0..ns);
+                m.n_shared = 0;
+                caps
+            }
+            None => Vec::new(),
+        };
+        // Re-materialize onto the new shown member (fresh, so they rebuild against it).
+        if let Some(ni) = self.mol_index(new_id) {
+            let m = &mut self.molecules[ni];
+            let live: Vec<Representation> = shared.iter().map(|s| s.to_representation()).collect();
+            let n = live.len();
+            m.reps.splice(0..0, live);
+            m.n_shared = n;
+        }
+        self.groups[gi].current = new_current;
+        self.apply_group_visibility(gi);
+        true
+    }
+
+    /// The shared reps of group `gi`, captured from the currently shown member's
+    /// prefix (the single live source of truth). Empty if the group/member is gone.
+    pub fn group_shared_reps(&self, gi: usize) -> Vec<RepState> {
+        let Some(g) = self.groups.get(gi) else { return Vec::new() };
+        let Some(cur_id) = g.members.get(g.current).copied() else { return Vec::new() };
+        let Some(mi) = self.mol_index(cur_id) else { return Vec::new() };
+        let m = &self.molecules[mi];
+        let ns = m.n_shared.min(m.reps.len());
+        m.reps[..ns].iter().map(RepState::capture).collect()
+    }
+
+    /// Remove a single member `mol_id` from its group and return it (for the trash).
+    /// Captures the group's shared reps first and re-materializes them onto the new
+    /// shown member, so deleting the *shown* member doesn't lose the shared document;
+    /// clamps `current` and drops the group if it becomes empty. `None` if `mol_id`
+    /// isn't a group member.
+    pub fn remove_grouped_molecule(&mut self, mol_id: MolId) -> Option<Molecule> {
+        let gid = self.molecules.iter().find(|m| m.id == mol_id)?.group?;
+        let gi = self.group_index(gid)?;
+        let shared = self.group_shared_reps(gi);
+        self.groups[gi].members.retain(|&id| id != mol_id);
+        let idx = self.mol_index(mol_id)?;
+        let mol = self.molecules.remove(idx);
+        if self.groups[gi].members.is_empty() {
+            self.groups.remove(gi);
+            return Some(mol);
+        }
+        if self.groups[gi].current >= self.groups[gi].members.len() {
+            self.groups[gi].current = self.groups[gi].members.len() - 1;
+        }
+        // Re-materialize the shared reps onto the (possibly new) shown member.
+        let cur = self.groups[gi].current;
+        if let Some(&cur_id) = self.groups[gi].members.get(cur) {
+            if let Some(mi) = self.mol_index(cur_id) {
+                let m = &mut self.molecules[mi];
+                let ns = m.n_shared.min(m.reps.len());
+                m.reps.drain(0..ns);
+                let live: Vec<Representation> =
+                    shared.iter().map(|s| s.to_representation()).collect();
+                m.n_shared = live.len();
+                m.reps.splice(0..0, live);
+            }
+        }
+        self.apply_group_visibility(gi);
+        Some(mol)
+    }
+
+    /// Clamp `selected_mol`/`selected_rep` to valid ranges (after add/remove). Also
+    /// prunes group membership of vanished molecules, clamps each group's `current`,
+    /// drops empty groups, and re-applies the group visibility invariant.
     pub fn clamp_selection(&mut self) {
+        // Prune dead members and empty groups.
+        let live: std::collections::HashSet<MolId> =
+            self.molecules.iter().map(|m| m.id).collect();
+        for g in &mut self.groups {
+            g.members.retain(|id| live.contains(id));
+            if g.current >= g.members.len() {
+                g.current = g.members.len().saturating_sub(1);
+            }
+        }
+        self.groups.retain(|g| !g.members.is_empty());
+        for gi in 0..self.groups.len() {
+            self.apply_group_visibility(gi);
+        }
+
         if self.molecules.is_empty() {
             self.selected_mol = None;
         } else {

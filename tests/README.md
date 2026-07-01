@@ -43,6 +43,37 @@
           g.write("ENDMDL\n")
   ```
 
+- `ligands20.sdf` — 20 diverse drug-like organic molecules in one multi-record SDF
+  (each `$$$$` record a distinct molecule with its own atoms + bonds), the committed
+  fixture for the **molecular group** feature (M28 — a multi-molecule SDF loads as one
+  group cycled member-by-member). Sizes span metformin (9 heavy atoms) to atorvastatin
+  (41) so cycling exercises the per-member camera re-fit. Regenerate from ChEMBL
+  canonical SMILES (names become the SDF titles → member names) with **Open Babel**:
+
+  ```sh
+  # ligands20.smi: one "SMILES name" per line (20 drugs pulled from ChEMBL —
+  # aspirin, caffeine, ibuprofen, …, atorvastatin, imatinib, penicillin_G)
+  obabel ligands20.smi -O tests/ligands20.sdf --gen3d   # 3D coords + bond orders
+  grep -c '^\$\$\$\$' tests/ligands20.sdf                # == 20
+  ```
+
+  Headless check: `MOLAR_VIS_DEBUG_SDF=tests/ligands20.sdf` (+ `MOLAR_VIS_DEBUG_GROUP_MEMBER=<n>`
+  / `MOLAR_VIS_DEBUG_GROUP_EXPAND=1`) loads it as a group, bypassing the file dialog.
+
+- `toy_tube.pdb` — two carbons + one bond: the minimal single-**tube** fixture for isolating
+  cylinder-impostor artifacts (used to fix the end-on "crescent"/strip bugs — see the *Impostors*
+  note in CLAUDE.md). Open in Licorice (`MOLAR_VIS_DEBUG_REP=licorice`) and rotate to an end-on
+  view.
+
+## Camera telemetry (debugging a specific view)
+
+To reproduce an **exact** interactive view headlessly: launch with
+`MOLAR_VIS_DEBUG_CAMERA_LOG=<path>` (writes the live camera as JSON each frame), position the view
+in the window, then render that view with `MOLAR_VIS_DEBUG_CAMERA=<same path>` (+
+`MOLAR_VIS_DEBUG_SAVE_IMAGE=out.png`). A magenta/white `MOLAR_VIS_DEBUG_BG` (or a hand-edited
+`background` in the JSON) distinguishes real coverage holes (show the bg color) from dark-shaded
+surface; `MOLAR_VIS_NO_EARLY_Z=1` isolates early-Z culling from geometry/shading.
+
 ## Quick run
 
 ```sh

@@ -85,8 +85,16 @@ fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: 
     let ndoth = max(dot(normal, half), 0.0);
     let exponent = 2.0 + mat.w * 128.0;
     let spec = mat.z * pow(ndoth, exponent);
-    return base * (mat.x + mat.y * ndotl) + vec3<f32>(spec);
+    // Subtle shadowed-side fill so joint creases / undersides aren't near-black
+    // "gaps"; gated by (1 − ndotl) so the lit side and highlight are untouched. See
+    // cylinder.wgsl for the rationale.
+    let fill_dir = normalize(vec3<f32>(-0.2, -0.3, 0.6));
+    let fill = max(dot(normal, fill_dir), 0.0) * (1.0 - ndotl) * FILL_STRENGTH;
+    return base * (mat.x + mat.y * (ndotl + fill)) + vec3<f32>(spec);
 }
+
+// Fill-light strength (see shade_material). Matches cylinder.wgsl.
+const FILL_STRENGTH: f32 = 0.35;
 
 // Weighted-blended OIT weight: bias the per-fragment contribution strongly toward
 // the camera so the nearest transparent layers dominate the blend (otherwise a
@@ -133,7 +141,18 @@ fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
     // only the GPU's early reject sees the (tight, correct) lower bound. Inert without
     // the attribute except for the degenerate camera-inside-the-sphere case.
     let near_c = camera.proj * vec4<f32>(view_center.x, view_center.y, view_center.z + inst.radius, 1.0);
-    out.clip.z = (near_c.z / near_c.w) * out.clip.w;
+    // Guard the near-plane / behind-eye case: when the near pole crosses the camera
+    // plane (extreme close-up), near_c.w ≤ 0 and the divide yields garbage.
+    var z_ndc_near = 0.0;
+    if (near_c.w > 1e-6) {
+        z_ndc_near = near_c.z / near_c.w;
+    }
+    // CRITICAL: clip.z drives primitive **clipping** (0 ≤ z ≤ w) too, not just the
+    // depth test. When the near pole is in front of the near plane (atom at the near
+    // plane on a close-up), an unclamped z < 0 near-clips the billboard quad → holes
+    // in the sphere. Clamp z into [0,1] so clip.z ∈ [0, w] never causes extra clipping;
+    // a clamped-to-0 lower bound is still ≤ the true depth, so early-Z stays sound.
+    out.clip.z = clamp(z_ndc_near, 0.0, 1.0) * out.clip.w;
     out.view_pos = view_pos;
     out.view_center = view_center;
     out.radius = inst.radius;

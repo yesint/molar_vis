@@ -19,16 +19,25 @@ impl App {
                 self.draw_menu_bar(ui);
                 ui.add_space(6.0);
 
-                // Molecules are listed directly (no "Molecules"/"Scene" headers);
-                // global scene controls live in the viewport overlay instead.
-                view_dirty |= self.draw_molecule_list(ui);
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                // FPS pinned to the panel bottom; the molecule/group list scrolls in
+                // the space above it.
+                egui::Panel::bottom("controls_fps").show_inside(ui, |ui| {
                     ui.add_space(4.0);
                     let dt = ui.ctx().input(|i| i.stable_dt);
                     let fps = if dt > 0.0 { 1.0 / dt } else { 0.0 };
                     ui.weak(format!("{fps:.0} fps  ({:.1} ms/frame)", dt * 1000.0));
                 });
+
+                // The WHOLE list (molecules + groups + their reps) scrolls when it's
+                // taller than the panel. Reserve the scrollbar (non-floating) so it
+                // sits at the panel edge and never overlaps the right-aligned row
+                // buttons/menus. Molecules are listed directly (no section headers).
+                ui.style_mut().spacing.scroll.floating = false;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        view_dirty |= self.draw_molecule_list(ui);
+                    });
             });
         view_dirty
     }
@@ -557,8 +566,41 @@ impl App {
         // The molecule currently being edited (for the edit-button highlight),
         // captured before the `&mut` molecule loop.
         let editing_target = self.draw.as_ref().and_then(|d| d.target);
+        // A group delete / single-member delete chosen from the panel — deferred to
+        // after the loop because removing molecules shifts the entry indices it iterates.
+        let mut delete_group: Option<GroupId> = None;
+        let mut delete_member: Option<MolId> = None;
 
-        for i in 0..self.scene.molecules.len() {
+        // Top-level entries in panel order: a standalone molecule, or a group shown at
+        // the position of its first member (later members are folded into the group).
+        enum Entry {
+            Mol(usize),
+            Group(usize),
+        }
+        let mut seen_groups = std::collections::HashSet::new();
+        let mut entries: Vec<Entry> = Vec::new();
+        for (i, mol) in self.scene.molecules.iter().enumerate() {
+            match mol.group {
+                None => entries.push(Entry::Mol(i)),
+                Some(gid) => {
+                    if seen_groups.insert(gid) {
+                        if let Some(gi) = self.scene.group_index(gid) {
+                            entries.push(Entry::Group(gi));
+                        }
+                    }
+                }
+            }
+        }
+
+        for entry in entries {
+            let i = match entry {
+                Entry::Mol(i) => i,
+                Entry::Group(gi) => {
+                    view_dirty |=
+                        self.draw_group_entry(ui, gi, &mut delete_group, &mut delete_member);
+                    continue;
+                }
+            };
             let open;
             {
                 let mol = &mut self.scene.molecules[i];
@@ -680,11 +722,45 @@ impl App {
                 open = mol.reps_open;
             }
             if open {
+                let len = self.scene.molecules[i].reps.len();
                 ui.indent(egui::Id::new(("reps", i)), |ui| {
-                    view_dirty |= self.draw_reps_for(ui, i);
+                    view_dirty |= self.draw_reps_for(ui, i, 0, len, false);
                 });
             }
             ui.add_space(4.0);
+        }
+
+        // Delete a whole group: move every member to the trash and the group to the
+        // group trash (so undo can restore it), then drop the group.
+        if let Some(gid) = delete_group {
+            if let Some(gi) = self.scene.group_index(gid) {
+                let g = self.scene.groups.remove(gi);
+                for mid in &g.members {
+                    if let Some(mmi) = self.scene.mol_index(*mid) {
+                        let m = self.scene.molecules.remove(mmi);
+                        self.loaders.remove(&m.id);
+                        #[cfg(target_arch = "wasm32")]
+                        self.wasm_loaders.remove(&m.id);
+                        self.scene.trash.insert(m.id, m);
+                    }
+                }
+                self.scene.group_trash.insert(g.id, g);
+                self.scene.clamp_selection();
+                view_dirty = true;
+            }
+        }
+
+        // Delete a single group member: remove it (shared reps preserved on the new
+        // shown member, see `Scene::remove_grouped_molecule`) and park it in the trash.
+        if let Some(mid) = delete_member {
+            if let Some(m) = self.scene.remove_grouped_molecule(mid) {
+                self.loaders.remove(&m.id);
+                #[cfg(target_arch = "wasm32")]
+                self.wasm_loaders.remove(&m.id);
+                self.scene.trash.insert(m.id, m);
+            }
+            self.scene.clamp_selection();
+            view_dirty = true;
         }
 
         if let Some(i) = delete {
@@ -738,6 +814,299 @@ impl App {
         if let Some(i) = edit_mol {
             self.open_in_editor(i);
             view_dirty = true;
+        }
+        view_dirty
+    }
+
+    /// Draw one molecular group: a header (group glyph · name · eye · zoom · add-shared
+    /// · menu), a member cycle bar, the shared reps (the shown member's prefix), and —
+    /// when expanded — each member with its own reps. Applies its own actions (member
+    /// switch with camera re-fit, eye, expand, add shared/own rep); a "Delete group"
+    /// is deferred to the caller via `delete_group` (it removes molecules, which would
+    /// shift the outer loop's indices). Returns whether the view needs re-rendering.
+    pub(super) fn draw_group_entry(
+        &mut self,
+        ui: &mut egui::Ui,
+        gi: usize,
+        delete_group: &mut Option<GroupId>,
+        delete_member: &mut Option<MolId>,
+    ) -> bool {
+        let mut view_dirty = false;
+        // Snapshot display data so the UI closures don't hold a scene borrow.
+        let gid = self.scene.groups[gi].id;
+        let gname = self.scene.groups[gi].name.clone();
+        let members = self.scene.groups[gi].members.clone();
+        let current = self.scene.groups[gi].current;
+        let gvisible = self.scene.groups[gi].visible;
+        let expanded = self.scene.groups[gi].expanded;
+        let n_members = members.len();
+        let member_names: Vec<String> = members
+            .iter()
+            .map(|&id| {
+                self.scene
+                    .mol_index(id)
+                    .map(|mi| self.scene.molecules[mi].name.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let cur_mi = members.get(current).and_then(|&id| self.scene.mol_index(id));
+        let cur_bbox = cur_mi.map(|mi| self.scene.molecules[mi].current_bbox());
+
+        // Deferred (set in closures, applied at the end so closures stay borrow-free).
+        let mut do_toggle_expand = false;
+        let mut do_toggle_eye = false;
+        let mut do_add_shared = false;
+        let mut do_focus = false;
+        let mut do_delete = false;
+        let mut new_current: Option<usize> = None;
+        let mut add_member: Option<MolId> = None;
+        let mut del_member: Option<MolId> = None;
+
+        // Header row.
+        ui.horizontal(|ui| {
+            let caret = if expanded { icon::CARET_DOWN } else { icon::CARET_RIGHT };
+            if ui
+                .selectable_label(false, caret)
+                .on_hover_text("Members")
+                .clicked()
+            {
+                do_toggle_expand = true;
+            }
+            ui.add(egui::Label::new(icon::STACK).selectable(false))
+                .on_hover_text("Molecular group");
+            ui.label(&gname)
+                .on_hover_text(format!("group · {n_members} molecules"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                compact_actions(ui);
+                ui.menu_button(icon::LIST, |ui| {
+                    if ui.button(format!("{}  Delete group", icon::TRASH)).clicked() {
+                        do_delete = true;
+                        ui.close();
+                    }
+                })
+                .response
+                .on_hover_text("Group menu");
+                let eye = if gvisible { icon::EYE } else { icon::EYE_SLASH };
+                if ui
+                    .selectable_label(gvisible, eye)
+                    .on_hover_text(if gvisible { "Hide group" } else { "Show group" })
+                    .clicked()
+                {
+                    do_toggle_eye = true;
+                }
+                if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to shown molecule").clicked() {
+                    do_focus = true;
+                }
+                if ui
+                    .button(format!("{} rep", icon::PLUS))
+                    .on_hover_text("Add a shared representation (applies to every member)")
+                    .clicked()
+                {
+                    do_add_shared = true;
+                }
+            });
+        });
+
+        // Member cycle bar (which molecule is shown). Tooltip shows "N/M <name>".
+        ui.indent(egui::Id::new(("groupbar", gid)), |ui| {
+            if let Some(nc) = draw_group_bar(ui, &member_names, current) {
+                new_current = Some(nc);
+            }
+        });
+
+        // Shared reps: the shown member's prefix, drawn under the group header.
+        if let Some(mi) = cur_mi {
+            let n_shared = self.scene.molecules[mi].n_shared;
+            ui.indent(egui::Id::new(("shared", gid)), |ui| {
+                view_dirty |= self.draw_reps_for(ui, mi, 0, n_shared, true);
+            });
+        }
+
+        // Expanded: list members (the whole panel list scrolls — see draw_left_panel),
+        // each foldable to its own (non-shared) reps. Member name is clickable → jump.
+        if expanded {
+            ui.indent(egui::Id::new(("members", gid)), |ui| {
+                        for (pos, &mid) in members.iter().enumerate() {
+                            let Some(mmi) = self.scene.mol_index(mid) else { continue };
+                            let mopen;
+                            {
+                                let shown = pos == current;
+                                // Reserve a shape slot *before* the row so the shown
+                                // member's highlight can be painted behind its content.
+                                let hl = ui.painter().add(egui::Shape::Noop);
+                                let m = &mut self.scene.molecules[mmi];
+                                let row = ui.horizontal(|ui| {
+                                    let caret = if m.reps_open {
+                                        icon::CARET_DOWN
+                                    } else {
+                                        icon::CARET_RIGHT
+                                    };
+                                    if ui
+                                        .selectable_label(false, caret)
+                                        .on_hover_text("Own representations")
+                                        .clicked()
+                                    {
+                                        m.reps_open = !m.reps_open;
+                                    }
+                                    // Clickable name: underlines on hover, click shows it.
+                                    let text = if shown {
+                                        egui::RichText::new(m.name.as_str()).strong()
+                                    } else {
+                                        egui::RichText::new(m.name.as_str())
+                                    };
+                                    let resp = ui
+                                        .add(egui::Label::new(text).sense(egui::Sense::click()))
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text(format!(
+                                            "{} atoms — click to show{}",
+                                            m.n_atoms,
+                                            if shown { " (shown)" } else { "" }
+                                        ));
+                                    if resp.hovered() {
+                                        let r = resp.rect;
+                                        ui.painter().hline(
+                                            r.x_range(),
+                                            r.bottom(),
+                                            egui::Stroke::new(1.0, ui.visuals().text_color()),
+                                        );
+                                    }
+                                    if resp.clicked() {
+                                        // Clicking a name shows it AND centers the
+                                        // camera on it (partial focus — pan, no zoom).
+                                        new_current = Some(pos);
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            compact_actions(ui);
+                                            ui.menu_button(icon::LIST, |ui| {
+                                                if ui
+                                                    .button(format!(
+                                                        "{}  Delete molecule",
+                                                        icon::TRASH
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    del_member = Some(mid);
+                                                    ui.close();
+                                                }
+                                            })
+                                            .response
+                                            .on_hover_text("Molecule menu");
+                                            if ui
+                                                .button(format!("{} rep", icon::PLUS))
+                                                .on_hover_text(
+                                                    "Add a representation to this molecule only",
+                                                )
+                                                .clicked()
+                                            {
+                                                add_member = Some(mid);
+                                            }
+                                        },
+                                    );
+                                });
+                                // Highlight the currently-shown member's row (a subtle
+                                // accent bar behind its content).
+                                if shown {
+                                    let c = ui.visuals().selection.bg_fill;
+                                    let bar = egui::Color32::from_rgba_unmultiplied(
+                                        c.r(),
+                                        c.g(),
+                                        c.b(),
+                                        60,
+                                    );
+                                    ui.painter().set(
+                                        hl,
+                                        egui::Shape::rect_filled(
+                                            row.response.rect.expand2(egui::vec2(4.0, 1.0)),
+                                            3.0,
+                                            bar,
+                                        ),
+                                    );
+                                }
+                                mopen = m.reps_open;
+                            }
+                            if mopen {
+                                let (start, end) = {
+                                    let m = &self.scene.molecules[mmi];
+                                    (m.n_shared, m.reps.len())
+                                };
+                                ui.indent(egui::Id::new(("ownreps", mid)), |ui| {
+                                    if start < end {
+                                        view_dirty |= self.draw_reps_for(ui, mmi, start, end, false);
+                                    } else {
+                                        ui.weak("(no own representations)");
+                                    }
+                                });
+                            }
+                        }
+            });
+        }
+        ui.add_space(4.0);
+
+        // --- apply deferred actions (indices into `scene.molecules` stay valid: none
+        // of these add or remove molecules; "Delete group" is deferred to the caller).
+        if do_toggle_expand {
+            self.scene.groups[gi].expanded = !self.scene.groups[gi].expanded;
+        }
+        if do_toggle_eye {
+            self.scene.groups[gi].visible = !self.scene.groups[gi].visible;
+            self.scene.apply_group_visibility(gi);
+            view_dirty = true;
+        }
+        if do_focus {
+            // Full zoom-to-fit the shown member (the magnifier means "zoom").
+            if let Some((min, max)) = cur_bbox {
+                self.camera.focus_bbox(min, max);
+                view_dirty = true;
+            }
+        }
+        if let Some(nc) = new_current {
+            // Partial focus: switch the shown member and CENTER the camera on it (pan
+            // the target only, keeping the current zoom). Applies to both the cycle bar
+            // (slider/arrows) and clicking a member name. Not gated on `switch`'s return
+            // so clicking the already-shown member re-centers it.
+            self.scene.switch_group_member(gi, nc);
+            if let Some(&id) = self.scene.groups[gi].members.get(nc) {
+                if let Some(mi) = self.scene.mol_index(id) {
+                    let (min, max) = self.scene.molecules[mi].current_bbox();
+                    self.camera.target = 0.5 * (min + max);
+                }
+            }
+            view_dirty = true;
+        }
+        if do_add_shared {
+            // Append a shared rep at the end of the shown member's shared prefix.
+            let cur = self.scene.groups[gi].current;
+            if let Some(&cur_id) = self.scene.groups[gi].members.get(cur) {
+                if let Some(mmi) = self.scene.mol_index(cur_id) {
+                    let rep = Representation::from_defaults(&self.rep_defaults);
+                    let m = &mut self.scene.molecules[mmi];
+                    let ns = m.n_shared.min(m.reps.len());
+                    m.reps.insert(ns, rep);
+                    m.n_shared = ns + 1;
+                    m.selected_rep = Some(ns);
+                    view_dirty = true;
+                }
+            }
+        }
+        if let Some(mid) = add_member {
+            if let Some(mmi) = self.scene.mol_index(mid) {
+                let rep = Representation::from_defaults(&self.rep_defaults);
+                let m = &mut self.scene.molecules[mmi];
+                m.reps.push(rep);
+                m.selected_rep = Some(m.reps.len() - 1);
+                m.reps_open = true;
+                view_dirty = true;
+            }
+        }
+        if do_delete {
+            *delete_group = Some(gid);
+        }
+        if del_member.is_some() {
+            // Deferred to the caller: removing a molecule shifts the entry indices the
+            // outer loop iterates over.
+            *delete_member = del_member;
         }
         view_dirty
     }
