@@ -60,7 +60,7 @@ impl App {
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase());
-            if extra.is_empty() && matches!(ext.as_deref(), Some("sdf") | Some("mol")) {
+            if extra.is_empty() && matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
                 match data::load_records(structure, &bond_params) {
                     Ok(records) if records.len() >= 2 => {
                         let name = structure

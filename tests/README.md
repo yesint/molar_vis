@@ -60,6 +60,11 @@
   Headless check: `MOLAR_VIS_DEBUG_SDF=tests/ligands20.sdf` (+ `MOLAR_VIS_DEBUG_GROUP_MEMBER=<n>`
   / `MOLAR_VIS_DEBUG_GROUP_EXPAND=1`) loads it as a group, bypassing the file dialog.
 
+- `jak2_inhs.sd` — 26 JAK2 inhibitors from ChEMBL in a multi-record file with the **`.sd`**
+  extension (a common alias for `.sdf`). The committed fixture proving the `.sd` alias dispatches
+  to molar's SDF handler and loads as a molecular group like `ligands20.sdf`. Headless check:
+  `MOLAR_VIS_DEBUG_SDF=tests/jak2_inhs.sd`.
+
 - `toy_tube.pdb` — two carbons + one bond: the minimal single-**tube** fixture for isolating
   cylinder-impostor artifacts (used to fix the end-on "crescent"/strip bugs — see the *Impostors*
   note in CLAUDE.md). Open in Licorice (`MOLAR_VIS_DEBUG_REP=licorice`) and rotate to an end-on

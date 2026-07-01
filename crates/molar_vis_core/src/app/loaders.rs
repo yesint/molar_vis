@@ -135,7 +135,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Some(path) = rfd::FileDialog::new()
-                .add_filter("Structures", &["pdb", "ent", "gro", "xyz", "tpr", "sdf", "mol"])
+                .add_filter("Structures", &["pdb", "ent", "gro", "xyz", "tpr", "sdf", "sd", "mol"])
                 .pick_file()
             else {
                 return;
@@ -146,7 +146,7 @@ impl App {
         {
             let tx = self.file_tx.clone();
             pick_file(
-                ".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc,.sdf,.mol",
+                ".pdb,.ent,.gro,.xyz,.dcd,.trr,.xtc,.sdf,.sd,.mol",
                 ctx.clone(),
                 move |name, bytes| {
                     let _ = tx.send((name, bytes));
@@ -162,7 +162,7 @@ impl App {
     pub(super) fn open_structure_path(&mut self, path: &std::path::Path) {
         let bonds = self.settings.behavior.bond_params();
         let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-        if matches!(ext.as_deref(), Some("sdf") | Some("mol")) {
+        if matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
             match data::load_records(path, &bonds) {
                 Ok(records) if records.len() >= 2 => {
                     let name = path

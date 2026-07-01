@@ -835,7 +835,7 @@ impl eframe::App for App {
         while let Ok((name, bytes)) = self.file_rx.try_recv() {
             let bonds = self.settings.behavior.bond_params();
             let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-            if matches!(ext.as_str(), "sdf" | "mol") {
+            if matches!(ext.as_str(), "sdf" | "sd" | "mol") {
                 // A multi-molecule SDF/MOL becomes a group; one record = one molecule.
                 match data::load_records_from_bytes(&name, bytes, &bonds) {
                     Ok(records) if records.len() >= 2 => {

@@ -131,7 +131,12 @@ built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 **Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
 `[patch]`). `Cargo.lock` pins the resolved git revisions. To develop molar/powersasa
 locally, temporarily add a `[patch."…powersasa-llm.git"] powersasa = { path = "…" }`
-and/or point `molar` at a local path — but don't commit those.
+and/or point `molar` at a local path — but don't commit those. **The user's local molar
+checkout is at `../molar`** (i.e. `/home/semen/work/Projects/molar`; a git clone of
+`github.com/yesint/molar` on `master`) — edit it there, `cargo build`/commit/push it,
+then bump molar_vis's `rev` in the root `Cargo.toml` + `Cargo.lock`. The `molar` crate is
+`../molar/molar`, the PyO3 bindings `../molar/molar_python`; the local dev `[patch]` points
+at those two paths.
 
 ## Workspace & modules
 
@@ -549,7 +554,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   grid, minus the periodic part: bin into `extent/dims` cells, flat `x + y·dx + z·dx·dy`) walks only
   the cells in the ray's R-tube (sub-cell march + R-skirt, dedup), so a query is O(tube + nearby), not
   O(N). Pure logic, WASM-safe; 3 unit tests.
-- **Hover detail lens** (QoL, `app.rs` + `scene.rs` `HoverDetail`): in Hover mode, the **front-facing
+- **Hover detail lens** (QoL, `app.rs` + `scene.rs` `HoverDetail`): **off by default**, gated behind the
+  `BehaviorSettings::hover_detail_lens` toggle (Settings ▸ Behavior → *Hover detail lens over
+  cartoon/surface*); when off the trigger block in `draw_viewport` is skipped and any stale lens is
+  cleared. When on, in Hover mode the **front-facing
   residues** under the cursor **view line** of a visible **Cartoon/Surface** molecule are shown as a
   distance-faded **CPK ball-and-stick** aid over the ribbon/surface — to hint *where the atoms are*. It
   is **driven by the cursor ray, NOT a pick hit** (`draw_viewport` triggers it whenever the cursor is
