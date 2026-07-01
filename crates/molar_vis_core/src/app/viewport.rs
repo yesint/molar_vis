@@ -387,7 +387,9 @@ impl App {
                     // (including *between* atoms / in ribbon gaps, which is the whole
                     // point: hint where the atoms are), reveal a faded ball-and-stick of
                     // those atoms. Rebuilt as the cursor moves (grid query is cheap).
-                    {
+                    // Off by default (`hover_detail_lens` behavior setting); when off,
+                    // `lens_shown` stays false and any stale lens is cleared below.
+                    if self.settings.behavior.hover_detail_lens {
                         let moved = self.last_lens_ndc.is_none_or(|(lx, ly)| {
                             (lx - ndc_x).abs() > 0.004 || (ly - ndc_y).abs() > 0.004
                         });

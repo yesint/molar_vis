@@ -275,6 +275,11 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
                 });
             ui.end_row();
         });
+    ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
+        .on_hover_text(
+            "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
+             over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
+        );
 
     ui.separator();
     egui::Grid::new("set_behavior_traj")

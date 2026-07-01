@@ -208,6 +208,11 @@ pub struct BehaviorSettings {
     /// (and split cartoon ribbons at the boundary). Off → such bonds draw as plain
     /// solid half-bonds (a long line across the box). A render setting (applies live).
     pub dashed_pbc_bonds: bool,
+    /// In pick/hover mode, show a faded ball-and-stick "lens" of the atoms under the
+    /// cursor view-line over a Cartoon/Surface rep (hints where the atoms are). **Off
+    /// by default** — it's a niche aid and adds a per-hover grid query + rebuild. A
+    /// behavior setting (applies live).
+    pub hover_detail_lens: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -225,6 +230,7 @@ impl Default for BehaviorSettings {
             bond_min_dist: b.min_dist,
             bond_search_periodic: b.periodic,
             dashed_pbc_bonds: true,
+            hover_detail_lens: false,
         }
     }
 }
