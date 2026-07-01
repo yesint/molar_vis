@@ -65,6 +65,10 @@
   to molar's SDF handler and loads as a molecular group like `ligands20.sdf`. Headless check:
   `MOLAR_VIS_DEBUG_SDF=tests/jak2_inhs.sd`.
 
+- `jak2.pdb` — the JAK2 kinase structure (PDB 4D0W, 4844 atoms, MDAnalysis-written frame 0), the
+  protein target that pairs with `jak2_inhs.sd` — a receptor + ligand-set fixture for exercising
+  a protein rep alongside a small-molecule group.
+
 - `toy_tube.pdb` — two carbons + one bond: the minimal single-**tube** fixture for isolating
   cylinder-impostor artifacts (used to fix the end-on "crescent"/strip bugs — see the *Impostors*
   note in CLAUDE.md). Open in Licorice (`MOLAR_VIS_DEBUG_REP=licorice`) and rotate to an end-on
