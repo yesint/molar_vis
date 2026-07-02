@@ -751,9 +751,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   over the providers) so frames render by reference. `System::state()`/`topology()` borrow the
   parts. (molar addition; `SelBound` is System-coupled and unchanged.)
 - Selection grammar incl.: `all`, `protein`, `backbone`, `water`, `name`, `resid`,
-  `resindex`, `resname`, `index`, `chain`, `within …`, and **`polarh`** (polar hydrogens —
-  H covalently bonded to N/O/F/S, read from the topology **bond graph**; matches nothing
-  when no bonds are computed. molar addition — see the molar-integration note).
+  `resindex`, `resname`, `index`, `chain`, `within …`, and **`polh`** / **`apolh`** (polar /
+  apolar hydrogens — H bonded to an electronegative N/O/F/S atom vs to a non-electronegative
+  heavy atom like carbon, read from the topology **bond graph**; each matches nothing when no
+  bonds are computed. molar addition — see the molar-integration note).
 - **Trajectory (M7, implemented):** per-molecule `Trajectory { frames: Vec<State>, current,
   playing, … }` (`trajectory.rs`). Frame 0 = the structure coords (`Molecule::seed_frame0`,
   via the `set_state(State::new_fake(n))` swap trick); loaded frames append; multiple loads
