@@ -143,6 +143,9 @@ pub fn expand_selection(
 pub struct PickHit {
     /// Index of the hit atom's molecule in `scene.molecules`.
     pub mol: usize,
+    /// Index of the rep (within the molecule) whose geometry was hit — used by the
+    /// partner-pick mode to identify which representation is under the cursor.
+    pub rep: usize,
     /// Global atom index of the hit atom within its molecule's `System`.
     pub id: usize,
     pub name: String,
@@ -186,7 +189,12 @@ fn cartoon_atom(name: &str) -> bool {
 /// aren't part of it); every other style draws something at each selected atom
 /// (Lines included, via its isolated-atom dots).
 pub(crate) fn atom_in_rep(kind: RepKind, name: &str) -> bool {
-    !matches!(kind, RepKind::Cartoon) || cartoon_atom(name)
+    match kind {
+        // An Interactions rep draws only contact lines — no per-atom geometry to hit.
+        RepKind::Interactions => false,
+        RepKind::Cartoon => cartoon_atom(name),
+        _ => true,
+    }
 }
 
 /// World-space ray (origin, unit direction) through the normalized device coords
@@ -327,6 +335,7 @@ pub fn hit_for_atom(scene: &Scene, mi: usize, rep_idx: usize, aid: usize) -> Opt
     };
     Some(PickHit {
         mol: mi,
+        rep: rep_idx,
         id: aid,
         name: atom.name.as_str().to_string(),
         resname: atom.resname.as_str().to_string(),
@@ -368,7 +377,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
             ]
         });
 
-        for rep in &mol.reps {
+        for (rep_idx, rep) in mol.reps.iter().enumerate() {
             if !rep.visible {
                 continue;
             }
@@ -403,6 +412,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                             let real = frame.coords[p.id];
                             best = Some(PickHit {
                                 mol: mi,
+                                rep: rep_idx,
                                 id: p.id,
                                 name: p.atom.name.as_str().to_string(),
                                 resname: p.atom.resname.as_str().to_string(),

@@ -132,6 +132,50 @@ impl AtomGrid {
         }
         out
     }
+
+    /// Call `f(id)` for every stored atom within `r` of the point `center`. Walks
+    /// only the cells in `center`'s R-skirt (clamped to the grid bounds, so a
+    /// degenerate single-cell grid stays O(1) instead of scanning a huge padded
+    /// cube) and tests each candidate's exact distance. The inverse of
+    /// [`atoms_near_ray_t`] for a point instead of a ray — used by the interaction
+    /// detector to find contacts between two atom sets without an O(N·M) double loop.
+    pub fn neighbors_within(&self, center: Vec3, r: f32, mut f: impl FnMut(u32)) {
+        if r <= 0.0 {
+            return;
+        }
+        let r2 = r * r;
+        let base = self.cell_of(center);
+        // +1 cell of slack guards float error / a cell sized below `r`.
+        let pad = [
+            (r / self.cell.x).ceil() as isize + 1,
+            (r / self.cell.y).ceil() as isize + 1,
+            (r / self.cell.z).ceil() as isize + 1,
+        ];
+        let lo = [
+            (base[0] - pad[0]).max(0),
+            (base[1] - pad[1]).max(0),
+            (base[2] - pad[2]).max(0),
+        ];
+        let hi = [
+            (base[0] + pad[0]).min(self.dims[0] as isize - 1),
+            (base[1] + pad[1]).min(self.dims[1] as isize - 1),
+            (base[2] + pad[2]).min(self.dims[2] as isize - 1),
+        ];
+        for cz in lo[2]..=hi[2] {
+            for cy in lo[1]..=hi[1] {
+                for cx in lo[0]..=hi[0] {
+                    let ci = cx as usize
+                        + cy as usize * self.dims[0]
+                        + cz as usize * self.dims[0] * self.dims[1];
+                    for &(id, q) in &self.cells[ci] {
+                        if (q - center).length_squared() <= r2 {
+                            f(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Squared distance from point `p` to the segment `[a, b]`.
@@ -201,6 +245,32 @@ mod tests {
         let far = hits.iter().find(|(id, _)| *id == 7).unwrap().1;
         assert!(near < far, "near atom must have smaller t ({near} vs {far})");
         assert!((near - 3.0).abs() < 1e-3, "t = (p-origin)·dir = 3 for x=-2");
+    }
+
+    #[test]
+    fn neighbors_within_finds_points_in_radius() {
+        let pts = [
+            (0, Vec3::new(0.0, 0.0, 0.0)),
+            (1, Vec3::new(0.4, 0.0, 0.0)), // 0.4 away
+            (2, Vec3::new(0.0, 0.6, 0.0)), // 0.6 away
+            (3, Vec3::new(3.0, 3.0, 3.0)), // far
+        ];
+        let g = grid_of(&pts);
+        let mut got = Vec::new();
+        g.neighbors_within(Vec3::ZERO, 0.5, |id| got.push(id));
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 1], "only points within 0.5 of the origin");
+    }
+
+    #[test]
+    fn neighbors_within_degenerate_single_cell_is_cheap() {
+        // All points coincide → extent≈0 → a single grid cell. A large query radius
+        // must not blow up the padded cell scan (clamped to grid bounds).
+        let pts = [(0, Vec3::ZERO), (1, Vec3::new(1e-4, 0.0, 0.0))];
+        let g = AtomGrid::build(pts.iter().copied(), Vec3::ZERO, Vec3::ZERO, 0.41);
+        let mut n = 0;
+        g.neighbors_within(Vec3::ZERO, 0.41, |_| n += 1);
+        assert_eq!(n, 2);
     }
 
     #[test]

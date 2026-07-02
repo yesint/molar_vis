@@ -443,9 +443,15 @@ impl Camera {
         self.target += self.right() * (ndc.x * aspect * k) + self.up() * (ndc.y * k);
     }
 
-    /// Zoom by right-drag (`dy` in points; drag down = zoom out).
-    pub fn zoom_drag(&mut self, dy: f32) {
-        self.apply_zoom(dy * 0.005);
+    /// Move the whole camera rig along the view axis (Shift+RMB): translates the scene
+    /// in depth **without** changing `distance`, so the near/far clip planes stay put and
+    /// the molecule moves *through* them (front/back clipping / slabbing) — unlike a zoom,
+    /// whose clip planes track the molecule. `dy` in points; drag down pushes the scene
+    /// away from the camera, drag up pulls it toward (and into) the near plane. Scaled by
+    /// the scene size so it feels consistent at any zoom.
+    pub fn translate_z(&mut self, dy: f32) {
+        // `orientation·Z` points from the target toward the eye, so `+` recedes.
+        self.target += self.orientation * Vec3::Z * (dy * 0.004 * self.scene_radius);
     }
 
     fn apply_zoom(&mut self, log_factor: f32) {
@@ -488,6 +494,21 @@ mod tests {
             cam.zoom_scroll(1000.0, Vec2::ZERO, 1.0);
         }
         assert!(cam.distance >= cam.scene_radius * 0.05 - 1e-6, "zoom-in is clamped");
+    }
+
+    #[test]
+    fn translate_z_moves_scene_without_changing_zoom() {
+        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
+        let d0 = cam.distance;
+        let t0 = cam.target;
+        cam.translate_z(50.0);
+        // Zoom (distance) is unchanged — clip planes derive from it, so they stay put.
+        assert!((cam.distance - d0).abs() < 1e-6, "translate_z must not change zoom");
+        // The rig moved along the view axis (target shifted by a multiple of it).
+        let shift = cam.target - t0;
+        assert!(shift.length() > 1e-4, "target should move");
+        let axis = cam.orientation * Vec3::Z;
+        assert!(shift.normalize().dot(axis).abs() > 0.999, "moves along the view axis");
     }
 
     #[test]

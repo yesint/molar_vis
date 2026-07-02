@@ -159,6 +159,9 @@ pub(super) fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_b
                 changed |= ui.add(egui::Slider::new(smoothing, 0..=5)).changed();
                 ui.end_row();
             }
+            // Interactions params are edited in a separate dialog (Partner row +
+            // Settings button drawn by the caller), so nothing inline here.
+            RepParams::Interactions { .. } => {}
         });
 
     // Secondary-structure algorithm — used by the Cartoon shape and the
@@ -531,17 +534,59 @@ impl App {
             .map(|(_, r)| r);
         let mut new_editing = self.editing_rep;
 
+        // Read this molecule's basics + clamp the range with an *immutable* borrow, so
+        // the partner-label precompute below (which reads *other* molecules) doesn't
+        // conflict with the `&mut mol` borrow taken afterward.
+        let (mol_id, has_box, start, end) = {
+            let mol = &self.scene.molecules[mi];
+            (
+                mol.id,
+                mol.data.state().pbox.is_some(),
+                start.min(mol.reps.len()),
+                end.min(mol.reps.len()),
+            )
+        };
+        // For each Interactions rep, resolve its partner into a display label
+        // ("Mol N: Rep M" / "(none)" / "(partner lost)") + whether it's a live,
+        // clickable (focusable) reference. Done here because it reads other molecules.
+        let partner_info: Vec<Option<(String, bool)>> = (start..end)
+            .map(|j| {
+                let rep = &self.scene.molecules[mi].reps[j];
+                if !matches!(rep.kind, RepKind::Interactions) {
+                    return None;
+                }
+                Some(match rep.partner {
+                    None => ("(none)".to_string(), false),
+                    // Group-aware resolution (follows the group's shown member), so the
+                    // label matches what's actually detected against.
+                    Some(_) => match super::build::partner_index(&self.scene, rep) {
+                        Some((pmi, pr)) => (format!("Mol {}: Rep {}", pmi + 1, pr + 1), true),
+                        None => ("(partner lost)".to_string(), false),
+                    },
+                })
+            })
+            .collect();
+
+        // Whether we're currently choosing an interaction partner (then each rep row
+        // becomes a click target for selecting it as the partner).
+        let picking_partner = self.partner_pick.is_some();
+
         let mol = &mut self.scene.molecules[mi];
-        let mol_id = mol.id;
-        // The Periodic tab is only offered when the molecule has a box.
-        let has_box = mol.data.state().pbox.is_some();
-        let start = start.min(mol.reps.len());
-        let end = end.min(mol.reps.len());
 
         let mut delete: Option<usize> = None;
         let mut duplicate: Option<usize> = None;
         let mut reorder: Option<(usize, usize)> = None;
         let mut zoom_rep: Option<usize> = None;
+        // Interactions partner controls: which rep opened partner-pick, which partner
+        // (mol id + rep) to focus, and — while picking — which rep row was clicked as
+        // the partner. Applied after the `mol` borrow ends.
+        let mut start_partner_pick: Option<usize> = None;
+        let mut focus_partner: Option<(MoleculeSource, usize)> = None;
+        let mut chosen_partner: Option<usize> = None;
+        let mut open_settings: Option<usize> = None;
+        // When a rep is switched to Interactions, the pre-switch clone (old style) to
+        // re-insert so the molecule's look is preserved: (rep index, cloned rep).
+        let mut clone_rep: Option<(usize, Representation)> = None;
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut save_rep: Option<usize> = None;
 
@@ -684,9 +729,47 @@ impl App {
                         {
                             rep.params_open = !rep.params_open;
                         }
-                        style_picker(ui, rep);
-                        color_picker(ui, rep);
-                        material_picker(ui, rep);
+                        if let Some(clone) = style_picker(ui, rep) {
+                            // Switched to Interactions → keep the old-style rep (below).
+                            clone_rep = Some((j, clone));
+                        }
+                        if matches!(rep.kind, RepKind::Interactions) {
+                            // An Interactions rep colors lines by contact type and draws
+                            // unlit dashes, so color/material are inert; instead show the
+                            // Partner link + Choose button inline on the style row.
+                            if let Some(Some((label, valid))) = partner_info.get(j - start) {
+                                if *valid {
+                                    let link = ui
+                                        .add(
+                                            egui::Label::new(
+                                                egui::RichText::new(label.as_str())
+                                                    .color(ui.visuals().hyperlink_color),
+                                            )
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("Focus this partner rep");
+                                    if link.clicked() {
+                                        focus_partner = rep.partner.clone();
+                                    }
+                                } else {
+                                    ui.weak(label.as_str());
+                                }
+                                if ui
+                                    .button(format!("{}  Choose…", icon::CROSSHAIR_SIMPLE))
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(
+                                        "Pick the partner rep: click one in the viewport or the list",
+                                    )
+                                    .clicked()
+                                {
+                                    start_partner_pick = Some(j);
+                                }
+                            }
+                        } else {
+                            color_picker(ui, rep);
+                            material_picker(ui, rep);
+                        }
                     });
                 })
                 .response;
@@ -695,29 +778,84 @@ impl App {
             if rep.params_open {
                 view_dirty |= ui
                     .indent(egui::Id::new(("rep_params", mol_id, j)), |ui| {
-                        draw_rep_params(ui, rep, has_box)
+                        // Interactions reps: a single line-width slider (applies to all
+                        // types) + the button opening the per-type settings dialog. Every
+                        // other style uses the normal params grid. (The Partner picker is
+                        // on the style row above.)
+                        if matches!(rep.kind, RepKind::Interactions) {
+                            let mut w_changed = false;
+                            if let RepParams::Interactions { settings } = &mut rep.params {
+                                ui.horizontal(|ui| {
+                                    ui.label("Line width");
+                                    w_changed = ui
+                                        .add(egui::Slider::new(&mut settings.line_width, 1.0..=6.0))
+                                        .changed();
+                                    if ui
+                                        .button(format!("{}  Settings…", icon::GEAR_SIX))
+                                        .on_hover_text(
+                                            "Choose which interaction types to show + tune their cutoffs",
+                                        )
+                                        .clicked()
+                                    {
+                                        open_settings = Some(j);
+                                    }
+                                });
+                            }
+                            if w_changed {
+                                rep.geom_dirty = true;
+                            }
+                            false
+                        } else {
+                            draw_rep_params(ui, rep, has_box)
+                        }
                     })
                     .inner;
             }
 
-            // Reorder drop target spans the whole two-row block.
-            if let (Some(ptr), Some(_)) = (
-                ui.input(|i| i.pointer.interact_pos()),
-                block.dnd_hover_payload::<usize>(),
-            ) {
-                let before = ptr.y < block.rect.center().y;
-                let y = if before { block.rect.top() } else { block.rect.bottom() };
-                ui.painter().hline(
-                    block.rect.x_range(),
-                    y,
-                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+            // While choosing an interaction partner, the whole rep block is a click
+            // target: hovering tints it, clicking selects it as the partner. (An
+            // overlay interact registered after the row, so it wins the click over the
+            // row's own buttons.)
+            if picking_partner {
+                let pick = ui.interact(
+                    block.rect,
+                    egui::Id::new(("partner_target", mol_id, j)),
+                    egui::Sense::click(),
                 );
-                if let Some(src) = block.dnd_release_payload::<usize>() {
-                    // Confine reorder to this drawn region (shared vs own): ignore a
-                    // drag that originated in the other list (their payloads share the
-                    // `usize` type), so the `n_shared` boundary can't be crossed.
-                    if (start..end).contains(&*src) {
-                        reorder = Some((*src, if before { j } else { j + 1 }));
+                if pick.hovered() {
+                    ui.painter().rect_filled(
+                        block.rect,
+                        4.0,
+                        ui.visuals().selection.bg_fill.linear_multiply(0.35),
+                    );
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if pick.clicked() {
+                    chosen_partner = Some(j);
+                }
+            }
+
+            // Reorder drop target spans the whole two-row block (disabled while
+            // choosing a partner, where the block is a partner-pick target instead).
+            if !picking_partner {
+                if let (Some(ptr), Some(_)) = (
+                    ui.input(|i| i.pointer.interact_pos()),
+                    block.dnd_hover_payload::<usize>(),
+                ) {
+                    let before = ptr.y < block.rect.center().y;
+                    let y = if before { block.rect.top() } else { block.rect.bottom() };
+                    ui.painter().hline(
+                        block.rect.x_range(),
+                        y,
+                        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                    );
+                    if let Some(src) = block.dnd_release_payload::<usize>() {
+                        // Confine reorder to this drawn region (shared vs own): ignore a
+                        // drag that originated in the other list (their payloads share the
+                        // `usize` type), so the `n_shared` boundary can't be crossed.
+                        if (start..end).contains(&*src) {
+                            reorder = Some((*src, if before { j } else { j + 1 }));
+                        }
                     }
                 }
             }
@@ -778,6 +916,16 @@ impl App {
             }
             view_dirty = true;
         }
+        // A rep switched to Interactions: re-insert its old-style clone just above it
+        // (kept visible) so the molecule's previous look isn't lost.
+        if let Some((j, clone)) = clone_rep {
+            mol.reps.insert(j, clone);
+            mol.selected_rep = Some(j + 1); // the Interactions rep (now shifted down)
+            if is_shared {
+                mol.n_shared += 1;
+            }
+            view_dirty = true;
+        }
         if let Some(j) = delete {
             mol.reps.remove(j);
             if is_shared {
@@ -826,7 +974,200 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let _ = save_rep;
 
+        // Enter partner-pick mode for an Interactions rep (the [Choose…] button).
+        if let Some(j) = start_partner_pick {
+            self.partner_pick = Some((mol_id, j));
+        }
+        // Open the interaction-settings dialog for this rep.
+        if let Some(j) = open_settings {
+            self.interactions_dialog = Some((mol_id, j));
+        }
+        // A rep row was clicked while choosing a partner → assign it.
+        if let Some(j) = chosen_partner {
+            self.assign_partner(mi, j);
+        }
+        // Focus the camera on a clicked partner rep (reads the partner molecule, so it
+        // runs after the `mol` borrow above ends).
+        if let Some((src, pr)) = focus_partner {
+            let bbox = self
+                .scene
+                .molecules
+                .iter()
+                .find(|m| m.source == src)
+                .and_then(|pmol| Some(pmol.sel_bbox(pmol.reps.get(pr)?.sel.as_ref()?)));
+            if let Some((min, max)) = bbox {
+                self.camera.focus_bbox(min, max);
+                view_dirty = true;
+            }
+        }
+
         self.editing_rep = new_editing;
         view_dirty
+    }
+
+    /// The Interactions **Settings** dialog (a movable `egui::Window`): a tab per
+    /// interaction type, each exposing that type's full parameter set (enable + all
+    /// cutoffs/angles), plus a shared line-width + Defaults footer, for the rep in
+    /// `self.interactions_dialog`. Any edit marks the rep `geom_dirty` so its contacts
+    /// rebuild. Closed via the window ✕ or when the target rep vanishes.
+    pub(super) fn draw_interactions_dialog(&mut self, ctx: &egui::Context) {
+        use crate::interactions::InteractionKind as K;
+        let Some((mol_id, ri)) = self.interactions_dialog else {
+            return;
+        };
+        let Some(mi) = self.scene.mol_index(mol_id) else {
+            self.interactions_dialog = None;
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Interaction settings")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                // A tab per interaction type (a colored dot marks each type's line color).
+                tab_bar(
+                    ui,
+                    &mut self.interactions_tab,
+                    &[
+                        (K::HBond, "H-bonds"),
+                        (K::Hydrophobic, "Hydrophobic"),
+                        (K::SaltBridge, "Salt bridges"),
+                        (K::PiStacking, "π-stack"),
+                        (K::PiCation, "π-cation"),
+                        (K::Halogen, "Halogen"),
+                    ],
+                );
+                ui.separator();
+                let tab = self.interactions_tab;
+                let Some(rep) = self.scene.molecules.get_mut(mi).and_then(|m| m.reps.get_mut(ri))
+                else {
+                    return;
+                };
+                let mut changed = false;
+                if let RepParams::Interactions { settings: s } = &mut rep.params {
+                    // A legend swatch + the enable checkbox for the active type.
+                    let swatch = |ui: &mut egui::Ui, kind: K| {
+                        let c = geometry::interaction_color(kind);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        ui.painter()
+                            .rect_filled(rect, 3.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+                    };
+                    let slider = |ui: &mut egui::Ui,
+                                  on: bool,
+                                  label: &str,
+                                  v: &mut f32,
+                                  range: std::ops::RangeInclusive<f32>,
+                                  suffix: &str|
+                     -> bool {
+                        ui.label(label);
+                        let c = ui
+                            .add_enabled(on, egui::Slider::new(v, range).suffix(suffix.to_string()))
+                            .changed();
+                        ui.end_row();
+                        c
+                    };
+                    match tab {
+                        K::HBond => {
+                            ui.horizontal(|ui| {
+                                swatch(ui, K::HBond);
+                                changed |= ui.checkbox(&mut s.hbonds, "Detect hydrogen bonds").changed();
+                            });
+                            let on = s.hbonds;
+                            egui::Grid::new("hb_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                changed |= slider(ui, on, "Donor–acceptor distance", &mut s.hbond_dist, 0.25..=0.50, " nm");
+                                changed |= slider(ui, on, "D–A distance (with H)", &mut s.hbond_dist_h, 0.25..=0.50, " nm");
+                                changed |= slider(ui, on, "Min D–H···A angle", &mut s.hbond_angle, 90.0..=180.0, "°");
+                            });
+                            ui.add_space(4.0);
+                            ui.small("With an explicit hydrogen on the donor the distance-with-H + angle test is used; otherwise the heavy-atom donor–acceptor distance.");
+                        }
+                        K::Hydrophobic => {
+                            ui.horizontal(|ui| {
+                                swatch(ui, K::Hydrophobic);
+                                changed |= ui.checkbox(&mut s.hydrophobic, "Detect hydrophobic contacts").changed();
+                            });
+                            let on = s.hydrophobic;
+                            egui::Grid::new("hy_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                changed |= slider(ui, on, "Max C···C distance", &mut s.hydrophobic_dist, 0.30..=0.55, " nm");
+                            });
+                            ui.add_space(4.0);
+                            ui.small("Carbons whose only neighbours are C/H. One contact is kept per residue pair.");
+                        }
+                        K::SaltBridge => {
+                            ui.horizontal(|ui| {
+                                swatch(ui, K::SaltBridge);
+                                changed |= ui.checkbox(&mut s.salt_bridges, "Detect salt bridges").changed();
+                            });
+                            let on = s.salt_bridges;
+                            egui::Grid::new("sb_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                changed |= slider(ui, on, "Max charge-centre distance", &mut s.salt_bridge_dist, 0.40..=0.70, " nm");
+                            });
+                            ui.add_space(4.0);
+                            ui.small("Charged groups: Arg/Lys/His (+), Asp/Glu (−), and ligand carboxylate / guanidinium / phosphate.");
+                        }
+                        K::PiStacking => {
+                            ui.horizontal(|ui| {
+                                swatch(ui, K::PiStacking);
+                                changed |= ui.checkbox(&mut s.pi_stacking, "Detect π-stacking").changed();
+                            });
+                            let on = s.pi_stacking;
+                            egui::Grid::new("ps_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                changed |= slider(ui, on, "Max ring-centre distance", &mut s.pi_stacking_dist, 0.40..=0.70, " nm");
+                                changed |= slider(ui, on, "Plane angle tolerance", &mut s.pi_stacking_angle, 10.0..=45.0, "°");
+                                changed |= slider(ui, on, "Max offset (parallel)", &mut s.pi_stacking_offset, 0.0..=0.40, " nm");
+                            });
+                            ui.add_space(4.0);
+                            ui.small("Aromatic rings that are near-parallel (within the tolerance, and overlapping) or T-shaped.");
+                        }
+                        K::PiCation => {
+                            ui.horizontal(|ui| {
+                                swatch(ui, K::PiCation);
+                                changed |= ui.checkbox(&mut s.pi_cation, "Detect π-cation").changed();
+                            });
+                            let on = s.pi_cation;
+                            egui::Grid::new("pc_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                changed |= slider(ui, on, "Max ring–cation distance", &mut s.pi_cation_dist, 0.40..=0.75, " nm");
+                                changed |= slider(ui, on, "Max offset from ring axis", &mut s.pi_cation_offset, 0.0..=0.40, " nm");
+                            });
+                            ui.add_space(4.0);
+                            ui.small("A cationic group sitting over an aromatic ring face.");
+                        }
+                        K::Halogen => {
+                            ui.horizontal(|ui| {
+                                swatch(ui, K::Halogen);
+                                changed |= ui.checkbox(&mut s.halogen, "Detect halogen bonds").changed();
+                            });
+                            let on = s.halogen;
+                            egui::Grid::new("hx_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                                changed |= slider(ui, on, "Max X···acceptor distance", &mut s.halogen_dist, 0.30..=0.50, " nm");
+                                changed |= slider(ui, on, "Min C–X···A angle", &mut s.halogen_angle, 120.0..=180.0, "°");
+                            });
+                            ui.add_space(4.0);
+                            ui.small("Cl/Br/I bonded to carbon donating to an O/N/S acceptor along the σ-hole.");
+                        }
+                    }
+                    ui.separator();
+                    // (Line width is a rep-level control, shown inline in the rep panel —
+                    // it applies to all interaction types — so it's not in this dialog.)
+                    if ui
+                        .button(format!("{}  Reset all to defaults", icon::ARROW_COUNTER_CLOCKWISE))
+                        .clicked()
+                    {
+                        let lw = s.line_width; // keep the (inline-edited) line width
+                        *s = crate::interactions::InteractionSettings::default();
+                        s.line_width = lw;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    rep.geom_dirty = true;
+                }
+            });
+        if !open {
+            self.interactions_dialog = None;
+        }
     }
 }

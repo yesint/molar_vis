@@ -69,6 +69,22 @@ pub(super) fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: 
             painter.circle_filled(c + Vec2::new(hw * 0.40, r * 0.18), r * 0.58, color);
             painter.circle_filled(c + Vec2::new(hw * 0.02, -r * 0.30), r * 0.50, color);
         }
+        RepKind::Interactions => {
+            // Two atoms joined by a green dashed line (the H-bond dash color).
+            let off = Vec2::new(hw * 0.62, 0.0);
+            let a = c - off;
+            let b = c + off;
+            painter.circle_filled(a, r * 0.4, color);
+            painter.circle_filled(b, r * 0.4, color);
+            let dash = egui::Color32::from_rgb(70, 200, 90);
+            let s = Stroke::new(1.6, dash);
+            // Three dashes along the segment between the atoms.
+            for k in 0..3 {
+                let t0 = 0.18 + k as f32 * 0.24;
+                let t1 = t0 + 0.14;
+                painter.line_segment([a.lerp(b, t0), a.lerp(b, t1)], s);
+            }
+        }
     }
 }
 
@@ -93,23 +109,36 @@ pub(super) fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> 
     resp.clicked()
 }
 
-/// A drawn style-icon + label button that opens a dropdown of style options.
-pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) {
+/// A drawn style-icon + label button that opens a dropdown of style options. When the
+/// rep is switched **to** Interactions from another style, returns a clone of the rep in
+/// its *old* style (still visible) so the caller can keep the molecule's current look —
+/// an Interactions rep only draws contact lines, so switching in place would hide it.
+pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) -> Option<Representation> {
     let color = ui.visuals().text_color();
     let kind = rep.kind;
     let lw = max_label_width(ui, RepKind::ALL.iter().map(|&k| k.label()));
     let resp = picker_button(ui, kind.label(), lw, |p, r| paint_style_icon(p, r, kind, color));
 
+    let mut cloned_old = None;
     egui::Popup::menu(&resp).show(|ui| {
         for kind in RepKind::ALL {
             if style_option(ui, kind, kind == rep.kind) {
+                if kind == RepKind::Interactions && rep.kind != RepKind::Interactions {
+                    cloned_old = Some(rep.duplicate());
+                }
                 rep.kind = kind;
                 rep.params = RepParams::for_kind(kind);
                 rep.geom_dirty = true;
+                // Interactions needs its Partner picker + Settings button visible, so
+                // auto-expand the rep's params panel when it's chosen.
+                if kind == RepKind::Interactions {
+                    rep.params_open = true;
+                }
                 ui.close();
             }
         }
     });
+    cloned_old
 }
 
 /// Draw a small icon depicting a color scheme into `rect` (uses the scheme's own

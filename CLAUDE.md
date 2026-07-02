@@ -111,6 +111,12 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   mouse-driven headlessly) +
   `MOLAR_VIS_DEBUG_DEFAULTS=1` (use built-in `Settings::default()` and skip the config-file
   read/write, so headless runs are reproducible and never touch the dev's saved config) +
+  `MOLAR_VIS_DEBUG_INTERACTIONS=1` (add an `Interactions` rep on mol 0 with a partner rep — mol 1's
+  first rep if a second molecule is loaded, else a disjoint-half second rep on mol 0 — and expand its
+  panel; exercises the cross-molecule contact detection + dashed-line build; pair with
+  `MOLAR_VIS_DEBUG_SAVE_IMAGE`) +
+  `MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[hbond|hydrophobic|salt|pistacking|pication|halogen]` (open the
+  tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
   `MOLAR_VIS_DEBUG_SCRIPT="<rhai source>"` (or `@path` to a file, native) — runs a console script at
   startup through the same path the console uses, and opens the console window, so a command's effect
   (e.g. `mol(0).rep(0).set_color("chain")`) + the echoed output can be screenshot headlessly. Generate a
@@ -553,7 +559,24 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   line spans the box so molar's `dist line` is brute O(N). The grid (mirroring molar's distance-search
   grid, minus the periodic part: bin into `extent/dims` cells, flat `x + y·dx + z·dx·dy`) walks only
   the cells in the ray's R-tube (sub-cell march + R-skirt, dedup), so a query is O(tube + nearby), not
-  O(N). Pure logic, WASM-safe; 3 unit tests.
+  O(N). Also `neighbors_within(center, r, |id|)` — a **point** neighbor query (cell skirt clamped to
+  grid bounds so a degenerate single-cell grid stays cheap), used by [[interactions.rs]] for
+  contact detection. Pure logic, WASM-safe; 5 unit tests.
+- `interactions.rs` — **non-covalent interaction detection** (M29; the `Interactions` rep style):
+  pure, WASM-safe, PLIP-derived. `detect(a, b, params)` takes two `InteractionSet`s (heavy `AtomInfo`
+  atoms + aromatic `RingInfo` + `ChargeGroup` cations/anions) and returns line segments for the six
+  types. **Atom-level** (H-bond / hydrophobic / halogen) pairing is **grid-based** (`spatial::AtomGrid`
+  over the larger set, query the smaller) — never O(N·M); **group-level** (salt bridge / π-stacking /
+  π-cation) is O(n²) over the small ring/charge lists. **H-bond**: N/O/S donor/acceptor; explicit-H →
+  D–A `< 4.1 Å` **and** D–H···A `> 100°`, else heavy-atom D–A `≤ 3.5 Å`. **Hydrophobic**: C with only
+  C/H neighbours, `< 4.0 Å`, one per residue pair. **Salt bridge**: opposite-charge centroids `< 5.5 Å`.
+  **π-stacking**: ring centroids `< 5.5 Å`, parallel (within angle tol + offset) or T-shaped.
+  **π-cation**: ring centroid ↔ cation `< 6.0 Å`, offset from ring axis bounded. **Halogen**: C–X
+  (Cl/Br/I)···(N/O/S) `< 4.0 Å`, C–X···A angle `> 140°`. All thresholds are user-editable via
+  `InteractionSettings` (rides `RepParams`) → `DetectParams`. The builder
+  (`app::build::{gather_set,build_interactions}`) gathers the sets from **two molecules'** displayed
+  frames + bonds + cached aromatic rings + charged-group heuristics and emits dashed `LineVertex`s
+  (`geometry::interaction_lines`, per-type colors); 9 unit tests incl. a grid-vs-brute-force check.
 - **Hover detail lens** (QoL, `app.rs` + `scene.rs` `HoverDetail`): **off by default**, gated behind the
   `BehaviorSettings::hover_detail_lens` toggle (Settings ▸ Behavior → *Hover detail lens over
   cartoon/surface*); when off the trigger block in `draw_viewport` is skipped and any stale lens is
@@ -728,7 +751,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   over the providers) so frames render by reference. `System::state()`/`topology()` borrow the
   parts. (molar addition; `SelBound` is System-coupled and unchanged.)
 - Selection grammar incl.: `all`, `protein`, `backbone`, `water`, `name`, `resid`,
-  `resindex`, `resname`, `index`, `chain`, `within …`.
+  `resindex`, `resname`, `index`, `chain`, `within …`, and **`polarh`** (polar hydrogens —
+  H covalently bonded to N/O/F/S, read from the topology **bond graph**; matches nothing
+  when no bonds are computed. molar addition — see the molar-integration note).
 - **Trajectory (M7, implemented):** per-molecule `Trajectory { frames: Vec<State>, current,
   playing, … }` (`trajectory.rs`). Frame 0 = the structure coords (`Molecule::seed_frame0`,
   via the `set_state(State::new_fake(n))` swap trick); loaded frames append; multiple loads
@@ -1470,6 +1495,48 @@ History labels via `describe_change` ("edit selection", "change coloring",
   `_GROUP_EXPAND=1`). Verified: 68 tests (incl. a group session round-trip), native+wasm+py green,
   clippy clean; headless renders of member 0 (aspirin) / member 7 (diazepam, camera re-fit) / a
   reloaded session (member 5, dopamine) + a panel screenshot (group row, cycle bar, member list).
+- ✅ M29 **Protein–ligand interactions (`Interactions` rep)** — a "drug-discovery goodies / PLIP
+  interactions" roadmap item: a new rep **style** that draws the six non-covalent interaction types —
+  **H-bonds, hydrophobic, salt bridges, π-stacking, π-cation, halogen bonds** — as Discovery-Studio-style
+  dashed lines (green / grey / orange / purple / magenta / teal) between its own selection and a chosen
+  **partner** rep in *this or another molecule* (the first rep that references atoms outside its own
+  molecule). Pieces: **detection** ([[interactions.rs]], pure/WASM-safe, PLIP-derived — atom-level types
+  grid-based, *not* N×M; group types over the small ring/charge lists; per-type user-editable cutoffs +
+  angles/offsets via `InteractionSettings`→`DetectParams`; auto H-vs-heavy-atom H-bond fallback for
+  structures without hydrogens; see that module bullet); **gather** (`app::build::gather_set` builds an
+  `InteractionSet` per rep = heavy atoms (+attached H / hydrophobic flag / halogen antecedent), aromatic
+  **rings** within the selection (centroid+normal; ring atom sets from `Molecule::ensure_interaction_rings`,
+  a cached molar ring-perception on a topology clone — no bond side-effects), and **charged groups**
+  (`charged_groups`: Arg/Lys/His +, Asp/Glu/C-term −, ligand carboxylate/guanidinium/phosphate by
+  connectivity — heuristic, no formal charges)); **cross-molecule build** runs in a **second
+  `rebuild_dirty` pass** (reads two molecules, so it's outside the `&mut`-iterator loop; rebuilds when its
+  own flags or *either* endpoint molecule changed, tracked by `mol_changed`; both molecules' ring caches
+  are populated mutably first); **partner reference** `Representation.partner: Option<(MoleculeSource,
+  usize)>` — serializable + reload-stable, so it round-trips undo/redo **and** sessions for free via
+  `history::RepState.partner` (no MolId↔source seam); **auto-update on partner change** — the second
+  pass also rebuilds on `view_dirty` (visibility / molecule add-remove / group member switch), and
+  `partner_index` is **group-following**: a partner pointing at a [`MolGroup`] member resolves to the
+  group's *currently-shown* member, so sliding the group's member slider moves the interactions to the
+  newly-shown ligand (partner label + detection stay in sync); **UI** (`app/rep_panel.rs`) — switching a rep **to**
+  Interactions **clones the old rep** (its previous style, kept visible, re-inserted just above) so the
+  molecule's look isn't lost (an Interactions rep only draws contact lines); the style is auto-expanded.
+  Color/material pickers are hidden (type picks the color); instead the style row carries the **Partner**
+  controls inline (clickable "Mol N: Rep M" focus link + **⊕ Choose…**), and the expanded params are a
+  single rep-level **Line width** slider (applies to all types) + a **Settings…** button opening the
+  **tabbed dialog** (`draw_interactions_dialog`, one tab per type, each with that type's full parameter
+  set — H-bonds has D–A distance, D–A-with-H, min angle — + a Reset-all footer; line width is *not* in
+  the dialog); **partner-pick mode** (`App::partner_pick`, `app/viewport.rs`) — [Choose…] enters a
+  mode where hovering a rep's geometry highlights the whole rep (finger cursor, via `pick::PickHit.rep`)
+  and a click assigns it, **and** clicking a rep's **panel row** also assigns it, Esc / empty-click
+  cancels, one undo checkpoint (`assign_partner`). Interaction lines aren't ray-traced (consistent with
+  the Lines rep / box / aromatic circles). Verified: 80 tests (grid-vs-brute-force, water-dimer ±H,
+  hydrophobic dedup, halogen angle, salt bridge, π-stacking offset, π-cation, group-following partner),
+  native+wasm+py green,
+  clippy clean; headless renders of a 2lao interface split (H-bond/hydrophobic/salt-bridge dashes) + the
+  tabbed dialog (H-bonds & π-stack tabs), a **byte-identical** session round-trip preserving the partner,
+  and a live panel screenshot. Hooks `MOLAR_VIS_DEBUG_INTERACTIONS=1` + `_INTERACTIONS_DIALOG=[type]`.
+  Deferred: distance labels; water bridges / metal complexes; weak C–H donors; ligand aromaticity relies
+  on molar perception (PDB ligands without bond orders may miss rings); scripting access.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

@@ -25,7 +25,7 @@ impl App {
 
             // VMD-style navigation:
             //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
-            //   RMB = pan           · Shift+RMB = move along view Z (dolly)
+            //   RMB = pan           · Shift+RMB = move scene along view Z (fixed clip → slab)
             //   middle = pan        · wheel = scale (zoom)
             // In Lasso pick mode an LMB drag draws the selection polygon (the held
             // modifier picks the set op on release: plain = replace, Shift = add,
@@ -67,7 +67,9 @@ impl App {
                 }
             } else if response.dragged_by(egui::PointerButton::Secondary) {
                 if shift {
-                    self.camera.zoom_drag(delta.y);
+                    // Move the scene along the view axis with fixed clip planes (slabbing),
+                    // not a zoom — so the molecule can be pushed through the near plane.
+                    self.camera.translate_z(delta.y);
                 } else {
                     self.camera.pan(delta.x, delta.y, rect.height());
                 }
@@ -282,7 +284,21 @@ impl App {
                 self.hover_pick = ids;
             }
 
-            let hovering = self.pick_mode == PickMode::Click && !response.dragged();
+            // Partner-pick mode (choosing an Interactions rep's partner): Esc cancels;
+            // the finger cursor + whole-rep highlight + click-assign are handled in the
+            // hover branch below. Takes precedence over the normal pick modes and works
+            // regardless of the current pick mode.
+            if self.partner_pick.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.partner_pick = None;
+                self.clear_hover();
+                ui.ctx().request_repaint();
+            }
+            let picking_partner = self.partner_pick.is_some();
+            if picking_partner {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let hovering =
+                (self.pick_mode == PickMode::Click || picking_partner) && !response.dragged();
             let mut residue_hit = false;
             let mut lens_shown = false;
             if hovering {
@@ -331,7 +347,30 @@ impl App {
                         let proj = self.camera.proj(aspect);
                         pick::pick(&self.scene, view, proj, ndc_x, ndc_y)
                     };
-                    if let Some(hit) = hit {
+                    if picking_partner {
+                        // Choosing an Interactions rep's partner: highlight the whole
+                        // rep under the cursor (its atoms glow), and assign it on click.
+                        match &hit {
+                            Some(h) => {
+                                let atoms = rep_atom_ids(&self.scene.molecules[h.mol], h.rep);
+                                residue_hit = true; // don't let the glow be cleared below
+                                if self.set_hover(h.mol, atoms) {
+                                    ui.ctx().request_repaint();
+                                }
+                                if response.clicked() {
+                                    self.assign_partner(h.mol, h.rep);
+                                    ui.ctx().request_repaint();
+                                }
+                            }
+                            None => {
+                                // Click on empty space cancels the pick.
+                                if response.clicked() {
+                                    self.partner_pick = None;
+                                    ui.ctx().request_repaint();
+                                }
+                            }
+                        }
+                    } else if let Some(hit) = hit {
                         // Click selects the hovered atom/residue: merge it into the
                         // active (pending) selection (Shift = add, Ctrl/⌘ = subtract,
                         // plain = replace), expanded per the scope mode. A plain LMB
@@ -389,7 +428,7 @@ impl App {
                     // those atoms. Rebuilt as the cursor moves (grid query is cheap).
                     // Off by default (`hover_detail_lens` behavior setting); when off,
                     // `lens_shown` stays false and any stale lens is cleared below.
-                    if self.settings.behavior.hover_detail_lens {
+                    if !picking_partner && self.settings.behavior.hover_detail_lens {
                         let moved = self.last_lens_ndc.is_none_or(|(lx, ly)| {
                             (lx - ndc_x).abs() > 0.004 || (ly - ndc_y).abs() > 0.004
                         });
@@ -631,6 +670,32 @@ impl App {
         }
     }
 
+    /// Assign the rep `(chosen_mi, chosen_rep)` as the partner of the Interactions rep
+    /// being configured (held in `self.partner_pick`), then leave partner-pick mode and
+    /// record one undo checkpoint. A pick resolving to the Interactions rep itself is
+    /// ignored (pick mode stays active so the user can choose a different rep).
+    pub(super) fn assign_partner(&mut self, chosen_mi: usize, chosen_rep: usize) {
+        let Some((target_id, target_rep)) = self.partner_pick else {
+            return;
+        };
+        let Some(target_mi) = self.scene.mol_index(target_id) else {
+            self.partner_pick = None; // the Interactions rep's molecule is gone
+            return;
+        };
+        if target_mi == chosen_mi && target_rep == chosen_rep {
+            return; // a rep can't be its own partner
+        }
+        let chosen_src = self.scene.molecules[chosen_mi].source.clone();
+        if let Some(rep) = self.scene.molecules[target_mi].reps.get_mut(target_rep) {
+            rep.partner = Some((chosen_src, chosen_rep));
+            rep.geom_dirty = true;
+        }
+        self.partner_pick = None;
+        self.clear_hover();
+        self.history.maybe_record(crate::history::EditState::capture(&self.scene));
+        self.view_dirty = true;
+    }
+
     /// Set molecule `mi`'s steady hover highlight to `atoms`, clearing every other
     /// molecule's. Returns whether anything changed (so the caller can request a
     /// repaint to rebuild the glow).
@@ -776,4 +841,15 @@ impl App {
         }
         mol.glow_dirty = true;
     }
+}
+
+/// All atom indices of a rep's evaluated selection (at the displayed frame) — used to
+/// glow the *whole* rep while choosing it as an interaction partner. Empty if the rep
+/// or its selection is missing.
+pub(super) fn rep_atom_ids(mol: &scene::Molecule, rep_idx: usize) -> Vec<usize> {
+    let Some(sel) = mol.reps.get(rep_idx).and_then(|r| r.sel.as_ref()) else {
+        return Vec::new();
+    };
+    let bound = mol.data.bind_with_state(sel, mol.render_state());
+    bound.iter_particle().map(|p| p.id).collect()
 }

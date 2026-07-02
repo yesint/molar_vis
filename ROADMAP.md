@@ -40,7 +40,10 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - Plugins architecture
 
 ## Drug-discovery goodies
-- PLIP-like interactions and their visualization
+- ~~PLIP-like interactions and their visualization~~ — **shipped** (M29; the `Interactions`
+  rep style — H-bonds + hydrophobic contacts between a rep and a chosen partner rep, drawn as
+  Discovery-Studio-style dashed lines). Later: π-stacking / salt bridges / halogen bonds,
+  distance labels.
 - Reading SDF files (molar)
 
 ## Altering structures visually

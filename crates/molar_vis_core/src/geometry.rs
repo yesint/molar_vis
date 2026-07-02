@@ -22,16 +22,22 @@ pub enum RepKind {
     Lines,
     Cartoon,
     Surface,
+    /// Non-covalent interactions (H-bonds, hydrophobic) between this rep's selection
+    /// and a chosen **partner** rep (possibly in another molecule). Drawn as dashed
+    /// lines; built outside `build` (see `app::build::build_interactions`) because it
+    /// reads two molecules.
+    Interactions,
 }
 
 impl RepKind {
-    pub const ALL: [RepKind; 6] = [
+    pub const ALL: [RepKind; 7] = [
         RepKind::Vdw,
         RepKind::Licorice,
         RepKind::BallAndStick,
         RepKind::Lines,
         RepKind::Cartoon,
         RepKind::Surface,
+        RepKind::Interactions,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +48,7 @@ impl RepKind {
             RepKind::Lines => "Lines",
             RepKind::Cartoon => "Cartoon",
             RepKind::Surface => "Surface",
+            RepKind::Interactions => "Interactions",
         }
     }
 
@@ -54,6 +61,7 @@ impl RepKind {
             "lines" => Some(RepKind::Lines),
             "cartoon" => Some(RepKind::Cartoon),
             "surface" | "surf" | "sas" => Some(RepKind::Surface),
+            "interactions" | "inter" => Some(RepKind::Interactions),
             _ => None,
         }
     }
@@ -102,6 +110,11 @@ pub enum RepParams {
         /// Distance-field blur passes before isosurfacing (0 = none, more = smoother).
         smoothing: u32,
     },
+    Interactions {
+        /// All per-type detection toggles + cutoffs + line width, edited in the
+        /// Interactions **Settings** dialog (there are too many to fit inline).
+        settings: crate::interactions::InteractionSettings,
+    },
 }
 
 impl RepParams {
@@ -125,6 +138,9 @@ impl RepParams {
                 // Off by default: the Laplacian mesh pass smooths the normals, so
                 // the distance-field blur is now opt-in (extra geometric smoothing).
                 smoothing: 0,
+            },
+            RepKind::Interactions => RepParams::Interactions {
+                settings: crate::interactions::InteractionSettings::default(),
             },
         }
     }
@@ -252,6 +268,9 @@ pub fn build(
             mesh: surface::build(bound, &colorizer, probe, quality, smoothing),
             ..Default::default()
         },
+        // Interactions read two molecules, so they're built outside `build` (see
+        // `app::build::build_interactions`); this path is never taken for them.
+        RepParams::Interactions { .. } => GeometryData::default(),
     };
 
     // Stamp the material onto every element: the packed lighting coefficients
@@ -283,6 +302,37 @@ pub fn build(
         v.mat = lighting;
     }
     data
+}
+
+/// Fixed line colors per interaction type (Discovery-Studio style): the type, not the
+/// rep's color scheme, picks the color.
+pub fn interaction_color(kind: crate::interactions::InteractionKind) -> [u8; 4] {
+    use crate::interactions::InteractionKind as K;
+    match kind {
+        K::HBond => [70, 200, 90, 255],       // green
+        K::Hydrophobic => [150, 150, 150, 255], // grey
+        K::SaltBridge => [235, 170, 40, 255],  // orange
+        K::PiStacking => [175, 110, 225, 255], // purple
+        K::PiCation => [235, 120, 175, 255],   // magenta
+        K::Halogen => [60, 200, 200, 255],     // teal
+    }
+}
+
+/// Dashed line vertices (line-list pairs) for a set of detected interactions, colored
+/// by kind. Reuses the same dash cadence as PBC half-bonds via [`dashes`].
+pub fn interaction_lines(
+    interactions: &[crate::interactions::Interaction],
+    width: f32,
+) -> Vec<LineVertex> {
+    let mut out = Vec::new();
+    for it in interactions {
+        let color = crate::color::pack_rgba8(interaction_color(it.kind));
+        for (s, e) in dashes(it.a.to_array(), it.b.to_array()) {
+            out.push(LineVertex { pos: s, color, width, offset_px: 0.0 });
+            out.push(LineVertex { pos: e, color, width, offset_px: 0.0 });
+        }
+    }
+    out
 }
 
 /// The 12 edges of the periodic box as a line list (24 vertices). The box is the

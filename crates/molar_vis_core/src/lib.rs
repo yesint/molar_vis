@@ -10,6 +10,7 @@ mod color;
 mod data;
 mod geometry;
 mod history;
+mod interactions;
 mod launch;
 mod material;
 mod minimize;

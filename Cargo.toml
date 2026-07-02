@@ -32,10 +32,10 @@ serde_json = "1"
 # bind) + pub pymolar accessors + molar_python as rlib with `register_molar` (for the
 # native Python module) + the State coords-version counter (live shared render) +
 # `.sd` recognized as an SDF extension (cbaae4b).
-molar = { git = "https://github.com/yesint/molar.git", rev = "cbaae4b", default-features = false }
+molar = { git = "https://github.com/yesint/molar.git", rev = "54d6a34", default-features = false }
 # pymolar (PyO3 bindings), as an rlib, for the native molar_vis Python module only.
 # Same git rev as `molar` above so the molar types unify across the dependency graph.
-molar_python = { git = "https://github.com/yesint/molar.git", rev = "cbaae4b" }
+molar_python = { git = "https://github.com/yesint/molar.git", rev = "54d6a34" }
 # Pure-Rust embedded scripting language for the in-app command console (native + wasm).
 # default-features=false + "std" == Rhai's own default; single-threaded (no "sync"), no time deps.
 rhai = { version = "1", default-features = false, features = ["std"] }

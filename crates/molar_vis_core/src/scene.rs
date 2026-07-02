@@ -149,6 +149,13 @@ pub struct TrajLoad {
 pub struct Representation {
     pub kind: RepKind,
     pub params: RepParams,
+    /// For an **Interactions** rep only: the partner representation it detects contacts
+    /// against, keyed by the partner molecule's [`MoleculeSource`] + its rep index. The
+    /// source is stable *and* serializable, so this survives undo/redo **and** a session
+    /// reload for free (via [`crate::history::RepState`]); it's resolved to a live
+    /// molecule at use time (a stale/missing reference → "partner lost", nothing drawn).
+    /// `None` = unset. (Two molecules sharing a source is ambiguous — the first wins.)
+    pub partner: Option<(MoleculeSource, usize)>,
     pub color: ColorMethod,
     /// Appearance preset (lighting + opacity); see [`crate::material::Material`].
     pub material: Material,
@@ -235,7 +242,7 @@ impl Representation {
     /// A copy with the same style/selection but fresh (unbuilt) GPU state, so it
     /// recompiles and uploads its own geometry on the next frame.
     pub fn duplicate(&self) -> Self {
-        Self::restore(
+        let mut r = Self::restore(
             self.kind,
             self.params,
             self.color,
@@ -247,7 +254,9 @@ impl Representation {
             self.material,
             self.periodic,
             self.smooth_window,
-        )
+        );
+        r.partner = self.partner.clone();
+        r
     }
 
     /// Build a fresh representation from the program's [`RepDefaults`] (initial rep
@@ -292,6 +301,7 @@ impl Representation {
         Self {
             kind,
             params,
+            partner: None,
             color,
             material,
             ss_algo,
@@ -406,6 +416,11 @@ pub struct Molecule {
     /// Aromatic rings (atom-index loops) from the last [`Molecule::perceive_aromaticity`],
     /// for the in-ring aromatic-circle overlay in the drawing editor. Transient.
     pub aromatic_rings: Vec<Vec<usize>>,
+    /// Aromatic rings (atom-index loops) for **interaction detection** (π-stacking /
+    /// π-cation), computed lazily via `ensure_interaction_rings` (molar ring perception
+    /// on a topology clone — no side effects). Topology-derived, so stable across
+    /// trajectory frames (only the centroids move); `None` until first needed. Transient.
+    pub interaction_rings: Option<Vec<Vec<usize>>>,
     /// Transient UI state: whether this molecule's representations block is
     /// expanded in the panel. Not part of `EditState` (view state, not undoable).
     pub reps_open: bool,
@@ -561,6 +576,7 @@ impl Molecule {
             n_shared: 0,
             selected_rep: Some(0),
             aromatic_rings: Vec::new(),
+            interaction_rings: None,
             reps_open: true,
             trajectory: Trajectory::default(),
             show_box: false,
@@ -832,6 +848,21 @@ impl Molecule {
     /// Implicit-hydrogen count per atom, over the editor's connectivity.
     pub fn implicit_hydrogens(&self) -> Vec<u8> {
         implicit_hydrogens(&self.topology_with_bonds())
+    }
+
+    /// Lazily compute + cache the molecule's aromatic rings (atom-index loops) for
+    /// interaction detection. Runs molar ring perception on a **clone** of the topology
+    /// (with the guessed bonds), so it has no side effects on the live bonds (unlike
+    /// `perceive_aromaticity`, which writes aromatic orders back for the editor). Rings
+    /// are topology-derived, so this runs once and is reused across trajectory frames.
+    pub fn ensure_interaction_rings(&mut self) {
+        if self.interaction_rings.is_some() {
+            return;
+        }
+        let mut top = self.data.topology().clone();
+        top.bonds = self.bonds.clone();
+        let perc = perceive(&mut top);
+        self.interaction_rings = Some(perc.aromatic_rings().cloned().collect());
     }
 }
 

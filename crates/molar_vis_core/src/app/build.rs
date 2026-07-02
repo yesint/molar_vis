@@ -1,5 +1,6 @@
 //! Free-function builders for hover-detail, glow, pick id-buffer geometry.
 use super::*;
+use crate::interactions::InteractionSet;
 
 
 /// Build the hover detail "lens": a distance-faded CPK ball-and-stick of the atoms
@@ -225,6 +226,286 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
     geometry::GeometryData { spheres, ..Default::default() }
 }
 
+/// A molecule's currently displayed coordinates: the active trajectory frame, or the
+/// static structure state. (Per-rep smoothing is ignored for interaction detection.)
+fn displayed_state(mol: &scene::Molecule) -> &State {
+    mol.trajectory
+        .frames
+        .get(mol.trajectory.current)
+        .unwrap_or_else(|| mol.data.state())
+}
+
+fn v3(p: &molar::prelude::Pos) -> glam::Vec3 {
+    glam::Vec3::new(p.x, p.y, p.z)
+}
+
+/// Which molecule index (in `scene.molecules`) an Interactions rep's partner resolves to,
+/// and its rep index — matched by [`MoleculeSource`]. `None` = unset / partner lost (the
+/// molecule is gone or the rep index is out of range).
+///
+/// **Group-following:** if the partner molecule belongs to a [`MolGroup`], the reference
+/// is redirected to the group's **currently-shown member** (same rep index — shared reps
+/// are the identical prefix on every shown member). So an interactions rep pointing at a
+/// group's ligand automatically follows the group slider to the newly-shown molecule.
+pub(super) fn partner_index(scene: &Scene, rep: &Representation) -> Option<(usize, usize)> {
+    let (src, pr) = rep.partner.as_ref()?;
+    let mut pmi = scene.molecules.iter().position(|m| &m.source == src)?;
+    if let Some(gid) = scene.molecules[pmi].group {
+        if let Some(gi) = scene.group_index(gid) {
+            let g = &scene.groups[gi];
+            if let Some(shown_mi) = g.members.get(g.current).and_then(|&id| scene.mol_index(id)) {
+                pmi = shown_mi;
+            }
+        }
+    }
+    // Validate the (possibly redirected) rep actually exists.
+    scene.molecules.get(pmi)?.reps.get(*pr)?;
+    Some((pmi, *pr))
+}
+
+/// Gather everything one rep's selection contributes to interaction detection: heavy
+/// atoms (+ attached H / hydrophobic flag / halogen antecedent), aromatic rings within
+/// the selection (centroid + normal from the displayed frame; ring atom sets come from
+/// the molecule's cached `interaction_rings`), and charged groups. `res_key` is made
+/// unique per (molecule, residue) via `mol_idx` so the detector's residue-level dedup
+/// never merges same-index residues from two molecules.
+fn gather_set(mol: &scene::Molecule, mol_idx: usize, sel: &molar::prelude::Sel, state: &State) -> InteractionSet {
+    let topo = mol.data.topology();
+    let n = state.coords.len();
+    let res_base = (mol_idx as u64) << 40;
+    let coord = |i: usize| state.coords.get(i).map(v3);
+
+    // Adjacency over the whole molecule (bonds index the full topology).
+    let mut neigh: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for bond in &mol.bonds {
+        let [a, b] = bond.pair();
+        if a < n && b < n {
+            neigh[a].push(b as u32);
+            neigh[b].push(a as u32);
+        }
+    }
+    let anum_of = |i: usize| topo.get_atom(i).map(|a| a.atomic_number).unwrap_or(0);
+
+    // Selected atoms → heavy-atom AtomInfo + a membership mask (for rings/charges).
+    let bound = mol.data.bind_with_state(sel, state);
+    let mut in_sel = vec![false; n];
+    let mut atoms = Vec::new();
+    for p in bound.iter_particle() {
+        in_sel[p.id] = true;
+        let anum = p.atom.atomic_number;
+        if anum == 1 {
+            continue; // H rides in its heavy neighbour's `attached_h`
+        }
+        let mut only_ch = anum == 6;
+        let mut attached_h = Vec::new();
+        let mut antecedent = None;
+        for &nb in &neigh[p.id] {
+            let nb = nb as usize;
+            let na = anum_of(nb);
+            if only_ch && !matches!(na, 1 | 6) {
+                only_ch = false;
+            }
+            if na == 1 {
+                if let Some(c) = coord(nb) {
+                    attached_h.push(c);
+                }
+            } else if antecedent.is_none() {
+                antecedent = coord(nb);
+            }
+        }
+        atoms.push(crate::interactions::AtomInfo {
+            pos: glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z),
+            atomicnum: anum,
+            res_key: res_base | (p.atom.resindex as u64),
+            only_ch_neighbors: only_ch,
+            attached_h,
+            antecedent,
+        });
+    }
+
+    // Aromatic rings fully inside the selection → centroid + plane normal.
+    let mut rings = Vec::new();
+    for ring in mol.interaction_rings.as_deref().unwrap_or(&[]) {
+        if ring.len() < 3 || !ring.iter().all(|&i| i < n && in_sel[i]) {
+            continue;
+        }
+        let pts: Vec<glam::Vec3> = ring.iter().filter_map(|&i| coord(i)).collect();
+        if pts.len() < 3 {
+            continue;
+        }
+        let center = pts.iter().copied().sum::<glam::Vec3>() / pts.len() as f32;
+        rings.push(crate::interactions::RingInfo {
+            center,
+            normal: crate::interactions::ring_normal(&pts),
+            res_key: res_base | (topo.get_atom(ring[0]).map(|a| a.resindex as u64).unwrap_or(0)),
+        });
+    }
+
+    let (cations, anions) = charged_groups(topo, &neigh, state, &in_sel, res_base, n);
+    InteractionSet { atoms, rings, cations, anions }
+}
+
+/// Detect charged groups in the selection: standard amino-acid sidechains / termini by
+/// residue+atom name, plus ligand functional groups (carboxylate, phosphate/sulfate,
+/// guanidinium) by connectivity. Heuristic — real formal charges aren't available; this
+/// covers the common protein–ligand salt-bridge / π-cation cases.
+fn charged_groups(
+    topo: &molar::prelude::Topology,
+    neigh: &[Vec<u32>],
+    state: &State,
+    in_sel: &[bool],
+    res_base: u64,
+    n: usize,
+) -> (Vec<crate::interactions::ChargeGroup>, Vec<crate::interactions::ChargeGroup>) {
+    use crate::interactions::ChargeGroup;
+    use std::collections::HashMap;
+    let coord = |i: usize| state.coords.get(i).map(v3);
+    let name = |i: usize| topo.get_atom(i).map(|a| a.name.as_str().to_string()).unwrap_or_default();
+    let anum = |i: usize| topo.get_atom(i).map(|a| a.atomic_number).unwrap_or(0);
+
+    // Group selected atoms by residue.
+    let mut byres: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, &sel) in in_sel.iter().enumerate().take(n) {
+        if sel {
+            if let Some(a) = topo.get_atom(i) {
+                byres.entry(a.resindex).or_default().push(i);
+            }
+        }
+    }
+    let centroid = |ids: &[usize]| -> Option<glam::Vec3> {
+        let mut sum = glam::Vec3::ZERO;
+        let mut k = 0;
+        for &i in ids {
+            if let Some(c) = coord(i) {
+                sum += c;
+                k += 1;
+            }
+        }
+        (k > 0).then(|| sum / k as f32)
+    };
+
+    let mut cations = Vec::new();
+    let mut anions = Vec::new();
+    for (ridx, ids) in &byres {
+        let rk = res_base | (*ridx as u64);
+        let resname = topo
+            .get_atom(ids[0])
+            .map(|a| a.resname.as_str().to_ascii_uppercase())
+            .unwrap_or_default();
+        let pick = |names: &[&str]| -> Vec<usize> {
+            ids.iter().copied().filter(|&i| names.contains(&name(i).as_str())).collect()
+        };
+        let mut push = |grp: Vec<usize>, positive: bool| {
+            if let Some(c) = centroid(&grp) {
+                let cg = ChargeGroup { center: c, res_key: rk };
+                if positive {
+                    cations.push(cg);
+                } else {
+                    anions.push(cg);
+                }
+            }
+        };
+        match resname.as_str() {
+            "ARG" => push(pick(&["CZ", "NH1", "NH2", "NE"]), true),
+            "LYS" => push(pick(&["NZ"]), true),
+            "HIS" | "HID" | "HIE" | "HIP" | "HSD" | "HSE" | "HSP" => {
+                push(pick(&["ND1", "NE2", "CE1", "CG", "CD2"]), true)
+            }
+            "ASP" => push(pick(&["CG", "OD1", "OD2"]), false),
+            "GLU" => push(pick(&["CD", "OE1", "OE2"]), false),
+            _ => {
+                // Ligand / non-standard residue: functional groups by connectivity.
+                for &i in ids {
+                    let deg_heavy = |j: usize| neigh[j].iter().filter(|&&k| anum(k as usize) > 1).count();
+                    if anum(i) == 6 {
+                        // Carboxylate: C bonded to ≥2 terminal O.
+                        let os: Vec<usize> = neigh[i]
+                            .iter()
+                            .map(|&k| k as usize)
+                            .filter(|&k| anum(k) == 8 && deg_heavy(k) <= 1)
+                            .collect();
+                        if os.len() >= 2 {
+                            let mut g = os;
+                            g.push(i);
+                            push(g, false);
+                        }
+                        // Guanidinium / amidinium: C bonded to ≥3 N.
+                        let ns = neigh[i].iter().filter(|&&k| anum(k as usize) == 7).count();
+                        if ns >= 3 {
+                            let mut g: Vec<usize> = neigh[i].iter().map(|&k| k as usize).collect();
+                            g.push(i);
+                            push(g, true);
+                        }
+                    } else if matches!(anum(i), 15 | 16) {
+                        // Phosphate / sulfate: P/S bonded to ≥3 O.
+                        let os: Vec<usize> =
+                            neigh[i].iter().map(|&k| k as usize).filter(|&k| anum(k) == 8).collect();
+                        if os.len() >= 3 {
+                            let mut g = os;
+                            g.push(i);
+                            push(g, false);
+                        }
+                    }
+                }
+            }
+        }
+        // C-terminal carboxylate (any residue carrying a terminal-oxygen name).
+        let oxt = pick(&["OXT", "OT1", "OT2", "OT"]);
+        if !oxt.is_empty() {
+            let mut g = oxt;
+            g.extend(pick(&["C", "O"]));
+            push(g, false);
+        }
+    }
+    (cations, anions)
+}
+
+/// Build the dashed contact-line geometry for an **Interactions** rep (`mol[self_mi]
+/// .reps[rep_idx]`): detect the enabled interaction types between this rep's selection and
+/// its partner rep's selection (possibly in another molecule) and emit colored dashed
+/// lines. Returns empty geometry if the partner is unset / stale / self / has no selection.
+/// Reads two molecules, so it runs outside the `&mut`-iterator rebuild loop (the ring
+/// caches of both molecules must already be populated — see `rebuild_dirty`).
+pub(super) fn build_interactions(
+    scene: &Scene,
+    self_mi: usize,
+    rep_idx: usize,
+) -> geometry::GeometryData {
+    let empty = geometry::GeometryData::default;
+    let Some(mol) = scene.molecules.get(self_mi) else {
+        return empty();
+    };
+    let Some(rep) = mol.reps.get(rep_idx) else {
+        return empty();
+    };
+    let RepParams::Interactions { settings } = rep.params else {
+        return empty();
+    };
+    let Some((pmi, prep_idx)) = partner_index(scene, rep) else {
+        return empty(); // unset / partner lost
+    };
+    if pmi == self_mi && prep_idx == rep_idx {
+        return empty(); // a rep can't point at itself
+    }
+    let Some(pmol) = scene.molecules.get(pmi) else {
+        return empty();
+    };
+    let Some(prep) = pmol.reps.get(prep_idx) else {
+        return empty();
+    };
+    let (Some(sel_a), Some(sel_b)) = (&rep.sel, &prep.sel) else {
+        return empty();
+    };
+
+    let set_a = gather_set(mol, self_mi, sel_a, displayed_state(mol));
+    let set_b = gather_set(pmol, pmi, sel_b, displayed_state(pmol));
+    let found = crate::interactions::detect(&set_a, &set_b, &settings.detect());
+    geometry::GeometryData {
+        lines: geometry::interaction_lines(&found, settings.line_width),
+        ..Default::default()
+    }
+}
+
 /// World-space (nm) outward shell offset for the active-selection glow mesh — large
 /// enough to dominate the sub-Ångström divergence between the subset and parent
 /// cartoon splines (so no z-fighting), small enough to read as a tight halo.
@@ -236,5 +517,51 @@ pub(super) fn inflate_mesh(mesh: &mut geometry::MeshData, d: f32) {
         v.pos[0] += v.normal[0] * d;
         v.pos[1] += v.normal[1] * d;
         v.pos[2] += v.normal[2] * d;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tpath(f: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/")).join(f)
+    }
+
+    /// An Interactions rep whose partner is a MolGroup member follows the group's
+    /// currently-shown member — so sliding the group updates the interactions target.
+    #[test]
+    fn partner_follows_group_shown_member() {
+        let rd = crate::settings::RepDefaults::default();
+        let bp = crate::data::bonds::BondParams::default();
+        let host = crate::data::load(&tpath("2lao.pdb")).expect("load 2lao.pdb");
+        let records = crate::data::load_records(&tpath("ligands20.sdf"), &bp).expect("load sdf");
+        assert!(records.len() >= 3, "need a few group members");
+
+        let mut scene = scene::Scene::default();
+        scene.add(host, &rd); // mol 0 = host, carries the interactions rep
+        scene.add_group(
+            records,
+            scene::MoleculeSource::File(tpath("ligands20.sdf")),
+            "ligands".into(),
+            &rd,
+        );
+
+        // Interactions rep on the host, partner = group member 0's shared rep (index 0).
+        let member0_src = scene.molecules[1].source.clone();
+        let mut rep = Representation::new(RepKind::Interactions);
+        rep.partner = Some((member0_src, 0));
+        scene.molecules[0].reps.push(rep);
+        let irep = scene.molecules[0].reps.len() - 1;
+
+        // Shown member is 0 → resolves to member 0's molecule.
+        let (pmi0, _) = partner_index(&scene, &scene.molecules[0].reps[irep]).unwrap();
+        assert_eq!(pmi0, scene.mol_index(scene.groups[0].members[0]).unwrap());
+
+        // Slide to member 2 → the partner follows the newly-shown member.
+        assert!(scene.switch_group_member(0, 2));
+        let (pmi2, _) = partner_index(&scene, &scene.molecules[0].reps[irep]).unwrap();
+        assert_eq!(pmi2, scene.mol_index(scene.groups[0].members[2]).unwrap());
+        assert_ne!(pmi0, pmi2, "partner molecule changed with the group slider");
     }
 }

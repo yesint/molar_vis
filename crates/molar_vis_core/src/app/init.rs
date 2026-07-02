@@ -213,6 +213,33 @@ impl App {
                 }
             }
         }
+        // Verification hook: MOLAR_VIS_DEBUG_INTERACTIONS=1 adds an Interactions rep on
+        // mol 0 detecting H-bonds + hydrophobic contacts against a partner rep — mol 1's
+        // first rep if a second molecule is loaded, else a second (disjoint-half) rep on
+        // mol 0. Exercises the cross-molecule detection + dashed-line build headlessly
+        // (pair with MOLAR_VIS_DEBUG_SAVE_IMAGE to screenshot the result).
+        if std::env::var("MOLAR_VIS_DEBUG_INTERACTIONS").is_ok() && !scene.molecules.is_empty() {
+            let (partner_src, partner_rep, self_sel) = if scene.molecules.len() >= 2 {
+                // Two molecules: mol 0 (whole) vs mol 1's first rep.
+                (scene.molecules[1].source.clone(), 0usize, "all".to_string())
+            } else {
+                // One molecule: split into two halves — rep 0 is the receptor half, the
+                // Interactions rep covers the other half.
+                let mol = &mut scene.molecules[0];
+                if let Some(r0) = mol.reps.first_mut() {
+                    r0.sel_text = "resid 100:9999".to_string();
+                    r0.sel_dirty = true;
+                }
+                (mol.source.clone(), 0usize, "resid 1:99".to_string())
+            };
+            let mut rep = Representation::new(RepKind::Interactions);
+            rep.sel_text = self_sel;
+            rep.sel_dirty = true;
+            rep.partner = Some((partner_src, partner_rep));
+            rep.params_open = true; // show the Partner control in the panel for screenshots
+            scene.molecules[0].reps.push(rep);
+            scene.molecules[0].reps_open = true;
+        }
         // Verification hook: MOLAR_VIS_DEBUG_SMOOTH=<window> sets mol 0's first rep
         // trajectory smoothing window (odd; needs MOLAR_VIS_DEBUG_TRAJ to do anything).
         if let Ok(w) = std::env::var("MOLAR_VIS_DEBUG_SMOOTH") {
@@ -501,6 +528,9 @@ impl App {
             pick_mode,
             selection_mode,
             lasso_path: Vec::new(),
+            partner_pick: None,
+            interactions_dialog: None,
+            interactions_tab: crate::interactions::InteractionKind::HBond,
             last_lens_ndc: None,
             #[cfg(not(target_arch = "wasm32"))]
             hover_pick: None,
@@ -637,6 +667,31 @@ impl App {
                 "behavior" => SettingsPage::Behavior,
                 _ => SettingsPage::Appearance,
             };
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[type] opens the
+        // Interactions settings dialog (on mol 0's Interactions rep, if any) at the
+        // given type tab, so the tabbed dialog can be screenshot headlessly. Pair with
+        // MOLAR_VIS_DEBUG_INTERACTIONS=1.
+        if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG") {
+            if let Some(mol) = app.scene.molecules.first() {
+                if let Some(ri) = mol
+                    .reps
+                    .iter()
+                    .position(|r| matches!(r.kind, RepKind::Interactions))
+                {
+                    app.interactions_dialog = Some((mol.id, ri));
+                    use crate::interactions::InteractionKind as K;
+                    app.interactions_tab = match tab.to_ascii_lowercase().as_str() {
+                        "hydrophobic" => K::Hydrophobic,
+                        "salt" | "saltbridge" => K::SaltBridge,
+                        "pistacking" | "pi-stack" | "pistack" => K::PiStacking,
+                        "pication" | "pi-cation" => K::PiCation,
+                        "halogen" => K::Halogen,
+                        _ => K::HBond,
+                    };
+                }
+            }
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DELFRAMES=1 opens the delete-frames

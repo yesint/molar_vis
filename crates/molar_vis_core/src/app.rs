@@ -158,6 +158,17 @@ pub struct App {
     /// In-progress lasso polygon (viewport pixel coords), accumulated while
     /// dragging in `PickMode::Lasso`. Empty when not lassoing. Transient view state.
     lasso_path: Vec<egui::Pos2>,
+    /// Active "choose a partner rep" mode for an Interactions rep, or `None`. Holds the
+    /// Interactions rep being configured as `(its molecule id, its rep index)`. While
+    /// set, hovering a rep's geometry (viewport) or a rep row (panel) highlights it and
+    /// clicking assigns it as the partner. Esc / empty-click cancels. Transient.
+    partner_pick: Option<(MolId, usize)>,
+    /// The Interactions rep whose per-type **Settings** dialog is open, as `(molecule
+    /// id, rep index)`, or `None`. A movable `egui::Window` (`draw_interactions_dialog`)
+    /// edits the rep's `InteractionSettings`. Transient.
+    interactions_dialog: Option<(MolId, usize)>,
+    /// Which interaction-type tab is active in that dialog. Transient.
+    interactions_tab: crate::interactions::InteractionKind,
     /// Last cursor NDC the hover detail lens was rebuilt at, so it only rebuilds as
     /// the cursor actually moves (the fade follows the ray, so any move rebuilds).
     last_lens_ndc: Option<(f32, f32)>,
@@ -559,7 +570,11 @@ impl App {
         // indices, so the GPU pick geometry's baked `mol+1` ids must be rebuilt.
         #[cfg(not(target_arch = "wasm32"))]
         let structure_changed = self.view_dirty;
-        for (_mi, mol) in self.scene.molecules.iter_mut().enumerate() {
+        // Which molecules had geometry/coords (re)built this pass — used by the
+        // Interactions second pass to rebuild a contact rep when either endpoint
+        // molecule changed (its own or the partner's coords/selection).
+        let mut mol_changed = vec![false; self.scene.molecules.len()];
+        for (mi, mol) in self.scene.molecules.iter_mut().enumerate() {
             // Only visible molecules are drawn into the pick id-buffer, so don't build
             // pick geometry for hidden ones (e.g. the N−1 unshown members of a group).
             // A hidden molecule made visible later sets `view_dirty`, re-marking it.
@@ -637,6 +652,13 @@ impl App {
                     }
                     rep.sel_dirty = false;
                 }
+                // Interactions reps read a *partner* molecule, so they can't be built
+                // inside this `&mut`-iterator loop — a second pass below handles them.
+                // Their selection was just evaluated (above); leave the geometry dirty
+                // flags for that pass to consume.
+                if matches!(rep.kind, RepKind::Interactions) {
+                    continue;
+                }
                 let Some(sel) = &rep.sel else {
                     rep.geom_dirty = false;
                     rep.coords_dirty = false;
@@ -697,6 +719,7 @@ impl App {
                     rep_geom_changed = true;
                 }
             }
+            mol_changed[mi] = rep_geom_changed;
             // Periodic-box wireframe: (re)build when dirty, regardless of whether
             // it's currently shown — both the molecule-level box toggle *and* a
             // rep's periodic `Box` toggle draw this geometry, and the latter isn't
@@ -785,12 +808,63 @@ impl App {
             // structure change). Mirrors the atoms CPU `pick` would ray-cast.
             #[cfg(not(target_arch = "wasm32"))]
             if rep_geom_changed || mol.pick_dirty {
-                let geom = build_pick(mol, _mi, render_state);
+                let geom = build_pick(mol, mi, render_state);
                 mol.pick_gpu = self.renderer.upload(rs, &geom);
                 mol.pick_dirty = false;
                 // No `changed = true`: pick geometry isn't drawn in render_scene, so
                 // it doesn't require a scene re-render on its own.
             }
+        }
+
+        // --- Second pass: Interactions reps ---
+        // They render contacts between their own selection and a *partner* rep in
+        // (possibly) another molecule, so they must read two molecules at once —
+        // impossible inside the `&mut`-iterator loop above. Rebuild one when its own
+        // flags are dirty OR either endpoint molecule's geometry/coords changed.
+        let mut inter_jobs: Vec<(usize, usize)> = Vec::new();
+        let mut need_rings: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        // A structural change (visibility toggle, group member switch via the slider,
+        // molecule add/remove) doesn't rebuild any rep's geometry, but it can change
+        // which molecule a partner resolves to (group-following) or its visibility — so
+        // rebuild every interactions rep on it too.
+        let structural = self.view_dirty;
+        for (mi, mol) in self.scene.molecules.iter().enumerate() {
+            for (ri, rep) in mol.reps.iter().enumerate() {
+                if !matches!(rep.kind, RepKind::Interactions) {
+                    continue;
+                }
+                let partner = build::partner_index(&self.scene, rep).map(|(p, _)| p);
+                let self_changed =
+                    rep.geom_dirty || rep.coords_dirty || mol_changed[mi] || structural;
+                let partner_changed = partner.is_some_and(|pmi| mol_changed[pmi]);
+                if self_changed || partner_changed {
+                    inter_jobs.push((mi, ri));
+                    // Both endpoint molecules need their aromatic-ring cache for the π
+                    // interactions (populated mutably here, before the immutable build).
+                    need_rings.insert(mi);
+                    if let Some(pmi) = partner {
+                        need_rings.insert(pmi);
+                    }
+                }
+            }
+        }
+        for mi in need_rings {
+            self.scene.molecules[mi].ensure_interaction_rings();
+        }
+        for (mi, ri) in inter_jobs {
+            // Compute (immutable scene borrow), then upload + store (drops the borrow
+            // first, so mutating the rep afterwards is fine).
+            let geom = build_interactions(&self.scene, mi, ri);
+            log::debug!(
+                "interactions rep {mi}:{ri} → {} dashed line vertices",
+                geom.lines.len()
+            );
+            let gpu = self.renderer.upload(rs, &geom);
+            let rep = &mut self.scene.molecules[mi].reps[ri];
+            rep.gpu = gpu;
+            rep.geom_dirty = false;
+            rep.coords_dirty = false;
+            changed = true;
         }
         changed
     }
@@ -912,6 +986,7 @@ impl eframe::App for App {
         self.draw_rename_dialog(&ctx);
         self.draw_image_dialog(&ctx);
         self.draw_settings_dialog(&ctx, frame);
+        self.draw_interactions_dialog(&ctx);
 
         // Apply undo/redo after the panel so list indices stay stable during draw.
         let applied = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {

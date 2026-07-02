@@ -43,6 +43,12 @@ pub struct RepState {
     pub material: Material,
     pub periodic: PeriodicParams,
     pub smooth_window: u32,
+    /// Interactions rep only: the partner rep, keyed by the partner molecule's
+    /// [`MoleculeSource`] + its rep index. Serializable + stable across reload, so it
+    /// round-trips through both undo/redo and sessions. `#[serde(default)]` keeps older
+    /// files loading.
+    #[serde(default)]
+    pub partner: Option<(MoleculeSource, usize)>,
 }
 
 /// serde mirror for molar's foreign [`SsAlgorithm`] (which derives no serde). Used
@@ -70,12 +76,13 @@ impl RepState {
             material: r.material,
             periodic: r.periodic,
             smooth_window: r.smooth_window,
+            partner: r.partner.clone(),
         }
     }
 
     /// Build a fresh (unbuilt, dirty) representation from this snapshot.
     pub fn to_representation(&self) -> Representation {
-        Representation::restore(
+        let mut rep = Representation::restore(
             self.kind,
             self.params,
             self.color,
@@ -87,7 +94,9 @@ impl RepState {
             self.material,
             self.periodic,
             self.smooth_window,
-        )
+        );
+        rep.partner = self.partner.clone();
+        rep
     }
 }
 
