@@ -34,6 +34,44 @@ pub(super) fn save_displayed(
     let _ = mol.data.set_state(prev); // restore the System's own state
     res
 }
+
+/// The `<stem>.edited.<ext>` path in `dir` for an edited-molecule copy, guaranteed **not**
+/// to resolve to `orig` — session save must never overwrite the original file. When the
+/// source is itself already named `*.edited.*`, the naive `<stem>.edited.<ext>` (after the
+/// `.edited` strip that avoids `.edited.edited` pile-up) would collide with it; a numeric
+/// suffix (`.edited.1.<ext>`, …) is added until the path is distinct.
+#[cfg(not(target_arch = "wasm32"))]
+fn edited_target_path(
+    dir: &std::path::Path,
+    stem: &str,
+    ext: &str,
+    orig: &std::path::Path,
+) -> std::path::PathBuf {
+    let base = dir.join(format!("{stem}.edited.{ext}"));
+    if !same_path(&base, orig) {
+        return base;
+    }
+    (1u32..)
+        .map(|n| dir.join(format!("{stem}.edited.{n}.{ext}")))
+        .find(|p| !same_path(p, orig))
+        .unwrap_or(base)
+}
+
+/// Whether `a` and `b` denote the same file. The target file may not exist yet, so the
+/// full path can't be canonicalized; compare each path's **canonicalized parent** plus its
+/// file name instead, falling back to a raw comparison if a parent can't be canonicalized.
+#[cfg(not(target_arch = "wasm32"))]
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let key = |p: &std::path::Path| {
+        let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+        let cp = parent.and_then(|d| std::fs::canonicalize(d).ok())?;
+        Some((cp, p.file_name()?.to_os_string()))
+    };
+    match (key(a), key(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a == b,
+    }
+}
 impl App {
 
     /// Tear down the current document: drop all molecules (and the trash), cancel
@@ -273,7 +311,7 @@ impl App {
                     .extension()
                     .map(|e| e.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "pdb".to_string());
-                Some((i, m.id, dir.join(format!("{stem}.edited.{ext}"))))
+                Some((i, m.id, edited_target_path(&dir, stem, &ext, orig)))
             })
             .collect();
 
