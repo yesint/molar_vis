@@ -121,6 +121,12 @@ impl App {
         let mut session = self.draw.take().unwrap_or_default();
         session.target = Some(id);
         session.drag = DrawDrag::Idle;
+        // Start this molecule with a clean editing slate: a leftover DihedralRotate tool +
+        // its selected axis are keyed (by MolId) to the previously-edited molecule, so a
+        // handle drag would keep rotating the *old* molecule instead of this one. Reset to
+        // the default Draw tool and drop the axis/handle state, as a fresh session would.
+        session.tool = DrawTool::Draw;
+        session.dihedral = super::dihedral::DihedralState::default();
         self.draw = Some(session);
     }
 
