@@ -19,7 +19,9 @@ use super::draw::DrawTool;
 use super::widgets::px_to_ndc;
 
 use glam::Vec3;
+use std::cell::RefCell;
 use std::f32::consts::{PI, TAU};
+use std::sync::Arc;
 
 /// Screen-space grab radius for a handle (points): click/drag within this of a handle's
 /// drawn dot to grab it.
@@ -100,6 +102,10 @@ pub(super) struct DihedralState {
     pub(super) axis: Option<DihedralAxis>,
     /// The active handle drag, if any.
     pub(super) drag: Option<DihedralDrag>,
+    /// Bond-graph adjacency cached for the hover preview, keyed by (molecule,
+    /// structure_version) — otherwise `build_axis` rebuilds it (O(atoms+bonds)) every hover
+    /// frame. `RefCell` so the `&self` preview path can populate it.
+    adj_cache: RefCell<Option<(MolId, u64, Arc<Vec<Vec<usize>>>)>>,
 }
 
 /// Adjacency list (neighbour atoms per atom index) from a molecule's bond graph.
@@ -148,22 +154,28 @@ fn side_atoms(adj: &[Vec<usize>], start: usize, i: usize, j: usize) -> Vec<usize
 /// Bond order is not considered — a guessed PDB bond has no order, and the tool is a
 /// geometric aid, so any non-ring, non-terminal bond may be twisted.
 fn build_axis(mol: &scene::Molecule, k: usize) -> Option<DihedralAxis> {
+    build_axis_with(mol, k, &adjacency(mol))
+}
+
+/// [`build_axis`] with a caller-supplied `adj` (indexed by atom, length `mol.n_atoms`), so
+/// the per-frame hover preview can reuse a cached adjacency instead of rebuilding it every
+/// frame.
+fn build_axis_with(mol: &scene::Molecule, k: usize, adj: &[Vec<usize>]) -> Option<DihedralAxis> {
     let bond = mol.bonds.get(k)?;
     let (i, j) = (bond.i1, bond.i2);
     if i >= mol.n_atoms || j >= mol.n_atoms || i == j {
         return None;
     }
-    let adj = adjacency(mol);
     // Terminal bond: an endpoint whose only neighbour is the other endpoint.
     if adj[i].len() < 2 || adj[j].len() < 2 {
         return None;
     }
-    let j_side = side_atoms(&adj, j, i, j);
+    let j_side = side_atoms(adj, j, i, j);
     // Ring: cutting i–j still leaves j connected to i → the bond can't rotate freely.
     if j_side.contains(&i) {
         return None;
     }
-    let i_side = side_atoms(&adj, i, i, j);
+    let i_side = side_atoms(adj, i, i, j);
     // Handles on every bond adjacent to the axis: the i-side neighbours (anchored at
     // i) and the j-side neighbours (anchored at j).
     let mut handles = Vec::new();
@@ -614,6 +626,25 @@ impl App {
         }
     }
 
+    /// Bond-graph adjacency for `mol`, cached on the DihedralState and keyed by
+    /// (molecule, structure_version), so the per-frame `&self` hover preview reuses it
+    /// instead of rebuilding it (O(atoms+bonds)) every frame. Falls back to a fresh build
+    /// when there's no active draw session.
+    fn dihedral_cached_adjacency(&self, mol: &scene::Molecule) -> Arc<Vec<Vec<usize>>> {
+        let Some(draw) = self.draw.as_ref() else {
+            return Arc::new(adjacency(mol));
+        };
+        let mut c = draw.dihedral.adj_cache.borrow_mut();
+        if let Some((id, ver, adj)) = c.as_ref() {
+            if *id == mol.id && *ver == mol.structure_version {
+                return adj.clone();
+            }
+        }
+        let adj = Arc::new(adjacency(mol));
+        *c = Some((mol.id, mol.structure_version, adj.clone()));
+        adj
+    }
+
     /// Faintly highlight the rotatable bond under the cursor (before one is selected),
     /// so the user sees what a click would pick. A non-rotatable bond isn't drawn.
     fn dihedral_preview_hover(&self, painter: &egui::Painter, rect: egui::Rect, size_px: [u32; 2]) {
@@ -624,7 +655,8 @@ impl App {
             return;
         };
         let mol = &self.scene.molecules[mi];
-        if build_axis(mol, k).is_none() {
+        let adj = self.dihedral_cached_adjacency(mol);
+        if build_axis_with(mol, k, &adj).is_none() {
             return; // not rotatable → no preview
         }
         let bond = mol.bonds[k];
@@ -671,7 +703,7 @@ impl App {
         self.draw = Some(DrawSession {
             tool: DrawTool::DihedralRotate,
             target: Some(mol_id),
-            dihedral: DihedralState { axis: Some(axis), drag: None },
+            dihedral: DihedralState { axis: Some(axis), drag: None, ..Default::default() },
             ..DrawSession::default()
         });
         self.view_dirty = true;
