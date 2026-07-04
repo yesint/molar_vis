@@ -701,6 +701,10 @@ impl App {
                     &mol.bonds,
                     kind,
                 );
+                // relax_in_system mutates coords directly (not via set_coords/rotate_fragment),
+                // so bump the version to invalidate the structure_snapshot cache — else the
+                // next topology edit's `before` would snapshot the *pre*-relax coordinates.
+                mol.structure_version = mol.structure_version.wrapping_add(1);
                 mol.refresh_bbox();
                 // Coordinates moved → in-place GPU coord update (no rebuild) + glow +
                 // aromatic circles follow.
