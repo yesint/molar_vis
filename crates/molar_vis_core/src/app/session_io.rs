@@ -157,13 +157,14 @@ impl App {
     /// format. Mirrors [`save_displayed`]'s frame-swap for each member.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn save_group(&mut self, gi: usize) {
-        let (name, member_ids) = match self.scene.groups.get(gi) {
-            Some(g) => (g.name.clone(), g.members.clone()),
+        // Only the group name is needed here (for the dialog's default file name); the
+        // member list is re-read by save_group_to when the write actually happens.
+        let name = match self.scene.groups.get(gi) {
+            Some(g) => g.name.clone(),
             None => return,
         };
         // Default to the group's own file name (usually "<something>.sdf").
         let default = if name.is_empty() { "group.sdf".to_string() } else { name };
-        let _ = member_ids;
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Multi-molecule", &["sdf", "sd", "mol", "pdb"])
             .set_file_name(&default)
