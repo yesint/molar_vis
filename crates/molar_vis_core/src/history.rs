@@ -209,19 +209,7 @@ impl StructEdit {
                 let coords = if forward { after } else { before };
                 let m = &mut scene.molecules[mi];
                 m.set_coords(atoms, coords, *frame);
-                for rep in &mut m.reps {
-                    rep.coords_dirty = true;
-                }
-                if m.pending.is_some() {
-                    m.glow_dirty = true;
-                }
-                if m.show_box {
-                    m.box_dirty = true;
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    m.pick_dirty = true;
-                }
+                m.mark_coords_dirty(true);
                 m.refresh_bbox();
             }
             StructEdit::Topology { before, after } => {
@@ -689,6 +677,8 @@ impl History {
     /// to the redo stack). This is the correct "structure differs from what was loaded"
     /// signal for session save: `structure_version` only ever counts up (an undo bumps it
     /// too), so it can't tell a live edit from one that was made and then reverted.
+    // Consumed only by the native-only session save, so it's dead code on wasm.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn struct_edited_ids(&self) -> std::collections::HashSet<MolId> {
         self.undo
             .iter()

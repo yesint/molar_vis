@@ -371,15 +371,8 @@ impl App {
                 continue; // coordinates unchanged since the last render
             }
             mol.shared_coords_version = version;
-            for rep in &mut mol.reps {
-                rep.coords_dirty = true;
-            }
-            if mol.pending.is_some() {
-                mol.glow_dirty = true;
-            }
-            if mol.show_box {
-                mol.box_dirty = true;
-            }
+            // Shared-source polling doesn't drive the GPU pick buffer → pick = false.
+            mol.mark_coords_dirty(false);
         }
     }
 

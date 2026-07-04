@@ -558,21 +558,9 @@ impl App {
                 DihedralSide::J => axis.j_side.clone(),
             }
         };
-        self.scene.molecules[mi].rotate_fragment(&atoms, axis_point, u, delta);
         let mol = &mut self.scene.molecules[mi];
-        for rep in &mut mol.reps {
-            rep.coords_dirty = true;
-        }
-        if mol.pending.is_some() {
-            mol.glow_dirty = true;
-        }
-        if mol.show_box {
-            mol.box_dirty = true;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            mol.pick_dirty = true;
-        }
+        mol.rotate_fragment(&atoms, axis_point, u, delta);
+        mol.mark_coords_dirty(true);
         self.view_dirty = true;
     }
 

@@ -708,18 +708,9 @@ impl App {
                 mol.refresh_bbox();
                 // Coordinates moved → in-place GPU coord update (no rebuild) + glow +
                 // aromatic circles follow.
-                for rep in &mut mol.reps {
-                    rep.coords_dirty = true;
-                }
+                mol.mark_coords_dirty(true);
                 if !mol.aromatic_rings.is_empty() {
                     mol.aromatic_dirty = true;
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    mol.pick_dirty = true;
-                }
-                if mol.pending.is_some() {
-                    mol.glow_dirty = true;
                 }
                 let coord_edit = before.and_then(|before| {
                     let after: Vec<[f32; 3]> =

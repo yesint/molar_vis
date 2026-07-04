@@ -746,6 +746,31 @@ impl Molecule {
         self.bbox_max = max;
     }
 
+    /// Flag the molecule's derived render state stale after a **coordinate-only** change
+    /// (frame swap, dihedral twist, relax, live shared-source edit): every rep gets an
+    /// in-place GPU coord update, and any pending-selection glow / periodic box / (native)
+    /// GPU pick buffer follows. `pick` gates the native pick-buffer rebuild — some callers
+    /// (e.g. shared-source polling) don't drive picking, so they pass `false`.
+    pub fn mark_coords_dirty(&mut self, pick: bool) {
+        for rep in &mut self.reps {
+            rep.coords_dirty = true;
+        }
+        if self.pending.is_some() {
+            self.glow_dirty = true;
+        }
+        if self.show_box {
+            self.box_dirty = true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if pick {
+            self.pick_dirty = true;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = pick;
+        }
+    }
+
     // --- Structure editing (drawing tool) ----------------------------------
     // These are the single source of bond/atom mutation; they keep `bonds` and
     // `bond_orders` index-aligned and the same length. The molar `System` is the
