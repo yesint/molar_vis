@@ -684,6 +684,21 @@ impl History {
         &self.redo[self.redo.len() - 1 - d].label
     }
 
+    /// The molecule ids that currently carry a **net applied** structural edit — a `Struct`
+    /// step still on the undo stack, i.e. not one that's been fully undone (which moves it
+    /// to the redo stack). This is the correct "structure differs from what was loaded"
+    /// signal for session save: `structure_version` only ever counts up (an undo bumps it
+    /// too), so it can't tell a live edit from one that was made and then reverted.
+    pub fn struct_edited_ids(&self) -> std::collections::HashSet<MolId> {
+        self.undo
+            .iter()
+            .filter_map(|e| match &e.step {
+                Step::Struct(mol, _) => Some(*mol),
+                Step::Doc(_) => None,
+            })
+            .collect()
+    }
+
     /// Undo one step, applying it to `scene` in place; returns its label (or `None` if
     /// the undo stack is empty). Steps are replayed individually in strict LIFO order — a
     /// structural delta must each be inverted in sequence, so there is no "jump to a

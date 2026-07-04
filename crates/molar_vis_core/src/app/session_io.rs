@@ -219,33 +219,50 @@ impl App {
     /// Write the current state to `path` (the file half of [`Self::save_session`],
     /// also driven by the `MOLAR_VIS_DEBUG_SAVE_SESSION` verification hook).
     ///
-    /// A session references molecules by source **path**. A File-source molecule that
-    /// was **structurally edited** (dihedral twist, draw/erase, cleanup — detected via
-    /// `structure_version`) is first written out as `<stem>.edited.<ext>` next to the
-    /// session file, and the session is pointed at that copy, so the edits reload (the
-    /// original file is left untouched). A molecule with no reloadable file source
-    /// (hand-drawn / in-memory bytes) still can't be restored — the user is warned.
+    /// A session references molecules by source **path**. A File-source molecule with a
+    /// **net applied** structural edit (dihedral twist, draw/erase, cleanup — detected from
+    /// the undo history's live `Struct` steps, so a *fully undone* edit doesn't count) is
+    /// first written out as `<stem>.edited.<ext>` next to the session file, and the session
+    /// is pointed at that copy, so the edits reload (the original file is left untouched).
+    /// An edited molecule with a **loaded trajectory** is *not* exported this way (the
+    /// replayed trajectory would override a single edited frame on reload); it reloads from
+    /// its original file + trajectory, and the user is warned the edit won't persist. A
+    /// molecule with no reloadable file source (hand-drawn / in-memory bytes) also can't be
+    /// restored — the user is warned.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn save_session_to(&mut self, path: &std::path::Path) {
         // Where the `*.edited.*` copies go: next to the session (falls back to the
         // original's own directory if the session has no parent).
         let session_dir = path.parent().map(|p| p.to_path_buf());
 
+        // Which molecules have a *net applied* structural edit (not one that's been fully
+        // undone). `structure_version` can't tell those apart — it only counts up — so use
+        // the undo history's live `Struct` steps.
+        let edited_ids = self.history.struct_edited_ids();
+
         // Collect the edited File-source standalone molecules + their target paths
-        // (immutable pass), then write each (mutable pass). Group members reload from
-        // their multi-record SDF by index, so per-member edited copies aren't wired up.
+        // (immutable pass), then write each (mutable pass). Skipped for: grouped members
+        // (they reload from their multi-record SDF by index); molecules with a loaded
+        // trajectory (a single displayed frame can't carry the edit faithfully, and the
+        // replayed trajectory would override it on reload — counted for a warning); and
+        // molecules with no net applied edit.
+        let mut edited_with_traj = 0usize;
         let targets: Vec<(usize, MolId, std::path::PathBuf)> = self
             .scene
             .molecules
             .iter()
             .enumerate()
             .filter_map(|(i, m)| {
-                if m.group.is_some() || m.structure_version == 0 {
-                    return None; // grouped, or never structurally edited → original reloads it
+                if m.group.is_some() || !edited_ids.contains(&m.id) {
+                    return None; // grouped, or no net structural edit → original reloads it
                 }
                 let MoleculeSource::File(orig) = &m.source else {
-                    return None; // no reloadable file source
+                    return None; // no reloadable file source (warned via `unreloadable`)
                 };
+                if !m.trajectory.frames.is_empty() {
+                    edited_with_traj += 1;
+                    return None;
+                }
                 let dir = session_dir
                     .clone()
                     .or_else(|| orig.parent().map(|p| p.to_path_buf()))?;
@@ -314,6 +331,12 @@ impl App {
                 if unreloadable > 0 {
                     msg.push_str(&format!(
                         "; {unreloadable} molecule(s) won't reload (use Save molecule… to export them)"
+                    ));
+                }
+                if edited_with_traj > 0 {
+                    msg.push_str(&format!(
+                        "; {edited_with_traj} edited molecule(s) with a trajectory keep only their \
+                         original structure (reload from the original file + trajectory)"
                     ));
                 }
                 if edited_failed > 0 {
