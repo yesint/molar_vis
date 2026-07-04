@@ -2,6 +2,7 @@
 use super::*;
 use super::overlay::*;
 use super::draw::DrawTool;
+use super::widgets::px_to_ndc;
 
 /// Tile-submits to issue per frame while pumping a trace. Keeps each frame's GPU work bounded
 /// (so the UI stays responsive) while the trace refines progressively over several frames.
@@ -98,12 +99,7 @@ impl App {
                     // Zoom toward the cursor: pass its NDC position (y up) + aspect.
                     let ndc = response
                         .hover_pos()
-                        .map(|p| {
-                            glam::vec2(
-                                ((p.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-                                1.0 - ((p.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-                            )
-                        })
+                        .map(|p| px_to_ndc(p, rect))
                         .unwrap_or(glam::Vec2::ZERO);
                     let aspect = rect.width() / rect.height().max(1.0);
                     self.camera.zoom_scroll(scroll, ndc, aspect);
@@ -329,10 +325,8 @@ impl App {
                     Some((0.0, 0.0))
                 } else {
                     response.hover_pos().map(|p| {
-                        (
-                            ((p.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-                            1.0 - ((p.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-                        )
+                        let n = px_to_ndc(p, rect);
+                        (n.x, n.y)
                     })
                 };
                 if let Some((ndc_x, ndc_y)) = ndc {
@@ -798,12 +792,7 @@ impl App {
         // Screen px → clip-space NDC (y up), matching `pick`'s convention.
         let polygon: Vec<glam::Vec2> = path
             .iter()
-            .map(|p| {
-                glam::Vec2::new(
-                    ((p.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-                    1.0 - ((p.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-                )
-            })
+            .map(|&p| px_to_ndc(p, rect))
             .collect();
         let aspect = size_px[0] as f32 / size_px[1] as f32;
         let view = self.camera.view();

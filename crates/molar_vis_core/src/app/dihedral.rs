@@ -16,6 +16,7 @@
 use super::*;
 use super::overlay::*;
 use super::draw::DrawTool;
+use super::widgets::px_to_ndc;
 
 use glam::Vec3;
 use std::f32::consts::{PI, TAU};
@@ -99,14 +100,6 @@ pub(super) struct DihedralState {
     pub(super) axis: Option<DihedralAxis>,
     /// The active handle drag, if any.
     pub(super) drag: Option<DihedralDrag>,
-}
-
-/// Viewport pixel → clip-space NDC (each in `[-1, 1]`, y up).
-fn px_to_ndc(px: egui::Pos2, rect: egui::Rect) -> (f32, f32) {
-    (
-        ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-        1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-    )
 }
 
 /// Adjacency list (neighbour atoms per atom index) from a molecule's bond graph.
@@ -322,7 +315,6 @@ impl App {
         let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
         let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
         let ndc = px_to_ndc(cursor, rect);
-        let ndc = glam::vec2(ndc.0, ndc.1);
         let mut best: Option<(usize, usize, f32)> = None;
         for (mi, mol) in self.scene.molecules.iter().enumerate() {
             if !mol.visible || mol.data.is_shared() || mol.bonds.is_empty() {
@@ -479,14 +471,14 @@ impl App {
         &self,
         _rect: egui::Rect,
         size_px: [u32; 2],
-        ndc: (f32, f32),
+        ndc: glam::Vec2,
         axis_point: Vec3,
         u: Vec3,
         e1: Vec3,
         e2: Vec3,
     ) -> Option<f32> {
         let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
-        let (o, dir) = pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc.0, ndc.1);
+        let (o, dir) = pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc.x, ndc.y);
         let denom = dir.dot(u);
         if denom.abs() < 1e-4 {
             return None;

@@ -1,6 +1,16 @@
 //! Shared egui widget helpers used across the app submodules.
 use super::*;
 
+/// Viewport pixel position → clip-space NDC (each component in `[-1, 1]`, y up). The single
+/// source of the pixel→NDC mapping shared by picking, drawing, the lasso, and the dihedral
+/// tool — change the viewport-to-NDC convention here, not in each call site.
+pub(super) fn px_to_ndc(px: egui::Pos2, rect: egui::Rect) -> glam::Vec2 {
+    glam::vec2(
+        ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
+        1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
+    )
+}
+
 
 /// A compact icon button: frameless at rest, with a background highlight on
 /// hover, plus a tooltip. Implemented via `selectable_label` (always unselected)

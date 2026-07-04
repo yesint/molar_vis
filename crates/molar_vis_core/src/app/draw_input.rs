@@ -2,6 +2,7 @@
 use super::*;
 use super::draw::*;
 use super::overlay::*;
+use super::widgets::px_to_ndc;
 
 
 /// Above this atom count, draw-mode edits skip the automatic whole-molecule
@@ -19,12 +20,11 @@ impl App {
     /// land on the focal plane the user is looking at. `None` if the ray is parallel
     /// to the plane (degenerate).
     pub(super) fn drawing_plane_point(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> Option<glam::Vec3> {
-        let ndc_x = ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0;
-        let ndc_y = 1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0;
+        let ndc = px_to_ndc(px, rect);
         let aspect = size_px[0] as f32 / size_px[1] as f32;
         let view = self.camera.view();
         let proj = self.camera.proj(aspect);
-        let (ro, rd) = pick::cursor_ray(view, proj, ndc_x, ndc_y);
+        let (ro, rd) = pick::cursor_ray(view, proj, ndc.x, ndc.y);
         // Plane normal = the view direction toward the eye (camera-facing).
         let n = (self.camera.eye() - self.camera.target).normalize_or_zero();
         let p0 = self
@@ -45,10 +45,9 @@ impl App {
 
     /// Pixel → world ray on the current camera (for snap-to-atom hit tests).
     pub(super) fn cursor_world_ray(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> (glam::Vec3, glam::Vec3) {
-        let ndc_x = ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0;
-        let ndc_y = 1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0;
+        let ndc = px_to_ndc(px, rect);
         let aspect = size_px[0] as f32 / size_px[1] as f32;
-        pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc_x, ndc_y)
+        pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc.x, ndc.y)
     }
 
     /// Project a world point (nm) to a viewport pixel (for the rubber-band's start).
@@ -247,10 +246,7 @@ impl App {
         // Outside every sphere → the nearest bond, if the cursor is close to its line.
         let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
         let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
-        let ndc = glam::vec2(
-            ((cursor.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-            1.0 - ((cursor.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-        );
+        let ndc = px_to_ndc(cursor, rect);
         pick::nearest_bond(mol, view, proj, ndc, 0.02).map(HitTarget::Bond)
     }
 
@@ -588,10 +584,7 @@ impl App {
         // No atom hit → try a bond.
         let aspect = size_px[0] as f32 / size_px[1] as f32;
         let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
-        let ndc = glam::vec2(
-            ((px.x - rect.left()) / rect.width().max(1.0)) * 2.0 - 1.0,
-            1.0 - ((px.y - rect.top()) / rect.height().max(1.0)) * 2.0,
-        );
+        let ndc = px_to_ndc(px, rect);
         if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02) {
             self.scene.molecules[mi].remove_bond_at(k);
             self.flag_edit(mi);
