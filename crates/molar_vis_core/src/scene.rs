@@ -864,22 +864,40 @@ impl Molecule {
         self.structure_version += 1;
     }
 
-    /// Overwrite the positions of `atoms` (global indices) with `coords` (parallel, nm),
-    /// mutating the **displayed** coordinates — the current trajectory frame if one is
-    /// loaded, else the owned `System`. Used by undo/redo of a coordinate delta
-    /// ([`crate::history::StructEdit::Coords`]); a shared molecule is left untouched.
-    pub fn set_coords(&mut self, atoms: &[usize], coords: &[[f32; 3]]) {
-        if let Some(frame) = self.trajectory.frames.get_mut(self.trajectory.current) {
-            for (&a, c) in atoms.iter().zip(coords) {
-                if let Some(p) = frame.coords.get_mut(a) {
-                    *p = Pos::new(c[0], c[1], c[2]);
+    /// The coordinate store a structural edit writes to *right now*: a specific trajectory
+    /// frame (`Some(index)`) if one is loaded, else the owned `System` (`None`). Captured at
+    /// edit time and carried on a [`StructEdit::Coords`](crate::history::StructEdit::Coords)
+    /// so its undo/redo targets the **same** store even after the displayed frame or the
+    /// trajectory itself has changed.
+    pub fn coord_edit_target(&self) -> Option<usize> {
+        (!self.trajectory.frames.is_empty()).then_some(self.trajectory.current)
+    }
+
+    /// Overwrite the positions of `atoms` (global indices) with `coords` (parallel, nm) in
+    /// the coordinate store `frame` designates — a specific trajectory frame (`Some`) or the
+    /// owned `System` (`None`), as captured by [`coord_edit_target`](Self::coord_edit_target)
+    /// when the edit was recorded. Used by undo/redo of a coordinate delta
+    /// ([`crate::history::StructEdit::Coords`]); a no-op if the target frame is gone or the
+    /// molecule is shared.
+    pub fn set_coords(&mut self, atoms: &[usize], coords: &[[f32; 3]], frame: Option<usize>) {
+        match frame {
+            Some(f) => {
+                if let Some(fr) = self.trajectory.frames.get_mut(f) {
+                    for (&a, c) in atoms.iter().zip(coords) {
+                        if let Some(p) = fr.coords.get_mut(a) {
+                            *p = Pos::new(c[0], c[1], c[2]);
+                        }
+                    }
                 }
             }
-        } else if let Some(sys) = self.data.system_mut() {
-            let mut bound = sys.select_all_bound_mut();
-            for (&a, c) in atoms.iter().zip(coords) {
-                if let Some(p) = bound.get_pos_mut(a) {
-                    *p = Pos::new(c[0], c[1], c[2]);
+            None => {
+                if let Some(sys) = self.data.system_mut() {
+                    let mut bound = sys.select_all_bound_mut();
+                    for (&a, c) in atoms.iter().zip(coords) {
+                        if let Some(p) = bound.get_pos_mut(a) {
+                            *p = Pos::new(c[0], c[1], c[2]);
+                        }
+                    }
                 }
             }
         }

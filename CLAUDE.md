@@ -349,8 +349,11 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   each either `Doc(EditState)` — the reps/visibility/groups **document**, snapshot-diffed at settle
   via `maybe_record` against the rolling `committed` baseline (as before) — or `Struct(MolId,
   StructEdit)` — a **self-contained structural delta**, recorded eagerly at gesture end via
-  `record_struct`. **`StructEdit::Coords { atoms, before, after }`** stores only the *moved* atoms'
-  positions (dihedral twist, minimizer/cleanup — owned-System only); **`StructEdit::Topology {
+  `record_struct`. **`StructEdit::Coords { atoms, before, after, frame }`** stores only the *moved*
+  atoms' positions (dihedral twist, minimizer/cleanup) plus the coordinate store the delta targets —
+  `frame: Some(i)` = trajectory frame *i*, `None` = the owned System — captured at edit time (via
+  `Molecule::coord_edit_target`) so undo hits the **same** store even after the displayed frame or
+  trajectory changes; a dihedral twist is undoable whether or not a trajectory is loaded. **`StructEdit::Topology {
   before, after: Arc<StructureSnapshot> }`** carries full before/after snapshots for atom/bond
   add/remove (molar re-indexes on removal, so per-atom topology deltas aren't feasible; rare + small,
   Arc-shared). Structure is **not** in the document — `EditState`/`MolState` hold only reps+visibility;

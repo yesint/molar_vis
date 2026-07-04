@@ -182,12 +182,14 @@ pub struct MolState {
 /// the snapshots are `Arc`-shared).
 pub enum StructEdit {
     /// A coordinate-only move (dihedral twist, minimizer/cleanup): the moved atoms and
-    /// their positions before/after. Applied to the **owned** System (recorded only when
-    /// no trajectory is loaded — a frame edit is transient view state).
+    /// their positions before/after, plus the coordinate store the delta targets —
+    /// a specific trajectory frame (`Some`) or the owned System (`None`), captured at edit
+    /// time so undo hits the same store even after the displayed frame/trajectory changes.
     Coords {
         atoms: Vec<usize>,
         before: Vec<[f32; 3]>,
         after: Vec<[f32; 3]>,
+        frame: Option<usize>,
     },
     /// A topology change (atom/bond add/remove, element/order): full before/after
     /// structure snapshots, `Arc`-shared with neighbours so unchanged history is cheap.
@@ -203,10 +205,10 @@ impl StructEdit {
     fn apply(&self, scene: &mut Scene, mol: MolId, forward: bool) {
         let Some(mi) = scene.mol_index(mol) else { return };
         match self {
-            StructEdit::Coords { atoms, before, after } => {
+            StructEdit::Coords { atoms, before, after, frame } => {
                 let coords = if forward { after } else { before };
                 let m = &mut scene.molecules[mi];
-                m.set_coords(atoms, coords);
+                m.set_coords(atoms, coords, *frame);
                 for rep in &mut m.reps {
                     rep.coords_dirty = true;
                 }
@@ -860,7 +862,12 @@ mod tests {
 
         hist.record_struct(
             id,
-            StructEdit::Coords { atoms: atoms.clone(), before: before.clone(), after: after.clone() },
+            StructEdit::Coords {
+                atoms: atoms.clone(),
+                before: before.clone(),
+                after: after.clone(),
+                frame: None,
+            },
             "rotate bond".into(),
         );
         assert_eq!(hist.undo_label(0), "rotate bond");
@@ -892,7 +899,7 @@ mod tests {
         let after = coords_of(&scene, &atoms);
         hist.record_struct(
             id,
-            StructEdit::Coords { atoms: atoms.clone(), before: before.clone(), after },
+            StructEdit::Coords { atoms: atoms.clone(), before: before.clone(), after, frame: None },
             "rotate bond".into(),
         );
         // (3) Doc: hide the rep.

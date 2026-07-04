@@ -80,10 +80,12 @@ pub(super) struct DihedralDrag {
     /// single small step.
     pub(super) last_angle: f32,
     /// The rotated side's atoms + their coordinates captured at grab time, so the whole
-    /// drag records as one undoable coordinate delta at release. Empty when the edit
-    /// isn't undoable (a trajectory is loaded → the rotation is a transient frame edit).
+    /// drag records as one undoable coordinate delta at release.
     pub(super) edit_atoms: Vec<usize>,
     pub(super) before: Vec<[f32; 3]>,
+    /// The coordinate store the twist targets (owned System / a trajectory frame), captured
+    /// at grab time so its undo hits the same store — see [`Molecule::coord_edit_target`].
+    pub(super) frame: Option<usize>,
 }
 
 /// State for the DihedralRotate tool, held on the active [`DrawSession`]: the selected
@@ -240,11 +242,11 @@ impl App {
                     .draw
                     .as_mut()
                     .and_then(|d| d.dihedral.drag.take())
-                    .map(|dr| (dr.edit_atoms, dr.before));
+                    .map(|dr| (dr.edit_atoms, dr.before, dr.frame));
                 if let Some(mi) = axis_mi {
                     self.scene.molecules[mi].refresh_bbox();
-                    if let Some((atoms, before)) = edit {
-                        self.dihedral_record_rotation(mi, atoms, before);
+                    if let Some((atoms, before, frame)) = edit {
+                        self.dihedral_record_rotation(mi, atoms, before, frame);
                     }
                 }
             }
@@ -381,14 +383,12 @@ impl App {
             };
             (axis.i, axis.j, h.atom, h.side, side_atoms)
         };
-        // Capture the rotated side's coords for undo — owned System only (a trajectory
-        // frame twist is transient view state); leave empty otherwise (→ not recorded).
-        let (edit_atoms, before) = if self.scene.molecules[mi].trajectory.frames.is_empty() {
-            let before = self.dihedral_coords_of(mi, &side_atoms);
-            (side_atoms, before)
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        // Capture the rotated side's coords + which store they live in, so the whole drag
+        // records as one undoable delta at release. This works for any molecule: the frame
+        // target keeps the undo correct even if the displayed frame changes afterward.
+        let frame = self.scene.molecules[mi].coord_edit_target();
+        let before = self.dihedral_coords_of(mi, &side_atoms);
+        let edit_atoms = side_atoms;
         let (Some(pi), Some(pj), Some(ph)) = (
             self.atom_world(mi, i),
             self.atom_world(mi, j),
@@ -428,13 +428,16 @@ impl App {
                 last_angle: angle,
                 edit_atoms,
                 before,
+                frame,
             });
         }
     }
 
-    /// The owned-System coordinates of `atoms` in molecule `mi` (nm), for undo capture.
+    /// The **displayed** coordinates of `atoms` in molecule `mi` (nm), for undo capture —
+    /// the current trajectory frame if one is loaded, else the owned System (matching where
+    /// `rotate_fragment` writes and the store `coord_edit_target` recorded).
     fn dihedral_coords_of(&self, mi: usize, atoms: &[usize]) -> Vec<[f32; 3]> {
-        let st = self.scene.molecules[mi].data.state();
+        let st = self.scene.molecules[mi].render_state();
         atoms
             .iter()
             .map(|&a| st.coords.get(a).map(|p| [p.x, p.y, p.z]).unwrap_or([0.0; 3]))
@@ -442,9 +445,16 @@ impl App {
     }
 
     /// Record the completed twist of `atoms` (from their `before` coords to the current
-    /// ones) as one undoable [`crate::history::StructEdit::Coords`] step. No-op if nothing
-    /// moved or the edit wasn't captured (empty `atoms`).
-    fn dihedral_record_rotation(&mut self, mi: usize, atoms: Vec<usize>, before: Vec<[f32; 3]>) {
+    /// ones, in coordinate store `frame`) as one undoable
+    /// [`crate::history::StructEdit::Coords`] step. No-op if nothing moved or the edit
+    /// wasn't captured (empty `atoms`).
+    fn dihedral_record_rotation(
+        &mut self,
+        mi: usize,
+        atoms: Vec<usize>,
+        before: Vec<[f32; 3]>,
+        frame: Option<usize>,
+    ) {
         if atoms.is_empty() {
             return;
         }
@@ -455,7 +465,7 @@ impl App {
         let id = self.scene.molecules[mi].id;
         self.history.record_struct(
             id,
-            crate::history::StructEdit::Coords { atoms, before, after },
+            crate::history::StructEdit::Coords { atoms, before, after, frame },
             "rotate bond".into(),
         );
     }

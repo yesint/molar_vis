@@ -737,7 +737,8 @@ impl App {
                     };
                     self.history.record_struct(
                         id,
-                        crate::history::StructEdit::Coords { atoms, before, after },
+                        // relax edits the owned System coords (system_mut), never a frame.
+                        crate::history::StructEdit::Coords { atoms, before, after, frame: None },
                         label.into(),
                     );
                 }
