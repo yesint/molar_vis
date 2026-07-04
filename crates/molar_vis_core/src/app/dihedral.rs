@@ -93,6 +93,10 @@ pub(super) struct DihedralDrag {
     pub(super) frame: Option<usize>,
 }
 
+/// Cached bond-graph adjacency for the hover preview, plus the (molecule,
+/// structure_version) it was built at — see [`DihedralState::adj_cache`].
+type AdjCache = RefCell<Option<(MolId, u64, Arc<Vec<Vec<usize>>>)>>;
+
 /// State for the DihedralRotate tool, held on the active [`DrawSession`]: the selected
 /// bond (axis) + its sides/handles, and any in-progress handle drag.
 #[derive(Default)]
@@ -105,7 +109,7 @@ pub(super) struct DihedralState {
     /// Bond-graph adjacency cached for the hover preview, keyed by (molecule,
     /// structure_version) — otherwise `build_axis` rebuilds it (O(atoms+bonds)) every hover
     /// frame. `RefCell` so the `&self` preview path can populate it.
-    adj_cache: RefCell<Option<(MolId, u64, Arc<Vec<Vec<usize>>>)>>,
+    adj_cache: AdjCache,
 }
 
 /// Adjacency list (neighbour atoms per atom index) from a molecule's bond graph.
