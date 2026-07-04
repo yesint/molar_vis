@@ -77,8 +77,10 @@ pub(super) struct DihedralDrag {
     pub(super) e2: Vec3,
     /// Last cursor angle in the rotation plane (rad); the per-frame delta drives the
     /// rotation, so there's no jump on grab and no accumulated float drift beyond a
-    /// single small step.
-    pub(super) last_angle: f32,
+    /// single small step. `None` when the axis is edge-on this frame (the angle can't be
+    /// measured) — the next measurable frame re-baselines to it instead of applying all the
+    /// motion accumulated during the edge-on span as one jump.
+    pub(super) last_angle: Option<f32>,
     /// The rotated side's atoms + their coordinates captured at grab time, so the whole
     /// drag records as one undoable coordinate delta at release.
     pub(super) edit_atoms: Vec<usize>,
@@ -414,9 +416,7 @@ impl App {
         let e1 = e1.normalize();
         let e2 = u.cross(e1).normalize();
         let ndc = px_to_ndc(px, rect);
-        let angle = self
-            .dihedral_plane_angle(rect, size_px, ndc, axis_point, u, e1, e2)
-            .unwrap_or(0.0);
+        let angle = self.dihedral_plane_angle(rect, size_px, ndc, axis_point, u, e1, e2);
         if let Some(d) = self.draw.as_mut() {
             d.dihedral.drag = Some(DihedralDrag {
                 side,
@@ -524,17 +524,26 @@ impl App {
             (d.axis_point, d.axis_dir, d.e1, d.e2, d.side, d.last_angle)
         };
         let Some(now) = self.dihedral_plane_angle(rect, size_px, ndc, axis_point, u, e1, e2) else {
+            // Edge-on axis: can't measure the angle this frame. Freeze and drop the
+            // reference so the next measurable frame re-baselines (delta 0) rather than
+            // applying all the motion accumulated during the edge-on span as one jump.
+            if let Some(d) = self.draw.as_mut().and_then(|d| d.dihedral.drag.as_mut()) {
+                d.last_angle = None;
+            }
             return;
         };
+        // Advance the reference to `now`. A delta is only applied when we had a valid
+        // reference last frame; otherwise this is the (re-)baseline frame → no rotation.
+        if let Some(d) = self.draw.as_mut().and_then(|d| d.dihedral.drag.as_mut()) {
+            d.last_angle = Some(now);
+        }
+        let Some(last) = last else { return };
         let mut delta = now - last;
         while delta > PI {
             delta -= TAU;
         }
         while delta < -PI {
             delta += TAU;
-        }
-        if let Some(d) = self.draw.as_mut().and_then(|d| d.dihedral.drag.as_mut()) {
-            d.last_angle = now;
         }
         if delta == 0.0 {
             return;
