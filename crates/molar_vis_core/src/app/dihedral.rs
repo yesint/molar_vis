@@ -693,15 +693,23 @@ impl App {
             if let (Some(pi), Some(pj)) = (self.atom_world(mi, i), self.atom_world(mi, j)) {
                 let u = (pj - pi).normalize_or_zero();
                 let j_side = axis.j_side.clone();
+                // Record it like a real handle twist (capture the store + before coords),
+                // so the twist is undoable and detected by session save's edited-structure
+                // export — the same path a user gesture takes.
+                let frame = self.scene.molecules[mi].coord_edit_target();
+                let before = self.dihedral_coords_of(mi, &j_side);
                 self.scene.molecules[mi].rotate_fragment(&j_side, pi, u, deg.to_radians());
-                let mol = &mut self.scene.molecules[mi];
-                for rep in &mut mol.reps {
-                    rep.geom_dirty = true;
-                }
-                #[cfg(not(target_arch = "wasm32"))]
                 {
-                    mol.pick_dirty = true;
+                    let mol = &mut self.scene.molecules[mi];
+                    for rep in &mut mol.reps {
+                        rep.geom_dirty = true;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        mol.pick_dirty = true;
+                    }
                 }
+                self.dihedral_record_rotation(mi, j_side, before, frame);
             }
         }
         self.draw = Some(DrawSession {
