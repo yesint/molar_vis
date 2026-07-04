@@ -74,7 +74,8 @@ impl App {
                             }
                         }
                     });
-                    // Mutually exclusive with Draw: choosing any pick mode leaves Draw.
+                    // Mutually exclusive with Draw (which hosts the dihedral tool):
+                    // choosing any pick mode leaves edit mode.
                     if pick_changed && self.pick_mode != PickMode::Off {
                         self.draw = None;
                     }
@@ -106,7 +107,8 @@ impl App {
                         });
                     }
 
-                    // (Draw-mode toggle now lives in the left-panel Molecule menu.)
+                    // (Draw-mode toggle — which now hosts the Draw/Erase/DihedralRotate
+                    // tools — lives in the left-panel Molecule menu.)
                     // (The selection modifier hint (add / subtract / rotate) is drawn
                     // as a floating overlay *on the 3D viewport* — `modifier_hint` /
                     // `draw_modifier_hint_overlay` in `draw_viewport` — so it never
@@ -839,6 +841,7 @@ impl App {
         let current = self.scene.groups[gi].current;
         let gvisible = self.scene.groups[gi].visible;
         let expanded = self.scene.groups[gi].expanded;
+        let members_expanded = self.scene.groups[gi].members_expanded;
         let n_members = members.len();
         let member_names: Vec<String> = members
             .iter()
@@ -852,11 +855,23 @@ impl App {
         let cur_mi = members.get(current).and_then(|&id| self.scene.mol_index(id));
         let cur_bbox = cur_mi.map(|mi| self.scene.molecules[mi].current_bbox());
 
+        // The shown member currently open in the editor (for the Edit-button highlight).
+        let editing_shown = self
+            .draw
+            .as_ref()
+            .and_then(|d| d.target)
+            .zip(members.get(current).copied())
+            .is_some_and(|(t, cur)| t == cur);
+
         // Deferred (set in closures, applied at the end so closures stay borrow-free).
         let mut do_toggle_expand = false;
+        let mut do_toggle_members = false;
         let mut do_toggle_eye = false;
         let mut do_add_shared = false;
         let mut do_focus = false;
+        let mut do_edit = false;
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut do_save = false;
         let mut do_delete = false;
         let mut new_current: Option<usize> = None;
         let mut add_member: Option<MolId> = None;
@@ -867,7 +882,7 @@ impl App {
             let caret = if expanded { icon::CARET_DOWN } else { icon::CARET_RIGHT };
             if ui
                 .selectable_label(false, caret)
-                .on_hover_text("Members")
+                .on_hover_text("Shared representations + Molecules")
                 .clicked()
             {
                 do_toggle_expand = true;
@@ -879,6 +894,15 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 compact_actions(ui);
                 ui.menu_button(icon::LIST, |ui| {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui
+                        .button(format!("{}  Save group…", icon::FLOPPY_DISK))
+                        .on_hover_text("Save all members to a multi-molecule file")
+                        .clicked()
+                    {
+                        do_save = true;
+                        ui.close();
+                    }
                     if ui.button(format!("{}  Delete group", icon::TRASH)).clicked() {
                         do_delete = true;
                         ui.close();
@@ -893,6 +917,14 @@ impl App {
                     .clicked()
                 {
                     do_toggle_eye = true;
+                }
+                // Edit: open the currently-shown member in the drawing editor.
+                if ui
+                    .selectable_label(editing_shown, icon::PENCIL_SIMPLE)
+                    .on_hover_text("Edit shown molecule (draw mode)")
+                    .clicked()
+                {
+                    do_edit = true;
                 }
                 if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to shown molecule").clicked() {
                     do_focus = true;
@@ -914,18 +946,40 @@ impl App {
             }
         });
 
-        // Shared reps: the shown member's prefix, drawn under the group header.
-        if let Some(mi) = cur_mi {
-            let n_shared = self.scene.molecules[mi].n_shared;
-            ui.indent(egui::Id::new(("shared", gid)), |ui| {
-                view_dirty |= self.draw_reps_for(ui, mi, 0, n_shared, true);
-            });
-        }
-
-        // Expanded: list members (the whole panel list scrolls — see draw_left_panel),
-        // each foldable to its own (non-shared) reps. Member name is clickable → jump.
+        // Top-level expanded: the group's shared reps, then a nested "Molecules"
+        // sub-expander (each opens/closes independently).
         if expanded {
-            ui.indent(egui::Id::new(("members", gid)), |ui| {
+            // Shared reps: the shown member's prefix, drawn under the group header.
+            if let Some(mi) = cur_mi {
+                let n_shared = self.scene.molecules[mi].n_shared;
+                ui.indent(egui::Id::new(("shared", gid)), |ui| {
+                    view_dirty |= self.draw_reps_for(ui, mi, 0, n_shared, true);
+                });
+            }
+
+            // Nested "Molecules" sub-expander — its own fold, listing the members below.
+            ui.indent(egui::Id::new(("molhdr", gid)), |ui| {
+                ui.horizontal(|ui| {
+                    let mcaret = if members_expanded {
+                        icon::CARET_DOWN
+                    } else {
+                        icon::CARET_RIGHT
+                    };
+                    if ui
+                        .selectable_label(false, format!("{mcaret}  Molecules"))
+                        .on_hover_text("Member molecules")
+                        .clicked()
+                    {
+                        do_toggle_members = true;
+                    }
+                    ui.weak(format!("({n_members})"));
+                });
+            });
+
+            // Member list (the whole panel list scrolls — see draw_left_panel), each
+            // foldable to its own (non-shared) reps. Member name is clickable → jump.
+            if members_expanded {
+              ui.indent(egui::Id::new(("members", gid)), |ui| {
                         for (pos, &mid) in members.iter().enumerate() {
                             let Some(mmi) = self.scene.mol_index(mid) else { continue };
                             let mopen;
@@ -1040,7 +1094,8 @@ impl App {
                                 });
                             }
                         }
-            });
+              });
+            }
         }
         ui.add_space(4.0);
 
@@ -1049,6 +1104,15 @@ impl App {
         if do_toggle_expand {
             self.scene.groups[gi].expanded = !self.scene.groups[gi].expanded;
         }
+        if do_toggle_members {
+            self.scene.groups[gi].members_expanded = !self.scene.groups[gi].members_expanded;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if do_save {
+            self.save_group(gi);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = do_save;
         if do_toggle_eye {
             self.scene.groups[gi].visible = !self.scene.groups[gi].visible;
             self.scene.apply_group_visibility(gi);
@@ -1058,6 +1122,13 @@ impl App {
             // Full zoom-to-fit the shown member (the magnifier means "zoom").
             if let Some((min, max)) = cur_bbox {
                 self.camera.focus_bbox(min, max);
+                view_dirty = true;
+            }
+        }
+        if do_edit {
+            // Open the currently-shown member in the drawing editor.
+            if let Some(mi) = cur_mi {
+                self.open_in_editor(mi);
                 view_dirty = true;
             }
         }

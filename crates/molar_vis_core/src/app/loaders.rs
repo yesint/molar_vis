@@ -111,12 +111,11 @@ pub(super) fn pick_file(accept: &str, ctx: egui::Context, deliver: impl Fn(Strin
 }
 impl App {
 
-    /// Open molecule `i` in the drawing editor: flag it `editable` (so its structure
-    /// is snapshotted for undo) and start a Draw session targeting it. Mutually
-    /// exclusive with picking.
+    /// Open molecule `i` in the drawing editor: start a Draw session targeting it.
+    /// Every molecule is editable + undoable now (no per-molecule flag), so this just
+    /// switches into edit mode. Mutually exclusive with picking.
     pub(super) fn open_in_editor(&mut self, i: usize) {
-        let Some(mol) = self.scene.molecules.get_mut(i) else { return };
-        mol.editable = true;
+        let Some(mol) = self.scene.molecules.get(i) else { return };
         let id = mol.id;
         self.pick_mode = PickMode::Off;
         let mut session = self.draw.take().unwrap_or_default();

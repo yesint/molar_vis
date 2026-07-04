@@ -281,6 +281,18 @@ pub(crate) fn nearest_bond(
     ndc: Vec2,
     max_dist: f32,
 ) -> Option<usize> {
+    nearest_bond_dist(mol, view, proj, ndc, max_dist).map(|(k, _)| k)
+}
+
+/// Like [`nearest_bond`], but also returns the screen-space (NDC) distance to the
+/// projected bond, so a caller picking across several molecules can compare hits.
+pub(crate) fn nearest_bond_dist(
+    mol: &Molecule,
+    view: Mat4,
+    proj: Mat4,
+    ndc: Vec2,
+    max_dist: f32,
+) -> Option<(usize, f32)> {
     let mvp = proj * view;
     let state = mol.render_state();
     let project = |i: usize| -> Option<Vec2> {
@@ -301,7 +313,7 @@ pub(crate) fn nearest_bond(
             best = Some((k, d));
         }
     }
-    best.map(|(k, _)| k)
+    best
 }
 
 /// Build a [`PickHit`] for a specific atom, given the molecule + rep that drew it

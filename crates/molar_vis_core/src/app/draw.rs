@@ -1,6 +1,7 @@
 //! Draw-mode types + tool palette UI.
 use super::*;
 use super::widgets::*;
+use super::dihedral::DihedralState;
 
 
 // ===========================================================================
@@ -100,6 +101,10 @@ pub(super) enum DrawTool {
     Draw,
     /// Click an atom to delete it (+ its bonds), or a bond to delete the bond.
     Erase,
+    /// Click a **rotatable** bond to make it the rotation axis, then drag one of the
+    /// handles drawn on its neighbouring bonds to twist that side of the molecule about
+    /// it. Handled entirely by [`App::dihedral_input`] (see `app/dihedral.rs`).
+    DihedralRotate,
 }
 
 /// What the cursor is over in the drawing editor (used by hover-highlight + click).
@@ -152,6 +157,9 @@ pub(super) struct DrawSession {
     /// A world point the drawing plane passes through (updated to the last-touched
     /// atom). `None` ⇒ use the camera target.
     pub(super) plane_depth: Option<glam::Vec3>,
+    /// State for the `DihedralRotate` tool: the selected bond (axis) + its sides/handles
+    /// and any in-progress handle drag. Empty for the Draw/Erase tools.
+    pub(super) dihedral: DihedralState,
 }
 
 impl Default for DrawSession {
@@ -165,6 +173,7 @@ impl Default for DrawSession {
             minimize_pending: false,
             relax: None,
             plane_depth: None,
+            dihedral: DihedralState::default(),
         }
     }
 }
@@ -181,15 +190,14 @@ impl App {
         }
     }
 
-    /// Create a new editable molecule from a freshly seeded single-atom `RawMolecule`,
-    /// give it a Ball-and-Stick rep (Element color), mark it `editable`, select it,
-    /// and record its `MolId` on `session.target`. Shared by the first Atom-tool click
-    /// and the headless preset hook.
+    /// Create a new molecule from a freshly seeded single-atom `RawMolecule`,
+    /// give it a Ball-and-Stick rep (Element color), select it, and record its `MolId`
+    /// on `session.target`. Shared by the first Atom-tool click and the headless preset
+    /// hook.
     pub(super) fn start_drawn_molecule(&mut self, raw: data::RawMolecule, session: &mut DrawSession) {
         let rep_defaults = self.rep_defaults.clone();
         let id = self.scene.add(raw, &rep_defaults);
         let mol = self.scene.molecules.last_mut().unwrap();
-        mol.editable = true;
         mol.trajectory.speed_fps = self.settings.behavior.traj_fps;
         mol.trajectory.loop_mode = self.settings.behavior.loop_mode;
         // A drawn molecule reads best as Ball-and-Stick / Element color.
@@ -227,16 +235,18 @@ impl App {
                     ui.vertical_centered(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 5.0);
 
-                        // — Tools (Draw / Erase) —
+                        // — Tools (Draw / Erase / Dihedral rotate) —
                         let cur_tool = self.draw.as_ref().map(|d| d.tool);
-                        for tool in [DrawTool::Draw, DrawTool::Erase] {
+                        for tool in [DrawTool::Draw, DrawTool::Erase, DrawTool::DihedralRotate] {
                             let glyph = match tool {
                                 DrawTool::Draw => icon::PENCIL_SIMPLE,
                                 DrawTool::Erase => icon::ERASER,
+                                DrawTool::DihedralRotate => icon::ARROW_ARC_RIGHT,
                             };
                             let tip = match tool {
                                 DrawTool::Draw => "Draw — click to add an atom, drag to add a bond; click a bond to cycle its order",
                                 DrawTool::Erase => "Erase — click an atom or bond to delete it",
+                                DrawTool::DihedralRotate => "Rotate a bond — click a rotatable bond, then drag one of its handles to twist that part of the molecule",
                             };
                             if overlay_button(ui, glyph, cur_tool == Some(tool))
                                 .on_hover_text(tip)
@@ -245,6 +255,7 @@ impl App {
                                 if let Some(d) = self.draw.as_mut() {
                                     d.tool = tool;
                                     d.drag = DrawDrag::Idle;
+                                    d.dihedral.drag = None; // end any in-progress twist
                                 }
                             }
                         }
@@ -324,7 +335,7 @@ impl App {
                                     self.scene.molecules.iter().position(|m| m.id == id)
                                 })
                             {
-                                self.toggle_hydrogens(mi);
+                                self.record_topology(mi, |s| s.toggle_hydrogens(mi));
                             }
                         }
                         // — New: the next click starts a fresh molecule.

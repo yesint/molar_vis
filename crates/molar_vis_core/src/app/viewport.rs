@@ -1,6 +1,7 @@
 //! Central 3D viewport: mouse nav, render, hover/lasso picking, pending selection.
 use super::*;
 use super::overlay::*;
+use super::draw::DrawTool;
 
 /// Tile-submits to issue per frame while pumping a trace. Keeps each frame's GPU work bounded
 /// (so the UI stays responsive) while the trace refines progressively over several frames.
@@ -39,14 +40,26 @@ impl App {
             // Alt+LMB orbits, so the view can be rotated without leaving Draw. RMB/MMB/
             // wheel navigate as usual.
             let draw_mode = self.draw.is_some();
+            // The DihedralRotate tool differs from Draw/Erase: a plain LMB drag orbits
+            // the camera *unless* it grabbed a handle (then it rotates the fragment). So
+            // the "suppress orbit" gate applies to the whole plain-LMB gesture for
+            // Draw/Erase, but only while a handle drag is active for DihedralRotate. The
+            // grab is set at drag-start in `dihedral_input` (which runs after this), so on
+            // the very first drag frame `dihedral_dragging` is still false and orbit runs
+            // with ~0 delta — imperceptible.
+            let dihedral_tool =
+                matches!(self.draw.as_ref().map(|d| d.tool), Some(DrawTool::DihedralRotate));
+            let dihedral_dragging =
+                self.draw.as_ref().is_some_and(|d| d.dihedral.drag.is_some());
             let delta = response.drag_delta();
             let mods = ui.input(|i| i.modifiers);
             let (shift, alt) = (mods.shift, mods.alt);
             // Alt+drag in Lasso/Draw mode orbits; otherwise an LMB lasso draws the
             // polygon (lasso), or the drawing tool acts (draw — handled separately).
             let lasso_draw = lasso_mode && !alt;
-            // A plain LMB in Draw mode does not orbit (the tool handles it).
-            let draw_tool_drag = draw_mode && !alt;
+            // A plain LMB in Draw/Erase does not orbit (the tool handles it); the
+            // DihedralRotate tool does orbit (unless dragging a handle — see below).
+            let draw_tool_drag = draw_mode && !alt && !dihedral_tool;
             if response.dragged_by(egui::PointerButton::Primary) {
                 if lasso_draw {
                     if let Some(pos) = response.interact_pointer_pos() {
@@ -58,6 +71,9 @@ impl App {
                 } else if draw_tool_drag {
                     // Drawing tool drag (e.g. Bond rubber-band) — see `draw_input`; no
                     // camera motion here.
+                } else if dihedral_dragging {
+                    // Rotating a fragment about the selected bond — see `dihedral_input`;
+                    // no camera motion here.
                 } else if shift && !lasso_mode && !draw_mode {
                     self.camera.roll(delta.x, self.settings.behavior.roll_sensitivity);
                 } else {
@@ -254,6 +270,11 @@ impl App {
             // Draw mode: handle the active tool (atom/bond/erase) for this frame's
             // pointer events, draw the bond rubber-band, and drive the debounced
             // minimizer. Plain LMB acts as the tool; Alt+LMB orbits (handled above).
+            // Edit (Draw) mode handles its active tool for this frame's pointer events:
+            // Draw/Erase build/erase atoms & bonds; DihedralRotate picks a bond and
+            // twists a fragment (dispatched inside `draw_input`). The camera orbit is
+            // suppressed above per tool (Draw/Erase always; DihedralRotate only while a
+            // handle drag is active).
             if self.draw.is_some() {
                 self.draw_input(ui, &response, rect, size_px);
             }

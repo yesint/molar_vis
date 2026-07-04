@@ -84,6 +84,13 @@ impl App {
         rect: egui::Rect,
         size_px: [u32; 2],
     ) {
+        // The DihedralRotate tool is self-contained (bond pick / handle drag / overlays)
+        // and doesn't use the Draw/Erase machinery (rubber-band, element keys, minimizer).
+        if matches!(self.draw.as_ref().map(|d| d.tool), Some(DrawTool::DihedralRotate)) {
+            self.dihedral_input(ui, response, rect, size_px);
+            return;
+        }
+
         let alt = ui.input(|i| i.modifiers.alt);
 
         // Keyboard shortcuts (unless a text field is focused): element + bond order.
@@ -160,9 +167,25 @@ impl App {
 
         // --- Tool events (suppressed while Alt orbits) -------------------------
         if !alt {
-            match tool {
-                DrawTool::Draw => self.draw_input_draw(response, rect, size_px, element, bond_order, target_mi),
-                DrawTool::Erase => self.draw_input_erase(response, rect, size_px, target_mi),
+            // Editing an existing molecule → wrap the gesture so a topology change is
+            // recorded as one undoable step. With no target the tool may *create* a
+            // molecule, which the document's "add molecule" step captures (via the trash),
+            // so it runs unwrapped.
+            match target_mi {
+                Some(mi) => self.record_topology(mi, |s| match tool {
+                    DrawTool::Draw => {
+                        s.draw_input_draw(response, rect, size_px, element, bond_order, target_mi)
+                    }
+                    DrawTool::Erase => s.draw_input_erase(response, rect, size_px, target_mi),
+                    DrawTool::DihedralRotate => {}
+                }),
+                None => match tool {
+                    DrawTool::Draw => {
+                        self.draw_input_draw(response, rect, size_px, element, bond_order, target_mi)
+                    }
+                    DrawTool::Erase => self.draw_input_erase(response, rect, size_px, target_mi),
+                    DrawTool::DihedralRotate => {}
+                },
             }
             if response.clicked() || response.drag_stopped_by(egui::PointerButton::Primary) {
                 ui.ctx().request_repaint();
@@ -232,9 +255,8 @@ impl App {
     }
 
     /// Painter overlays for the drawing editor: a hover highlight on the atom/bond
-    /// under the cursor (shown during a drag too), a gray circle in the plane of each
-    /// aromatic ring, and a "?" over each unspecified-order bond that's front-facing
-    /// and on-screen (capped, so a big loaded molecule isn't flooded).
+    /// under the cursor (shown during a drag too). The aromatic-ring circles are drawn
+    /// as depth-tested 3-D line geometry in the scene (`Molecule::aromatic_gpu`), not here.
     pub(super) fn draw_draw_overlays(&self, ui: &egui::Ui, rect: egui::Rect, size_px: [u32; 2]) {
         let Some(d) = self.draw.as_ref() else { return };
         let Some(mi) = d
@@ -245,38 +267,7 @@ impl App {
         };
         let mol = &self.scene.molecules[mi];
         let painter = ui.painter_at(rect);
-        let view = self.camera.view();
         let px_of = |w: glam::Vec3| self.world_to_pixel(w, rect, size_px);
-        let eye_z = |w: glam::Vec3| (view * w.extend(1.0)).z; // larger (less negative) = nearer
-
-        // "?" over unspecified bonds — only the front-facing, on-screen ones, capped.
-        let center = (mol.bbox_min + mol.bbox_max) * 0.5;
-        let center_z = eye_z(center);
-        let font = egui::FontId::proportional(13.0);
-        let mut shown = 0usize;
-        const Q_MAX: usize = 150;
-        for b in &mol.bonds {
-            if shown >= Q_MAX {
-                break;
-            }
-            if b.order != crate::minimize::BondOrder::Unspecified {
-                continue;
-            }
-            let (Some(p), Some(q)) = (self.atom_world(mi, b.i1), self.atom_world(mi, b.i2)) else {
-                continue;
-            };
-            let mid = (p + q) * 0.5;
-            if eye_z(mid) < center_z {
-                continue; // back half of the molecule
-            }
-            if let Some(m) = px_of(mid).filter(|m| rect.contains(*m)) {
-                painter.text(m, egui::Align2::CENTER_CENTER, "?", font.clone(), egui::Color32::from_rgb(255, 200, 90));
-                shown += 1;
-            }
-        }
-
-        // (The aromatic-ring circle is drawn as depth-tested 3-D line geometry in the
-        // scene — `Molecule::aromatic_gpu` — not as a flat overlay here, so it occludes.)
 
         // Hover highlight (also during a drag, so you see the atom you'd bond to —
         // `pointer_latest_pos` stays valid while the button is held, unlike hover_pos).
@@ -610,6 +601,39 @@ impl App {
         }
     }
 
+    /// Run a topology-editing gesture `f` on molecule `mi`, recording it as one undoable
+    /// [`StructEdit::Topology`] step (before/after structure snapshots). A no-op wrapper
+    /// (just runs `f`) for a shared molecule, one above the editor size cap
+    /// ([`DRAW_AUTO_MAX_ATOMS`]), or a gesture that deletes the whole molecule — the
+    /// document's "delete molecule" step restores that from the trash. Coalesces all of
+    /// `f`'s mutations into one step.
+    pub(super) fn record_topology<F: FnOnce(&mut Self)>(&mut self, mi: usize, f: F) {
+        let (before, id) = {
+            let Some(mol) = self.scene.molecules.get(mi) else {
+                f(self);
+                return;
+            };
+            let eligible = !mol.data.is_shared() && mol.n_atoms <= DRAW_AUTO_MAX_ATOMS;
+            (eligible.then(|| mol.structure_snapshot()).flatten(), mol.id)
+        };
+        f(self);
+        let Some(before) = before else { return };
+        // `f` may have deleted the molecule (erased its last atom) — the document handles
+        // that; nothing to record.
+        let Some(mi2) = self.scene.mol_index(id) else { return };
+        let Some(after) = self.scene.molecules[mi2].structure_snapshot() else {
+            return;
+        };
+        if !std::sync::Arc::ptr_eq(&before, &after) {
+            let label = crate::history::topology_label(&before, &after);
+            self.history.record_struct(
+                id,
+                crate::history::StructEdit::Topology { before, after },
+                label,
+            );
+        }
+    }
+
     /// Mark molecule `mi`'s reps dirty after a structural edit (rebuild geometry +
     /// the GPU pick buffer) and flag a re-render.
     pub(super) fn flag_edit(&mut self, mi: usize) {
@@ -664,6 +688,13 @@ impl App {
                     }
                     return;
                 }
+                // Snapshot coords before the relax so the move is undoable (owned System
+                // only — a trajectory frame edit is transient). `coords_moved` carries the
+                // delta out to be recorded after the `&mut mol` borrow ends.
+                let record = mol.trajectory.frames.is_empty();
+                let before: Option<Vec<[f32; 3]>> = record.then(|| {
+                    mol.data.state().coords.iter().map(|p| [p.x, p.y, p.z]).collect()
+                });
                 let _ = crate::minimize::relax_in_system(
                     mol.data.system_mut().expect("drawn molecule is owned"),
                     &mol.bonds,
@@ -685,7 +716,26 @@ impl App {
                 if mol.pending.is_some() {
                     mol.glow_dirty = true;
                 }
+                let coord_edit = before.and_then(|before| {
+                    let after: Vec<[f32; 3]> =
+                        mol.data.state().coords.iter().map(|p| [p.x, p.y, p.z]).collect();
+                    (before != after).then_some((mol.id, before, after))
+                });
                 self.view_dirty = true;
+                // Record the coordinate delta as one undoable step (after the mol borrow).
+                if let Some((id, before, after)) = coord_edit {
+                    let atoms: Vec<usize> = (0..before.len()).collect();
+                    let label = if matches!(kind, crate::minimize::RelaxKind::Cleanup) {
+                        "clean up"
+                    } else {
+                        "relax"
+                    };
+                    self.history.record_struct(
+                        id,
+                        crate::history::StructEdit::Coords { atoms, before, after },
+                        label.into(),
+                    );
+                }
             }
             // One-shot: clear the job.
             if let Some(d) = self.draw.as_mut() {

@@ -389,6 +389,7 @@ mod tests {
             current: shown,
             visible: true,
             expanded: false,
+            members_expanded: false,
         });
         scene.apply_group_visibility(0);
 

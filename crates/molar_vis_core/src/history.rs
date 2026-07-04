@@ -12,6 +12,8 @@
 //! whole slider drag becomes one undo step. Each step is tagged with a descriptive
 //! label (derived by diffing the two states) shown in the undo/redo dropdowns.
 
+use std::sync::Arc;
+
 use molar::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -126,8 +128,9 @@ pub struct StructureSnapshot {
 
 impl StructureSnapshot {
     /// Snapshot a molecule's live structure (topology atoms + system coords + the
-    /// editor's bond graph).
-    fn capture(mol: &Molecule) -> Self {
+    /// editor's bond graph). Called by [`Molecule::structure_snapshot`], which caches
+    /// the result behind an `Arc` keyed by the molecule's `structure_version`.
+    pub fn capture(mol: &Molecule) -> Self {
         let topo = mol.data.topology();
         let atoms = (0..mol.n_atoms)
             .filter_map(|i| topo.get_atom(i))
@@ -158,18 +161,94 @@ impl StructureSnapshot {
 /// `System`, source, trajectory) is referenced by [`MolId`] for undo/redo and by
 /// source for sessions, never snapshotted; a *drawn* molecule has no source to
 /// reload from, so its structure rides in `structure`.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+/// The editable **document** state of a molecule: its representations + visibility.
+/// A molecule's *structure* (atoms/coords/bonds) is **not** here — it's undone via
+/// self-contained [`StructEdit`] deltas on the same timeline (see [`Step`]), so the
+/// per-settle document diff never touches per-atom data. A molecule's existence
+/// (add/delete) rides the document (reconciled by `MolId` from the scene/trash, which
+/// preserves the live structure across an add/delete undo).
+#[derive(Clone, PartialEq)]
 pub struct MolState {
-    /// Runtime identity; only meaningful within a live session (undo/redo). Not
-    /// persisted — a loaded session reassigns ids when it reloads molecules.
-    #[serde(skip)]
+    /// Runtime identity; only meaningful within a live session (undo/redo).
     pub id: MolId,
     pub visible: bool,
     pub reps: Vec<RepState>,
-    /// Full structure snapshot for an editable (drawn) molecule; `None` for loaded
-    /// molecules. Drives undo/redo of atom/bond edits.
-    #[serde(default)]
-    pub structure: Option<StructureSnapshot>,
+}
+
+/// A reversible structural change to one molecule, undone/redone in place (the delta
+/// half of the undo timeline). Coordinate moves store only the atoms that moved; topology
+/// changes carry full before/after snapshots (molar re-indexes atoms on removal, so
+/// per-atom topology deltas aren't feasible — but topology edits are rare and small, and
+/// the snapshots are `Arc`-shared).
+pub enum StructEdit {
+    /// A coordinate-only move (dihedral twist, minimizer/cleanup): the moved atoms and
+    /// their positions before/after. Applied to the **owned** System (recorded only when
+    /// no trajectory is loaded — a frame edit is transient view state).
+    Coords {
+        atoms: Vec<usize>,
+        before: Vec<[f32; 3]>,
+        after: Vec<[f32; 3]>,
+    },
+    /// A topology change (atom/bond add/remove, element/order): full before/after
+    /// structure snapshots, `Arc`-shared with neighbours so unchanged history is cheap.
+    Topology {
+        before: Arc<StructureSnapshot>,
+        after: Arc<StructureSnapshot>,
+    },
+}
+
+impl StructEdit {
+    /// Apply this edit to `mol` in `scene`. `forward` = redo (write `after`); `!forward`
+    /// = undo (write `before`). No-op if the molecule id is gone (dangling reference).
+    fn apply(&self, scene: &mut Scene, mol: MolId, forward: bool) {
+        let Some(mi) = scene.mol_index(mol) else { return };
+        match self {
+            StructEdit::Coords { atoms, before, after } => {
+                let coords = if forward { after } else { before };
+                let m = &mut scene.molecules[mi];
+                m.set_coords(atoms, coords);
+                for rep in &mut m.reps {
+                    rep.coords_dirty = true;
+                }
+                if m.pending.is_some() {
+                    m.glow_dirty = true;
+                }
+                if m.show_box {
+                    m.box_dirty = true;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    m.pick_dirty = true;
+                }
+                m.refresh_bbox();
+            }
+            StructEdit::Topology { before, after } => {
+                let snap = if forward { after } else { before };
+                reconcile_structure(&mut scene.molecules[mi], snap);
+            }
+        }
+    }
+}
+
+/// A concise undo label for a topology change, from the atom/bond count/identity diff
+/// between the before/after snapshots (mirrors the old `describe_change` structure
+/// block, now that structure edits carry their own label).
+pub fn topology_label(before: &StructureSnapshot, after: &StructureSnapshot) -> String {
+    use std::cmp::Ordering::*;
+    match after.atoms.len().cmp(&before.atoms.len()) {
+        Greater => return "add atom".into(),
+        Less => return "delete atom".into(),
+        Equal => {}
+    }
+    match after.bonds.len().cmp(&before.bonds.len()) {
+        Greater => return "add bond".into(),
+        Less => return "delete bond".into(),
+        Equal => {}
+    }
+    if after.bonds != before.bonds {
+        return "change bond order".into();
+    }
+    "edit structure".into()
 }
 
 /// The undoable state of a [`MolGroup`]: its membership, group-level visibility, and
@@ -210,8 +289,6 @@ impl EditState {
                     id: m.id,
                     visible: if m.group.is_some() { true } else { m.visible },
                     reps: m.reps[ns..].iter().map(RepState::capture).collect(),
-                    // Only drawn molecules carry a structure snapshot.
-                    structure: m.editable.then(|| StructureSnapshot::capture(m)),
                 }
             })
             .collect();
@@ -250,12 +327,9 @@ impl EditState {
             }
             mol.n_shared = 0;
             mol.group = None;
-            // Restore the drawn structure first (rebuilds the System, resets atom
-            // count), then reconcile reps over it.
-            mol.editable = ms.structure.is_some();
-            if let Some(snap) = &ms.structure {
-                reconcile_structure(&mut mol, snap);
-            }
+            // Structure is not part of the document — it's preserved across add/delete
+            // undo by reusing the molecule (with its live System) from the scene/trash,
+            // and edited via `StructEdit` deltas. So only reps are reconciled here.
             reconcile_reps(&mut mol, &ms.reps);
             new_mols.push(mol);
         }
@@ -282,6 +356,7 @@ impl EditState {
                     current: 0,
                     visible: true,
                     expanded: false,
+                    members_expanded: false,
                 });
             g.members = gs.members.clone();
             g.visible = gs.visible;
@@ -322,9 +397,10 @@ impl EditState {
 }
 
 /// Rebuild a molecule's molar `System` + bond graph from a [`StructureSnapshot`]
-/// (undo/redo of a drawn molecule). Editable molecules are tiny, so an
-/// unconditional rebuild is fine. Marks the reps for a geometry rebuild.
-fn reconcile_structure(mol: &mut Molecule, snap: &StructureSnapshot) {
+/// (undo/redo of a structural change). Then adopts the `Arc` as the molecule's current
+/// snapshot so the next undo capture sees it by identity (no spurious step). Marks the
+/// reps for a geometry rebuild.
+fn reconcile_structure(mol: &mut Molecule, snap: &Arc<StructureSnapshot>) {
     let mut top = Topology::default();
     for lite in &snap.atoms {
         let mut a = Atom::new()
@@ -371,6 +447,8 @@ fn reconcile_structure(mol: &mut Molecule, snap: &StructureSnapshot) {
         {
             mol.pick_dirty = true;
         }
+        // Adopt this exact Arc as the current snapshot (identity for the next capture).
+        mol.adopt_structure_snapshot(snap.clone());
     }
 }
 
@@ -422,29 +500,8 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
         if om.visible != nm.visible {
             return "toggle molecule".into();
         }
-        // Structure edits on a drawn molecule.
-        if om.structure != nm.structure {
-            if let (Some(o), Some(n)) = (&om.structure, &nm.structure) {
-                use std::cmp::Ordering::*;
-                match n.atoms.len().cmp(&o.atoms.len()) {
-                    Greater => return "add atom".into(),
-                    Less => return "delete atom".into(),
-                    Equal => {}
-                }
-                match n.bonds.len().cmp(&o.bonds.len()) {
-                    Greater => return "add bond".into(),
-                    Less => return "delete bond".into(),
-                    Equal => {}
-                }
-                // Equal atom/bond counts: a bond difference is an order change
-                // (or a re-bond); otherwise only the coordinates moved.
-                if n.bonds != o.bonds {
-                    return "change bond order".into();
-                }
-                return "edit geometry".into(); // coordinates changed (minimize / move)
-            }
-            return "draw".into();
-        }
+        // (Structure edits — atom/bond/coordinate — are `StructEdit` steps with their
+        // own labels; the document diff no longer sees them.)
         match nm.reps.len().cmp(&om.reps.len()) {
             Greater => return "add representation".into(),
             Less => return "delete representation".into(),
@@ -536,12 +593,27 @@ fn is_permutation(a: &[RepState], b: &[RepState]) -> bool {
     remaining.is_empty()
 }
 
+/// One step on the unified undo timeline.
+enum Step {
+    /// A document change: the stored [`EditState`] is the state to restore when this step
+    /// is undone (the "before"; redo stores the "after" symmetrically). Applied against
+    /// the rolling `committed` baseline.
+    Doc(EditState),
+    /// A structural/coordinate change to one molecule (self-contained before+after),
+    /// applied in place and independent of `committed`.
+    Struct(MolId, StructEdit),
+}
+
 struct Entry {
-    state: EditState,
-    /// Label of the action that moved *away* from `state`.
+    step: Step,
+    /// Label of this action (shown in the Edit menu).
     label: String,
 }
 
+/// Undo/redo history: a single chronological, strict-LIFO stack of [`Step`]s (document
+/// snapshots interleaved with structural deltas), so one Ctrl+Z walks both. `committed`
+/// is the rolling baseline for the document steps; structural steps don't touch it (they
+/// edit disjoint per-atom state), which is what lets the two mechanisms compose.
 pub struct History {
     undo: Vec<Entry>,
     redo: Vec<Entry>,
@@ -559,18 +631,32 @@ impl History {
         }
     }
 
-    /// Record a checkpoint if `current` differs from the last committed state.
-    /// Call only when the interaction has settled (coalesces drags/typing).
+    /// Push a new step onto the undo stack (trimming to `cap`) and clear redo — the one
+    /// place both the document and structural record paths funnel through.
+    fn push_undo(&mut self, step: Step, label: String) {
+        self.undo.push(Entry { step, label });
+        if self.undo.len() > self.cap {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+    }
+
+    /// Record a **document** checkpoint if `current` differs from the last committed
+    /// state. Call only when the interaction has settled (coalesces drags/typing).
     pub fn maybe_record(&mut self, current: EditState) {
         if current != self.committed {
             let label = describe_change(&self.committed, &current);
-            let prev = std::mem::replace(&mut self.committed, current);
-            self.undo.push(Entry { state: prev, label });
-            if self.undo.len() > self.cap {
-                self.undo.remove(0);
-            }
-            self.redo.clear();
+            let before = std::mem::replace(&mut self.committed, current);
+            self.push_undo(Step::Doc(before), label);
         }
+    }
+
+    /// Record a **structural** delta (coordinate/topology edit) as its own step. Recorded
+    /// eagerly at gesture completion; since structure is not part of the document, the
+    /// settle-time [`maybe_record`](Self::maybe_record) stays silent for it (no
+    /// double-record), and being pushed mid-frame it lands before that frame's doc step.
+    pub fn record_struct(&mut self, mol: MolId, edit: StructEdit, label: String) {
+        self.push_undo(Step::Struct(mol, edit), label);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -579,8 +665,6 @@ impl History {
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
-    // Depth accessors for the (now test-only) cumulative undo/redo machinery; the
-    // UI dropdown that used them was folded into the single-step Edit-menu items.
     #[allow(dead_code)]
     pub fn undo_len(&self) -> usize {
         self.undo.len()
@@ -598,32 +682,46 @@ impl History {
         &self.redo[self.redo.len() - 1 - d].label
     }
 
-    /// Undo `n` steps cumulatively; returns the state to apply (or `None`).
-    pub fn undo_n(&mut self, n: usize) -> Option<EditState> {
-        let n = n.min(self.undo.len());
-        if n == 0 {
-            return None;
-        }
-        for _ in 0..n {
-            let entry = self.undo.pop().unwrap();
-            let cur = std::mem::replace(&mut self.committed, entry.state);
-            self.redo.push(Entry { state: cur, label: entry.label });
-        }
-        Some(self.committed.clone())
+    /// Undo one step, applying it to `scene` in place; returns its label (or `None` if
+    /// the undo stack is empty). Steps are replayed individually in strict LIFO order — a
+    /// structural delta must each be inverted in sequence, so there is no "jump to a
+    /// committed snapshot" shortcut. Loop this for a multi-step undo.
+    pub fn undo(&mut self, scene: &mut Scene) -> Option<String> {
+        let entry = self.undo.pop()?;
+        let label = entry.label.clone();
+        let redo_entry = match entry.step {
+            Step::Doc(before) => {
+                let after = std::mem::replace(&mut self.committed, before);
+                self.committed.apply(scene);
+                Entry { step: Step::Doc(after), label }
+            }
+            Step::Struct(mol, edit) => {
+                edit.apply(scene, mol, false);
+                Entry { step: Step::Struct(mol, edit), label }
+            }
+        };
+        let out = redo_entry.label.clone();
+        self.redo.push(redo_entry);
+        Some(out)
     }
 
-    /// Redo `n` steps cumulatively; returns the state to apply (or `None`).
-    pub fn redo_n(&mut self, n: usize) -> Option<EditState> {
-        let n = n.min(self.redo.len());
-        if n == 0 {
-            return None;
-        }
-        for _ in 0..n {
-            let entry = self.redo.pop().unwrap();
-            let cur = std::mem::replace(&mut self.committed, entry.state);
-            self.undo.push(Entry { state: cur, label: entry.label });
-        }
-        Some(self.committed.clone())
+    /// Redo one step (the inverse of [`undo`](Self::undo)); returns its label.
+    pub fn redo(&mut self, scene: &mut Scene) -> Option<String> {
+        let entry = self.redo.pop()?;
+        let undo_entry = match entry.step {
+            Step::Doc(after) => {
+                let before = std::mem::replace(&mut self.committed, after);
+                self.committed.apply(scene);
+                Entry { step: Step::Doc(before), label: entry.label }
+            }
+            Step::Struct(mol, edit) => {
+                edit.apply(scene, mol, true);
+                Entry { step: Step::Struct(mol, edit), label: entry.label }
+            }
+        };
+        let out = undo_entry.label.clone();
+        self.undo.push(undo_entry);
+        Some(out)
     }
 }
 
@@ -640,6 +738,12 @@ mod tests {
         scene
     }
 
+    /// Capture the coords of `atoms` in molecule 0 as `[f32;3]`s (test helper).
+    fn coords_of(scene: &Scene, atoms: &[usize]) -> Vec<[f32; 3]> {
+        let st = scene.molecules[0].data.state();
+        atoms.iter().map(|&a| { let p = st.coords[a]; [p.x, p.y, p.z] }).collect()
+    }
+
     #[test]
     fn undo_redo_add_rep() {
         let mut scene = load_scene();
@@ -649,9 +753,9 @@ mod tests {
         assert!(hist.can_undo());
         assert_eq!(hist.undo_label(0), "add representation");
 
-        hist.undo_n(1).unwrap().apply(&mut scene);
+        hist.undo(&mut scene);
         assert_eq!(scene.molecules[0].reps.len(), 1);
-        hist.redo_n(1).unwrap().apply(&mut scene);
+        hist.redo(&mut scene);
         assert_eq!(scene.molecules[0].reps.len(), 2);
     }
 
@@ -669,8 +773,10 @@ mod tests {
         assert_eq!(hist.undo_len(), 3);
         assert_eq!(hist.undo_label(0), "toggle representation");
 
-        // Undo all three at once → back to the original single "all" rep, visible.
-        hist.undo_n(3).unwrap().apply(&mut scene);
+        // Undo all three (one step at a time) → back to the original single "all" rep.
+        for _ in 0..3 {
+            hist.undo(&mut scene);
+        }
         assert_eq!(scene.molecules[0].reps.len(), 1);
         assert_eq!(scene.molecules[0].reps[0].sel_text, "all");
         assert!(scene.molecules[0].reps[0].visible);
@@ -692,7 +798,7 @@ mod tests {
         hist.maybe_record(EditState::capture(&scene));
         assert_eq!(hist.undo_label(0), "delete molecule");
 
-        hist.undo_n(1).unwrap().apply(&mut scene);
+        hist.undo(&mut scene);
         assert_eq!(scene.molecules.len(), 2);
         assert!(scene.trash.is_empty());
     }
@@ -700,7 +806,6 @@ mod tests {
     #[test]
     fn undo_redo_structure_edit() {
         use glam::Vec3;
-        // A drawn molecule: one carbon, flagged editable.
         let raw = crate::data::RawMolecule::single_atom(
             "Drawn",
             Atom::new().with_name("C").guess(),
@@ -709,30 +814,119 @@ mod tests {
         .unwrap();
         let mut scene = Scene::default();
         scene.add(raw, &crate::settings::RepDefaults::default());
-        scene.molecules[0].editable = true;
         let mut hist = History::new(EditState::capture(&scene));
+        let id = scene.molecules[0].id;
 
-        // Add a second atom + bond it to the first.
+        // Add a second atom + bond it to the first, recorded as a Topology delta (the
+        // before/after snapshots the app's `record_topology` builds).
+        let before = scene.molecules[0].structure_snapshot().unwrap();
         let mol = &mut scene.molecules[0];
         let idx = mol
             .add_atom(&Atom::new().with_name("C").guess(), Vec3::new(0.15, 0.0, 0.0))
             .unwrap();
         assert!(mol.add_bond(0, idx, BondOrder::Single));
-        hist.maybe_record(EditState::capture(&scene));
+        let after = scene.molecules[0].structure_snapshot().unwrap();
+        let label = topology_label(&before, &after);
+        hist.record_struct(id, StructEdit::Topology { before, after }, label);
         assert_eq!(hist.undo_label(0), "add atom");
 
-        // Undo → back to the lone carbon, no bonds, still editable.
-        hist.undo_n(1).unwrap().apply(&mut scene);
+        // Undo → back to the lone carbon, no bonds (the System is rebuilt from the snap).
+        hist.undo(&mut scene);
         assert_eq!(scene.molecules[0].n_atoms, 1);
         assert_eq!(scene.molecules[0].bonds.len(), 0);
-        // The molar System itself was rebuilt from the snapshot, not just n_atoms.
         assert_eq!(scene.molecules[0].data.state().coords.len(), 1);
-        assert!(scene.molecules[0].editable);
 
         // Redo → two atoms + one bond restored.
-        hist.redo_n(1).unwrap().apply(&mut scene);
+        hist.redo(&mut scene);
         assert_eq!(scene.molecules[0].n_atoms, 2);
         assert_eq!(scene.molecules[0].bonds.len(), 1);
         assert_eq!(scene.molecules[0].bonds[0].order, BondOrder::Single);
+    }
+
+    /// A coordinate edit (a dihedral twist) is undoable on any molecule via a `Coords`
+    /// delta that stores only the moved atoms' before/after positions.
+    #[test]
+    fn undo_redo_coordinate_edit() {
+        use glam::Vec3;
+        let mut scene = load_scene(); // 2lao — a plain file-loaded molecule
+        let mut hist = History::new(EditState::capture(&scene));
+        let id = scene.molecules[0].id;
+
+        let atoms = vec![10usize, 11, 12];
+        let before = coords_of(&scene, &atoms);
+        scene.molecules[0].rotate_fragment(&atoms, Vec3::ZERO, Vec3::X, 0.7);
+        let after = coords_of(&scene, &atoms);
+        assert_ne!(before, after, "rotation should move the atoms");
+
+        hist.record_struct(
+            id,
+            StructEdit::Coords { atoms: atoms.clone(), before: before.clone(), after: after.clone() },
+            "rotate bond".into(),
+        );
+        assert_eq!(hist.undo_label(0), "rotate bond");
+
+        hist.undo(&mut scene);
+        assert_eq!(coords_of(&scene, &atoms), before, "undo restores coordinates");
+        hist.redo(&mut scene);
+        assert_eq!(coords_of(&scene, &atoms), after, "redo re-applies the twist");
+    }
+
+    /// Document and structural steps interleave on one timeline: undo walks them in
+    /// strict reverse order (the §1a invariant from the design review) and redo replays
+    /// them forward.
+    #[test]
+    fn interleaved_doc_and_struct_undo() {
+        use glam::Vec3;
+        let mut scene = load_scene();
+        let mut hist = History::new(EditState::capture(&scene));
+        let id = scene.molecules[0].id;
+        let orig_color = scene.molecules[0].reps[0].color;
+
+        // (1) Doc: change a rep's color.
+        scene.molecules[0].reps[0].color = ColorMethod::Chain;
+        hist.maybe_record(EditState::capture(&scene));
+        // (2) Struct: twist some atoms.
+        let atoms = vec![5usize, 6, 7];
+        let before = coords_of(&scene, &atoms);
+        scene.molecules[0].rotate_fragment(&atoms, Vec3::ZERO, Vec3::Y, 0.5);
+        let after = coords_of(&scene, &atoms);
+        hist.record_struct(
+            id,
+            StructEdit::Coords { atoms: atoms.clone(), before: before.clone(), after },
+            "rotate bond".into(),
+        );
+        // (3) Doc: hide the rep.
+        scene.molecules[0].reps[0].visible = false;
+        hist.maybe_record(EditState::capture(&scene));
+
+        // Undo all three in reverse: hide → twist → color.
+        hist.undo(&mut scene);
+        assert!(scene.molecules[0].reps[0].visible, "undo (3) restores visibility");
+        hist.undo(&mut scene);
+        assert_eq!(coords_of(&scene, &atoms), before, "undo (2) restores coordinates");
+        hist.undo(&mut scene);
+        assert_eq!(scene.molecules[0].reps[0].color, orig_color, "undo (1) restores color");
+
+        // Redo all three forward.
+        hist.redo(&mut scene);
+        hist.redo(&mut scene);
+        hist.redo(&mut scene);
+        assert_eq!(scene.molecules[0].reps[0].color, ColorMethod::Chain);
+        assert!(!scene.molecules[0].reps[0].visible);
+    }
+
+    /// Capturing an unchanged (even large) molecule every settle must be cheap — the
+    /// structure snapshot is shared by identity, so repeated captures return the *same*
+    /// `Arc` and compare equal by pointer (no full re-clone, no spurious undo step).
+    #[test]
+    fn unchanged_structure_snapshot_is_shared_by_identity() {
+        let scene = load_scene();
+        let a = scene.molecules[0].structure_snapshot().expect("owned → Some");
+        let b = scene.molecules[0].structure_snapshot().expect("owned → Some");
+        assert!(Arc::ptr_eq(&a, &b), "no structural change → same Arc");
+        // And two captures with no edit in between produce equal EditStates (no step).
+        let s0 = EditState::capture(&scene);
+        let s1 = EditState::capture(&scene);
+        assert!(s0 == s1, "idle re-capture must not look like a change");
     }
 }

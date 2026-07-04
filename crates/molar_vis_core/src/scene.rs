@@ -1,7 +1,9 @@
 //! The scene graph: a set of molecules, each with its own representations.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use glam::Vec3;
 use molar::prelude::*;
@@ -10,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::color::ColorMethod;
 use crate::data::RawMolecule;
 use crate::geometry::{RepKind, RepParams};
-use crate::history::RepState;
+use crate::history::{RepState, StructureSnapshot};
 use crate::material::Material;
 use crate::minimize::{Bond, BondOrder};
 use crate::moldata::MolData;
@@ -57,9 +59,13 @@ pub struct MolGroup {
     /// Group-level visibility (the header eye). The shown member is visible iff this
     /// is true; all other members are always hidden.
     pub visible: bool,
-    /// Transient UI: whether the group is expanded to list its members (like
-    /// [`Molecule::reps_open`]; not undoable).
+    /// Transient UI: whether the group's top-level entry is expanded — showing its
+    /// shared representations + the nested "Molecules" sub-expander. Not undoable.
     pub expanded: bool,
+    /// Transient UI: whether the nested "Molecules" sub-expander is open — listing the
+    /// member molecules (each foldable to its own reps). Independent of [`expanded`]
+    /// (only rendered while it's true). Not undoable.
+    pub members_expanded: bool,
 }
 
 /// Periodic-image display for a representation: render extra copies of the
@@ -392,11 +398,16 @@ pub struct Molecule {
     /// recorded order are `Unspecified`). Mutated only via the helper methods so it
     /// stays consistent.
     pub bonds: Vec<Bond>,
-    /// This molecule was created/edited by the drawing tool, so its full structure
-    /// (atoms + coords + bonds) is snapshotted for undo and may be relaxed by the
-    /// force field. Loaded molecules stay `false` (referenced by source, never
-    /// structure-snapshotted) — see [`crate::history`].
-    pub editable: bool,
+    /// Monotonic counter bumped by every structural mutation (atom/bond add/remove,
+    /// element/order change, `rotate_fragment`). Undo capture uses it to snapshot a
+    /// molecule's structure only when it actually changed — see
+    /// [`structure_snapshot`](Self::structure_snapshot) + [`crate::history`]. Transient.
+    pub structure_version: u64,
+    /// Cache for [`structure_snapshot`](Self::structure_snapshot): the last built
+    /// `Arc<StructureSnapshot>` plus the `structure_version` it was built at, so a
+    /// re-capture at the same version is a cheap `Arc` clone (interior mutability, since
+    /// undo capture borrows the scene immutably). Transient.
+    structure_cache: RefCell<Option<(u64, Arc<StructureSnapshot>)>>,
     pub n_atoms: usize,
     pub bbox_min: Vec3,
     pub bbox_max: Vec3,
@@ -566,7 +577,8 @@ impl Molecule {
             traj_loads: Vec::new(),
             data,
             bonds,
-            editable: false,
+            structure_version: 0,
+            structure_cache: RefCell::new(None),
             n_atoms,
             bbox_min,
             bbox_max,
@@ -692,6 +704,37 @@ impl Molecule {
         self.sel_bbox(&self.data.select_all())
     }
 
+    /// The molecule's structure snapshot (atoms + coords + bonds) for undo, as a
+    /// shared `Arc`, (re)built **only** when [`structure_version`](Self::structure_version)
+    /// has changed since the last call — so an unchanged molecule costs an `Arc` clone,
+    /// not a full copy, at every undo checkpoint. Returns `None` for a **shared**
+    /// (pymolar/JS) molecule: its coordinates live outside the viewer and can't be
+    /// structure-edited or restored, so it has no undoable structure.
+    pub fn structure_snapshot(&self) -> Option<Arc<StructureSnapshot>> {
+        if self.data.is_shared() {
+            return None;
+        }
+        let mut cache = self.structure_cache.borrow_mut();
+        if let Some((v, arc)) = cache.as_ref() {
+            if *v == self.structure_version {
+                return Some(arc.clone());
+            }
+        }
+        let arc = Arc::new(StructureSnapshot::capture(self));
+        *cache = Some((self.structure_version, arc.clone()));
+        Some(arc)
+    }
+
+    /// Adopt `snap` as this molecule's current structure snapshot after the caller has
+    /// rebuilt the molecule to match it (undo/redo of a structural change). Bumps the
+    /// version and seeds the cache with **this exact `Arc`**, so the next
+    /// [`structure_snapshot`](Self::structure_snapshot) returns it *by identity* — the
+    /// undo diff (`Arc::ptr_eq`) then sees no change and doesn't record a spurious step.
+    pub fn adopt_structure_snapshot(&mut self, snap: Arc<StructureSnapshot>) {
+        self.structure_version = self.structure_version.wrapping_add(1);
+        *self.structure_cache.borrow_mut() = Some((self.structure_version, snap));
+    }
+
     /// Recompute the cached bounding box from the live structure (guards the
     /// 0-atom case, where molar's `min_max` would panic).
     pub fn refresh_bbox(&mut self) {
@@ -720,6 +763,7 @@ impl Molecule {
                 self.bbox_min = self.bbox_min.min(pos);
                 self.bbox_max = self.bbox_max.max(pos);
                 self.hover_grid = None;
+                self.structure_version += 1;
                 Some(idx)
             }
             Err(_) => None,
@@ -740,6 +784,7 @@ impl Molecule {
             return false;
         }
         self.bonds.push(Bond::with_order(i, j, order));
+        self.structure_version += 1;
         true
     }
 
@@ -747,6 +792,7 @@ impl Molecule {
     pub fn remove_bond_at(&mut self, k: usize) {
         if k < self.bonds.len() {
             self.bonds.remove(k);
+            self.structure_version += 1;
         }
     }
 
@@ -757,6 +803,7 @@ impl Molecule {
             Some(k) => {
                 if self.bonds[k].order != order {
                     self.bonds[k].order = order;
+                    self.structure_version += 1;
                     return true;
                 }
                 false
@@ -779,6 +826,65 @@ impl Molecule {
             a.mass = src.mass;
         }
         self.hover_grid = None;
+        self.structure_version += 1;
+    }
+
+    /// Rotate the atoms `atoms` (global indices) about the world-space line through
+    /// point `c` with unit direction `u`, by `angle` radians — the dihedral-rotation
+    /// tool's rigid fragment rotation. Mutates the **displayed** coordinates: the
+    /// current trajectory frame if one is loaded, else the owned `System`'s state
+    /// (a shared external molecule without frames is left untouched). Atoms lying on
+    /// the axis line (the bond endpoints) don't move, so the axis stays fixed.
+    pub fn rotate_fragment(&mut self, atoms: &[usize], c: Vec3, u: Vec3, angle: f32) {
+        let u = u.normalize_or_zero();
+        if u == Vec3::ZERO || angle == 0.0 {
+            return;
+        }
+        let q = glam::Quat::from_axis_angle(u, angle);
+        let rot = |p: &mut Pos| {
+            let v = Vec3::new(p.x, p.y, p.z);
+            let nv = c + q * (v - c);
+            *p = Pos::new(nv.x, nv.y, nv.z);
+        };
+        if let Some(frame) = self.trajectory.frames.get_mut(self.trajectory.current) {
+            for &a in atoms {
+                if let Some(p) = frame.coords.get_mut(a) {
+                    rot(p);
+                }
+            }
+        } else if let Some(sys) = self.data.system_mut() {
+            let mut bound = sys.select_all_bound_mut();
+            for &a in atoms {
+                if let Some(p) = bound.get_pos_mut(a) {
+                    rot(p);
+                }
+            }
+        }
+        self.hover_grid = None;
+        self.structure_version += 1;
+    }
+
+    /// Overwrite the positions of `atoms` (global indices) with `coords` (parallel, nm),
+    /// mutating the **displayed** coordinates — the current trajectory frame if one is
+    /// loaded, else the owned `System`. Used by undo/redo of a coordinate delta
+    /// ([`crate::history::StructEdit::Coords`]); a shared molecule is left untouched.
+    pub fn set_coords(&mut self, atoms: &[usize], coords: &[[f32; 3]]) {
+        if let Some(frame) = self.trajectory.frames.get_mut(self.trajectory.current) {
+            for (&a, c) in atoms.iter().zip(coords) {
+                if let Some(p) = frame.coords.get_mut(a) {
+                    *p = Pos::new(c[0], c[1], c[2]);
+                }
+            }
+        } else if let Some(sys) = self.data.system_mut() {
+            let mut bound = sys.select_all_bound_mut();
+            for (&a, c) in atoms.iter().zip(coords) {
+                if let Some(p) = bound.get_pos_mut(a) {
+                    *p = Pos::new(c[0], c[1], c[2]);
+                }
+            }
+        }
+        self.structure_version += 1;
+        self.hover_grid = None;
     }
 
     /// Cycle the order of bond `k` (single→double→triple→single).
@@ -786,6 +892,7 @@ impl Molecule {
         use crate::minimize::BondOrderExt;
         if let Some(b) = self.bonds.get_mut(k) {
             b.order = b.order.cycle();
+            self.structure_version += 1;
         }
     }
 
@@ -806,6 +913,7 @@ impl Molecule {
         let _ = self.data.remove(std::iter::once(i));
         self.n_atoms = self.n_atoms.saturating_sub(1);
         self.hover_grid = None;
+        self.structure_version += 1;
         self.refresh_bbox();
         self.n_atoms == 0
     }
@@ -1022,6 +1130,7 @@ impl Scene {
             current: 0,
             visible: true,
             expanded: false,
+            members_expanded: false,
         });
         let gi = self.groups.len() - 1;
         self.apply_group_visibility(gi);

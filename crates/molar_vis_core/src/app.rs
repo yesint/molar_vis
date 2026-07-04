@@ -37,6 +37,7 @@ use egui_phosphor::regular as icon;
 
 mod build;
 mod console;
+mod dihedral;
 mod draw;
 mod draw_input;
 mod export;
@@ -988,14 +989,27 @@ impl eframe::App for App {
         self.draw_settings_dialog(&ctx, frame);
         self.draw_interactions_dialog(&ctx);
 
-        // Apply undo/redo after the panel so list indices stay stable during draw.
-        let applied = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {
-            (Some(n), _) => self.history.undo_n(n),
-            (None, Some(n)) => self.history.redo_n(n),
-            (None, None) => None,
-        };
-        if let Some(state) = applied {
-            state.apply(&mut self.scene);
+        // Apply undo/redo after the panel so list indices stay stable during draw. Each
+        // step is replayed individually (a structural delta must be inverted in order —
+        // no jump-to-snapshot shortcut); undo/redo apply to the scene in place.
+        let mut applied = false;
+        if let Some(n) = self.pending_undo_n.take() {
+            for _ in 0..n {
+                if self.history.undo(&mut self.scene).is_none() {
+                    break;
+                }
+                applied = true;
+            }
+        }
+        if let Some(n) = self.pending_redo_n.take() {
+            for _ in 0..n {
+                if self.history.redo(&mut self.scene).is_none() {
+                    break;
+                }
+                applied = true;
+            }
+        }
+        if applied {
             self.view_dirty = true;
         }
 

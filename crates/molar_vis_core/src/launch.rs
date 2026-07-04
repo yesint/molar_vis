@@ -103,12 +103,21 @@ pub fn early_z_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 /// Native-only: the web build uses `eframe::WebRunner` from a wasm entry point.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run(launch: AppLaunch) -> eframe::Result<()> {
+    // `MOLAR_VIS_DEBUG_HIDDEN=1` creates the window **invisible** so headless
+    // verification runs (e.g. `MOLAR_VIS_DEBUG_SAVE_IMAGE`, which renders offscreen
+    // during `App::new`) never pop a window onto the user's desktop. Pair with
+    // `MOLAR_VIS_DEBUG_EXIT=1` (see `App::new`) to quit right after the offscreen work,
+    // before the event loop ever presents a frame.
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("molar_vis")
+        .with_inner_size([1200.0, 800.0]);
+    if std::env::var_os("MOLAR_VIS_DEBUG_HIDDEN").is_some() {
+        viewport = viewport.with_visible(false);
+    }
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: early_z_wgpu_options(),
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("molar_vis")
-            .with_inner_size([1200.0, 800.0]),
+        viewport,
         ..Default::default()
     };
 

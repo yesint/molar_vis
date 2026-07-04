@@ -113,6 +113,65 @@ impl App {
         };
     }
 
+    /// Save every member of group `gi` to a single file (rfd save dialog), each at its
+    /// displayed frame. A `.sdf`/`.sd` writes a `$$$$`-delimited multi-record file (how a
+    /// group is normally loaded); `.mol`/`.pdb`/… write the members concatenated per that
+    /// format. Mirrors [`save_displayed`]'s frame-swap for each member.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn save_group(&mut self, gi: usize) {
+        let (name, member_ids) = match self.scene.groups.get(gi) {
+            Some(g) => (g.name.clone(), g.members.clone()),
+            None => return,
+        };
+        // Default to the group's own file name (usually "<something>.sdf").
+        let default = if name.is_empty() { "group.sdf".to_string() } else { name };
+        let _ = member_ids;
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Multi-molecule", &["sdf", "sd", "mol", "pdb"])
+            .set_file_name(&default)
+            .save_file()
+        else {
+            return;
+        };
+        self.status = match self.save_group_to(gi, &path) {
+            Ok(n) => format!("Saved {n} molecule(s) to {}", path.display()),
+            Err(e) => {
+                log::error!("save group: {e}");
+                format!("Save failed: {e}")
+            }
+        };
+    }
+
+    /// Write every member of group `gi` to `path` as one multi-record file (the dialog-
+    /// free core of [`save_group`], also driven by the `MOLAR_VIS_DEBUG_SAVE_GROUP` hook).
+    /// Returns the number of members written.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn save_group_to(&mut self, gi: usize, path: &std::path::Path) -> Result<usize, String> {
+        let member_ids = match self.scene.groups.get(gi) {
+            Some(g) => g.members.clone(),
+            None => return Err("no such group".to_string()),
+        };
+        let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
+        let mut n = 0usize;
+        for id in member_ids {
+            let Some(mi) = self.scene.mol_index(id) else { continue };
+            let mol = &mut self.scene.molecules[mi];
+            // Swap the displayed frame into the System around the write, restore after
+            // (frames render by reference, not held in the System) — as save_displayed.
+            let displayed = mol.render_state().clone();
+            let prev = mol.data.set_state(displayed).map_err(|e| e.to_string())?;
+            let w = mol
+                .data
+                .system()
+                .ok_or_else(|| "cannot save a shared molecule".to_string())
+                .and_then(|sys| h.write(sys).map_err(|e| e.to_string()));
+            let _ = mol.data.set_state(prev);
+            w?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// The persistable global view state (camera + view-toolbar toggles). This and
     /// [`Self::apply_view_state`] are the **only** manual plumbing the save/load
     /// framework needs: a new persisted global setting is added to
@@ -159,24 +218,111 @@ impl App {
 
     /// Write the current state to `path` (the file half of [`Self::save_session`],
     /// also driven by the `MOLAR_VIS_DEBUG_SAVE_SESSION` verification hook).
+    ///
+    /// A session references molecules by source **path**. A File-source molecule that
+    /// was **structurally edited** (dihedral twist, draw/erase, cleanup — detected via
+    /// `structure_version`) is first written out as `<stem>.edited.<ext>` next to the
+    /// session file, and the session is pointed at that copy, so the edits reload (the
+    /// original file is left untouched). A molecule with no reloadable file source
+    /// (hand-drawn / in-memory bytes) still can't be restored — the user is warned.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn save_session_to(&mut self, path: &std::path::Path) {
-        let session = Session::capture(&self.scene, self.view_state());
-        // Drawn molecules have no file source to reload from, so a session can't
-        // restore them (it references molecules by source path). Warn so the user
-        // knows to export them via "Save molecule…" instead.
-        let drawn = self.scene.molecules.iter().filter(|m| m.editable).count();
+        // Where the `*.edited.*` copies go: next to the session (falls back to the
+        // original's own directory if the session has no parent).
+        let session_dir = path.parent().map(|p| p.to_path_buf());
+
+        // Collect the edited File-source standalone molecules + their target paths
+        // (immutable pass), then write each (mutable pass). Group members reload from
+        // their multi-record SDF by index, so per-member edited copies aren't wired up.
+        let targets: Vec<(usize, MolId, std::path::PathBuf)> = self
+            .scene
+            .molecules
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| {
+                if m.group.is_some() || m.structure_version == 0 {
+                    return None; // grouped, or never structurally edited → original reloads it
+                }
+                let MoleculeSource::File(orig) = &m.source else {
+                    return None; // no reloadable file source
+                };
+                let dir = session_dir
+                    .clone()
+                    .or_else(|| orig.parent().map(|p| p.to_path_buf()))?;
+                let raw_stem = orig.file_stem()?.to_string_lossy().into_owned();
+                // Strip a prior ".edited" so re-saving doesn't pile up ".edited.edited".
+                let stem = raw_stem.strip_suffix(".edited").unwrap_or(&raw_stem);
+                let ext = orig
+                    .extension()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "pdb".to_string());
+                Some((i, m.id, dir.join(format!("{stem}.edited.{ext}"))))
+            })
+            .collect();
+
+        let mut edited: std::collections::HashMap<MolId, std::path::PathBuf> = Default::default();
+        let mut edited_failed = 0usize;
+        for (i, id, ep) in targets {
+            match save_displayed(&mut self.scene.molecules[i], &ep, None) {
+                Ok(()) => {
+                    edited.insert(id, ep);
+                }
+                Err(e) => {
+                    log::error!("save edited molecule: {e}");
+                    edited_failed += 1;
+                }
+            }
+        }
+
+        let mut session = Session::capture(&self.scene, self.view_state());
+        // Rewire each saved edited molecule to its `*.edited.*` copy. `session.molecules`
+        // is captured in the same order as the non-grouped molecules, so zip by that.
+        let ids: Vec<MolId> = self
+            .scene
+            .molecules
+            .iter()
+            .filter(|m| m.group.is_none())
+            .map(|m| m.id)
+            .collect();
+        for (ms, id) in session.molecules.iter_mut().zip(ids) {
+            if let Some(ep) = edited.get(&id) {
+                ms.source = MoleculeSource::File(ep.clone());
+            }
+        }
+
+        // Molecules that still can't be restored: no file source, or an edited write
+        // that failed (those revert to the original on reload).
+        let unreloadable = self
+            .scene
+            .molecules
+            .iter()
+            .filter(|m| m.group.is_none() && !matches!(m.source, MoleculeSource::File(_)))
+            .count();
+
         let result = session
             .to_json()
             .and_then(|json| std::fs::write(path, json).map_err(|e| e.to_string()));
         match result {
-            Ok(()) if drawn > 0 => {
-                self.status = format!(
-                    "Saved session to {} — {drawn} drawn molecule(s) won't reload (use Save molecule… to export them)",
-                    path.display()
-                );
+            Ok(()) => {
+                let mut msg = format!("Saved session to {}", path.display());
+                if !edited.is_empty() {
+                    msg.push_str(&format!(
+                        " — {} edited molecule(s) saved as *.edited.*",
+                        edited.len()
+                    ));
+                }
+                if unreloadable > 0 {
+                    msg.push_str(&format!(
+                        "; {unreloadable} molecule(s) won't reload (use Save molecule… to export them)"
+                    ));
+                }
+                if edited_failed > 0 {
+                    msg.push_str(&format!(
+                        "; {edited_failed} edited molecule(s) couldn't be written (revert to original)"
+                    ));
+                }
+                self.status = msg;
             }
-            Ok(()) => self.status = format!("Saved session to {}", path.display()),
             Err(e) => {
                 log::error!("save session: {e}");
                 self.status = format!("Save failed: {e}");
@@ -349,6 +495,7 @@ impl App {
                 current,
                 visible: gs.visible,
                 expanded: false,
+                members_expanded: false,
             });
             let gi = self.scene.groups.len() - 1;
             self.scene.apply_group_visibility(gi);

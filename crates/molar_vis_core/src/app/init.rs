@@ -165,7 +165,8 @@ impl App {
                     }
                     if std::env::var("MOLAR_VIS_DEBUG_GROUP_EXPAND").is_ok() {
                         if let Some(g) = scene.groups.get_mut(gi) {
-                            g.expanded = true;
+                            g.expanded = true; // shared reps + the Molecules sub-expander
+                            g.members_expanded = true; // and the member list itself
                         }
                     }
                 }
@@ -558,6 +559,25 @@ impl App {
             jobs_rx: None,
         };
 
+        // Verification hook: MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>] enters dihedral-rotation
+        // mode and selects the first rotatable bond of molecule <mol> (default 0), so
+        // the axis + handles overlay can be screenshot from a window. Pair with
+        // MOLAR_VIS_DEBUG_DIHEDRAL_ROTATE=<deg> to also twist that bond's J-side by
+        // <deg>° up front, so a MOLAR_VIS_DEBUG_SAVE_IMAGE render shows the rotation.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_DIHEDRAL") {
+            let mi = v.trim().parse::<usize>().unwrap_or(0);
+            let deg = std::env::var("MOLAR_VIS_DEBUG_DIHEDRAL_ROTATE")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok());
+            match app.debug_dihedral_select(mi, deg) {
+                Some((i, j)) => log::info!(
+                    "debug dihedral: mol {mi} axis bond {i}-{j}{}",
+                    deg.map(|d| format!(", rotated J-side {d}°")).unwrap_or_default()
+                ),
+                None => log::warn!("debug dihedral: no rotatable bond on mol {mi}"),
+            }
+        }
+
         // Verification hooks (native): exercise the session save/load round-trip
         // headlessly, since the rfd file dialogs can't be driven in a headless run.
         // MOLAR_VIS_DEBUG_LOAD_SESSION=<path> replaces the scene from a session
@@ -578,6 +598,15 @@ impl App {
                         Ok(()) => log::info!("debug: saved molecule to {path}"),
                         Err(e) => log::error!("debug save molecule failed: {e}"),
                     }
+                }
+            }
+            // MOLAR_VIS_DEBUG_SAVE_GROUP=<path> writes group 0's members to one
+            // multi-record file (exercises the group-save write loop; pair with
+            // MOLAR_VIS_DEBUG_SDF to load a group).
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_GROUP") {
+                match app.save_group_to(0, std::path::Path::new(&path)) {
+                    Ok(n) => log::info!("debug: saved group ({n} molecules) to {path}"),
+                    Err(e) => log::error!("debug save group failed: {e}"),
                 }
             }
             // MOLAR_VIS_DEBUG_SAVE_IMAGE=<path> renders the startup scene to a PNG
@@ -737,6 +766,16 @@ impl App {
             app.run_script(&src);
             app.console_open = true; // show the console (echo + output) for the screenshot
             app.console.focus_input = true;
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_EXIT=1 quits the process right here — after
+        // the file-producing debug hooks above (SAVE_IMAGE / RAYTRACE / SAVE_SESSION /
+        // SAVE_MOL) have run in `App::new`, but before eframe enters its event loop and
+        // ever presents a frame. Combined with MOLAR_VIS_DEBUG_HIDDEN=1 this makes
+        // headless verification fully non-interactive: no window is shown on the desktop.
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("MOLAR_VIS_DEBUG_EXIT").is_some() {
+            std::process::exit(0);
         }
 
         Ok(app)

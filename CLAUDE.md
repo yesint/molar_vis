@@ -98,6 +98,8 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   can be screenshot headlessly — pair with `MOLAR_VIS_DEBUG_SEL`) +
   `MOLAR_VIS_DEBUG_SAVE_MOL=<path>` (write mol 0 to a structure file at startup — exercises the
   molar `FileHandler` write + displayed-frame swap path headlessly) +
+  `MOLAR_VIS_DEBUG_SAVE_GROUP=<path>` (write group 0's members to one multi-record file — exercises
+  the group-save write loop; pair with `MOLAR_VIS_DEBUG_SDF`) +
   `MOLAR_VIS_DEBUG_SAVE_IMAGE=<path>` (+ optional `_W`/`_H`, default 800×600) — render the startup
   scene to a PNG at startup (builds geometry via `rebuild_dirty`, then offscreen render → GPU
   readback → encode), so the "Save image" path is verifiable headlessly without a window +
@@ -111,12 +113,25 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   mouse-driven headlessly) +
   `MOLAR_VIS_DEBUG_DEFAULTS=1` (use built-in `Settings::default()` and skip the config-file
   read/write, so headless runs are reproducible and never touch the dev's saved config) +
+  `MOLAR_VIS_DEBUG_HIDDEN=1` (create the window **invisible** — `ViewportBuilder::with_visible(false)`
+  — so an offscreen render never pops a window onto the desktop) +
+  `MOLAR_VIS_DEBUG_EXIT=1` (quit at the end of `App::new`, after the file-producing hooks below have
+  run but before eframe's event loop presents a frame). **Pair the two** for fully non-interfering
+  headless verification: `MOLAR_VIS_DEBUG_HIDDEN=1 MOLAR_VIS_DEBUG_EXIT=1 MOLAR_VIS_DEBUG_SAVE_IMAGE=…`
+  writes the PNG offscreen and self-exits in <1 s — no window, no `timeout` needed. (This is the
+  **preferred** way to run the SAVE_IMAGE/RAYTRACE/SAVE_SESSION/SAVE_MOL hooks on a live desktop; only
+  the egui *panel/overlay* screenshots — handles, dialogs — still need a real visible window.) +
   `MOLAR_VIS_DEBUG_INTERACTIONS=1` (add an `Interactions` rep on mol 0 with a partner rep — mol 1's
   first rep if a second molecule is loaded, else a disjoint-half second rep on mol 0 — and expand its
   panel; exercises the cross-molecule contact detection + dashed-line build; pair with
   `MOLAR_VIS_DEBUG_SAVE_IMAGE`) +
   `MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[hbond|hydrophobic|salt|pistacking|pication|halogen]` (open the
   tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
+  `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (enter edit mode with the **DihedralRotate** tool and select the
+  first rotatable bond of molecule `<mol>` — default 0 — so the axis + handles overlay can be
+  screenshot from a window) +
+  `MOLAR_VIS_DEBUG_DIHEDRAL_ROTATE=<deg>` (also twist that bond's J-side by `<deg>`° up front, so a
+  `MOLAR_VIS_DEBUG_SAVE_IMAGE` render shows the rotated geometry headlessly) +
   `MOLAR_VIS_DEBUG_SCRIPT="<rhai source>"` (or `@path` to a file, native) — runs a console script at
   startup through the same path the console uses, and opens the console window, so a command's effect
   (e.g. `mol(0).rep(0).set_color("chain")`) + the echoed output can be screenshot headlessly. Generate a
@@ -185,6 +200,18 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
   - `app/console.rs` — scripting-console UI + command-execution glue.
   - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.
+  - `app/dihedral.rs` — the **DihedralRotate tool** of edit (Draw) mode (alongside Draw/Erase; state
+    in `DihedralState` on the active `DrawSession`, tool button in `draw_tools_panel`): click a
+    **rotatable** bond (non-ring, non-terminal — found by cutting the bond and BFS-splitting the graph
+    into the two sides) to set it as the rotation **axis**, then drag a **handle** drawn on each
+    neighbouring bond (side-tinted) to twist that side of the molecule about the axis. The drag angle
+    is the cursor's ray projected into the rotation plane (⟂ the axis); the per-frame delta drives
+    `Molecule::rotate_fragment` (rigid rotation of one side's atoms about the bond line, editing the
+    displayed coords in place — trajectory frame or owned System). Plain-LMB elsewhere orbits (only a
+    handle drag suppresses orbit); a shared pymolar/JS molecule is skipped (can't mutate). Dispatched
+    from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
+    before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
+    `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
 - `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font, configures both
   the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
   `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
@@ -311,6 +338,30 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `seed_frame0`/`append_frames`/`push_frame`/`apply_current_frame` methods (see *molar integration*),
   plus a `source: MoleculeSource` (`File(path)`/`Bytes{name}`) and `traj_loads: Vec<TrajLoad>`
   (the trajectory files loaded into it, in order) — both for session save/load (see `session.rs`).
+  **One molecule type** — every owned molecule is editable/undoable (there's no `editable` flag;
+  a *shared* pymolar/JS molecule just can't be mutated in place). `Molecule::structure_snapshot`
+  returns an `Arc<StructureSnapshot>` (atoms+coords+bonds) rebuilt **only when `structure_version`
+  bumps** (bumped by every structural mutator — `add_atom`/`add_bond`/`remove_*`/`cycle_bond_order`/
+  `set_atom_element`/`rotate_fragment`/`set_coords`), so it's O(1) at idle; `rotate_fragment`
+  (dihedral) + `set_coords` (undo) edit the **displayed** coords in place (trajectory frame or owned
+  System).
+- `history.rs` — **undo/redo on one unified timeline** (M30). A single strict-LIFO stack of `Step`s,
+  each either `Doc(EditState)` — the reps/visibility/groups **document**, snapshot-diffed at settle
+  via `maybe_record` against the rolling `committed` baseline (as before) — or `Struct(MolId,
+  StructEdit)` — a **self-contained structural delta**, recorded eagerly at gesture end via
+  `record_struct`. **`StructEdit::Coords { atoms, before, after }`** stores only the *moved* atoms'
+  positions (dihedral twist, minimizer/cleanup — owned-System only); **`StructEdit::Topology {
+  before, after: Arc<StructureSnapshot> }`** carries full before/after snapshots for atom/bond
+  add/remove (molar re-indexes on removal, so per-atom topology deltas aren't feasible; rare + small,
+  Arc-shared). Structure is **not** in the document — `EditState`/`MolState` hold only reps+visibility;
+  a molecule's *existence* (add/delete) rides the document but its live structure is preserved across
+  add/delete undo by reusing the `Molecule` (with its `System`) from the scene/`trash`. `undo(&mut
+  Scene)`/`redo` apply one step in place (Doc → swap+`apply` committed; Struct → `StructEdit::apply`
+  writing coords / rebuilding via `reconcile_structure`) and return the label; there is **no
+  jump-to-committed shortcut** (each delta must be replayed in order). `RepState`/`StructureSnapshot`
+  live here (see the *save/load* design in `session.rs`). Recording sites: `app/draw_input.rs`
+  `record_topology` wraps Draw/Erase + `toggle_hydrogens`; `drive_minimize` records the relax's
+  `Coords`; `app/dihedral.rs` records the twist's `Coords` at drag end.
 - `session.rs` — **save/load visualization state** (M13). `Session { format, version, view:
   ViewState, molecules: Vec<MolSession> }`, serialized to JSON. The design goal is
   *extensible-without-ceremony*: the per-rep document is serialized through the **same**
@@ -1316,8 +1367,9 @@ History labels via `describe_change` ("edit selection", "change coloring",
   Draw/Erase tools + CPK element chips + bond-order icons. The unified **Draw tool** infers the
   action from the gesture (click empty → atom, drag from atom → bond, click bond → cycle order,
   Erase → delete); `App::draw: Option<DrawSession>` + the edit helpers on `Molecule`
-  (`add_atom`/`add_bond`/`cycle_bond_order`). Structure edits are undoable via
-  `MolState.structure: Option<StructureSnapshot>` (captured only for `editable` molecules). A
+  (`add_atom`/`add_bond`/`cycle_bond_order`). Structure edits are undoable via the unified
+  `history` timeline (`StructEdit::Topology`/`Coords`; M30 — was `MolState.structure` +
+  the now-removed `editable` flag). A
   greenfield cleanup force field (`minimize.rs`: harmonic bond/angle + weak torsion + WCA-repulsive
   vdW, analytic gradients, FIRE integrator) relaxes the sketch debounced + via a Clean-up button;
   molar's `Vec<Bond>` carries `BondOrder`, and Double/Triple/Aromatic render as parallel/dashed
@@ -1478,10 +1530,13 @@ History labels via `describe_change` ("edit selection", "change coloring",
   to choose the shown member (**partial focus** — cycling or clicking a member name shows it and
   **centers** the camera on it by panning the target only, keeping the current zoom; the header
   magnifier is a **full zoom-to-fit**; the slider tooltip is anchored **under the knob** showing
-  "N/M `<name>`"), the shared reps under the header, and — when expanded — each member (real name
-  from the SDF title line, a **clickable label** that partial-focuses it; the **shown member's row is
-  highlighted** with an accent bar; a per-member `LIST` menu → **Delete molecule**) collapsible to its
-  **own** reps (`draw_reps_for` gained a `start,end,is_shared` sub-range). The whole left-panel list
+  "N/M `<name>`"), an **Edit** button (opens the *shown* member in the drawing editor), and a group
+  `LIST` menu (**Save group…** — writes all members to one multi-record file via `save_group_to`;
+  **Delete group**). **Two independent expanders**: the header caret shows the **shared reps** + a
+  nested **"Molecules (N)"** sub-expander (its own `members_expanded` fold), which lists each member
+  (real name from the SDF title line, a **clickable label** that partial-focuses it; the **shown
+  member's row is highlighted** with an accent bar; a per-member `LIST` menu → **Delete molecule**)
+  collapsible to its **own** reps (`draw_reps_for` gained a `start,end,is_shared` sub-range). The whole left-panel list
   scrolls (a single panel-level `ScrollArea`, non-floating scrollbar; fps in a bottom sub-panel).
   Per-member delete preserves the shared reps (`Scene::remove_grouped_molecule` re-materializes them
   onto the new shown member). New-group default
@@ -1538,6 +1593,34 @@ History labels via `describe_change` ("edit selection", "change coloring",
   and a live panel screenshot. Hooks `MOLAR_VIS_DEBUG_INTERACTIONS=1` + `_INTERACTIONS_DIALOG=[type]`.
   Deferred: distance labels; water bridges / metal complexes; weak C–H donors; ligand aromaticity relies
   on molar perception (PDB ligands without bond orders may miss rings); scripting access.
+- ✅ M30 **Dihedral rotation (edit-mode tool) + one molecule type + delta undo** — three coupled
+  changes. **(1) Dihedral rotation** (`app/dihedral.rs`): click a **rotatable** bond (non-ring,
+  non-terminal — found by cutting the bond and BFS-splitting the graph) to set it as the rotation
+  **axis**, then drag a side-tinted **handle** on a neighbouring bond to twist that half of the
+  molecule about the bond (drag angle = the cursor ray projected into the plane ⟂ the axis; the
+  per-frame delta drives `Molecule::rotate_fragment`, a rigid rotation of one side's atoms). It's the
+  third **tool** of edit (Draw) mode (`DrawTool::DihedralRotate`, state in `DihedralState` on
+  `DrawSession`, palette button in `draw_tools_panel`, dispatched from `draw_input`) — *not* a
+  separate mode; plain-LMB elsewhere orbits, only a handle drag suppresses orbit. **(2) One molecule
+  type**: removed the `Molecule.editable` flag — every owned molecule is editable/undoable; the "Edit"
+  button just enters edit mode; the session-save warning keys off a non-`File` source instead. **(3)
+  Delta undo** (`history.rs`): a unified `Doc | Struct` timeline — coordinate moves (dihedral,
+  minimizer) record a `StructEdit::Coords` delta of **only the moved atoms**; topology edits record a
+  `StructEdit::Topology` before/after `Arc<StructureSnapshot>`; per-settle document capture no longer
+  touches per-atom data (structure left the document; add/delete-molecule preserves structure via the
+  trash). Idle capture is O(1) (`structure_snapshot` rebuilds only on a `structure_version` bump).
+  So a dihedral twist (or draw/erase/cleanup) is now **undoable on any molecule** — no "Edit"-to-enable
+  step. Verified: native+wasm+py green, **84 tests** (Coords/Topology round-trips, Doc–Struct
+  interleave, identity-shared snapshot), clippy clean; headless save-image confirms the twist applies +
+  a windowed screenshot of the three-tool palette with the amber axis / side-tinted handles.
+  **Follow-ups shipped:** the flaky "?" unspecified-bond overlay was dropped from edit mode; a
+  molecular **group** header gained an **Edit** button (opens the *shown* member in the editor); and
+  **session save persists edited structures** — a structurally-edited File-source molecule
+  (`structure_version > 0`) is written next to the session as `<stem>.edited.<ext>` and the session
+  is pointed at that copy, so the edits reload (original untouched; verified: edited file written +
+  session round-trip reloads the edited coords). Deferred: persisting edits of *grouped* members
+  (they still reload from the SDF by index); edge-on-axis drag is ill-conditioned (freezes rather
+  than jumps).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed
