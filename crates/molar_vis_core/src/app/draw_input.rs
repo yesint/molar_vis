@@ -603,17 +603,18 @@ impl App {
 
     /// Run a topology-editing gesture `f` on molecule `mi`, recording it as one undoable
     /// [`StructEdit::Topology`] step (before/after structure snapshots). A no-op wrapper
-    /// (just runs `f`) for a shared molecule, one above the editor size cap
-    /// ([`DRAW_AUTO_MAX_ATOMS`]), or a gesture that deletes the whole molecule — the
-    /// document's "delete molecule" step restores that from the trash. Coalesces all of
-    /// `f`'s mutations into one step.
+    /// (just runs `f`) for a shared molecule, or a gesture that deletes the whole molecule
+    /// — the document's "delete molecule" step restores that from the trash. Coalesces all
+    /// of `f`'s mutations into one step. (No atom-count cap: a topology snapshot is cheap
+    /// and rare, and every owned molecule must be undoable — the [`DRAW_AUTO_MAX_ATOMS`]
+    /// cap gates only the O(N²) auto-relax, not undo.)
     pub(super) fn record_topology<F: FnOnce(&mut Self)>(&mut self, mi: usize, f: F) {
         let (before, id) = {
             let Some(mol) = self.scene.molecules.get(mi) else {
                 f(self);
                 return;
             };
-            let eligible = !mol.data.is_shared() && mol.n_atoms <= DRAW_AUTO_MAX_ATOMS;
+            let eligible = !mol.data.is_shared();
             (eligible.then(|| mol.structure_snapshot()).flatten(), mol.id)
         };
         f(self);
