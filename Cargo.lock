@@ -2284,7 +2284,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=4098139#4098139d1291ce6197560464c4f7c24f2c098d0d"
+source = "git+https://github.com/yesint/molar.git?rev=09507e9#09507e950fac0c4953a8c7f52939a821ce025edd"
 dependencies = [
  "anyhow",
  "clap",
@@ -2310,7 +2310,7 @@ dependencies = [
 [[package]]
 name = "molar_ff"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=4098139#4098139d1291ce6197560464c4f7c24f2c098d0d"
+source = "git+https://github.com/yesint/molar.git?rev=09507e9#09507e950fac0c4953a8c7f52939a821ce025edd"
 dependencies = [
  "molar",
  "thiserror 2.0.18",
@@ -2320,7 +2320,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=4098139#4098139d1291ce6197560464c4f7c24f2c098d0d"
+source = "git+https://github.com/yesint/molar.git?rev=09507e9#09507e950fac0c4953a8c7f52939a821ce025edd"
 dependencies = [
  "cc",
  "libloading",
@@ -2329,7 +2329,7 @@ dependencies = [
 [[package]]
 name = "molar_python"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=4098139#4098139d1291ce6197560464c4f7c24f2c098d0d"
+source = "git+https://github.com/yesint/molar.git?rev=09507e9#09507e950fac0c4953a8c7f52939a821ce025edd"
 dependencies = [
  "env_logger",
  "log",

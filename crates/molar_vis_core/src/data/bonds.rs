@@ -1,6 +1,11 @@
-//! Bond guessing. GRO files carry no bonds and PDB only partial ones, so we
-//! infer connectivity from interatomic distances using molar's grid distance
-//! search, then accept pairs closer than a fraction of the summed VDW radii.
+//! Where a molecule's connectivity comes from.
+//!
+//! Some formats record bonds and some don't, so [`resolve`] owns the policy: trust a
+//! chemistry-complete table (SDF/MOL — it carries bond **orders**), union a partial one
+//! (PDB `CONECT`) with a distance guess, and fall back to guessing alone (GRO/XYZ).
+//! [`guess`] is the distance part: molar's grid search, accepting pairs closer than a
+//! fraction of the summed VDW radii. molar has no coordinate-based bond perception of its
+//! own, so that part stays here.
 
 use molar::prelude::*;
 
@@ -26,6 +31,63 @@ impl Default for BondParams {
     fn default() -> Self {
         Self { factor: 0.6, search_cutoff: 0.25, min_dist: 0.04, periodic: false }
     }
+}
+
+/// The molecule's connectivity, combining what the file recorded with what geometry
+/// implies. `file_bonds` is the freshly loaded topology's own bond table; the remaining
+/// arguments are [`guess`]'s.
+///
+/// Three cases, keyed off molar's own signal for "did this format record chemistry":
+///
+/// * **`file_bonds.has_orders()`** — the source carried explicit bond *orders* (an SDF/MOL
+///   bond block), so it is a complete chemistry table. Taken verbatim: distance guessing
+///   could only lose the orders, and those orders are what aromatic-ring perception and
+///   espaloma charge assignment need (a Kekulé structure can't be recovered from
+///   distances).
+/// * **bonds but no orders** — a connectivity-only table. In a PDB that's `CONECT`, which
+///   records the *exceptions* (ligands, disulfides, metal links) and may or may not cover
+///   the whole system — 2 records in `2lao.pdb`, but a complete 32716 in the Martini
+///   `cg.pdb`. So it's **unioned** with the distance guess rather than replacing it or
+///   being replaced: neither source is trusted to be complete. This is also what finally
+///   gives coarse-grained structures their real bonds — CG bead spacing (~0.32 nm) exceeds
+///   `search_cutoff`, so distance guessing finds almost none of them.
+/// * **no bonds** — GRO/XYZ; the distance guess is all there is.
+pub fn resolve(
+    file_bonds: &BondStorage,
+    sel: &impl PosProvider,
+    positions: &[[f32; 3]],
+    vdw: &[f32],
+    pbox: Option<&PeriodicBox>,
+    params: &BondParams,
+) -> Vec<Bond> {
+    let n = positions.len();
+    let from_file = || {
+        // Defensive: never let a malformed record index past the atoms we loaded.
+        bond_vec(file_bonds).into_iter().filter(|b| b.i1 < n && b.i2 < n && b.i1 != b.i2)
+    };
+    if file_bonds.has_orders() {
+        let mut bonds: Vec<Bond> = from_file().map(normalized).collect();
+        dedup_keeping_order(&mut bonds);
+        return bonds;
+    }
+    let mut bonds = guess(sel, positions, vdw, pbox, params);
+    if !file_bonds.is_empty() {
+        bonds.extend(from_file().map(normalized));
+        dedup_keeping_order(&mut bonds);
+    }
+    bonds
+}
+
+/// A bond with its endpoints in ascending order, so the two sources' pairs compare equal.
+fn normalized(b: Bond) -> Bond {
+    if b.i1 <= b.i2 { b } else { Bond::with_order(b.i2, b.i1, b.order) }
+}
+
+/// Sort + drop duplicate pairs, keeping the most informative order of each duplicate group
+/// (a file's `Single`/`Double`/… beats a guess's `Unspecified`).
+fn dedup_keeping_order(bonds: &mut Vec<Bond>) {
+    bonds.sort_unstable_by_key(|b| (b.i1, b.i2, b.order == BondOrder::Unspecified));
+    bonds.dedup_by_key(|b| (b.i1, b.i2));
 }
 
 /// Guess bonds for all atoms. `sel` is the bound all-selection (the position
@@ -97,6 +159,11 @@ pub fn guess(
     bonds.into_iter().map(|[a, b]| Bond::new(a, b)).collect()
 }
 
+/// Collect a columnar [`BondStorage`] back into the flat list the viewer keeps.
+pub fn bond_vec(st: &BondStorage) -> Vec<Bond> {
+    st.iter().map(|b| Bond::with_order(b.i1(), b.i2(), b.order())).collect()
+}
+
 /// Scatter a flat bond list into molar's columnar [`BondStorage`].
 ///
 /// The viewer keeps connectivity as a flat `Vec<Bond>` (indexable, `Copy` rows — what
@@ -110,4 +177,95 @@ pub fn bond_storage(bonds: &[Bond]) -> BondStorage {
         st.push(b);
     }
     st
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests")).join(name)
+    }
+
+    /// Bond count from distance guessing alone — the pre-`resolve` behavior, for
+    /// comparison.
+    fn guessed_only(path: &Path) -> Vec<Bond> {
+        let system = System::from_file(path.to_str().unwrap()).expect("load");
+        let all = system.select_all_bound();
+        let (positions, vdw): (Vec<[f32; 3]>, Vec<f32>) = all
+            .iter_pos()
+            .zip(all.iter_atoms())
+            .map(|(p, a)| ([p.x, p.y, p.z], a.vdw()))
+            .unzip();
+        let pbox = system.state().pbox.clone();
+        guess(&all, &positions, &vdw, pbox.as_ref(), &BondParams::default())
+    }
+
+    /// An SDF carries a complete bond block *with orders*, so it is taken verbatim —
+    /// distance guessing can't recover a Kekulé structure, which is what aromatic
+    /// perception and espaloma charges need.
+    #[test]
+    fn sdf_bonds_are_taken_verbatim_with_orders() {
+        let recs = crate::data::load_records(&fixture("ligands20.sdf"), &BondParams::default())
+            .expect("load ligands20.sdf");
+        let aspirin = &recs[0];
+        // The molfile counts line says "21 21": 21 atoms, 21 bonds.
+        assert_eq!(aspirin.n_atoms, 21);
+        assert_eq!(aspirin.bonds.len(), 21, "the file's own bond table, not a guess");
+        // Aspirin has an aromatic ring + two carbonyls, so orders must have survived.
+        assert!(
+            aspirin.bonds.iter().any(|b| b.order == BondOrder::Double),
+            "SDF bond orders must survive loading"
+        );
+        assert!(aspirin.bonds.iter().all(|b| b.order != BondOrder::Unspecified));
+    }
+
+    /// A PDB's `CONECT` block is only the exceptions, so it is unioned with the guess —
+    /// every guessed bond is kept and the recorded pairs are added on top.
+    #[test]
+    fn pdb_conect_unions_with_the_distance_guess() {
+        let path = fixture("2lao.pdb");
+        let guessed = guessed_only(&path);
+        let raw = crate::data::load(&path).expect("load 2lao.pdb");
+        assert!(
+            raw.bonds.len() >= guessed.len(),
+            "union can only add: {} < {}",
+            raw.bonds.len(),
+            guessed.len()
+        );
+        let resolved: std::collections::BTreeSet<[usize; 2]> =
+            raw.bonds.iter().map(|b| [b.i1, b.i2]).collect();
+        for g in &guessed {
+            assert!(resolved.contains(&[g.i1, g.i2]), "guessed bond {g:?} was dropped");
+        }
+    }
+
+    /// Coarse-grained beads sit ~0.32 nm apart, past `search_cutoff`, so distance
+    /// guessing misses most CG bonds. Reading the `CONECT` table is what recovers them.
+    #[test]
+    fn cg_conect_recovers_bonds_the_guess_misses() {
+        let path = fixture("2lao_cg.pdb");
+        let guessed = guessed_only(&path).len();
+        let resolved = crate::data::load(&path).expect("load 2lao_cg.pdb").bonds.len();
+        assert!(
+            resolved > guessed,
+            "CONECT must add CG bonds the guess can't see: {resolved} vs {guessed}"
+        );
+    }
+
+    /// A duplicated pair keeps the informative order (the file's) over a guess's
+    /// `Unspecified`, whichever way round the endpoints were recorded.
+    #[test]
+    fn dedup_prefers_the_known_order() {
+        let mut bonds = vec![
+            Bond::new(0, 1),
+            normalized(Bond::with_order(1, 0, BondOrder::Double)),
+            Bond::new(2, 3),
+        ];
+        dedup_keeping_order(&mut bonds);
+        assert_eq!(bonds.len(), 2);
+        assert_eq!(bonds[0].order, BondOrder::Double);
+        assert_eq!(bonds[1].order, BondOrder::Unspecified);
+    }
 }

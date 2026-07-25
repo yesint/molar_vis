@@ -536,7 +536,14 @@ impl Molecule {
                 positions.push([pos.x, pos.y, pos.z]);
                 vdw.push(atom.vdw());
             }
-            let bonds = crate::data::bonds::guess(&bound, &positions, &vdw, state.pbox.as_ref(), bond_params);
+            let bonds = crate::data::bonds::resolve(
+                &topo.bonds,
+                &bound,
+                &positions,
+                &vdw,
+                state.pbox.as_ref(),
+                bond_params,
+            );
             (
                 bonds,
                 Vec3::new(min.x, min.y, min.z),
@@ -570,7 +577,7 @@ impl Molecule {
         bbox_max: Vec3,
         rep_defaults: &crate::settings::RepDefaults,
     ) -> Self {
-        Self {
+        let mut mol = Self {
             id,
             name,
             source,
@@ -614,6 +621,33 @@ impl Molecule {
             pick_gpu: RepGpu::default(),
             #[cfg(not(target_arch = "wasm32"))]
             pick_dirty: true,
+        };
+        // The resolved connectivity is generally not the structure file's own table, so
+        // hand it to the topology that molar's bond-reading machinery consults.
+        mol.sync_bonds_to_topology();
+        mol
+    }
+
+    /// Republish `self.bonds` into the owned `System`'s topology.
+    ///
+    /// The viewer's connectivity is resolved at load ([`crate::data::bonds::resolve`]:
+    /// what the file recorded ∪ what distances imply) and then edited by the structure
+    /// editor, so it is generally *not* what the structure file's own bond table holds.
+    /// Everything on molar's side that reads bonds — the `polh` / `apolh` selection
+    /// keywords, [`perceive`], `molar_ff`'s force-field typing and espaloma charges —
+    /// reads the topology, so it has to be told.
+    ///
+    /// Called at construction and after every bond edit; the flat `Vec<Bond>` stays the
+    /// authority (it is also the only bond store a *shared* molecule has, since we don't
+    /// own that topology — hence the no-op there).
+    pub(crate) fn sync_bonds_to_topology(&mut self) {
+        let bonds = bond_storage(&self.bonds);
+        if let Some(sys) = self.data.system_mut() {
+            // Only an index out of range can fail, and `self.bonds` is maintained in
+            // range by the mutators below; a stale bond would just be dropped silently.
+            if let Err(e) = sys.set_bonds(bonds) {
+                log::warn!("could not publish bonds to the topology: {e}");
+            }
         }
     }
 
@@ -810,6 +844,7 @@ impl Molecule {
         }
         self.bonds.push(Bond::with_order(i, j, order));
         self.structure_version += 1;
+        self.sync_bonds_to_topology();
         true
     }
 
@@ -818,6 +853,7 @@ impl Molecule {
         if k < self.bonds.len() {
             self.bonds.remove(k);
             self.structure_version += 1;
+            self.sync_bonds_to_topology();
         }
     }
 
@@ -829,6 +865,7 @@ impl Molecule {
                 if self.bonds[k].order != order {
                     self.bonds[k].order = order;
                     self.structure_version += 1;
+                    self.sync_bonds_to_topology();
                     return true;
                 }
                 false
@@ -957,6 +994,8 @@ impl Molecule {
         self.n_atoms = self.n_atoms.saturating_sub(1);
         self.hover_grid = None;
         self.structure_version += 1;
+        // The atom columns shrank and the surviving bonds were renumbered above.
+        self.sync_bonds_to_topology();
         self.refresh_bbox();
         self.n_atoms == 0
     }
@@ -974,52 +1013,70 @@ impl Molecule {
     }
 
     // --- Molecular perception bridge ---------------------------------------
-    // molar's perception works on a `Topology`, but the editor keeps its connectivity
-    // in `self.bonds` (separate from the System's topology bonds). These helpers run
-    // perception over a topology assembled from the System's atoms + `self.bonds`.
+    // molar's perception routines all take a prebuilt `BondAdjacency`, and the owned
+    // `System`'s topology already carries our resolved connectivity (see
+    // `sync_bonds_to_topology`), so these run directly on it — no copy of the atoms.
+    // A *shared* molecule's topology isn't ours to index, so it falls back to a
+    // throwaway topology carrying its atoms and our bonds.
 
-    /// A topology with the System's atoms but the editor's bond graph, with the bond
-    /// adjacency already built (molar's graph routines all take a prebuilt one).
-    fn topology_with_bonds(&self) -> Topology {
+    /// Run `f` over a topology holding this molecule's atoms and its resolved bond graph,
+    /// plus the matching bond adjacency.
+    ///
+    /// For an owned molecule that topology *is* the `System`'s — it already carries the
+    /// resolved connectivity (see [`Molecule::sync_bonds_to_topology`]) — so nothing is
+    /// copied. Only a shared molecule needs a scratch clone, since we can't publish bonds
+    /// into a topology we don't own.
+    ///
+    /// The adjacency is built from whichever bond table `f` will read, so the bond indices
+    /// it hands out always index that same table.
+    fn with_perception_topology<R>(&self, f: impl FnOnce(&Topology, &BondAdjacency) -> R) -> R {
+        if let Some(sys) = self.data.system() {
+            let top = sys.topology();
+            let adj = BondAdjacency::build(top.atoms.len(), top.bonds.iter_pairs());
+            return f(top, &adj);
+        }
         let mut top = self.data.topology().clone();
         top.bonds = bond_storage(&self.bonds);
         top.bonds.ensure_adjacency(top.atoms.len());
-        top
+        let adj = top.bonds.get_adjacency().unwrap();
+        f(&top, adj)
     }
 
     /// Perceive rings + aromaticity: write the perceived aromatic orders back into
     /// `self.bonds` and cache the aromatic rings (atom-index loops) for the ring-circle
     /// overlay. Coordinate-free; cheap for editor-scale molecules.
     pub fn perceive_aromaticity(&mut self) {
-        let mut top = self.topology_with_bonds();
-        let perc = perceive(&mut top); // molar::perception (via prelude)
-        // Aromatic orders written back into the flat editor graph. `perceive` only
-        // rewrites the order column, so the pairs still line up index-for-index.
+        // This one *does* aromatize, and the editor wants that (the orders it writes back
+        // drive the double/triple-bond rendering), so it runs on a scratch topology and the
+        // result is copied into the flat graph — `perceive` only rewrites the order column,
+        // so the bond indices still line up.
+        let mut top = self.data.topology().clone();
+        top.bonds = bond_storage(&self.bonds);
+        let perc = perceive(&mut top);
         for (b, r) in self.bonds.iter_mut().zip(top.bonds.iter()) {
             b.order = r.order();
         }
         self.aromatic_rings = perc.aromatic_rings().cloned().collect();
         self.aromatic_dirty = true; // the ring-circle geometry must rebuild
+        self.sync_bonds_to_topology(); // the orders changed
     }
 
     /// Implicit-hydrogen count per atom, over the editor's connectivity.
     pub fn implicit_hydrogens(&self) -> Vec<u8> {
-        let top = self.topology_with_bonds();
-        implicit_hydrogens(&top, top.bonds.get_adjacency().unwrap())
+        self.with_perception_topology(|top, adj| implicit_hydrogens(top, adj))
     }
 
     /// Lazily compute + cache the molecule's aromatic rings (atom-index loops) for
-    /// interaction detection. Runs molar ring perception on a **clone** of the topology
-    /// (with the guessed bonds), so it has no side effects on the live bonds (unlike
-    /// `perceive_aromaticity`, which writes aromatic orders back for the editor). Rings
+    /// interaction detection. Uses molar's **non-mutating** `aromatic_rings`, so unlike
+    /// `perceive_aromaticity` it leaves the bond orders alone — which matters because an
+    /// aromatized bond can no longer be charged (espaloma needs a Kekulé structure). Rings
     /// are topology-derived, so this runs once and is reused across trajectory frames.
     pub fn ensure_interaction_rings(&mut self) {
         if self.interaction_rings.is_some() {
             return;
         }
-        let mut top = self.topology_with_bonds();
-        let perc = perceive(&mut top);
-        self.interaction_rings = Some(perc.aromatic_rings().cloned().collect());
+        let rings = self.with_perception_topology(|top, adj| aromatic_rings(top, adj));
+        self.interaction_rings = Some(rings);
     }
 }
 
@@ -1340,5 +1397,65 @@ impl Scene {
             max = max.max(m.bbox_max);
         }
         Some((min, max))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::bonds::BondParams;
+    use crate::settings::RepDefaults;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests")).join(name)
+    }
+
+    fn load_first_record(name: &str) -> Molecule {
+        let mut recs = crate::data::load_records(&fixture(name), &BondParams::default())
+            .expect("load records");
+        Molecule::new(MolId(0), recs.remove(0), &RepDefaults::default())
+    }
+
+    /// The resolved bond graph reaches the topology, so molar's bond-graph selection
+    /// keywords work. Aspirin's only polar hydrogen is its carboxylic acid O–H; every
+    /// other H hangs off carbon.
+    #[test]
+    fn resolved_bonds_reach_the_selection_keywords() {
+        let mol = load_first_record("ligands20.sdf");
+        let polh = mol.data.evaluate("polh").expect("polh must match with bonds published");
+        assert_eq!(polh.1.len(), 1, "aspirin has one acid O-H");
+        let apolh = mol.data.evaluate("apolh").expect("apolh must match");
+        assert_eq!(apolh.1.len(), 7, "the remaining hydrogens are on carbon");
+    }
+
+    /// Aromatic-ring perception needs the file's Kekulé orders — a benzene of
+    /// order-less (distance-guessed) bonds reads as sp3 and yields no aromatic ring.
+    /// This silently found nothing before the file's bond table was kept.
+    #[test]
+    fn aromatic_rings_are_found_on_an_sdf_ligand() {
+        let mut mol = load_first_record("ligands20.sdf");
+        mol.ensure_interaction_rings();
+        let rings = mol.interaction_rings.as_ref().expect("rings cached");
+        assert_eq!(rings.len(), 1, "aspirin has one aromatic ring");
+        assert_eq!(rings[0].len(), 6, "...a six-membered one");
+    }
+
+    /// ...and finding them must not aromatize the molecule: espaloma charge assignment
+    /// rejects `Aromatic`-order bonds, so the Kekulé structure has to survive.
+    #[test]
+    fn ring_perception_leaves_bond_orders_alone() {
+        let mut mol = load_first_record("ligands20.sdf");
+        let before: Vec<BondOrder> = mol.bonds.iter().map(|b| b.order).collect();
+        mol.ensure_interaction_rings();
+        let after: Vec<BondOrder> = mol.bonds.iter().map(|b| b.order).collect();
+        assert_eq!(before, after, "interaction-ring perception must not rewrite orders");
+        assert!(
+            !after.contains(&BondOrder::Aromatic),
+            "the SDF is Kekulé and must stay chargeable"
+        );
+        // The published topology must match the flat graph, order for order.
+        let published: Vec<BondOrder> =
+            mol.data.topology().bonds.iter().map(|b| b.order()).collect();
+        assert_eq!(published, after);
     }
 }

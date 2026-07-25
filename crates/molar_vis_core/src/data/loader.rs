@@ -208,10 +208,18 @@ fn assemble(
             positions.push([pos.x, pos.y, pos.z]);
             vdw.push(atom.vdw());
         }
-        // PBC-aware bond guessing when the structure has a box (finds bonds that
-        // cross a box face in a wrapped structure; rendered as dashed half-bonds).
+        // What the file recorded + what geometry implies (see `bonds::resolve`). The
+        // guessing half is PBC-aware when the structure has a box, so bonds crossing a
+        // box face in a wrapped structure are found and drawn as dashed half-bonds.
         let pbox = system.state().pbox.clone();
-        let bonds = bonds::guess(&all, &positions, &vdw, pbox.as_ref(), bond_params);
+        let bonds = bonds::resolve(
+            &system.topology().bonds,
+            &all,
+            &positions,
+            &vdw,
+            pbox.as_ref(),
+            bond_params,
+        );
         (
             bonds,
             Vec3::new(min.x, min.y, min.z),
