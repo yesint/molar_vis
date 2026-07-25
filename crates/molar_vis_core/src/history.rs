@@ -45,6 +45,10 @@ pub struct RepState {
     pub material: Material,
     pub periodic: PeriodicParams,
     pub smooth_window: u32,
+    /// Which charge the `Charge` scheme paints — an option of that scheme, not a scheme of
+    /// its own. `#[serde(default)]` keeps older files loading.
+    #[serde(default)]
+    pub charge_kind: crate::color::ChargeKind,
     /// Interactions rep only: the partner rep, keyed by the partner molecule's
     /// [`MoleculeSource`] + its rep index. Serializable + stable across reload, so it
     /// round-trips through both undo/redo and sessions. `#[serde(default)]` keeps older
@@ -78,6 +82,7 @@ impl RepState {
             material: r.material,
             periodic: r.periodic,
             smooth_window: r.smooth_window,
+            charge_kind: r.charge_kind,
             partner: r.partner.clone(),
         }
     }
@@ -97,6 +102,7 @@ impl RepState {
             self.periodic,
             self.smooth_window,
         );
+        rep.charge_kind = self.charge_kind;
         rep.partner = self.partner.clone();
         rep
     }
@@ -197,6 +203,14 @@ pub enum StructEdit {
         before: Arc<StructureSnapshot>,
         after: Arc<StructureSnapshot>,
     },
+    /// A per-atom partial-charge assignment (espaloma): the charged atoms and their
+    /// charges before/after. Shaped like [`StructEdit::Coords`] but with no frame target —
+    /// charges live in the topology, not per trajectory frame.
+    Charges {
+        atoms: Vec<usize>,
+        before: Vec<f32>,
+        after: Vec<f32>,
+    },
 }
 
 impl StructEdit {
@@ -215,6 +229,10 @@ impl StructEdit {
             StructEdit::Topology { before, after } => {
                 let snap = if forward { after } else { before };
                 reconcile_structure(&mut scene.molecules[mi], snap);
+            }
+            StructEdit::Charges { atoms, before, after } => {
+                let charges = if forward { after } else { before };
+                scene.molecules[mi].set_charges(atoms, charges);
             }
         }
     }
@@ -881,6 +899,42 @@ mod tests {
         assert_eq!(coords_of(&scene, &atoms), before, "undo restores coordinates");
         hist.redo(&mut scene);
         assert_eq!(coords_of(&scene, &atoms), after, "redo re-applies the twist");
+    }
+
+    /// A charge assignment is a structural delta too, so Ctrl+Z reverts it. Charges live
+    /// in the topology rather than per frame, so the edit carries no frame target.
+    #[test]
+    fn undo_redo_charge_assignment() {
+        let mut scene = load_scene();
+        let mut hist = History::new(EditState::capture(&scene));
+        let id = scene.molecules[0].id;
+        let charges_of = |scene: &Scene, atoms: &[usize]| -> Vec<f32> {
+            let topo = scene.molecules[0].data.topology();
+            atoms.iter().map(|&a| topo.get_atom(a).unwrap().get_charge()).collect()
+        };
+
+        let atoms = vec![0usize, 1, 2];
+        let before = charges_of(&scene, &atoms);
+        let after = vec![-0.5f32, 0.25, 0.25];
+        assert_ne!(before, after);
+
+        scene.molecules[0].set_charges(&atoms, &after);
+        assert_eq!(charges_of(&scene, &atoms), after, "charges are written into the topology");
+        hist.record_struct(
+            id,
+            StructEdit::Charges {
+                atoms: atoms.clone(),
+                before: before.clone(),
+                after: after.clone(),
+            },
+            "compute charges".into(),
+        );
+        assert_eq!(hist.undo_label(0), "compute charges");
+
+        hist.undo(&mut scene);
+        assert_eq!(charges_of(&scene, &atoms), before, "undo restores the old charges");
+        hist.redo(&mut scene);
+        assert_eq!(charges_of(&scene, &atoms), after, "redo re-applies them");
     }
 
     /// Document and structural steps interleave on one timeline: undo walks them in

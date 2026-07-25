@@ -63,6 +63,7 @@ pub fn parse_color(s: &str) -> Option<ColorMethod> {
         "index" => Some(ColorMethod::Index),
         "beta" | "bfactor" | "b-factor" => Some(ColorMethod::Beta),
         "secstruct" | "structure" | "ss" => Some(ColorMethod::SecStruct),
+        "charge" => Some(ColorMethod::Charge),
         "solid" => Some(ColorMethod::Solid(DEFAULT_SOLID)),
         _ => None,
     }

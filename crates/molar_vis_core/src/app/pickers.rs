@@ -261,6 +261,37 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
                 Stroke::NONE,
             ));
         }
+        ColorMethod::Charge => {
+            // The diverging red-white-blue charge ramp, with its signs at the poles.
+            let bar = rect.shrink2(egui::vec2(1.0, rect.height() * 0.22));
+            let n = 24;
+            for i in 0..n {
+                // Sample across [-1, 1] so both poles and the white centre show.
+                let t = (i as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let x0 = bar.left() + bar.width() * (i as f32 / n as f32);
+                let x1 = bar.left() + bar.width() * ((i + 1) as f32 / n as f32);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(pos2(x0, bar.top()), pos2(x1, bar.bottom())),
+                    0.0,
+                    rgb4(color::charge_ramp(t)),
+                );
+            }
+            let font = egui::FontId::proportional(10.0);
+            painter.text(
+                pos2(bar.left() + 3.0, bar.center().y),
+                egui::Align2::LEFT_CENTER,
+                "−",
+                font.clone(),
+                Color32::BLACK,
+            );
+            painter.text(
+                pos2(bar.right() - 3.0, bar.center().y),
+                egui::Align2::RIGHT_CENTER,
+                "+",
+                font,
+                Color32::BLACK,
+            );
+        }
         ColorMethod::Solid(c) => {
             // A filled swatch of the chosen color, with a subtle border.
             let sw = rect.shrink(2.0);

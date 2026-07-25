@@ -204,6 +204,7 @@ impl App {
                 "index" => Some(ColorMethod::Index),
                 "beta" => Some(ColorMethod::Beta),
                 "secstruct" | "structure" | "ss" => Some(ColorMethod::SecStruct),
+                "charge" => Some(ColorMethod::Charge),
                 "solid" => Some(ColorMethod::Solid(crate::color::DEFAULT_SOLID)),
                 _ => None,
             }
@@ -211,6 +212,21 @@ impl App {
             for mol in &mut scene.molecules {
                 if let Some(rep) = mol.reps.first_mut() {
                     rep.color = cm;
+                }
+            }
+        }
+        // Verification hook: MOLAR_VIS_DEBUG_CHARGE_KIND=partial|formal picks which charge
+        // the `charge` color scheme paints (its Color-tab option; default partial).
+        if let Some(kind) = std::env::var("MOLAR_VIS_DEBUG_CHARGE_KIND").ok().and_then(|k| {
+            match k.to_ascii_lowercase().as_str() {
+                "partial" => Some(ChargeKind::Partial),
+                "formal" => Some(ChargeKind::Formal),
+                _ => None,
+            }
+        }) {
+            for mol in &mut scene.molecules {
+                if let Some(rep) = mol.reps.first_mut() {
+                    rep.charge_kind = kind;
                 }
             }
         }
@@ -530,6 +546,7 @@ impl App {
             selection_mode,
             lasso_path: Vec::new(),
             partner_pick: None,
+            charge_status: None,
             interactions_dialog: None,
             interactions_tab: crate::interactions::InteractionKind::HBond,
             last_lens_ndc: None,
@@ -590,6 +607,40 @@ impl App {
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_SESSION") {
                 app.save_session_to(std::path::Path::new(&path));
             }
+        // Verification hook: MOLAR_VIS_DEBUG_CHARGES=1 presses [Compute charges] on every
+        // molecule's first rep (as the Color tab's button does) and logs the outcome, so
+        // the espaloma path is exercisable headlessly. Pair with MOLAR_VIS_DEBUG_COLOR=charge
+        // + MOLAR_VIS_DEBUG_SAVE_IMAGE to see the result painted; expand the rep params
+        // (MOLAR_VIS_DEBUG_EXPAND_COLOR) to screenshot the tab itself.
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("MOLAR_VIS_DEBUG_CHARGES").is_ok() {
+            for mi in 0..app.scene.molecules.len() {
+                if app.scene.molecules[mi].reps.is_empty() {
+                    continue;
+                }
+                // Selections aren't evaluated until the first `rebuild_dirty`, and the
+                // button works off `rep.sel` — so resolve it here as that frame would.
+                {
+                    let mol = &mut app.scene.molecules[mi];
+                    if mol.reps[0].sel.is_none() {
+                        let text = mol.reps[0].sel_text.clone();
+                        if let Ok((expr, sel)) = mol.data.evaluate(&text) {
+                            mol.reps[0].expr = Some(expr);
+                            mol.reps[0].sel = Some(sel);
+                        }
+                    }
+                }
+                app.compute_rep_charges(mi, 0);
+                match app.charge_status.as_ref() {
+                    Some((_, m)) if m.starts_with('!') => {
+                        log::warn!("charges (mol {mi}): {}", m.trim_start_matches('!'))
+                    }
+                    Some((_, m)) => log::info!("charges (mol {mi}): {m}"),
+                    None => {}
+                }
+            }
+        }
+
             // MOLAR_VIS_DEBUG_SAVE_MOL=<path> writes mol 0 to a structure file
             // (exercises the molar FileHandler write + displayed-frame swap path).
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_MOL") {
@@ -720,6 +771,15 @@ impl App {
                         _ => K::HBond,
                     };
                 }
+            }
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_EXPAND_COLOR=1 expands mol 0's first rep
+        // params at the [Color] tab, so that tab can be screenshot from a window.
+        if std::env::var("MOLAR_VIS_DEBUG_EXPAND_COLOR").is_ok() {
+            if let Some(rep) = app.scene.molecules.first_mut().and_then(|m| m.reps.first_mut()) {
+                rep.params_open = true;
+                rep.settings_tab = crate::scene::SettingsTab::Color;
             }
         }
 

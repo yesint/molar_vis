@@ -174,7 +174,7 @@ impl RtScene {
                     mol.n_atoms,
                     &mol.bonds,
                     &rep.params,
-                    rep.color,
+                    rep.color_spec(),
                     rep.material,
                     ss.as_ref(),
                     dashed_pbc,

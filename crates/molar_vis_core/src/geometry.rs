@@ -6,7 +6,7 @@
 
 use molar::prelude::*;
 
-use crate::color::{ColorMethod, Colorizer};
+use crate::color::{ColorMethod, ColorSpec, Colorizer};
 use crate::material::Material;
 use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
 use crate::secstruct::SsMap;
@@ -201,7 +201,7 @@ pub fn build(
     n_atoms: usize,
     bonds: &[Bond],
     params: &RepParams,
-    color: ColorMethod,
+    color: ColorSpec,
     material: Material,
     ss: Option<&SsMap>,
     dashed_pbc: bool,
@@ -549,6 +549,17 @@ const DASH_GAP: f32 = 0.015;
 /// full size).
 const MULTI_SIZE_SCALE: f32 = 0.5;
 
+/// Upper bound on a multi-order strand's tube radius (nm), = Ball-and-Stick's default
+/// stick radius × [`MULTI_SIZE_SCALE`].
+///
+/// Without it the bundle scales with the rep's own bond radius, and Licorice's fat sticks
+/// (0.03 nm, twice Ball-and-Stick's) make a double bond twice as thick **and** twice as
+/// splayed — it stops reading as one bond and just looks like two fat tubes. A double bond
+/// is a chemical annotation, so it wants a legible fixed size rather than one proportional
+/// to however thick the sticks are: capping here makes Licorice's double bonds look exactly
+/// like Ball-and-Stick's, and leaves Ball-and-Stick itself untouched.
+const MULTI_MAX_STRAND_RADIUS: f32 = 0.015 * MULTI_SIZE_SCALE;
+
 /// Cylinder strand gap (nm). The shader shifts strand `slot` by `slot * gap` along
 /// the screen-perpendicular. A double bond uses slots −1/+1, so the two tube centers
 /// sit `2·gap` apart; sized to ~2.3× the reduced tube radius is barely separated.
@@ -680,7 +691,11 @@ fn cylinders(
             }
             let slots = strand_slots(bond.order);
             let multi = slots.len() > 1;
-            let rad = if multi { radius * MULTI_SIZE_SCALE } else { radius };
+            let rad = if multi {
+                (radius * MULTI_SIZE_SCALE).min(MULTI_MAX_STRAND_RADIUS)
+            } else {
+                radius
+            };
             let gap = if multi { rad * CYL_STRAND_GAP_FACTOR } else { 0.0 };
             for &(slot, dash) in slots {
                 push(pa, pb, ca, cb, rad, [slot, gap], dash);

@@ -280,6 +280,12 @@ mod tests {
         rep.sel_text = "protein".to_string();
         rep.visible = false;
         scene.molecules[0].reps.push(rep);
+        // A third rep exercising a color-scheme *option* (which charge `Charge` paints):
+        // it rides `RepState` like every other undoable rep field, so it saves for free.
+        let mut charged = Representation::new(RepKind::Vdw);
+        charged.color = ColorMethod::Charge;
+        charged.charge_kind = crate::color::ChargeKind::Formal;
+        scene.molecules[0].reps.push(charged);
 
         let session = Session::capture(&scene, ViewState::default());
         let json = session.to_json().unwrap();
@@ -290,17 +296,20 @@ mod tests {
         assert_eq!(back.molecules.len(), 1);
         let m = &back.molecules[0];
         assert!(matches!(&m.source, MoleculeSource::File(p) if p.ends_with("2lao.pdb")));
-        assert_eq!(m.reps.len(), 2);
+        assert_eq!(m.reps.len(), 3);
         assert_eq!(m.reps[0].kind, RepKind::Lines);
         assert_eq!(m.reps[1].kind, RepKind::Cartoon);
         assert_eq!(m.reps[1].color, ColorMethod::SecStruct);
         assert_eq!(m.reps[1].sel_text, "protein");
         assert!(!m.reps[1].visible);
+        assert_eq!(m.reps[2].color, ColorMethod::Charge);
+        assert_eq!(m.reps[2].charge_kind, crate::color::ChargeKind::Formal);
 
         // `build_reps` reconstructs live representations from the document.
         let reps = m.build_reps(RepKind::Lines);
-        assert_eq!(reps.len(), 2);
+        assert_eq!(reps.len(), 3);
         assert_eq!(reps[1].kind, RepKind::Cartoon);
+        assert_eq!(reps[2].charge_kind, crate::color::ChargeKind::Formal);
     }
 
     /// The global view state (camera incl. glam quaternion/vector fields)

@@ -8,12 +8,14 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use molar::prelude::{AtomLike, AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, State};
+use molar::prelude::{
+    AtomLike, AtomProvider, IndexSliceProvider, Measure, ParticleIterProvider, SsAlgorithm, State,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
 use crate::camera::{Ao, Background, BgKind, Camera, CueMode, DepthCue, Projection};
-use crate::color::ColorMethod;
+use crate::color::{ChargeKind, ColorMethod};
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{EditState, History};
@@ -168,6 +170,10 @@ pub struct App {
     /// id, rep index)`, or `None`. A movable `egui::Window` (`draw_interactions_dialog`)
     /// edits the rep's `InteractionSettings`. Transient.
     interactions_dialog: Option<(MolId, usize)>,
+    /// Result of the last [Compute charges] press, as `(rep index, message)` for the
+    /// molecule it ran on — shown in that rep's **Color** tab. A leading `!` marks an
+    /// error (rendered red); anything else is an informational summary. Transient.
+    charge_status: Option<(usize, String)>,
     /// Which interaction-type tab is active in that dialog. Transient.
     interactions_tab: crate::interactions::InteractionKind,
     /// Last cursor NDC the hover detail lens was rebuilt at, so it only rebuilds as
@@ -675,7 +681,7 @@ impl App {
                         let ss = geometry::needs_ss(&rep.params, rep.color)
                             .then(|| SsMap::compute(&bound, rep.ss_algo));
                         let geom = geometry::build(
-                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
+                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                             ss.as_ref(), dashed,
                         );
                         (geom, ss)
@@ -700,7 +706,7 @@ impl App {
                     let geom = {
                         let bound = mol.data.bind_with_state(sel, state);
                         geometry::build(
-                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color, rep.material,
+                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                             rep.ss_cache.as_ref(), dashed,
                         )
                     };

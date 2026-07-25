@@ -6,6 +6,9 @@
 
 mod app;
 mod camera;
+/// Espaloma partial-charge assignment (native only — see the module docs).
+#[cfg(not(target_arch = "wasm32"))]
+mod charges;
 mod color;
 mod data;
 mod geometry;

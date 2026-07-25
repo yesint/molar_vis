@@ -194,6 +194,10 @@ pub struct Representation {
     /// coordinates are a Savitzky–Golay blend of the nearby frames, computed
     /// transiently at build time (`Trajectory::smoothed_state`). In `EditState`.
     pub smooth_window: u32,
+    /// An **option** of the [`ColorMethod::Charge`] scheme: which charge it paints,
+    /// partial or formal. Edited in the rep settings' `Color` tab; ignored by every other
+    /// scheme. In `EditState` (undoable + saved in sessions).
+    pub charge_kind: crate::color::ChargeKind,
     pub visible: bool,
     /// Re-evaluate the (compiled) selection every time the System's State changes
     /// (i.e. each trajectory frame). For coordinate-dependent selections like
@@ -229,6 +233,12 @@ pub struct Representation {
 }
 
 impl Representation {
+    /// This rep's color scheme together with its options — what the geometry builders
+    /// need to colorize atoms (see [`crate::color::ColorSpec`]).
+    pub fn color_spec(&self) -> crate::color::ColorSpec {
+        crate::color::ColorSpec { method: self.color, charge_kind: self.charge_kind }
+    }
+
     pub fn new(kind: RepKind) -> Self {
         Self::restore(
             kind,
@@ -261,6 +271,7 @@ impl Representation {
             self.periodic,
             self.smooth_window,
         );
+        r.charge_kind = self.charge_kind;
         r.partner = self.partner.clone();
         r
     }
@@ -319,6 +330,10 @@ impl Representation {
             sel_empty: false,
             periodic,
             smooth_window,
+            // An option of the Charge scheme, defaulted here and assigned by the callers
+            // that carry one (`duplicate`, `RepState::to_representation`) — `restore`'s
+            // positional list is long enough already.
+            charge_kind: crate::color::ChargeKind::default(),
             visible,
             dynamic,
             ss_per_frame,
@@ -344,6 +359,9 @@ pub enum SettingsTab {
     Traj,
     /// Periodic-image rendering.
     Periodic,
+    /// Options of the active color scheme. Only shown for schemes that have any —
+    /// currently just `Charge` (partial vs formal, and computing partial charges).
+    Color,
 }
 
 /// A freshly captured selection (e.g. from the lasso) that has not yet been
@@ -965,6 +983,25 @@ impl Molecule {
         }
         self.structure_version += 1;
         self.hover_grid = None;
+    }
+
+    /// Write per-atom partial charges (by global atom index) into the owned `System`.
+    /// Used by the espaloma assignment and its undo/redo. Charges are per-atom topology
+    /// data, not per-frame, so there is no coordinate store to choose.
+    pub fn set_charges(&mut self, atoms: &[usize], charges: &[f32]) {
+        if let Some(sys) = self.data.system_mut() {
+            let mut bound = sys.select_all_bound_mut();
+            for (&a, &q) in atoms.iter().zip(charges) {
+                if let Some(mut at) = bound.get_atom_mut(a) {
+                    at.set_charge(q);
+                }
+            }
+        }
+        // Colors are baked into the geometry, so a charge change needs a rebuild — not the
+        // cheaper coords-only path, which reuses the existing per-vertex colors.
+        for rep in &mut self.reps {
+            rep.geom_dirty = true;
+        }
     }
 
     /// Cycle the order of bond `k` (single→double→triple→single).

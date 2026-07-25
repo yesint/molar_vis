@@ -28,7 +28,7 @@ pub(super) fn build_hover_detail(
         n_atoms,
         bonds,
         &params,
-        ColorMethod::Element,
+        ColorMethod::Element.into(),
         crate::material::Material::Opaque,
         None,
         dashed_pbc,
@@ -115,7 +115,7 @@ pub(super) fn build_glow(
         };
         let bound = data.bind_with_state(&sel, state);
         let mut geom = geometry::build(
-            &bound, n_atoms, bonds, &rep.params, rep.color, rep.material,
+            &bound, n_atoms, bonds, &rep.params, rep.color_spec(), rep.material,
             rep.ss_cache.as_ref(), dashed_pbc,
         );
         // Surface re-builds the glow over the *subset* of selected atoms, so its mesh

@@ -80,28 +80,55 @@ pub(super) fn sel_text_edit(
     )
 }
 
-pub(super) fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_box: bool) -> bool {
-    let mut view_dirty = false;
-    // The Periodic tab only exists when the molecule has a box; if it was the
-    // active tab and the box went away, fall back to Style.
-    if !has_box && rep.settings_tab == SettingsTab::Periodic {
+/// What the rep-settings panel wants the app to do next (the panel only sees the rep, so
+/// anything needing the molecule is reported back — same pattern as the Interactions
+/// partner/settings buttons).
+#[derive(Default)]
+pub(super) struct RepParamsOutcome {
+    /// Some render-only setting changed (periodic images); re-render without rebuilding.
+    pub view_dirty: bool,
+    /// The [Compute charges] button was pressed.
+    pub compute_charges: bool,
+}
+
+pub(super) fn draw_rep_params(
+    ui: &mut egui::Ui,
+    rep: &mut Representation,
+    has_box: bool,
+    charge_status: Option<&str>,
+) -> RepParamsOutcome {
+    let mut out = RepParamsOutcome::default();
+    // The Periodic tab only exists when the molecule has a box, and the Color tab only for
+    // a color scheme that has options (just Charge today); if the active tab's condition
+    // went away, fall back to Style.
+    let has_color_tab = rep.color.is_charge();
+    if (!has_box && rep.settings_tab == SettingsTab::Periodic)
+        || (!has_color_tab && rep.settings_tab == SettingsTab::Color)
+    {
         rep.settings_tab = SettingsTab::Style;
     }
-    // Tab bar: [Style] [Traj] [Periodic?] — the app's standard underline tabs.
+    // Tab bar: [Style] [Traj] [Periodic?] [Color?] — the app's standard underline tabs.
     let mut tabs = vec![(SettingsTab::Style, "Style"), (SettingsTab::Traj, "Traj")];
     if has_box {
         tabs.push((SettingsTab::Periodic, "Periodic"));
+    }
+    if has_color_tab {
+        tabs.push((SettingsTab::Color, "Color"));
     }
     tab_bar(ui, &mut rep.settings_tab, &tabs);
     ui.separator();
     match rep.settings_tab {
         SettingsTab::Traj => {
             draw_traj_tab(ui, rep);
-            return view_dirty;
+            return out;
         }
         SettingsTab::Periodic => {
-            view_dirty |= draw_periodic_tab(ui, rep);
-            return view_dirty;
+            out.view_dirty |= draw_periodic_tab(ui, rep);
+            return out;
+        }
+        SettingsTab::Color => {
+            out.compute_charges = draw_color_tab(ui, rep, charge_status);
+            return out;
         }
         SettingsTab::Style => {}
     }
@@ -201,13 +228,126 @@ pub(super) fn draw_rep_params(ui: &mut egui::Ui, rep: &mut Representation, has_b
     if changed {
         rep.geom_dirty = true;
     }
-    view_dirty
+    out
 }
 
 /// [Periodic] tab: render copies of the selection shifted by integer combinations
 /// of the box lattice vectors `a,b,c`. Returns true if anything changed (render-only
 /// — no geometry rebuild, the images are drawn under a translated camera). Only
 /// shown when the molecule has a box.
+impl App {
+    /// Run espaloma partial-charge prediction on rep `j`'s selection of molecule `mi` and
+    /// record it as one undo step. The outcome — a charge-range summary or the failure's
+    /// advice — is parked in `charge_status` for that rep's **Color** tab to display.
+    ///
+    /// Charges are per-atom topology data, so unlike the coordinate edits this is not tied
+    /// to a trajectory frame; and like them it is a `StructEdit`, so Ctrl+Z reverts it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn compute_rep_charges(&mut self, mi: usize, j: usize) {
+        let idx: Option<Vec<usize>> = self.scene.molecules[mi]
+            .reps
+            .get(j)
+            .and_then(|r| r.sel.as_ref())
+            .map(|s| s.get_index_slice().to_vec());
+        // `Sel` isn't `Clone`, and it lives inside the rep we'd otherwise hold borrowed —
+        // so rebuild an equivalent one from its indices.
+        let Some(sel) = idx.and_then(|v| molar::prelude::Sel::from_vec(v).ok()) else {
+            self.charge_status = Some((j, "!select some atoms first".into()));
+            return;
+        };
+        let mol = &mut self.scene.molecules[mi];
+        match crate::charges::compute_espaloma(mol, &sel) {
+            Ok(edit) => {
+                let (lo, hi) = edit
+                    .after
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), &q| (lo.min(q), hi.max(q)));
+                let n = edit.atoms.len();
+                mol.set_charges(&edit.atoms, &edit.after);
+                let id = mol.id;
+                self.history.record_struct(
+                    id,
+                    crate::history::StructEdit::Charges {
+                        atoms: edit.atoms,
+                        before: edit.before,
+                        after: edit.after,
+                    },
+                    "compute charges".into(),
+                );
+                self.charge_status =
+                    Some((j, format!("{n} atoms charged, {lo:+.3} … {hi:+.3} e")));
+                self.view_dirty = true;
+            }
+            Err(e) => self.charge_status = Some((j, format!("!{e}"))),
+        }
+    }
+}
+
+/// The **[Color]** tab: options of the active color scheme. Shown only for `Charge`
+/// (the one scheme with any) — pick which charge to paint, and compute partial charges
+/// for selections that don't carry them. Returns whether [Compute charges] was pressed.
+pub(super) fn draw_color_tab(
+    ui: &mut egui::Ui,
+    rep: &mut Representation,
+    status: Option<&str>,
+) -> bool {
+    if !rep.color.is_charge() {
+        return false;
+    }
+    let mut kind = rep.charge_kind;
+    let mut compute = false;
+
+    ui.horizontal(|ui| {
+        ui.label("Charge");
+        for k in ChargeKind::ALL {
+            let tip = match k {
+                ChargeKind::Partial => "Per-atom partial charge (from the topology, or computed below)",
+                ChargeKind::Formal => "Integer formal charge, where the structure records one (e.g. an SDF 'M  CHG')",
+            };
+            ui.radio_value(&mut kind, k, k.label()).on_hover_text(tip);
+        }
+    });
+    if kind != rep.charge_kind {
+        rep.charge_kind = kind;
+        rep.geom_dirty = true; // colors are baked into the geometry
+    }
+
+    ui.add_space(4.0);
+    // Espaloma needs a `System` we own plus real bond orders, neither of which exists in
+    // the browser build, so the button is native-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let enabled = kind == ChargeKind::Partial;
+        ui.add_enabled_ui(enabled, |ui| {
+            compute = ui
+                .button(format!("{}  Compute charges", icon::LIGHTNING))
+                .on_hover_text("Compute Espaloma charges on selection")
+                .clicked();
+        });
+        if !enabled {
+            ui.weak("Formal charges are read from the structure, not computed.");
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    ui.weak("Charge computation is not available in the browser.");
+
+    if let Some(msg) = status {
+        ui.add_space(4.0);
+        // Errors are multi-line advice (see `charges::explain`), so let them wrap.
+        let err = msg.starts_with('!');
+        let text = msg.strip_prefix('!').unwrap_or(msg);
+        ui.add(
+            egui::Label::new(if err {
+                egui::RichText::new(text).color(egui::Color32::from_rgb(230, 120, 120))
+            } else {
+                egui::RichText::new(text).weak()
+            })
+            .wrap(),
+        );
+    }
+    compute
+}
+
 pub(super) fn draw_periodic_tab(ui: &mut egui::Ui, rep: &mut Representation) -> bool {
     let p = &mut rep.periodic;
     let mut changed = false;
@@ -571,6 +711,8 @@ impl App {
         // becomes a click target for selecting it as the partner).
         let picking_partner = self.partner_pick.is_some();
 
+        // Read before the `&mut mol` borrow below, since the params panel needs it inside.
+        let charge_status = self.charge_status.clone();
         let mol = &mut self.scene.molecules[mi];
 
         let mut delete: Option<usize> = None;
@@ -584,6 +726,9 @@ impl App {
         let mut focus_partner: Option<(MoleculeSource, usize)> = None;
         let mut chosen_partner: Option<usize> = None;
         let mut open_settings: Option<usize> = None;
+        // Which rep asked for espaloma charges (needs `&mut Molecule`, so it runs after
+        // the borrow below ends).
+        let mut compute_charges: Option<usize> = None;
         // When a rep is switched to Interactions, the pre-switch clone (old style) to
         // re-insert so the molecule's look is preserved: (rep index, cloned rep).
         let mut clone_rep: Option<(usize, Representation)> = None;
@@ -806,7 +951,15 @@ impl App {
                             }
                             false
                         } else {
-                            draw_rep_params(ui, rep, has_box)
+                            let status = charge_status
+                                .as_ref()
+                                .filter(|(sj, _)| *sj == j)
+                                .map(|(_, m)| m.as_str());
+                            let out = draw_rep_params(ui, rep, has_box, status);
+                            if out.compute_charges {
+                                compute_charges = Some(j);
+                            }
+                            out.view_dirty
                         }
                     })
                     .inner;
@@ -982,6 +1135,13 @@ impl App {
         if let Some(j) = open_settings {
             self.interactions_dialog = Some((mol_id, j));
         }
+        // Compute espaloma partial charges for a rep's selection.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(j) = compute_charges {
+            self.compute_rep_charges(mi, j);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = compute_charges;
         // A rep row was clicked while choosing a partner → assign it.
         if let Some(j) = chosen_partner {
             self.assign_partner(mi, j);

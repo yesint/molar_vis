@@ -35,6 +35,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.15"
 directories = "5"
+# espaloma partial charges (the `Charge` coloring's [Compute charges] button). Native only:
+# it bundles a ~600 kB ONNX model and pulls `tract`, neither of which belongs in the wasm
+# bundle — and the browser build has no way to obtain charges anyway. Charge *coloring*
+# itself is platform-independent and lives in `color.rs`.
+molar_ff = { workspace = true }
 
 # Browser runtime: the eframe `WebRunner` entry (`launch::run_web`) needs the
 # canvas + async glue; `wgpu`'s `webgl` feature gives a WebGL2 fallback for
