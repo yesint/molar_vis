@@ -1,5 +1,6 @@
 //! Free-function builders for hover-detail, glow, pick id-buffer geometry.
 use super::*;
+
 use crate::interactions::InteractionSet;
 
 
@@ -86,7 +87,7 @@ pub(super) fn build_glow(
     let topo = data.topology();
     let res_set: std::collections::HashSet<u32> = atoms
         .iter()
-        .filter_map(|&a| topo.get_atom(a).map(|at| at.resindex as u32))
+        .filter_map(|&a| topo.get_atom(a).map(|at| at.get_resindex() as u32))
         .collect();
     let mut out = geometry::GeometryData::default();
     for rep in reps {
@@ -205,7 +206,7 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
         let pick_x = mi as u32 + 1;
         let pick_rep = (rj as u32) << PICK_ATOM_BITS;
         for p in bound.iter_particle() {
-            if !pick::atom_in_rep(rep.kind, p.atom.name.as_str()) {
+            if !pick::atom_in_rep(rep.kind, p.atom.get_name()) {
                 continue;
             }
             let base = glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z);
@@ -284,7 +285,7 @@ fn gather_set(mol: &scene::Molecule, mol_idx: usize, sel: &molar::prelude::Sel, 
             neigh[b].push(a as u32);
         }
     }
-    let anum_of = |i: usize| topo.get_atom(i).map(|a| a.atomic_number).unwrap_or(0);
+    let anum_of = |i: usize| topo.get_atom(i).map(|a| a.get_atomic_number()).unwrap_or(0);
 
     // Selected atoms → heavy-atom AtomInfo + a membership mask (for rings/charges).
     let bound = mol.data.bind_with_state(sel, state);
@@ -292,7 +293,7 @@ fn gather_set(mol: &scene::Molecule, mol_idx: usize, sel: &molar::prelude::Sel, 
     let mut atoms = Vec::new();
     for p in bound.iter_particle() {
         in_sel[p.id] = true;
-        let anum = p.atom.atomic_number;
+        let anum = p.atom.get_atomic_number();
         if anum == 1 {
             continue; // H rides in its heavy neighbour's `attached_h`
         }
@@ -316,7 +317,7 @@ fn gather_set(mol: &scene::Molecule, mol_idx: usize, sel: &molar::prelude::Sel, 
         atoms.push(crate::interactions::AtomInfo {
             pos: glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z),
             atomicnum: anum,
-            res_key: res_base | (p.atom.resindex as u64),
+            res_key: res_base | (p.atom.get_resindex() as u64),
             only_ch_neighbors: only_ch,
             attached_h,
             antecedent,
@@ -337,7 +338,7 @@ fn gather_set(mol: &scene::Molecule, mol_idx: usize, sel: &molar::prelude::Sel, 
         rings.push(crate::interactions::RingInfo {
             center,
             normal: crate::interactions::ring_normal(&pts),
-            res_key: res_base | (topo.get_atom(ring[0]).map(|a| a.resindex as u64).unwrap_or(0)),
+            res_key: res_base | (topo.get_atom(ring[0]).map(|a| a.get_resindex() as u64).unwrap_or(0)),
         });
     }
 
@@ -360,15 +361,15 @@ fn charged_groups(
     use crate::interactions::ChargeGroup;
     use std::collections::HashMap;
     let coord = |i: usize| state.coords.get(i).map(v3);
-    let name = |i: usize| topo.get_atom(i).map(|a| a.name.as_str().to_string()).unwrap_or_default();
-    let anum = |i: usize| topo.get_atom(i).map(|a| a.atomic_number).unwrap_or(0);
+    let name = |i: usize| topo.get_atom(i).map(|a| a.get_name().to_string()).unwrap_or_default();
+    let anum = |i: usize| topo.get_atom(i).map(|a| a.get_atomic_number()).unwrap_or(0);
 
     // Group selected atoms by residue.
     let mut byres: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, &sel) in in_sel.iter().enumerate().take(n) {
         if sel {
             if let Some(a) = topo.get_atom(i) {
-                byres.entry(a.resindex).or_default().push(i);
+                byres.entry(a.get_resindex()).or_default().push(i);
             }
         }
     }
@@ -390,7 +391,7 @@ fn charged_groups(
         let rk = res_base | (*ridx as u64);
         let resname = topo
             .get_atom(ids[0])
-            .map(|a| a.resname.as_str().to_ascii_uppercase())
+            .map(|a| a.get_resname().to_ascii_uppercase())
             .unwrap_or_default();
         let pick = |names: &[&str]| -> Vec<usize> {
             ids.iter().copied().filter(|&i| names.contains(&name(i).as_str())).collect()

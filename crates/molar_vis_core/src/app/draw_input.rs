@@ -431,7 +431,7 @@ impl App {
             if let Some(mi) = target_mi {
                 match self.draw_hit_test(mi, rect, size_px, px) {
                     Some(HitTarget::Atom(i)) => {
-                        if self.scene.molecules[mi].data.topology().get_atom(i).map(|a| a.atomic_number)
+                        if self.scene.molecules[mi].data.topology().get_atom(i).map(|a| a.get_atomic_number())
                             != Some(element.atomic_number())
                         {
                             let src = element.make_atom();
@@ -498,13 +498,13 @@ impl App {
         let has_h = {
             let mol = &self.scene.molecules[mi];
             let topo = mol.data.topology();
-            (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1))
+            (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
         };
         if has_h {
             let mol = &mut self.scene.molecules[mi];
             let topo = mol.data.topology();
             let h_idx: Vec<usize> = (0..mol.n_atoms)
-                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1))
+                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
                 .collect();
             // Don't strip an all-hydrogen molecule down to nothing.
             if !h_idx.is_empty() && h_idx.len() < mol.n_atoms {

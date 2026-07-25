@@ -135,10 +135,10 @@ impl StructureSnapshot {
         let atoms = (0..mol.n_atoms)
             .filter_map(|i| topo.get_atom(i))
             .map(|a| AtomLite {
-                name: a.name.as_str().to_string(),
-                atomic_number: a.atomic_number,
-                resname: a.resname.as_str().to_string(),
-                resid: a.resid,
+                name: a.get_name().to_string(),
+                atomic_number: a.get_atomic_number(),
+                resname: a.get_resname().to_string(),
+                resid: a.get_resid() as i32,
             })
             .collect();
         let coords = mol
@@ -399,7 +399,7 @@ fn reconcile_structure(mol: &mut Molecule, snap: &Arc<StructureSnapshot>) {
             .with_resid(lite.resid)
             .guess();
         a.atomic_number = lite.atomic_number; // pin the element exactly
-        top.atoms.push(a);
+        top.atoms.push(&a);
     }
     top.assign_resindex();
     let st = State {

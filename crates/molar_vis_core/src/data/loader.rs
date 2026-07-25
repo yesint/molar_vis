@@ -241,7 +241,7 @@ impl RawMolecule {
     /// display name; the source is `Bytes` (no file to reload from).
     pub fn single_atom(mol_name: &str, atom: Atom, pos: Vec3) -> Result<RawMolecule, String> {
         let mut top = Topology::default();
-        top.atoms.push(atom);
+        top.atoms.push(&atom);
         top.assign_resindex();
         let st = State {
             coords: vec![Pos::new(pos.x, pos.y, pos.z)],

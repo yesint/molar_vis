@@ -474,7 +474,7 @@ fn isolated_crosses(
 fn spheres(
     bound: &impl ParticleIterProvider,
     colorizer: &Colorizer,
-    radius: impl Fn(&Atom) -> f32,
+    radius: impl Fn(AtomRef) -> f32,
 ) -> Vec<SphereInstance> {
     spheres_where(bound, colorizer, radius, |_| true)
 }
@@ -486,7 +486,7 @@ fn spheres(
 fn spheres_where(
     bound: &impl ParticleIterProvider,
     colorizer: &Colorizer,
-    radius: impl Fn(&Atom) -> f32,
+    radius: impl Fn(AtomRef) -> f32,
     keep: impl Fn(usize) -> bool,
 ) -> Vec<SphereInstance> {
     bound

@@ -88,7 +88,7 @@ pub fn expand_selection(
                 if out.contains(&seed) {
                     continue;
                 }
-                let Some(r) = topo.get_atom(seed).map(|a| a.resindex) else {
+                let Some(r) = topo.get_atom(seed).map(|a| a.get_resindex()) else {
                     continue;
                 };
                 out.insert(seed);
@@ -96,7 +96,7 @@ pub fn expand_selection(
                 while i > 0 {
                     i -= 1;
                     match topo.get_atom(i) {
-                        Some(a) if a.resindex == r => {
+                        Some(a) if a.get_resindex() == r => {
                             out.insert(i);
                         }
                         _ => break,
@@ -104,7 +104,7 @@ pub fn expand_selection(
                 }
                 let mut i = seed + 1; // walk up to its last atom
                 while let Some(a) = topo.get_atom(i) {
-                    if a.resindex == r {
+                    if a.get_resindex() == r {
                         out.insert(i);
                         i += 1;
                     } else {
@@ -115,13 +115,13 @@ pub fn expand_selection(
             out.into_iter().collect()
         }
         SelectionMode::BoundH => {
-            let is_h = |i: usize| topo.get_atom(i).is_some_and(|a| a.atomic_number == 1);
+            let is_h = |i: usize| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1);
             // Hit heavy atoms; then the hydrogens bonded to them (the `heavy`
             // snapshot drives the bond test so added H can't chain further).
             let heavy: BTreeSet<usize> = atoms
                 .iter()
                 .copied()
-                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.atomic_number != 1))
+                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() != 1))
                 .collect();
             let mut out = heavy.clone();
             for bond in bonds {
@@ -166,7 +166,7 @@ const BALLSTICK_SPHERE_SCALE: f32 = 0.25;
 
 /// The highlight/pick sphere radius for an atom in a given rep: the actual drawn
 /// sphere for VDW / Ball-and-Stick, else the small Ball-and-Stick sphere size.
-pub(crate) fn effective_radius(params: &RepParams, atom: &Atom) -> f32 {
+pub(crate) fn effective_radius(params: &RepParams, atom: impl AtomLike) -> f32 {
     match params {
         RepParams::Vdw { scale } => atom.vdw() * scale,
         RepParams::BallAndStick { sphere_scale, .. } => atom.vdw() * sphere_scale,
@@ -349,9 +349,9 @@ pub fn hit_for_atom(scene: &Scene, mi: usize, rep_idx: usize, aid: usize) -> Opt
         mol: mi,
         rep: rep_idx,
         id: aid,
-        name: atom.name.as_str().to_string(),
-        resname: atom.resname.as_str().to_string(),
-        resid: atom.resid,
+        name: atom.get_name().to_string(),
+        resname: atom.get_resname().to_string(),
+        resid: atom.get_resid() as i32,
         real,
         display,
         radius,
@@ -411,7 +411,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
             for p in bound.iter_particle() {
                 // Only hit atoms that form part of this rep's visible geometry
                 // (Cartoon → backbone only; everything else → all selected atoms).
-                if !atom_in_rep(rep.kind, p.atom.name.as_str()) {
+                if !atom_in_rep(rep.kind, p.atom.get_name()) {
                     continue;
                 }
                 let base = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
@@ -426,9 +426,9 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                                 mol: mi,
                                 rep: rep_idx,
                                 id: p.id,
-                                name: p.atom.name.as_str().to_string(),
-                                resname: p.atom.resname.as_str().to_string(),
-                                resid: p.atom.resid,
+                                name: p.atom.get_name().to_string(),
+                                resname: p.atom.get_resname().to_string(),
+                                resid: p.atom.get_resid() as i32,
                                 real: Vec3::new(real.x, real.y, real.z),
                                 display: center,
                                 radius: r,
@@ -523,7 +523,7 @@ pub fn lasso_select(scene: &Scene, view: Mat4, proj: Mat4, polygon: &[Vec2]) -> 
             let bound = mol.data.bind_with_state(sel, disp_state);
             for p in bound.iter_particle() {
                 // Same style filter as picking, and skip atoms already selected.
-                if !atom_in_rep(rep.kind, p.atom.name.as_str()) || picked.contains(&p.id) {
+                if !atom_in_rep(rep.kind, p.atom.get_name()) || picked.contains(&p.id) {
                     continue;
                 }
                 let base = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
@@ -703,7 +703,7 @@ mod tests {
         let mut name_by_id = vec![String::new(); mol.n_atoms];
         let mut n_protein = 0usize;
         for p in bound.iter_particle() {
-            name_by_id[p.id] = p.atom.name.as_str().to_string();
+            name_by_id[p.id] = p.atom.get_name().to_string();
         }
         // Protein atom count (the rep's selection size) for the "fewer" assertion.
         if let Some(sel) = &mol.reps[0].sel {
@@ -748,8 +748,8 @@ mod tests {
         let mut resindex_by_id = vec![0usize; mol.n_atoms];
         let mut atoms_in_res: std::collections::HashMap<usize, Vec<usize>> = Default::default();
         for p in bound.iter_particle() {
-            resindex_by_id[p.id] = p.atom.resindex;
-            atoms_in_res.entry(p.atom.resindex).or_default().push(p.id);
+            resindex_by_id[p.id] = p.atom.get_resindex();
+            atoms_in_res.entry(p.atom.get_resindex()).or_default().push(p.id);
         }
 
         // Seed with one atom from residue 0 and a *middle* atom of a later residue,
@@ -813,7 +813,7 @@ mod tests {
         // Sanity: the loader read the elements and guessed the 4 C–H bonds.
         let all = data.select_all();
         let bound = data.bind(&all);
-        let z: Vec<u8> = bound.iter_particle().map(|p| p.atom.atomic_number).collect();
+        let z: Vec<u8> = bound.iter_particle().map(|p| p.atom.get_atomic_number()).collect();
         assert_eq!(z, vec![6, 1, 1, 1, 1, 1], "expected C + 5 H");
         let c_bonds = bonds.iter().filter(|b| b.contains(0)).count();
         assert_eq!(c_bonds, 4, "carbon should have 4 bonded H (lone H unbonded)");

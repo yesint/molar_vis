@@ -49,11 +49,11 @@ impl SsMap {
         let mut bb: BTreeMap<usize, Vector3f> = BTreeMap::new();
         let mut has_ca = false;
         for p in bound.iter_particle() {
-            resindices.insert(p.atom.resindex, ());
-            match p.atom.name.as_str() {
+            resindices.insert(p.atom.get_resindex(), ());
+            match p.atom.get_name() {
                 "CA" => has_ca = true,
                 "BB" => {
-                    bb.entry(p.atom.resindex).or_insert(p.pos.coords);
+                    bb.entry(p.atom.get_resindex()).or_insert(p.pos.coords);
                 }
                 _ => {}
             }

@@ -1,0 +1,375 @@
+{
+  "format": "molar_vis.session",
+  "version": 1,
+  "view": {
+    "camera": {
+      "target": [
+        2.998432,
+        -1.6460062,
+        0.42211577
+      ],
+      "orientation": [
+        -0.059294663,
+        -0.19176696,
+        0.2659343,
+        0.9428619
+      ],
+      "distance": 3.4961185,
+      "scene_radius": 0.79089797,
+      "fov_y": 0.7853982,
+      "projection": "Orthographic",
+      "depth_cue": {
+        "enabled": true,
+        "start": 0.3,
+        "strength": 0.55,
+        "mode": "Linear"
+      },
+      "ao": {
+        "enabled": false,
+        "strength": 0.5,
+        "radius": 0.4
+      },
+      "shadow": {
+        "enabled": false,
+        "strength": 0.25,
+        "softness": 0.4
+      },
+      "background": {
+        "kind": "Solid",
+        "color": [
+          0.02,
+          0.02,
+          0.05,
+          1.0
+        ],
+        "top": [
+          0.11,
+          0.13,
+          0.2,
+          1.0
+        ],
+        "bottom": [
+          0.01,
+          0.01,
+          0.02,
+          1.0
+        ]
+      },
+      "fill": 0.9,
+      "gi": 0.0
+    },
+    "pick_mode": "Off",
+    "selection_mode": "Atoms",
+    "axes_on": false,
+    "axes_corner": "BottomRight"
+  },
+  "molecules": [
+    {
+      "source": {
+        "File": "/home/semen/work/Projects/molar_vis/tests/jak2.pdb"
+      },
+      "name": "jak2.pdb",
+      "visible": true,
+      "show_box": false,
+      "reps": [
+        {
+          "kind": "Lines",
+          "params": {
+            "Lines": {
+              "width": 2.5
+            }
+          },
+          "color": "Element",
+          "ss_algo": "Dssp",
+          "sel_text": "noh",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "partner": null
+        },
+        {
+          "kind": "Cartoon",
+          "params": {
+            "Cartoon": {
+              "coil_radius": 0.03,
+              "ribbon_width": 0.15,
+              "ribbon_thickness": 0.03
+            }
+          },
+          "color": "SecStruct",
+          "ss_algo": "Dssp",
+          "sel_text": "all",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "partner": null
+        }
+      ],
+      "traj_loads": [],
+      "current_frame": 0
+    }
+  ],
+  "groups": [
+    {
+      "source": {
+        "File": "/home/semen/work/Projects/molar_vis/tests/jak2_inhs.sd"
+      },
+      "name": "jak2_inhs.sd",
+      "current": 4,
+      "visible": true,
+      "shared_reps": [
+        {
+          "kind": "Licorice",
+          "params": {
+            "Licorice": {
+              "bond_radius": 0.03
+            }
+          },
+          "color": "Element",
+          "ss_algo": "Dssp",
+          "sel_text": "noh",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "partner": null
+        },
+        {
+          "kind": "Interactions",
+          "params": {
+            "Interactions": {
+              "settings": {
+                "hbonds": true,
+                "hbond_dist": 0.35,
+                "hbond_dist_h": 0.41,
+                "hbond_angle": 100.0,
+                "hydrophobic": true,
+                "hydrophobic_dist": 0.4,
+                "salt_bridges": true,
+                "salt_bridge_dist": 0.55,
+                "pi_stacking": true,
+                "pi_stacking_dist": 0.55,
+                "pi_stacking_angle": 30.0,
+                "pi_stacking_offset": 0.2,
+                "pi_cation": true,
+                "pi_cation_dist": 0.6,
+                "pi_cation_offset": 0.2,
+                "halogen": true,
+                "halogen_dist": 0.4,
+                "halogen_angle": 140.0,
+                "line_width": 3.0
+              }
+            }
+          },
+          "color": "Element",
+          "ss_algo": "Dssp",
+          "sel_text": "all",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "partner": [
+            {
+              "File": "/home/semen/work/Projects/molar_vis/tests/jak2.pdb"
+            },
+            0
+          ]
+        }
+      ],
+      "members": [
+        {
+          "record_index": 0,
+          "name": "CHEMBL3330127",
+          "reps": []
+        },
+        {
+          "record_index": 1,
+          "name": "CHEMBL3330107",
+          "reps": []
+        },
+        {
+          "record_index": 2,
+          "name": "CHEMBL3330105",
+          "reps": []
+        },
+        {
+          "record_index": 3,
+          "name": "CHEMBL3330126",
+          "reps": []
+        },
+        {
+          "record_index": 4,
+          "name": "CHEMBL3330103",
+          "reps": []
+        },
+        {
+          "record_index": 5,
+          "name": "CHEMBL3330109",
+          "reps": []
+        },
+        {
+          "record_index": 6,
+          "name": "CHEMBL3330129",
+          "reps": []
+        },
+        {
+          "record_index": 7,
+          "name": "CHEMBL3330130",
+          "reps": []
+        },
+        {
+          "record_index": 8,
+          "name": "CHEMBL3330104",
+          "reps": []
+        },
+        {
+          "record_index": 9,
+          "name": "CHEMBL3330111",
+          "reps": []
+        },
+        {
+          "record_index": 10,
+          "name": "CHEMBL3330101",
+          "reps": []
+        },
+        {
+          "record_index": 11,
+          "name": "CHEMBL3330100",
+          "reps": []
+        },
+        {
+          "record_index": 12,
+          "name": "CHEMBL1964290",
+          "reps": []
+        },
+        {
+          "record_index": 13,
+          "name": "CHEMBL3330131",
+          "reps": []
+        },
+        {
+          "record_index": 14,
+          "name": "CHEMBL3330117",
+          "reps": []
+        },
+        {
+          "record_index": 15,
+          "name": "CHEMBL1981079",
+          "reps": []
+        },
+        {
+          "record_index": 16,
+          "name": "CHEMBL3330123",
+          "reps": []
+        },
+        {
+          "record_index": 17,
+          "name": "CHEMBL1965660",
+          "reps": []
+        },
+        {
+          "record_index": 18,
+          "name": "CHEMBL3330102",
+          "reps": []
+        },
+        {
+          "record_index": 19,
+          "name": "CHEMBL3330106",
+          "reps": []
+        },
+        {
+          "record_index": 20,
+          "name": "CHEMBL1270230",
+          "reps": []
+        },
+        {
+          "record_index": 21,
+          "name": "CHEMBL3330124",
+          "reps": []
+        },
+        {
+          "record_index": 22,
+          "name": "CHEMBL3330122",
+          "reps": []
+        },
+        {
+          "record_index": 23,
+          "name": "CHEMBL3402476",
+          "reps": []
+        },
+        {
+          "record_index": 24,
+          "name": "CHEMBL3330118",
+          "reps": []
+        },
+        {
+          "record_index": 25,
+          "name": "CHEMBL3330125",
+          "reps": []
+        }
+      ]
+    }
+  ]
+}

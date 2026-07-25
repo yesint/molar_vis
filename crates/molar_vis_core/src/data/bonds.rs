@@ -93,6 +93,21 @@ pub fn guess(
     // The search may report a pair from either cell ordering; dedup.
     bonds.sort_unstable();
     bonds.dedup();
-    // Guessed bonds carry no chemical order (no file format we read records it).
+    // Guessed bonds carry no chemical order (distances don't tell us one).
     bonds.into_iter().map(|[a, b]| Bond::new(a, b)).collect()
+}
+
+/// Scatter a flat bond list into molar's columnar [`BondStorage`].
+///
+/// The viewer keeps connectivity as a flat `Vec<Bond>` (indexable, `Copy` rows — what
+/// the geometry/pick hot paths want), while molar's topology-side machinery — selection
+/// keywords (`polh`/`apolh`), [`perceive`](molar::prelude::perceive), force-field typing
+/// and charge assignment — reads a `BondStorage`. This is the bridge between the two.
+pub fn bond_storage(bonds: &[Bond]) -> BondStorage {
+    let mut st = BondStorage::default();
+    st.reserve(bonds.len());
+    for b in bonds {
+        st.push(b);
+    }
+    st
 }

@@ -65,15 +65,15 @@ pub fn build(
     // reference is the ribbon's *thin* axis, not its wide one.
     let mut cg = false;
     for p in bound.iter_particle() {
-        let acc = by_res.entry(p.atom.resindex).or_insert(Acc {
+        let acc = by_res.entry(p.atom.get_resindex()).or_insert(Acc {
             ca: None,
             o: None,
-            chain: p.atom.chain,
+            chain: p.atom.get_chain(),
         });
-        match p.atom.name.as_str() {
+        match p.atom.get_name() {
             // Backbone trace point: atomistic Cα, or the Martini CG backbone bead.
             "CA" | "BB" => {
-                cg |= p.atom.name.as_str() == "BB";
+                cg |= p.atom.get_name() == "BB";
                 acc.ca = Some((v3(p.pos), colorizer.color(p.atom, p.id)));
             }
             // Ribbon-orientation reference: the atomistic carbonyl O, or (for CG, which

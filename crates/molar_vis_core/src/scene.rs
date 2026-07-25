@@ -10,7 +10,7 @@ use molar::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::ColorMethod;
-use crate::data::RawMolecule;
+use crate::data::{bond_storage, RawMolecule};
 use crate::geometry::{RepKind, RepParams};
 use crate::history::{RepState, StructureSnapshot};
 use crate::material::Material;
@@ -845,10 +845,10 @@ impl Molecule {
             return;
         }
         let mut bound = self.data.select_all_bound_mut();
-        if let Some(a) = bound.get_atom_mut(i) {
-            a.name = src.name;
-            a.atomic_number = src.atomic_number;
-            a.mass = src.mass;
+        if let Some(mut a) = bound.get_atom_mut(i) {
+            a.set_name(src.get_name());
+            a.set_atomic_number(src.get_atomic_number());
+            a.set_mass(src.get_mass());
         }
         self.hover_grid = None;
         self.structure_version += 1;
@@ -978,10 +978,12 @@ impl Molecule {
     // in `self.bonds` (separate from the System's topology bonds). These helpers run
     // perception over a topology assembled from the System's atoms + `self.bonds`.
 
-    /// A topology with the System's atoms but the editor's bond graph.
+    /// A topology with the System's atoms but the editor's bond graph, with the bond
+    /// adjacency already built (molar's graph routines all take a prebuilt one).
     fn topology_with_bonds(&self) -> Topology {
         let mut top = self.data.topology().clone();
-        top.bonds = self.bonds.clone();
+        top.bonds = bond_storage(&self.bonds);
+        top.bonds.ensure_adjacency(top.atoms.len());
         top
     }
 
@@ -991,14 +993,19 @@ impl Molecule {
     pub fn perceive_aromaticity(&mut self) {
         let mut top = self.topology_with_bonds();
         let perc = perceive(&mut top); // molar::perception (via prelude)
-        self.bonds = top.bonds; // aromatic orders written back
+        // Aromatic orders written back into the flat editor graph. `perceive` only
+        // rewrites the order column, so the pairs still line up index-for-index.
+        for (b, r) in self.bonds.iter_mut().zip(top.bonds.iter()) {
+            b.order = r.order();
+        }
         self.aromatic_rings = perc.aromatic_rings().cloned().collect();
         self.aromatic_dirty = true; // the ring-circle geometry must rebuild
     }
 
     /// Implicit-hydrogen count per atom, over the editor's connectivity.
     pub fn implicit_hydrogens(&self) -> Vec<u8> {
-        implicit_hydrogens(&self.topology_with_bonds())
+        let top = self.topology_with_bonds();
+        implicit_hydrogens(&top, top.bonds.get_adjacency().unwrap())
     }
 
     /// Lazily compute + cache the molecule's aromatic rings (atom-index loops) for
@@ -1010,8 +1017,7 @@ impl Molecule {
         if self.interaction_rings.is_some() {
             return;
         }
-        let mut top = self.data.topology().clone();
-        top.bonds = self.bonds.clone();
+        let mut top = self.topology_with_bonds();
         let perc = perceive(&mut top);
         self.interaction_rings = Some(perc.aromatic_rings().cloned().collect());
     }

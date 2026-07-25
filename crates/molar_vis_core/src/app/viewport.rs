@@ -492,7 +492,7 @@ impl App {
                                             // Cartoon → the N–CA–C chain trace only (no
                                             // carbonyl / terminal backbone oxygens).
                                             let keep = (has_cartoon
-                                                && matches!(p.atom.name.as_str(), "N" | "CA" | "C"))
+                                                && matches!(p.atom.get_name(), "N" | "CA" | "C"))
                                                 || (has_surface
                                                     && sasa.as_ref().is_some_and(|a| {
                                                         a.get(p.id).copied().unwrap_or(0.0) > 0.01

@@ -646,7 +646,7 @@ pub fn relax_in_system(
     let (mut coords, atomic_numbers): (Vec<Vec3>, Vec<u8>) = {
         let b = system.select_all_bound();
         let coords = b.iter_pos().map(|p| Vec3::new(p.x, p.y, p.z)).collect();
-        let z = b.iter_atoms().map(|a| a.atomic_number).collect();
+        let z = b.iter_atoms().map(|a| a.get_atomic_number()).collect();
         (coords, z)
     };
 

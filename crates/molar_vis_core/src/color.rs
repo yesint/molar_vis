@@ -178,8 +178,8 @@ impl Colorizer {
             let mut lo = f32::INFINITY;
             let mut hi = f32::NEG_INFINITY;
             for a in src.iter_atoms() {
-                lo = lo.min(a.bfactor);
-                hi = hi.max(a.bfactor);
+                lo = lo.min(a.get_bfactor());
+                hi = hi.max(a.get_bfactor());
             }
             if lo.is_finite() {
                 (lo, 1.0 / (hi - lo).max(1e-6))
@@ -204,19 +204,23 @@ impl Colorizer {
         }
     }
 
-    /// Packed RGBA8 color for an atom (`id` is its global atom index).
-    pub fn color(&self, atom: &Atom, id: usize) -> u32 {
+    /// Packed RGBA8 color for an atom (`id` is its global atom index). Takes the atom
+    /// by value: molar hands out `AtomRef` column proxies (a `Copy` two-word handle),
+    /// not `&Atom`.
+    pub fn color(&self, atom: impl AtomLike, id: usize) -> u32 {
         let rgba = match self.method {
-            ColorMethod::Element => element_color(atom.atomic_number),
-            ColorMethod::Chain => categorical(atom.chain as usize),
-            ColorMethod::ResId => categorical(atom.resid.rem_euclid(1 << 24) as usize),
-            ColorMethod::ResName => categorical(hash_str(atom.resname.as_str())),
+            ColorMethod::Element => element_color(atom.get_atomic_number()),
+            ColorMethod::Chain => categorical(atom.get_chain() as usize),
+            ColorMethod::ResId => categorical(atom.get_resid().rem_euclid(1 << 24) as usize),
+            ColorMethod::ResName => categorical(hash_str(atom.get_resname())),
             ColorMethod::Index => rainbow(id as f32 * self.inv_n),
-            ColorMethod::Beta => beta_ramp((atom.bfactor - self.beta_min) * self.beta_inv_range),
+            ColorMethod::Beta => {
+                beta_ramp((atom.get_bfactor() - self.beta_min) * self.beta_inv_range)
+            }
             ColorMethod::SecStruct => self
                 .ss_rgba
                 .as_ref()
-                .and_then(|m| m.get(&atom.resindex).copied())
+                .and_then(|m| m.get(&atom.get_resindex()).copied())
                 .unwrap_or([230, 230, 230, 255]),
             ColorMethod::Solid(rgba) => rgba,
         };
