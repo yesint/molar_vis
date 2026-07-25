@@ -227,12 +227,15 @@ pub struct App {
     /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
     /// the bottom of this file.
     draw: Option<DrawSession>,
-    /// Whether the scripting console window is open (toggled from the Edit menu).
+    /// Whether the scripting console panel is open (toggled from the View menu).
+    #[cfg(feature = "scripting")]
     console_open: bool,
     /// Scripting-console scrollback + input + history (see `script::console`).
+    #[cfg(feature = "scripting")]
     console: crate::script::ScriptConsole,
     /// Persistent Rhai REPL backing the console: keeps the engine + a `Scope` alive
-    /// across input lines so `let` bindings survive between lines (see `script.rs`).
+    /// across input lines so `let` bindings survive between lines (see `script::engine`).
+    #[cfg(feature = "scripting")]
     script: crate::script::ScriptSession,
     /// External command channel for the native Python module (`molar_vis_py`) and the
     /// wasm JavaScript API (`molar_vis_js`): jobs queued from the host are drained + run
@@ -1041,6 +1044,7 @@ impl eframe::App for App {
         self.draw_tools_panel(ui);
         // Scripting console as a resizable bottom panel (when open), claimed before
         // the central viewport so the 3D view fills the space above it.
+        #[cfg(feature = "scripting")]
         self.draw_console(ui);
         self.draw_viewport(ui, frame);
 

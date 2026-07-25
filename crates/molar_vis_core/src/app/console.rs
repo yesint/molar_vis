@@ -1,4 +1,8 @@
-//! Scripting console UI + command execution glue.
+//! Command execution glue, plus the scripting console's UI hook.
+//!
+//! [`App::execute_command`] is always compiled — the app's own menu actions and the
+//! Python/JS hosts drive the viewer through it. The console/REPL entry points above it
+//! ride the `scripting` feature.
 use super::*;
 
 impl App {
@@ -8,6 +12,7 @@ impl App {
     /// Draw the console as a resizable bottom panel (when open) and run any submitted
     /// line. Added to the panel layout before the viewport, so the 3D view fills the
     /// space above it (not a floating window).
+    #[cfg(feature = "scripting")]
     pub(super) fn draw_console(&mut self, ui: &mut egui::Ui) {
         if !self.console_open {
             return;
@@ -22,6 +27,7 @@ impl App {
     /// errors into the console, apply the produced commands on the UI thread, then
     /// record one undo checkpoint. (Called by the console and the
     /// `MOLAR_VIS_DEBUG_SCRIPT` hook.)
+    #[cfg(feature = "scripting")]
     pub(super) fn run_script(&mut self, source: &str) {
         use crate::script::{ConsoleLine, LineKind};
         self.console.lines.push(ConsoleLine { kind: LineKind::Input, text: source.to_string() });
@@ -69,6 +75,7 @@ impl App {
     }
 
     /// A one-line-per-rep listing of the scene, returned by the script `list()`.
+    #[cfg(feature = "scripting")]
     pub(super) fn scene_summary(&self) -> String {
         if self.scene.molecules.is_empty() {
             return "(no molecules)".to_string();

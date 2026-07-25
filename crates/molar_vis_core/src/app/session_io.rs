@@ -88,6 +88,7 @@ impl App {
         self.load_dialog = None;
         // A new document = a fresh REPL: drop console variables so a stored handle
         // (`let m = mol(0)`) doesn't outlive the molecule it referred to.
+        #[cfg(feature = "scripting")]
         self.script.reset();
     }
 

@@ -18,6 +18,11 @@ crate-type = ["cdylib"]
 # behind `#![cfg(target_arch = "wasm32")]`), so a plain native `cargo build` of the
 # workspace produces an empty cdylib and pulls nothing extra. Built for the browser with
 # `wasm-pack build crates/molar_vis_js --target web`.
+[features]
+# Pass-through for the core's in-app Rhai scripting console (off by default — see
+# `molar_vis_core`'s own `scripting` feature). Build with `--features scripting` to get it.
+scripting = ["molar_vis_core/scripting"]
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 molar_vis_core = { path = "../molar_vis_core" }
 # Same molar as the workspace (rev-pinned, default-features => Float = f32) so the

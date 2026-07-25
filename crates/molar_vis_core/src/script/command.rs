@@ -18,6 +18,11 @@ use crate::color::{ColorMethod, DEFAULT_SOLID};
 use crate::material::Material;
 
 /// Which representation of a molecule a command targets.
+// The vocabulary is deliberately complete: which variants have an in-crate constructor
+// depends on which front ends are compiled in — the Rhai console (the `scripting` feature)
+// builds all of them, the app's menu actions and the Python/JS hosts a subset — so
+// dead-code analysis here would only track the build configuration.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepRef {
     /// An existing representation by index.
@@ -27,6 +32,7 @@ pub enum RepRef {
     Last,
 }
 
+#[allow(dead_code)] // see the note on `RepRef`
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// Set a representation's selection text (recompiled via the normal `sel_dirty` path).

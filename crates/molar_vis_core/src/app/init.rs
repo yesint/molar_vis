@@ -570,8 +570,11 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             wasm_loaders: HashMap::new(),
             draw: None,
+            #[cfg(feature = "scripting")]
             console_open: false,
+            #[cfg(feature = "scripting")]
             console: crate::script::ScriptConsole::default(),
+            #[cfg(feature = "scripting")]
             script: crate::script::ScriptSession::new(),
             jobs_rx: None,
         };
@@ -595,23 +598,32 @@ impl App {
             }
         }
 
-        // Verification hooks (native): exercise the session save/load round-trip
-        // headlessly, since the rfd file dialogs can't be driven in a headless run.
-        // MOLAR_VIS_DEBUG_LOAD_SESSION=<path> replaces the scene from a session
-        // file; MOLAR_VIS_DEBUG_SAVE_SESSION=<path> writes the current state out.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_LOAD_SESSION") {
-                app.load_session_from(std::path::Path::new(&path));
-            }
-            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_SESSION") {
-                app.save_session_to(std::path::Path::new(&path));
-            }
+        // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai
+        // script at startup through the same path the console uses, so a command's
+        // effect (e.g. `mol(0).rep(0).set_color("chain")`) can be screenshot headlessly.
+        // Ahead of the offscreen-render hooks below, so the effect lands in a
+        // MOLAR_VIS_DEBUG_SAVE_IMAGE render and not just in a window screenshot.
+        #[cfg(feature = "scripting")]
+        if let Ok(src) = std::env::var("MOLAR_VIS_DEBUG_SCRIPT") {
+            #[cfg(not(target_arch = "wasm32"))]
+            let src = match src.strip_prefix('@') {
+                Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
+                    log::error!("debug script file: {e}");
+                    String::new()
+                }),
+                None => src,
+            };
+            app.run_script(&src);
+            app.console_open = true; // show the console (echo + output) for the screenshot
+            app.console.focus_input = true;
+        }
+
         // Verification hook: MOLAR_VIS_DEBUG_CHARGES=1 presses [Compute charges] on every
         // molecule's first rep (as the Color tab's button does) and logs the outcome, so
         // the espaloma path is exercisable headlessly. Pair with MOLAR_VIS_DEBUG_COLOR=charge
         // + MOLAR_VIS_DEBUG_SAVE_IMAGE to see the result painted; expand the rep params
-        // (MOLAR_VIS_DEBUG_EXPAND_COLOR) to screenshot the tab itself.
+        // (MOLAR_VIS_DEBUG_EXPAND_COLOR) to screenshot the tab itself. Colors are baked
+        // into the geometry, so this too must precede the render hooks.
         #[cfg(not(target_arch = "wasm32"))]
         if std::env::var("MOLAR_VIS_DEBUG_CHARGES").is_ok() {
             for mi in 0..app.scene.molecules.len() {
@@ -641,6 +653,18 @@ impl App {
             }
         }
 
+        // Verification hooks (native): exercise the session save/load round-trip
+        // headlessly, since the rfd file dialogs can't be driven in a headless run.
+        // MOLAR_VIS_DEBUG_LOAD_SESSION=<path> replaces the scene from a session
+        // file; MOLAR_VIS_DEBUG_SAVE_SESSION=<path> writes the current state out.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_LOAD_SESSION") {
+                app.load_session_from(std::path::Path::new(&path));
+            }
+            if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_SESSION") {
+                app.save_session_to(std::path::Path::new(&path));
+            }
             // MOLAR_VIS_DEBUG_SAVE_MOL=<path> writes mol 0 to a structure file
             // (exercises the molar FileHandler write + displayed-frame swap path).
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_MOL") {
@@ -809,23 +833,6 @@ impl App {
         // length after relaxation. Presets: methane, ethane, water, benzene.
         if let Ok(preset) = std::env::var("MOLAR_VIS_DEBUG_DRAW") {
             app.debug_draw_preset(&preset.to_ascii_lowercase());
-        }
-
-        // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai
-        // script at startup through the same path the console uses, so a command's
-        // effect (e.g. `mol(0).rep(0).set_color("chain")`) can be screenshot headlessly.
-        if let Ok(src) = std::env::var("MOLAR_VIS_DEBUG_SCRIPT") {
-            #[cfg(not(target_arch = "wasm32"))]
-            let src = match src.strip_prefix('@') {
-                Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
-                    log::error!("debug script file: {e}");
-                    String::new()
-                }),
-                None => src,
-            };
-            app.run_script(&src);
-            app.console_open = true; // show the console (echo + output) for the screenshot
-            app.console.focus_input = true;
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_EXIT=1 quits the process right here — after

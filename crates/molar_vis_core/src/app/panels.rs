@@ -499,7 +499,9 @@ impl App {
                 }
             }).response);
 
-            // — View —
+            // — View — (its only entry is the console toggle, so the whole menu goes
+            // with the `scripting` feature)
+            #[cfg(feature = "scripting")]
             menu_buttons.push(ui.menu_button("View", |ui| {
                 // Checkable Console toggle (a `[x]`-style item via the leading icon).
                 let mark = if self.console_open { icon::CHECK_SQUARE } else { icon::SQUARE };
