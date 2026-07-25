@@ -20,7 +20,16 @@ cargo test -p molar_vis_core
 cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
 cargo build -p molar_vis_py                                     # native Python module (compile check)
 wasm-pack build crates/molar_vis_js --target web --out-dir web/pkg   # browser JS API (M27)
+
+cargo run -p molar_vis --features scripting          # + the in-app Rhai console (M31)
+cargo test -p molar_vis_core --features scripting    # 96 tests (92 without)
 ```
+
+**Feature flags.** The one feature is **`scripting`** (M31, **off by default**): the in-app Rhai
+console. Every crate has a pass-through of it (`molar_vis`, `molar_vis_web`, `molar_vis_py`,
+`molar_vis_js` → `molar_vis_core/scripting`). Verify **both** configurations after touching
+anything near `script*` or the `App` console fields — with it off, `rhai` is out of the
+dependency graph entirely (`cargo tree -p molar_vis | grep rhai` → nothing).
 
 **Native Python module** (`crates/molar_vis_py`, M26): `import molar_vis` to drive the viewer
 from Python/Jupyter (see that crate + the *Native Python module* notes below). Build/install with
@@ -58,7 +67,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 - Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon|surface`
   (+ `MOLAR_VIS_DEBUG_SURF=1` logs surface grid stats),
   `MOLAR_VIS_DEBUG_SEL="<selection>"`,
-  `MOLAR_VIS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct`,
+  `MOLAR_VIS_DEBUG_COLOR=element|chain|resid|resname|index|beta|secstruct|charge`,
   `MOLAR_VIS_DEBUG_ALLCOLORS=1` (one rep per color scheme, cycling styles — shows every icon),
   `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`,
   `MOLAR_VIS_DEBUG_CUEMODE=linear|exp|exp2` (set the depth-cue falloff curve + bump strength so it
@@ -127,14 +136,24 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_SAVE_IMAGE`) +
   `MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[hbond|hydrophobic|salt|pistacking|pication|halogen]` (open the
   tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
+  `MOLAR_VIS_DEBUG_CHARGE_KIND=partial|formal` (which charge the `charge` scheme paints — its
+  *Color*-tab option; default partial) +
+  `MOLAR_VIS_DEBUG_CHARGES=1` (press **[Compute charges]** on every molecule's first rep, as the
+  Color tab's button does, and log the outcome — exercises the espaloma path headlessly; pair with
+  `MOLAR_VIS_DEBUG_COLOR=charge` + `_SAVE_IMAGE` to see it painted. Needs an SDF/MOL input: espaloma
+  requires Kekulé bond orders, so on a PDB it logs the "load an SDF/MOL" advice instead) +
+  `MOLAR_VIS_DEBUG_EXPAND_COLOR=1` (expand mol 0's first rep params at the **[Color]** tab, so that
+  tab can be screenshot from a window) +
   `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (enter edit mode with the **DihedralRotate** tool and select the
   first rotatable bond of molecule `<mol>` — default 0 — so the axis + handles overlay can be
   screenshot from a window) +
   `MOLAR_VIS_DEBUG_DIHEDRAL_ROTATE=<deg>` (also twist that bond's J-side by `<deg>`° up front, so a
   `MOLAR_VIS_DEBUG_SAVE_IMAGE` render shows the rotated geometry headlessly) +
-  `MOLAR_VIS_DEBUG_SCRIPT="<rhai source>"` (or `@path` to a file, native) — runs a console script at
-  startup through the same path the console uses, and opens the console window, so a command's effect
-  (e.g. `mol(0).rep(0).set_color("chain")`) + the echoed output can be screenshot headlessly. Generate a
+  `MOLAR_VIS_DEBUG_SCRIPT="<rhai source>"` (or `@path` to a file, native; **requires
+  `--features scripting`**) — runs a console script at startup through the same path the console uses,
+  and opens the console window, so a command's effect (e.g. `mol(0).rep(0).set_color("chain")`) + the
+  echoed output can be screenshot headlessly. It and `_CHARGES` run **before** the offscreen-render
+  hooks, so their effect lands in a `_SAVE_IMAGE` render too. Generate a
   quick test trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not
   in git**).
 
@@ -142,10 +161,14 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **1.4** (**git dep** `git = "https://github.com/yesint/molar.git"`,
-`default-features=false` → `Float=f32`; pulls `powersasa` transitively from git),
-rhai **1** (`default-features=false, features=["std"]` — pure-Rust embedded scripting
-language for the console; builds for wasm). **`molar_vis_py` only** (native Python module, M26):
+molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
+`default-features=false` → `Float=f32`; pulls `powersasa` transitively from git; **edition 2024,
+MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
+`espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
+~600 kB ONNX model and pulls `tract`),
+rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
+features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
+**`molar_vis_py` only** (native Python module, M26):
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
@@ -226,7 +249,20 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   near/far). Also owns the view-state knobs the top-bar menu edits: `depth_cue`/`ao`/`shadow`,
   `background` (`Background { Solid|Gradient, color/top/bottom }`) — all `serde(default)`, so
   sessions save/load them for free. `#[derive(PartialEq)]` drives render-skip.
-- `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `Colorizer`.
+- `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `ColorSpec`, `Colorizer`.
+  **`ColorMethod::Charge`** (M31) paints per-atom charge on a **diverging** red–white–blue ramp
+  (`charge_ramp`: negative red, positive blue, white at zero — the chemistry convention, and the
+  opposite direction from `beta_ramp`, which spans an arbitrary range rather than diverging about a
+  meaningful zero), normalized by the largest **magnitude in the selection**, so the sign and the
+  relative extremes read at any absolute scale (partial charges run to ~±0.8 e, formal ones ±1..2).
+  *Which* charge it paints is an **option of the one scheme, not a second scheme**: `ChargeKind`
+  {`Partial` (molar's always-present `charge` column), `Formal` (the optional `formal_charge` one —
+  absent on most structures, which then paint uniformly white rather than failing)} lives on the
+  representation (`Representation::charge_kind`) and is edited in the rep settings' **[Color]** tab.
+  **`ColorSpec { method, charge_kind }`** bundles a scheme with its options so `Colorizer::new` and
+  `geometry::build` take one value instead of growing a parameter per option; `Representation::color_spec()`
+  produces it, and `From<ColorMethod>` covers the internal builders (glow, hover lens) that hard-code
+  a method and never paint charges.
 - `secstruct.rs` — `SsMap` (per-residue SS keyed by `resindex`), `SsClass` (helix/sheet/coil),
   VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme. **Coarse-grained
   (Martini) path** (`assign_cg_ss`, M22): when the residues are CG `BB` beads (no atomistic `CA`),
@@ -356,7 +392,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   trajectory changes; a dihedral twist is undoable whether or not a trajectory is loaded. **`StructEdit::Topology {
   before, after: Arc<StructureSnapshot> }`** carries full before/after snapshots for atom/bond
   add/remove (molar re-indexes on removal, so per-atom topology deltas aren't feasible; rare + small,
-  Arc-shared). Structure is **not** in the document — `EditState`/`MolState` hold only reps+visibility;
+  Arc-shared). **`StructEdit::Charges { atoms, before, after }`** (M31) is the espaloma assignment —
+  shaped like `Coords` but with **no frame target**, since charges live in the topology rather than
+  per trajectory frame (applied by `Molecule::set_charges`, which marks every rep `geom_dirty` because
+  colors are baked into the geometry). Structure is **not** in the document — `EditState`/`MolState` hold only reps+visibility;
   a molecule's *existence* (add/delete) rides the document but its live structure is preserved across
   add/delete undo by reusing the `Molecule` (with its `System`) from the scene/`trash`. `undo(&mut
   Scene)`/`redo` apply one step in place (Doc → swap+`apply` committed; Struct → `StructEdit::apply`
@@ -406,7 +445,14 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `egui::Window`** (not a centered `Modal` — a Modal re-centers each frame so its top jumps as the
   per-tab content height changes; a top-anchored fixed-width Window grows/shrinks only at the
   **bottom**), closed via Save / Cancel / Escape. 4 round-trip/default/compat tests.
-- `script.rs` (+ `script/{command,console}.rs`) — **in-app Rhai scripting console** (M24). A
+- `script.rs` (+ `script/command.rs`) — **the command layer, always compiled**: `Command` (the
+  vocabulary of scene mutations) + `apply_scene_command` + the `parse_*` helpers. The app's own menu
+  actions and the Python/JS hosts drive the viewer through it, so it does **not** ride the `scripting`
+  feature; only the Rhai front end on top of it does (`script/engine.rs` + `script/console.rs`,
+  below). `RepRef`/`Command` carry `#[allow(dead_code)]` because *which* variants have an in-crate
+  constructor depends on which front ends are compiled in.
+- `script/engine.rs` + `script/console.rs` — **in-app Rhai scripting console** (M24), behind the
+  non-default **`scripting`** feature (M31). A
   togglable Console — a **resizable bottom `Panel::bottom`** (View menu → `[x] Console`; the input
   field auto-focuses on open via `console.focus_input`), *not* a floating window. The input row is a
   nested `Panel::bottom` (keeps the outer panel at its set height — computing a scroll height from
@@ -456,9 +502,25 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 - `trajectory.rs` — `Trajectory { frames: Vec<State>, current, playing, loop_mode, speed_fps, … }`
   (`n_frames`/`has_playback`/`set_current`/`step`/`tick`), `LoadOptions {from,to,stride}`,
   `LoadMode {Sync,Async}`, `LoadMsg {Frame,Done,Error}`. Pure data + playback math, **WASM-safe**.
-- `data.rs` + `data/loader.rs` (`RawMolecule`: System + guessed bonds + bbox; positions/
-  radii are transient, used only for bond guessing) + `data/bonds.rs` (VDW-fraction filter)
-  + `data/traj_loader.rs` (**native-only**, `#[cfg(not(wasm))]`: `read_frames_sync`/`spawn_async`).
+- `data.rs` + `data/loader.rs` (`RawMolecule`: System + resolved bonds + bbox; positions/
+  radii are transient, used only for bond guessing) + `data/bonds.rs` + `data/traj_loader.rs`
+  (**native-only**, `#[cfg(not(wasm))]`: `read_frames_sync`/`spawn_async`).
+- `data/bonds.rs` — **where a molecule's connectivity comes from**. `bonds::guess` is the
+  distance part (molar's grid search + a VDW-fraction filter; molar has no coordinate-based bond
+  perception of its own, so this stays here). **`bonds::resolve` owns the policy** (M31), keyed off
+  molar's own `BondStorage::has_orders()` signal:
+  - **orders present** (an SDF/MOL bond block) → the file's table is taken **verbatim**. Distance
+    guessing could only lose the orders, and those orders are what aromatic-ring perception and
+    espaloma charges need — a Kekulé structure is not recoverable from distances.
+  - **bonds but no orders** (a PDB's `CONECT`) → **unioned** with the distance guess. CONECT records
+    the *exceptions* and may or may not be complete: 2 records in `2lao.pdb`, a complete 32716 in the
+    Martini `cg.pdb` — so neither source is trusted alone. Union also means no structure can lose a
+    bond it used to have (2lao still resolves to the same 1855), and it is what finally gives
+    **coarse-grained** structures real bonds: CG bead spacing (~0.32 nm) exceeds `search_cutoff`, so
+    `2lao_cg.pdb` went 290 guessed → 858 resolved and CG licorice draws a connected network.
+  - **no bonds** (GRO/XYZ) → the guess is all there is.
+  `bond_storage`/`bond_vec` bridge the viewer's flat `Vec<Bond>` and molar's columnar `BondStorage`
+  (see `Molecule::sync_bonds_to_topology`).
 - `render.rs` — `SceneRenderer`: offscreen color + `Depth32Float` targets (Strategy A) **plus
   Weighted-Blended OIT `accum` (RGBA16F) + `reveal` (R16F) targets** (in `Targets`, with an
   `oit_bind_group` for the resolve), **dynamic-offset** camera UBO (bind group 0; an array of
@@ -616,6 +678,17 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   O(N). Also `neighbors_within(center, r, |id|)` — a **point** neighbor query (cell skirt clamped to
   grid bounds so a degenerate single-cell grid stays cheap), used by [[interactions.rs]] for
   contact detection. Pure logic, WASM-safe; 5 unit tests.
+- `charges.rs` — **espaloma partial-charge assignment** on a selection (M31), via `molar_ff`'s
+  `ApplyCharges`. **Native only** (`tract` + a ~600 kB bundled ONNX has no business in the wasm
+  bundle, and the browser has no way to obtain charges anyway; charge *coloring* works everywhere).
+  `compute_espaloma(mol, sel)` predicts, writes the charges into the molecule, and returns a
+  `ChargeEdit { atoms, before, after }` so the caller can record it as one undo step. The model needs
+  **chemistry, not coordinates** — explicit Kekulé orders and a bond-complete selection — so its two
+  likely failures are translated into advice rather than passed through raw: no bond orders → "load
+  the molecule from an SDF/MOL, or draw it in the structure editor" (distance-guessed PDB/GRO
+  connectivity is order-less, and *aromatized* bonds are rejected too — which is why
+  `ensure_interaction_rings` uses the non-mutating `aromatic_rings`); a cut bond → "widen the
+  selection to the complete molecule" (charges are equilibrated over the whole graph).
 - `interactions.rs` — **non-covalent interaction detection** (M29; the `Interactions` rep style):
   pure, WASM-safe, PLIP-derived. `detect(a, b, params)` takes two `InteractionSet`s (heavy `AtomInfo`
   atoms + aromatic `RingInfo` + `ChargeGroup` cations/anions) and returns line segments for the six
@@ -786,6 +859,40 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 
 ## molar integration notes
 
+### molar 2.1 API (the SoA migration, M31)
+
+molar 2.0/2.1 flipped `Topology` to **struct-of-arrays** storage. The consequences that matter here:
+
+- **There is no `&Atom` or `&Bond` to borrow.** `iter_atoms`/`get_atom` hand out **`AtomRef` /
+  `AtomRefMut`** column proxies (a `Copy` two-word `{storage, index}` handle) and bonds come back as
+  **`BondRef`**. So every property read is an `AtomLike::get_*()` call, not a field access, and a
+  helper that used to take `&Atom` takes `impl AtomLike` (by value — it's `Copy`) or the concrete
+  `AtomRef` where a closure signature needs naming. `Particle.atom` is an `AtomRef`.
+  The owned `Atom` / `Bond` rows remain as the **construction** types (`AtomStorage::push(&Atom)`).
+- **Interface vs storage widths**: `AtomLike::get_resid()` returns `isize` while the column (and
+  `Atom.resid`, and `Atom::with_resid`) is `i32` — like `usize` at the bond-pair boundary. Mirror the
+  *storage* width in our own types and narrow at the getter.
+- **`Topology.bonds` is a `BondStorage`** (columnar: an always-present pair column + an *optional*
+  order column, absent for connectivity-only sources — hence `has_orders()`, which
+  `bonds::resolve` keys its policy off). It caches a **`BondAdjacency`**; every molar graph
+  routine (`sssr_rings`, `aromatic_rings`, `implicit_hydrogens`, `perception::perceive`, all of
+  `molar_ff`) takes a **prebuilt** one — build it from *whichever bond table the callee will read*
+  (`BondAdjacency::build(n, top.bonds.iter_pairs())`), or the bond indices it hands out won't index
+  that table.
+- **Optional atom columns** (`type_name` / `type_id` / `formal_charge` / `flags`) → getters return
+  `Option`; a `None` column costs nothing. `charge` (partial) and `formal_charge` (integer) are
+  **separate** properties — that split is what the `Charge` color scheme's two options read.
+- **`System::set_bonds`** (a molar addition for this migration) installs connectivity that did not
+  come from the structure file. Bonds take no part in the topology/state size invariant, so they are
+  the one part of a topology swappable on a live system; this is how our resolved bond graph reaches
+  the `polh`/`apolh` selection keywords, `perceive`, and `molar_ff`. See
+  `Molecule::sync_bonds_to_topology`.
+- **Perception**: `perceive(&mut Topology)` annotates in place and is **destructive of Kekulé
+  structure** (an aromatic ring's bonds all become `Aromatic`). Use the non-mutating
+  **`aromatic_rings(mol, adj)`** / `sssr_rings(adj)` when the orders must survive — notably before
+  charge assignment, which rejects `Aromatic` bonds outright. `implicit_hydrogens(mol, adj)` was
+  restored in molar for the editor's hydrogen toggle.
+
 - Coordinates and `atom.vdw()` are in **nanometers** — do all geometry/camera/clip in nm.
 - `const _: () = assert!(size_of::<molar::Float>()==4)` in the loader guards f32.
 - The `System` is kept alive per molecule and is the single source of per-atom data
@@ -807,8 +914,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 - Selection grammar incl.: `all`, `protein`, `backbone`, `water`, `name`, `resid`,
   `resindex`, `resname`, `index`, `chain`, `within …`, and **`polh`** / **`apolh`** (polar /
   apolar hydrogens — H bonded to an electronegative N/O/F/S atom vs to a non-electronegative
-  heavy atom like carbon, read from the topology **bond graph**; each matches nothing when no
-  bonds are computed. molar addition — see the molar-integration note).
+  heavy atom like carbon, read from the topology **bond graph** — which the viewer publishes via
+  `Molecule::sync_bonds_to_topology`, so these work on any loaded molecule; they match nothing only
+  when the topology genuinely has no bonds. molar addition — see the molar-integration note).
 - **Trajectory (M7, implemented):** per-molecule `Trajectory { frames: Vec<State>, current,
   playing, … }` (`trajectory.rs`). Frame 0 = the structure coords (`Molecule::seed_frame0`,
   via the `set_state(State::new_fake(n))` swap trick); loaded frames append; multiple loads
@@ -840,9 +948,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   and per-frame buffer reallocation. Per-rep **`ss_per_frame`** toggle (settings **Traj**
   tab, Cartoon / SecStruct only; in `EditState`) forces DSSP recompute every frame when
   motion changes SS.
-- Bonds aren't in GRO (partial in PDB); guessed **once at load** (`distance_search_single` +
-  `dist < 0.6*(vdw_i+vdw_j)`; `BondParams` = factor/cutoff/min_dist/**periodic**) and never
-  recomputed on a frame change. **Periodic bond search is opt-in** (`BondParams.periodic`, the
+- Connectivity is resolved **once at load** by `bonds::resolve` (see the `data/bonds.rs` bullet:
+  an SDF/MOL table verbatim, a PDB `CONECT` unioned with the guess, GRO/XYZ guessed) and never
+  recomputed on a frame change. The viewer keeps it as a flat `Vec<Bond>` on `Molecule` — indexable
+  `Copy` rows for the geometry/pick hot paths, and the only bond store a *shared* pymolar/JS molecule
+  has, since we don't own that topology — and **republishes it into the owned `System`'s topology**
+  (`Molecule::sync_bonds_to_topology`, at construction and after every bond edit) so molar's
+  bond-reading machinery sees the same graph the viewer draws: the `polh`/`apolh` keywords,
+  `perceive`, and `molar_ff`'s typing/charges.
+- The distance-guessing half is `distance_search_single` + `dist < 0.6*(vdw_i+vdw_j)`
+  (`BondParams` = factor/cutoff/min_dist/**periodic**). **Periodic bond search is opt-in** (`BondParams.periodic`, the
   *Periodic search* setting — off by default): only then does `bonds::guess` use
   `distance_search_single_pbc` + minimum-image scoring to find covalent bonds across a box face in a
   wrapped structure. The PBC search is **much slower** (scans neighbouring cells), so the default
@@ -914,7 +1029,8 @@ next frame). The menus —
   (`App::draw_settings_dialog`; see `settings.rs` / M21).
 - **View** — **`[x] Console`** (a `CHECK_SQUARE`/`SQUARE`-marked toggle of `console_open` — the Rhai
   scripting console bottom panel; opening it sets `console.focus_input` so the input grabs focus; see
-  `script.rs` / M24).
+  `script/engine.rs` / M24). This is the menu's only entry, so the **whole View menu is behind the
+  `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
 expand-caret + **name** (the atom/frame counts are no longer shown inline — they're a **hover
@@ -1022,7 +1138,15 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   molecule has a box** — gated by `mol.system.state().pbox.is_some()`: *Self* / *Box* checkboxes
   + six `spin_u32` spinboxes −x/+x/−y/+y/−z/+z (a `DragValue` flanked by `−`/`+` step buttons,
   range 0..=8) giving the image counts along ±a,±b,±c; these
-  are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`); tab in
+  are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`), and
+  **[Color]** (`draw_color_tab`, **only shown for a color scheme that has options** — gated the same
+  way [Periodic] is gated on a box, so today only `Charge`: *partial* / *formal* **radio buttons**
+  (`rep.charge_kind`), a **[Compute charges]** button (tip *"Compute Espaloma charges on selection"*,
+  native-only — see `charges.rs`), and the outcome, either a charge-range summary or the failure's
+  advice, wrapped). Because the panel only sees the rep, the button is reported back to the app via
+  **`RepParamsOutcome`** (the same deferred-action pattern as the Interactions partner/settings
+  buttons) and `App::compute_rep_charges` runs it once the `&mut Molecule` borrow ends, recording one
+  `StructEdit::Charges` undo step and parking the message in `App::charge_status`. Tab in
   `rep.settings_tab: SettingsTab`. The tab bar uses the shared **`tab_bar(ui, &mut current, &[(T,
   label)…])`** helper — the **app-default tab style** (underline tabs: selected = bold + accent
   underline, others weak/clickable), reused by every tabbed UI (rep settings, the delete-frames
@@ -1624,6 +1748,46 @@ History labels via `describe_change` ("edit selection", "change coloring",
   session round-trip reloads the edited coords). Deferred: persisting edits of *grouped* members
   (they still reload from the SDF by index); edge-on-axis drag is ill-conditioned (freezes rather
   than jumps).
+- ✅ M31 **molar 2.1 migration + charge coloring (espaloma) + optional scripting** — four coupled
+  changes.
+  **(1) molar 2.1** (SoA atom + columnar bond storage): every atom property read became an
+  `AtomLike::get_*()` call on the `AtomRef`/`AtomRefMut` proxies (there is no `&Atom`/`&Bond` to
+  borrow any more), our three `&Atom`-taking helpers now take the proxy, and the perception bridge
+  goes through a prebuilt `BondAdjacency`. See the *molar 2.1 API* notes. Driven off rustc's own error
+  list so only flagged expressions moved.
+  **(2) Connectivity** (the "is our perception redundant?" audit): our distance-based bond guessing
+  stays (molar has none), and our aromaticity was already molar's — but the loader was **discarding
+  every bond the file gave us**, which silently meant aromatic-ring perception found *nothing* on any
+  loaded molecule (a benzene of order-less bonds reads as sp3), disabling π-stacking/π-cation for
+  exactly the ligands M29 was built for. `bonds::resolve` now owns the policy (SDF verbatim / CONECT
+  unioned / guess), the resolved graph is **published into the topology** (`sync_bonds_to_topology`,
+  via molar's new `System::set_bonds`) so `polh`/`apolh` and `molar_ff` see it, and
+  `ensure_interaction_rings` uses molar's new **non-mutating `aromatic_rings`** instead of cloning the
+  whole topology to run the destructive `perceive`. Side wins: CG bonds (`2lao_cg.pdb` 290 → 858) and
+  a molar bug where every cysteine `SG` was typed as **seaborgium** (the PDB element column was
+  ignored).
+  **(3) Charge coloring** (`ColorMethod::Charge` + `ChargeKind` + `ColorSpec` + the **[Color]** tab +
+  `charges.rs` + the native-only `molar_ff` dep): a diverging red–white–blue ramp normalized to the
+  selection's extremes, with partial/formal as an **option of the one scheme**, and espaloma
+  prediction on demand recorded as an undoable `StructEdit::Charges`. Also capped the multi-order bond
+  strand radius at Ball-and-Stick's — with SDF orders now surviving, Licorice's double bonds were
+  twice as thick *and* twice as splayed.
+  **(4) `scripting` feature** (non-default): Rhai + the console UI moved behind it, split along the
+  seam that already existed — the `Command`/`apply_scene_command` layer the app's menus and the
+  Python/JS hosts use stays always-compiled in `script.rs`; everything Rhai-specific moved to
+  `script/engine.rs`.
+  Verified: **96 tests** with `--features scripting`, 92 without (16 new across the four changes),
+  all five crates building for native + wasm32 in **both** configurations with no warnings, clippy
+  clean, a byte-identical session round-trip, and headless renders of the charge scheme on aspirin
+  (21 atoms, −0.683…+0.830 e, carbonyl O red / their C blue), the SS/B-factor/ResID schemes, the four
+  rep styles, and the fixed Licorice double bonds (Ball-and-Stick byte-identical to before). molar
+  pinned at rev `f161420` (2.1.0 + `implicit_hydrogens` restored, `aromatic_rings`,
+  `System::set_bonds`, the PDB element-column fix). **Deferred**: name-based element guessing is still
+  ambiguous for sources with no element column (a GRO's `SG` is still seaborgium — fixing it means
+  teaching the guesser about remoteness codes); computed charges are not saved in sessions (molecules
+  reload from disk); espaloma needs Kekulé orders, so PDB/GRO inputs can't be charged at all; and the
+  `float_literal_f32_fallback` warnings from rustc 1.97 on egui literals are untouched (31 sites, all
+  pre-existing and unrelated).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

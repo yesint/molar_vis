@@ -31,8 +31,12 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 ## Coarse-grained
 - ~~CG (Martini) secondary-structure **display** (cartoon)~~ — **shipped** (M22; geometric SS from
   the BB trace + flat ribbon wrapped on the helix cylinder surface, no bonds needed)
-- CG (Martini) bond guessing — distance search doesn't transfer to CG bead sizes; needs a
-  Martini-aware criterion (the cartoon sidesteps this by grouping per-residue BB/SC beads)
+- CG (Martini) bond guessing — **partly shipped** (M31): a CG structure that records its
+  connectivity (a PDB's `CONECT` — the usual case for a martinized system) now keeps it, since
+  `bonds::resolve` unions the file's table with the distance guess instead of discarding it
+  (`2lao_cg.pdb` 290 → 858 bonds). Still open for CG files with **no** recorded bonds: distance
+  search doesn't transfer to CG bead sizes, so that needs a Martini-aware criterion (the cartoon
+  sidesteps this by grouping per-residue BB/SC beads)
 
 ## Scripting & extensibility
 - Python bindings with exposed visualizer objects
@@ -45,6 +49,12 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
   Discovery-Studio-style dashed lines). Later: π-stacking / salt bridges / halogen bonds,
   distance labels.
 - Reading SDF files (molar)
+- ~~Partial-charge coloring + on-demand charge computation~~ — **shipped** (M31; the `Charge`
+  color scheme on a diverging red–white–blue ramp, partial or formal, with espaloma prediction on
+  the selection via `molar_ff` behind the **[Color]** tab's *Compute charges* button). Later:
+  GAFF/GAFF2 atom typing is already in `molar_ff` and could surface the same way; computed charges
+  aren't yet persisted in a session (molecules reload from disk), and espaloma needs Kekulé bond
+  orders so PDB/GRO inputs can't be charged.
 
 ## Altering structures visually
 - Deleting / Moving / rotating atoms, residues, molecules
