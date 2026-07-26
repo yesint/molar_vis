@@ -1,0 +1,418 @@
+//! The **Load docking data…** dialog and its load path.
+//!
+//! Loading a docking result by hand is a fiddly sequence — open the receptor, append its
+//! ensemble as a trajectory, open the pose file as a group, add an `Interactions` rep, aim
+//! it at the receptor with the partner picker — and every step is easy to get subtly wrong.
+//! This does the whole thing from two file choices, and refuses the combinations that don't
+//! describe a docking run (see [`crate::docking::docking_mode`]).
+//!
+//! Native only: it reads several files from disk and the browser build has no filesystem.
+
+use super::*;
+use super::loaders::DialogAction;
+use crate::docking::{docking_mode, sync_action, DockingMode, Sync};
+
+/// State of the "Load docking data" modal.
+///
+/// Both selections are `Vec<PathBuf>` because both are legitimately multi-file:
+///
+/// * **Ligands** — either one multi-record SDF (each `$$$$` record a pose) or one file per
+///   pose. Either way the poses become the members of one [`MolGroup`].
+/// * **Protein** — one structure; or several files with the first as the structure and the
+///   rest as trajectory frames; or a structure plus a trajectory file. These are the same
+///   thing to the loader, so they need no separate controls: the first file always provides
+///   the topology and everything after it contributes frames (the command line's
+///   `-m a.pdb a.xtc` grouping, see `launch::parse_file_args`).
+pub(super) struct DockingDialog {
+    pub(super) protein: Vec<std::path::PathBuf>,
+    pub(super) ligands: Vec<std::path::PathBuf>,
+    pub(super) error: Option<String>,
+}
+
+impl DockingDialog {
+    pub(super) fn new() -> Self {
+        Self { protein: Vec::new(), ligands: Vec::new(), error: None }
+    }
+}
+
+/// One line of the file summary: "3 files: jak2.pdb, jak2_traj.pdb, …" or the single name.
+fn describe(paths: &[std::path::PathBuf]) -> String {
+    let name = |p: &std::path::PathBuf| {
+        p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    };
+    match paths {
+        [] => String::new(),
+        [one] => name(one),
+        many => format!("{} files: {}", many.len(), name(&many[0])),
+    }
+}
+
+impl App {
+    /// Render the "Load docking data" modal: a receptor chooser, a ligand chooser, and
+    /// Load/Cancel. Mirrors `draw_load_dialog`'s shape (a centered `egui::Modal`, errors
+    /// shown in place so a rejected combination can be corrected without reopening).
+    pub(super) fn draw_docking_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.docking_dialog.take() else {
+            return;
+        };
+        let mut action = DialogAction::Keep;
+
+        let modal = egui::Modal::new(egui::Id::new("docking_modal")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("Load docking data");
+            ui.label(
+                egui::RichText::new(
+                    "A receptor plus the ligand poses docked into it. One receptor frame is \
+                     rigid docking; one frame per pose is flexible docking.",
+                )
+                .weak(),
+            );
+            ui.separator();
+
+            egui::Grid::new("docking_files")
+                .num_columns(3)
+                .spacing(egui::vec2(8.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label("Protein");
+                    if ui
+                        .button(format!("{}  Choose…", icon::FOLDER_OPEN))
+                        .on_hover_text(
+                            "A structure; or a structure + trajectory; or several files, the \
+                             first as the structure and the rest as frames (multi-select)",
+                        )
+                        .clicked()
+                    {
+                        if let Some(mut ps) = rfd::FileDialog::new()
+                            .add_filter(
+                                "Structures & trajectories",
+                                &["pdb", "ent", "gro", "xyz", "tpr", "xtc", "trr", "dcd", "nc", "ncdf"],
+                            )
+                            .pick_files()
+                        {
+                            // rfd hands back selection order, which is unspecified across
+                            // platforms; sort so "the first file is the structure" is
+                            // predictable (jak2.pdb before jak2_traj.pdb).
+                            ps.sort();
+                            dialog.protein = ps;
+                            dialog.error = None;
+                        }
+                    }
+                    match dialog.protein.is_empty() {
+                        true => {
+                            ui.weak("no file selected");
+                        }
+                        false => {
+                            ui.monospace(describe(&dialog.protein))
+                                .on_hover_text(dialog.protein.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Ligands");
+                    if ui
+                        .button(format!("{}  Choose…", icon::FOLDER_OPEN))
+                        .on_hover_text(
+                            "One multi-molecule SDF, or one file per pose (multi-select)",
+                        )
+                        .clicked()
+                    {
+                        if let Some(mut ps) = rfd::FileDialog::new()
+                            .add_filter("Ligands", &["sdf", "sd", "mol", "mol2", "pdb", "xyz"])
+                            .pick_files()
+                        {
+                            ps.sort();
+                            dialog.ligands = ps;
+                            dialog.error = None;
+                        }
+                    }
+                    match dialog.ligands.is_empty() {
+                        true => {
+                            ui.weak("no file selected");
+                        }
+                        false => {
+                            ui.monospace(describe(&dialog.ligands))
+                                .on_hover_text(dialog.ligands.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n"));
+                        }
+                    }
+                    ui.end_row();
+                });
+
+            if let Some(e) = &dialog.error {
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(e).color(egui::Color32::from_rgb(230, 120, 120)),
+                    )
+                    .wrap(),
+                );
+            }
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                let ready = !dialog.protein.is_empty() && !dialog.ligands.is_empty();
+                if ui.add_enabled(ready, egui::Button::new("Load")).clicked() {
+                    action = DialogAction::Load;
+                }
+                if ui.button("Cancel").clicked() {
+                    action = DialogAction::Cancel;
+                }
+            });
+        });
+
+        if modal.should_close() {
+            action = DialogAction::Cancel;
+        }
+        match action {
+            DialogAction::Keep => self.docking_dialog = Some(dialog),
+            DialogAction::Cancel => {}
+            DialogAction::Load => match self.load_docking(&dialog.protein, &dialog.ligands) {
+                Ok(msg) => self.status = msg,
+                Err(e) => {
+                    // Keep the dialog open with the reason, so the selection can be fixed.
+                    log::error!("docking load: {e}");
+                    dialog.error = Some(e);
+                    self.docking_dialog = Some(dialog);
+                }
+            },
+        }
+    }
+
+    /// Load a docking result: the receptor (+ its ensemble as trajectory frames) and the
+    /// ligand poses as a [`MolGroup`], with an `Interactions` rep on the group aimed at the
+    /// receptor. Returns the status line, or the reason it isn't a docking result.
+    ///
+    /// Validated **before** anything is added to the scene, so a rejected combination
+    /// leaves the document untouched rather than half-loaded.
+    pub(super) fn load_docking(
+        &mut self,
+        protein: &[std::path::PathBuf],
+        ligands: &[std::path::PathBuf],
+    ) -> Result<String, String> {
+        let bonds = self.settings.behavior.bond_params();
+
+        // --- ligands: one multi-record file, or one file per pose --------------------
+        let mut poses: Vec<data::RawMolecule> = Vec::new();
+        for path in ligands {
+            let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+            // A record-structured file may hold many poses; anything else is one.
+            if matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
+                poses.extend(data::load_records(path, &bonds)?);
+            } else {
+                poses.push(data::load_with(path, &bonds)?);
+            }
+        }
+        if poses.is_empty() {
+            return Err("no ligand poses were loaded".into());
+        }
+
+        // --- receptor: the first file is the topology, the rest are its ensemble -----
+        //
+        // The **first file supplies the topology**, and the receptor's conformations are the
+        // frames of the files *after* it — so a structure plus a 26-frame trajectory is 26
+        // conformations, one per pose, not 27. The structure's own coordinates are its
+        // reference conformation, not an extra pose; counting them would offset every
+        // pose/receptor pairing by one.
+        //
+        // With nothing after it, the single file *is* the ensemble: its own frames are used,
+        // so a one-model PDB is rigid docking and a 26-model one is flexible.
+        let (structure, extra) = protein.split_first().ok_or("no protein file selected")?;
+        let receptor = data::load_with(structure, &bonds)?;
+        let n_atoms = receptor.n_atoms;
+        // Read the frames *before* anything is added to the scene, so a count mismatch
+        // aborts with the document untouched.
+        let mut frames: Vec<(std::path::PathBuf, usize, Vec<State>)> = Vec::new();
+        for path in extra {
+            let opts = LoadOptions { from: 0, to: None, stride: 1 };
+            let read = data::traj_loader::read_frames_sync(path, &opts, n_atoms)?;
+            if !read.is_empty() {
+                frames.push((path.clone(), 0, read));
+            }
+        }
+        // Nothing after the first file: fall back to that file's own extra models (read from
+        // frame 1, since frame 0 is the structure we already loaded) — seeded as frame 0 below.
+        let seed_structure = frames.is_empty();
+        if seed_structure {
+            let opts = LoadOptions { from: 1, to: None, stride: 1 };
+            let own = data::traj_loader::read_frames_sync(structure, &opts, n_atoms)?;
+            if !own.is_empty() {
+                frames.push((structure.clone(), 1, own));
+            }
+        }
+        let appended: usize = frames.iter().map(|(_, _, s)| s.len()).sum();
+        // `seed_structure` means frame 0 is the structure's own coordinates, so it counts.
+        let receptor_frames = if seed_structure { appended + 1 } else { appended };
+        let mode = docking_mode(receptor_frames, poses.len())?;
+
+        // --- commit: receptor, then the pose group, then the link ------------------
+        let mut receptor = receptor;
+        receptor.source = MoleculeSource::File(structure.clone());
+        self.add_loaded(receptor);
+        let protein_mi = self.scene.molecules.len() - 1;
+        let protein_src = self.scene.molecules[protein_mi].source.clone();
+        {
+            let mol = &mut self.scene.molecules[protein_mi];
+            for (path, from, states) in frames {
+                // Only seed frame 0 with the structure's own coordinates when *it* is the
+                // ensemble; when later files supply one, the frames are exactly theirs.
+                if seed_structure {
+                    mol.seed_frame0(); // idempotent
+                }
+                mol.append_frames(states);
+                mol.traj_loads.push(crate::scene::TrajLoad { path, from, to: None, stride: 1 });
+            }
+            mol.apply_current_frame();
+        }
+
+        let n_poses = poses.len();
+        let group_name = ligands
+            .first()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "ligands".to_string());
+        let group_source = match ligands {
+            // One record-structured file: the group reloads from it by record index.
+            [one] => MoleculeSource::File(one.clone()),
+            // Several files: there is no single file to reload the group from, so the
+            // members keep their own per-file sources (set by the loader) and the group
+            // is byte-sourced — the same limitation a browser-loaded group has.
+            _ => MoleculeSource::Bytes { name: group_name.clone() },
+        };
+        self.add_group(poses, group_source, group_name);
+        let Some(gi) = self.scene.groups.len().checked_sub(1) else {
+            return Err("failed to create the ligand group".into());
+        };
+
+        // The Interactions rep goes on the *group* (a shared rep, so it survives member
+        // switching and applies to whichever pose is shown) and points at the receptor's
+        // first rep — exactly the state the partner picker would leave behind.
+        self.add_docking_interactions(gi, protein_src, 0);
+        // Flexible docking: line the receptor's frame up with the shown pose from the
+        // start, and let the two step together from then on (`sync_docking_frames`).
+        if mode == DockingMode::Flexible {
+            self.scene.groups[gi].docking_sync = None; // force the first reconcile
+        }
+        self.view_dirty = true;
+        Ok(match mode {
+            DockingMode::Rigid => format!("Loaded {n_poses} ligand poses (rigid receptor)"),
+            DockingMode::Flexible => {
+                format!("Loaded {n_poses} ligand poses (flexible receptor, {receptor_frames} frames)")
+            }
+        })
+    }
+
+    /// Give the ligand group an `Interactions` shared rep whose partner is the receptor's
+    /// rep `protein_rep`, as if it had been assigned with the partner picker.
+    ///
+    /// The group's existing shared rep (Licorice, from `add_group`) is kept — an
+    /// `Interactions` rep draws only contact lines, so on its own the poses would vanish.
+    /// That is the same reasoning as the style picker's clone-on-switch.
+    fn add_docking_interactions(&mut self, gi: usize, protein_src: MoleculeSource, protein_rep: usize) {
+        let Some(&member_id) = self
+            .scene
+            .groups
+            .get(gi)
+            .and_then(|g| g.members.get(g.current))
+        else {
+            return;
+        };
+        let Some(mi) = self.scene.mol_index(member_id) else { return };
+        let mut rep = Representation::new(RepKind::Interactions);
+        rep.partner = Some((protein_src, protein_rep));
+        let mol = &mut self.scene.molecules[mi];
+        // Appended to the shared prefix, so it is shared across members like the Licorice.
+        let at = mol.n_shared.min(mol.reps.len());
+        mol.reps.insert(at, rep);
+        mol.n_shared = at + 1;
+        mol.selected_rep = Some(at);
+    }
+}
+
+impl App {
+    /// Keep a flexible-docking group and its receptor in step: moving to another pose shows
+    /// the receptor conformation it was docked into, and scrubbing (or playing) the receptor
+    /// trajectory shows the matching pose.
+    ///
+    /// Applies to any group whose `Interactions` partner resolves to a molecule with exactly
+    /// one frame per member — which is what makes them a flexible-docking pair, whether they
+    /// came from the docking dialog or were wired up by hand. Rigid docking (one receptor
+    /// frame) has nothing to step, and a mismatched count is left alone.
+    ///
+    /// Called once per frame after the panels have drawn. Rather than hooking every control
+    /// that can move either side (the pose cycle bar, the trajectory bar, `Command::Frame`,
+    /// the playback tick), it compares both values against the pair recorded last frame and
+    /// propagates whichever moved — so playback works for free, and there is no risk of a
+    /// control being missed. The member takes precedence if somehow both moved at once.
+    pub(super) fn sync_docking_frames(&mut self) {
+        for gi in 0..self.scene.groups.len() {
+            let Some(pmi) = self.docking_receptor(gi) else {
+                self.scene.groups[gi].docking_sync = None; // not (or no longer) a pair
+                continue;
+            };
+            let members = self.scene.groups[gi].members.len();
+            if self.scene.molecules[pmi].trajectory.n_frames() != members {
+                self.scene.groups[gi].docking_sync = None;
+                continue;
+            }
+            let member = self.scene.groups[gi].current;
+            let frame = self.scene.molecules[pmi].trajectory.current;
+            match sync_action(self.scene.groups[gi].docking_sync, member, frame) {
+                Sync::ShowFrame(f) => self.set_receptor_frame(pmi, f),
+                Sync::ShowPose(p) => self.switch_group_member_synced(gi, p),
+                Sync::Idle => {}
+            }
+            // Re-read: either branch may have moved one of them.
+            let member = self.scene.groups[gi].current;
+            let frame = self.scene.molecules[pmi].trajectory.current;
+            self.scene.groups[gi].docking_sync = Some((member, frame));
+        }
+    }
+
+    /// The receptor molecule of a flexible-docking pair: the molecule targeted by the
+    /// group's `Interactions` rep. `None` when the group has no such rep, its partner is
+    /// unresolvable, or the partner is a member of this very group.
+    fn docking_receptor(&self, gi: usize) -> Option<usize> {
+        let g = self.scene.groups.get(gi)?;
+        let mi = self.scene.mol_index(*g.members.get(g.current)?)?;
+        let mol = &self.scene.molecules[mi];
+        let n_shared = mol.n_shared.min(mol.reps.len());
+        for rep in &mol.reps[..n_shared] {
+            if !matches!(rep.kind, RepKind::Interactions) {
+                continue;
+            }
+            if let Some((pmi, _)) = super::build::partner_index(&self.scene, rep) {
+                // A partner inside this group would make the coupling self-referential.
+                if self.scene.molecules[pmi].group != Some(g.id) {
+                    return Some(pmi);
+                }
+            }
+        }
+        None
+    }
+
+    /// Show receptor frame `frame`, going through the molecule's own frame-change path so
+    /// the geometry/coords dirty flags are set exactly as the trajectory bar would.
+    fn set_receptor_frame(&mut self, pmi: usize, frame: usize) {
+        let mol = &mut self.scene.molecules[pmi];
+        if mol.trajectory.current == frame || frame >= mol.trajectory.n_frames() {
+            return;
+        }
+        mol.trajectory.set_current(frame);
+        mol.apply_current_frame();
+        self.view_dirty = true;
+    }
+
+    /// Show pose `member`, re-centering the camera on it exactly as the cycle bar does
+    /// (partial focus: pan the target, keep the zoom).
+    fn switch_group_member_synced(&mut self, gi: usize, member: usize) {
+        if !self.scene.switch_group_member(gi, member) {
+            return;
+        }
+        if let Some(&id) = self.scene.groups[gi].members.get(member) {
+            if let Some(mi) = self.scene.mol_index(id) {
+                let (min, max) = self.scene.molecules[mi].current_bbox();
+                self.camera.target = 0.5 * (min + max);
+            }
+        }
+        self.view_dirty = true;
+    }
+}

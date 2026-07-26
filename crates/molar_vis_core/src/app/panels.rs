@@ -410,6 +410,19 @@ impl App {
                     self.open_structure(ui.ctx());
                     ui.close();
                 }
+                // Docking results read several files from disk, so native-only.
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui
+                    .button(format!("{}  Load docking data…", icon::TARGET))
+                    .on_hover_text(
+                        "Open a receptor + the ligand poses docked into it, linked by an \
+                         Interactions representation",
+                    )
+                    .clicked()
+                {
+                    self.docking_dialog = Some(super::docking_dialog::DockingDialog::new());
+                    ui.close();
+                }
             }).response);
 
             // — Session — New starts an empty scene (pure in-memory, so available

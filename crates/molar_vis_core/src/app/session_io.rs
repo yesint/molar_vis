@@ -559,6 +559,7 @@ impl App {
                 visible: gs.visible,
                 expanded: false,
                 members_expanded: false,
+                docking_sync: None,
             });
             let gi = self.scene.groups.len() - 1;
             self.scene.apply_group_visibility(gi);

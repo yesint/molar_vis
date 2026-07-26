@@ -399,6 +399,7 @@ mod tests {
             visible: true,
             expanded: false,
             members_expanded: false,
+                docking_sync: None,
         });
         scene.apply_group_visibility(0);
 

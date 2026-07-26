@@ -365,6 +365,7 @@ impl EditState {
                     visible: true,
                     expanded: false,
                     members_expanded: false,
+                docking_sync: None,
                 });
             g.members = gs.members.clone();
             g.visible = gs.visible;

@@ -66,6 +66,13 @@ pub struct MolGroup {
     /// member molecules (each foldable to its own reps). Independent of [`expanded`]
     /// (only rendered while it's true). Not undoable.
     pub members_expanded: bool,
+    /// **Flexible-docking frame coupling**: the `(shown member, receptor frame)` pair as of
+    /// the last reconcile, or `None` to force one. When this group's `Interactions` rep
+    /// points at a molecule with exactly one frame per member, whichever of the two the user
+    /// moved is propagated to the other (see `App::sync_docking_frames`) — comparing against
+    /// the last pair is what tells them apart, and it means playback of the receptor
+    /// trajectory cycles the poses too. Transient view state: not undoable, not serialized.
+    pub docking_sync: Option<(usize, usize)>,
 }
 
 /// Periodic-image display for a representation: render extra copies of the
@@ -1274,6 +1281,7 @@ impl Scene {
             visible: true,
             expanded: false,
             members_expanded: false,
+                docking_sync: None,
         });
         let gi = self.groups.len() - 1;
         self.apply_group_visibility(gi);

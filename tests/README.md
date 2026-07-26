@@ -24,6 +24,37 @@
   gmx genconf -f ../../molar/molar/tests/cpt.gro -o tests/large_375k.gro -nbox 2 2 1
   ```
 
+- `jak2.pdb` — JAK2 kinase (4D0W, 4844 atoms) with `CONECT` records covering its waters —
+  the fixture for the **docking** feature's receptor, and a regression fixture for PDB
+  `CONECT` serial resolution (its `TER 4824` consumes a serial, so `serial - 1` mapping bonded
+  the wrong atoms; see `data::bonds`'s bond-length test).
+
+- `jak2_inhs.sd` — 26 JAK2 inhibitors from ChEMBL, the ligand poses for the docking feature
+  (`Molecule ▸ Load docking data…`). Used as one multi-record SDF → a 26-member `MolGroup`.
+
+- `jak2_traj.pdb` — a **26-frame** multi-MODEL trajectory of `jak2` — one receptor
+  conformation per pose in `jak2_inhs.sd`, i.e. the **flexible-docking** case (frame count
+  must equal the ligand count). **Not tracked in git** (~10 MB, generated). Regenerate:
+
+  ```python
+  import math, pathlib
+  atoms = [l.rstrip("\n") for l in open("tests/jak2.pdb") if l.startswith(("ATOM", "HETATM"))]
+  n = pathlib.Path("tests/jak2_inhs.sd").read_text().count("$$$$")   # 26
+  with open("tests/jak2_traj.pdb", "w") as g:
+      for fr in range(n):
+          g.write(f"MODEL     {fr + 1:>4}\n")
+          amp = 0.6 * math.sin(fr / max(n - 1, 1) * math.pi)
+          for idx, l in enumerate(atoms):
+              x, y, z = float(l[30:38]), float(l[38:46]), float(l[46:54])
+              ph = (idx % 37) / 37 * 2 * math.pi
+              x += amp * math.cos(ph) + 0.05 * fr
+              y += amp * math.sin(ph)
+              z += 0.3 * amp * math.cos(2 * ph)
+              g.write(f"{l[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{l[54:]}\n")
+          g.write("ENDMDL\n")
+      g.write("END\n")
+  ```
+
 - `2lao_traj.pdb` — a 20-frame multi-MODEL trajectory of `2lao` (rigid drift + breathing
   wobble) for verifying trajectory loading/playback. **Not tracked in git** (generated).
   Regenerate:

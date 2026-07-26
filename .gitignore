@@ -21,3 +21,6 @@
 # Generated noisy 3-MODEL trajectory of 2lao for verifying trajectory smoothing
 # (clean / noisy / clean frames; regenerate with the snippet in the smoothing commit)
 /tests/2lao_noisy.pdb
+
+# Generated test fixtures (regenerate per tests/README.md; too large to track)
+/tests/jak2_traj.pdb

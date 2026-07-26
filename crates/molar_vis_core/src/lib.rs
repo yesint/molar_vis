@@ -11,6 +11,8 @@ mod camera;
 mod charges;
 mod color;
 mod data;
+/// Loading a docking result (receptor + ligand poses) — see the module docs.
+mod docking;
 mod geometry;
 mod history;
 mod interactions;

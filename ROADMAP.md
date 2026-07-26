@@ -44,6 +44,11 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - Plugins architecture
 
 ## Drug-discovery goodies
+- ~~Loading docking results (receptor + ligand poses)~~ — **shipped** (M32; `Molecule ▸ Load
+  docking data…`: poses as a `MolGroup` with an `Interactions` rep auto-linked to the receptor,
+  rigid or flexible receptor, and pose ⇄ receptor-frame stepping for the flexible case). Later:
+  per-pose score display + sorting, and recording the pairing in a session as *docking* rather
+  than as its parts.
 - ~~PLIP-like interactions and their visualization~~ — **shipped** (M29; the `Interactions`
   rep style — H-bonds + hydrophobic contacts between a rep and a chosen partner rep, drawn as
   Discovery-Studio-style dashed lines). Later: π-stacking / salt bridges / halogen bonds,

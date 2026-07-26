@@ -146,6 +146,12 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_SAVE_IMAGE`) +
   `MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[hbond|hydrophobic|salt|pistacking|pication|halogen]` (open the
   tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
+  `MOLAR_VIS_DEBUG_DOCKING="<protein files>;<ligand files>"` (load a docking result the way the
+  dialog's [Load] does — paths comma-separated within each half, e.g.
+  `"tests/jak2.pdb,tests/jak2_traj.pdb;tests/jak2_inhs.sd"` — bypassing the file picker) +
+  `MOLAR_VIS_DEBUG_DOCKING_POSE=<n>` / `_DOCKING_FRAME=<n>` (then move that side and reconcile,
+  logging `pose=… receptor_frame=…`, so the flexible-docking coupling is checkable in each
+  direction) + `MOLAR_VIS_DEBUG_DOCKING_DIALOG=1` (open the empty dialog for a `_SAVE_UI` shot) +
   `MOLAR_VIS_DEBUG_CHARGE_KIND=partial|formal` (which charge the `charge` scheme paints — its
   *Color*-tab option; default partial) +
   `MOLAR_VIS_DEBUG_CHARGES=1` (press **[Compute charges]** on every molecule's first rep, as the
@@ -690,6 +696,32 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   O(N). Also `neighbors_within(center, r, |id|)` — a **point** neighbor query (cell skirt clamped to
   grid bounds so a degenerate single-cell grid stays cheap), used by [[interactions.rs]] for
   contact detection. Pure logic, WASM-safe; 5 unit tests.
+- `docking.rs` + `app/docking_dialog.rs` — **loading a docking result** (M32): a receptor plus
+  the ligand poses docked into it, via **Molecule ▸ Load docking data…** (native only — it reads
+  several files from disk). `docking.rs` is the pure half: **`docking_mode`** (how the receptor's
+  frames line up with the poses — 1 frame = `Rigid`, one per pose = `Flexible`, anything else is
+  an error rather than a guess) and **`sync_action`** (which side of a flexible pair to drive).
+  `app/docking_dialog.rs` is the dialog + the load:
+  - **Ligands**: one multi-record SDF *or* one file per pose (multi-select) → the poses become
+    the members of one [`MolGroup`].
+  - **Protein**: the **first file supplies the topology**, and the receptor's conformations are
+    the frames of the files *after* it — so a structure + a 26-frame trajectory is 26
+    conformations, one per pose, **not** 27. The structure's own coordinates are its reference
+    conformation, not an extra pose; counting them would offset every pose/receptor pairing by
+    one. With nothing after it the single file *is* the ensemble (a 1-model PDB → rigid, a
+    26-model one → flexible). Everything is read + validated **before** the scene is touched, so
+    a rejected combination leaves the document untouched.
+  - The pose group gets an **`Interactions` shared rep pointed at the receptor's rep** — exactly
+    the state the partner picker would leave behind, so it round-trips undo/sessions for free via
+    `RepState.partner`. The group's existing Licorice shared rep is kept (an Interactions rep
+    draws only contact lines, so alone it would hide the poses).
+  - **Flexible pairs step together** (`sync_docking_frames`, run per frame after the panels *and*
+    the viewport): moving to another pose shows the conformation it was docked into, and scrubbing
+    — or *playing* — the receptor trajectory shows the matching pose. Rather than hooking every
+    control that can move either side, it compares both against the pair recorded last frame
+    (`MolGroup::docking_sync`, transient) and propagates whichever moved, so playback works for
+    free and no control can be missed. Applies to **any** group whose Interactions partner has one
+    frame per member, however it was set up — not just what the dialog built.
 - `charges.rs` — **espaloma partial-charge assignment** on a selection (M31), via `molar_ff`'s
   `ApplyCharges`. **Native only** (`tract` + a ~600 kB bundled ONNX has no business in the wasm
   bundle, and the browser has no way to obtain charges anyway; charge *coloring* works everywhere).
@@ -1014,7 +1046,8 @@ and when any bar popup `is_id_open`, a hover over a *different* button calls `Po
 closes the others — at most one popup is open per viewport) + a `request_repaint` (it takes effect
 next frame). The menus —
 - **Molecule** — **Draw** (toggle the interactive sketch mode, `toggle_draw`; a checkable
-  `selectable_label`) · **Load…** (`App::open_structure` — native `rfd` picker / wasm file picker
+  `selectable_label`) · **Load docking data…** (native; the receptor + ligand-pose loader — see
+  the `docking.rs` bullet) · **Load…** (`App::open_structure` — native `rfd` picker / wasm file picker
   filtered to topology+coords formats pdb/ent/gro/xyz/tpr; loads via `data::load`, `scene.add`s a new
   molecule, frames the camera on the first one, undoable via the normal checkpoint).
 - **Session** — **New** (`App::new_session` — drop all molecules + reset camera/history to an empty
@@ -1805,6 +1838,29 @@ History labels via `describe_change` ("edit selection", "change coloring",
   reload from disk); espaloma needs Kekulé orders, so PDB/GRO inputs can't be charged at all; and the
   `float_literal_f32_fallback` warnings from rustc 1.97 on egui literals are untouched (31 sites, all
   pre-existing and unrelated).
+- ✅ M32 **Docking results — receptor + ligand poses in one load** — **Molecule ▸ Load docking
+  data…** (`docking.rs` + `app/docking_dialog.rs`, native): a dialog with *Protein* `[Choose…]` /
+  *Ligands* `[Choose…]` / `[Load]` `[Cancel]` that does in one step what was a fiddly manual
+  sequence — open the receptor, append its ensemble, open the poses as a group, add an
+  `Interactions` rep, aim it with the partner picker. Ligands are one multi-record SDF or one file
+  per pose (multi-select) → a [`MolGroup`]; the protein's first file supplies the topology and the
+  files after it its conformations, validated to be **1 frame (rigid docking) or one per pose
+  (flexible)** before the scene is touched. The pose group gets an `Interactions` shared rep
+  already pointed at the receptor, and a flexible pair **steps together in both directions**
+  (pose ⇄ receptor frame, playback included) — see the module bullet for the reconcile design and
+  why the receptor's own structure frame isn't counted as a pose. Fixtures: `tests/jak2.pdb` (4844
+  atoms) + `tests/jak2_inhs.sd` (26 ChEMBL inhibitors) + a generated 26-frame `tests/jak2_traj.pdb`
+  (not in git; see `tests/README.md`). Verified: 9 unit tests over the two pure decisions
+  (mode from frame counts, which side to drive — first reconcile, either direction, playback,
+  both-moved precedence, idle), 103 tests total (107 with `scripting`), all crates green for
+  native + wasm32 in both feature configurations with no warnings, and headless offscreen checks
+  of the dialog, the loaded result (pose in the site with green H-bond dashes, receptor at 26
+  frames), both coupling directions at several indices, rigid mode staying decoupled, and the
+  mismatch error. Hooks `MOLAR_VIS_DEBUG_DOCKING[_POSE|_FRAME|_DIALOG]`. **Deferred**: sessions
+  don't yet record the pairing as *docking* (the group + the Interactions partner round-trip, so
+  the coupling re-establishes itself on load, but a multi-file ligand selection has no single
+  source to reload the group from — the members keep their own per-file sources, as for a
+  browser-loaded group); no per-pose score display or sorting.
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed

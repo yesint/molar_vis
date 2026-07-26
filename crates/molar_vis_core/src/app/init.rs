@@ -539,6 +539,8 @@ impl App {
             pending_redo_n: None,
             editing_rep: None,
             load_dialog: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            docking_dialog: None,
             delete_frames_dialog: None,
             rename_mol: None,
             loaders: HashMap::new(),
@@ -598,6 +600,62 @@ impl App {
                 ),
                 None => log::warn!("debug dihedral: no rotatable bond on mol {mi}"),
             }
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_DOCKING_DIALOG=1 opens the "Load docking data"
+        // modal (empty), so the dialog itself can be screenshot with MOLAR_VIS_DEBUG_SAVE_UI.
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("MOLAR_VIS_DEBUG_DOCKING_DIALOG").is_ok() {
+            app.docking_dialog = Some(super::docking_dialog::DockingDialog::new());
+        }
+
+        // Verification hook: MOLAR_VIS_DEBUG_DOCKING="<protein files>;<ligand files>" loads a
+        // docking result the way the dialog's [Load] does (paths comma-separated within each
+        // half), bypassing the file picker. E.g.
+        // `MOLAR_VIS_DEBUG_DOCKING="tests/jak2.pdb,tests/jak2_traj.pdb;tests/jak2_inhs.sd"`.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_DOCKING") {
+            let paths = |s: &str| -> Vec<std::path::PathBuf> {
+                s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(Into::into).collect()
+            };
+            let (prot, ligs) = spec.split_once(';').unwrap_or((spec.as_str(), ""));
+            match app.load_docking(&paths(prot), &paths(ligs)) {
+                Ok(msg) => log::info!("debug docking: {msg}"),
+                Err(e) => log::error!("debug docking: {e}"),
+            }
+            // The pose/frame coupling normally runs per frame; do one reconcile now so a
+            // MOLAR_VIS_DEBUG_SAVE_IMAGE render shows the paired receptor conformation.
+            app.sync_docking_frames();
+            // MOLAR_VIS_DEBUG_DOCKING_POSE=<n> / _FRAME=<n> then move one side and reconcile
+            // again, logging both, so the flexible-docking coupling is checkable headlessly
+            // in each direction.
+            let num = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+            if let Some(pose) = num("MOLAR_VIS_DEBUG_DOCKING_POSE") {
+                // Through `switch_group_member`, as the cycle bar does — it re-materializes
+                // the shared rep prefix onto the newly shown member, which is where the
+                // coupling looks for the Interactions rep.
+                let n = app.scene.groups.first().map(|g| g.members.len()).unwrap_or(0);
+                app.scene.switch_group_member(0, pose.min(n.saturating_sub(1)));
+                app.sync_docking_frames();
+            }
+            if let Some(frame) = num("MOLAR_VIS_DEBUG_DOCKING_FRAME") {
+                // Move the receptor the way the trajectory bar would.
+                if let Some(mi) = app.scene.molecules.iter().position(|m| m.group.is_none()) {
+                    let mol = &mut app.scene.molecules[mi];
+                    let n = mol.trajectory.n_frames();
+                    mol.trajectory.set_current(frame.min(n.saturating_sub(1)));
+                    mol.apply_current_frame();
+                }
+                app.sync_docking_frames();
+            }
+            let pose = app.scene.groups.first().map(|g| g.current);
+            let frame = app
+                .scene
+                .molecules
+                .iter()
+                .find(|m| m.group.is_none())
+                .map(|m| m.trajectory.current);
+            log::info!("debug docking: pose={pose:?} receptor_frame={frame:?}");
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai

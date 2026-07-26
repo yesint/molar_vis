@@ -40,6 +40,8 @@ use egui_phosphor::regular as icon;
 mod build;
 mod console;
 mod dihedral;
+#[cfg(not(target_arch = "wasm32"))]
+mod docking_dialog;
 mod draw;
 mod draw_input;
 mod export;
@@ -142,6 +144,9 @@ pub struct App {
     editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).
     load_dialog: Option<LoadDialog>,
+    /// Open "Load docking data…" dialog, if any (native: it reads several files from disk).
+    #[cfg(not(target_arch = "wasm32"))]
+    docking_dialog: Option<docking_dialog::DockingDialog>,
     /// Open "delete trajectory frames" dialog, if any.
     delete_frames_dialog: Option<DeleteFramesDialog>,
     /// Open "Render ▸ Image…" save dialog (the chosen output scale), if any.
@@ -1002,6 +1007,8 @@ impl eframe::App for App {
         self.view_dirty |= panel_dirty;
 
         // The "Load trajectory" / "Delete frames" modals float above everything.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.draw_docking_dialog(&ctx);
         self.draw_load_dialog(&ctx);
         self.draw_delete_frames_dialog(&ctx);
         self.draw_rename_dialog(&ctx);
@@ -1065,6 +1072,12 @@ impl eframe::App for App {
         #[cfg(feature = "scripting")]
         self.draw_console(ui);
         self.draw_viewport(ui, frame);
+
+        // Flexible-docking pairs: propagate whichever of {shown pose, receptor frame} moved
+        // this frame to the other. After the panels *and* the viewport, so it sees the pose
+        // cycle bar, the trajectory bar and the playback tick alike.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.sync_docking_frames();
 
         // MOLAR_VIS_DEBUG_SAVE_UI=<path>: capture the whole egui surface (panels included)
         // and quit — the offscreen alternative to screenshotting a real window.
