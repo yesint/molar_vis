@@ -413,7 +413,7 @@ impl App {
                 // Docking results read several files from disk, so native-only.
                 #[cfg(not(target_arch = "wasm32"))]
                 if ui
-                    .button(format!("{}  Load docking data…", icon::TARGET))
+                    .button(format!("{}  Load docking data…", icon::FOLDER_OPEN))
                     .on_hover_text(
                         "Open a receptor + the ligand poses docked into it, linked by an \
                          Interactions representation",
@@ -632,7 +632,8 @@ impl App {
                     }
                     // Name only; the atom/frame counts move to a hover tooltip.
                     let frames = mol.trajectory.n_frames().max(1);
-                    ui.label(mol.name.as_str()).on_hover_text(format!(
+                    // Bold: the molecule is a node of the tree, and its reps below are not.
+                    ui.label(egui::RichText::new(mol.name.as_str()).strong()).on_hover_text(format!(
                         "{} atoms / {} frame{}",
                         mol.n_atoms,
                         frames,
@@ -904,7 +905,7 @@ impl App {
             }
             ui.add(egui::Label::new(icon::STACK).selectable(false))
                 .on_hover_text("Molecular group");
-            ui.label(&gname)
+            ui.label(egui::RichText::new(&gname).strong())
                 .on_hover_text(format!("group · {n_members} molecules"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 compact_actions(ui);
@@ -1029,11 +1030,11 @@ impl App {
                                         m.reps_open = !m.reps_open;
                                     }
                                     // Clickable name: underlines on hover, click shows it.
-                                    let text = if shown {
-                                        egui::RichText::new(m.name.as_str()).strong()
-                                    } else {
-                                        egui::RichText::new(m.name.as_str())
-                                    };
+                                    // Bold like every molecule name; the *shown* member is
+                                    // marked by its accent bar + underline instead.
+                                    let text = egui::RichText::new(m.name.as_str()).strong();
+                                    let text =
+                                        if shown { text.underline() } else { text };
                                     let resp = ui
                                         .add(egui::Label::new(text).sense(egui::Sense::click()))
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)

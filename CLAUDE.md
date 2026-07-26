@@ -715,6 +715,14 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     the state the partner picker would leave behind, so it round-trips undo/sessions for free via
     `RepState.partner`. The group's existing Licorice shared rep is kept (an Interactions rep
     draws only contact lines, so alone it would hide the poses).
+  - **The view is set up for looking at a pose**, not for a fresh structure: every rep is scoped
+    to `not apolh` (`HEAVY_ATOMS` — docked structures are fully protonated and the C–H hydrogens
+    are pure haze; the *polar* ones are kept, being what H-bonds are made of and what the
+    detector's explicit-H geometry test needs), the receptor gets a **cartoon coloured by
+    secondary structure** on top of its lines (at `DOCKING_LINE_WIDTH` = 3 px, since the receptor
+    is a backdrop read *through*), and the camera frames the **shown pose plus a 0.6 nm contact
+    shell** (`POSE_VIEW_MARGIN`, sized to the interaction cutoffs, so every residue a contact
+    line can reach is on screen — a bare ligand bbox fits so tightly the site vanishes).
   - **Flexible pairs step together** (`sync_docking_frames`, run per frame after the panels *and*
     the viewport): moving to another pose shows the conformation it was docked into, and scrubbing
     — or *playing* — the receptor trajectory shows the matching pose. Rather than hooking every
@@ -1078,7 +1086,8 @@ next frame). The menus —
   `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
-expand-caret + **name** (the atom/frame counts are no longer shown inline — they're a **hover
+expand-caret + **name** (bold — a molecule/group is a node of the tree and its reps are not; a
+group's *shown* member is additionally underlined) (the atom/frame counts are no longer shown inline — they're a **hover
 tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
 `Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old
