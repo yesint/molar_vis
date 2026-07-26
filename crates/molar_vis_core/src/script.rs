@@ -26,7 +26,7 @@ pub use command::{parse_color, parse_material, Command, RepRef};
 #[cfg(feature = "scripting")]
 pub use console::{ConsoleLine, LineKind, ScriptConsole};
 #[cfg(feature = "scripting")]
-pub use engine::{EvalOutcome, ScriptSession};
+pub use engine::ScriptSession;
 
 /// Apply a **scene-mutating** command (everything except [`Command::Load`], which
 /// needs the App's loader and is handled in `App::execute_command`). Performs the

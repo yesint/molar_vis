@@ -158,7 +158,7 @@ impl App {
                 let painter = ui.painter_at(rect);
                 painter.line_segment(
                     [start, current],
-                    egui::Stroke::new(2.0, egui::Color32::from_rgb(130, 215, 255)),
+                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(130, 215, 255)),
                 );
                 ui.ctx().request_repaint();
             }
@@ -283,7 +283,7 @@ impl App {
                     {
                         painter.line_segment(
                             [p, q],
-                            egui::Stroke::new(5.0, egui::Color32::from_rgba_unmultiplied(120, 220, 255, 160)),
+                            egui::Stroke::new(5.0_f32, egui::Color32::from_rgba_unmultiplied(120, 220, 255, 160)),
                         );
                     }
                 }

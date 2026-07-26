@@ -13,7 +13,7 @@ pub(super) fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
     painter.rect_stroke(
         rect,
         2.0,
-        egui::Stroke::new(1.5, red),
+        egui::Stroke::new(1.5_f32, red),
         egui::StrokeKind::Inside,
     );
     painter.text(
@@ -236,6 +236,68 @@ pub(super) fn draw_rep_params(
 /// — no geometry rebuild, the images are drawn under a translated camera). Only
 /// shown when the molecule has a box.
 impl App {
+    /// The active (pending) selection block for molecule `mi` — the italic "selection"
+    /// label plus accept / discard — drawn standalone, for a molecule whose reps are *not*
+    /// laid out by a plain [`Self::draw_reps_for`] pass.
+    ///
+    /// That is the [`MolGroup`] case. A group's members are listed behind the group's own
+    /// expander *and* a nested "Molecules" sub-expander *and* each member's rep fold, and
+    /// the own-reps pass isn't rendered at all when the member has no own reps — which is
+    /// exactly the state a freshly loaded SDF member is in. So a lasso or click selection on
+    /// a group member glowed with no way to accept it. Drawn at the group header instead,
+    /// unconditionally on the shown member, so it's visible the moment a selection exists.
+    ///
+    /// Accepting pushes a Ball-and-Stick rep onto the *member* (past its shared prefix, so
+    /// it becomes that member's own rep) — right, since the captured `index …` selection
+    /// refers to that member's atoms and means nothing on its siblings.
+    pub(super) fn draw_pending_block(&mut self, ui: &mut egui::Ui, mi: usize) -> bool {
+        let mol = &mut self.scene.molecules[mi];
+        if mol.pending.is_none() {
+            return false;
+        }
+        let mut accept = false;
+        let mut discard = false;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new("selection").italics()).selectable(false),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                compact_actions(ui);
+                if icon_button(ui, icon::TRASH, "Discard selection").clicked() {
+                    discard = true;
+                }
+                if ui
+                    .selectable_label(
+                        false,
+                        egui::RichText::new(icon::CHECK)
+                            .color(egui::Color32::from_rgb(120, 220, 120)),
+                    )
+                    .on_hover_text("Accept as a representation")
+                    .clicked()
+                {
+                    accept = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+
+        if accept {
+            if let Some(p) = mol.pending.take() {
+                let mut rep = Representation::new(RepKind::BallAndStick);
+                rep.sel_text = p.sel_text;
+                mol.reps.push(rep);
+                mol.selected_rep = Some(mol.reps.len() - 1);
+                mol.reps_open = true;
+            }
+            mol.glow_dirty = true; // clear the glow geometry
+        }
+        if discard {
+            mol.pending = None;
+            mol.glow_dirty = true;
+        }
+        accept || discard
+    }
+
     /// Run espaloma partial-charge prediction on rep `j`'s selection of molecule `mi` and
     /// record it as one undo step. The outcome — a charge-range summary or the failure's
     /// advice — is parked in `charge_status` for that rep's **Color** tab to display.
@@ -244,42 +306,95 @@ impl App {
     /// to a trajectory frame; and like them it is a `StructEdit`, so Ctrl+Z reverts it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn compute_rep_charges(&mut self, mi: usize, j: usize) {
-        let idx: Option<Vec<usize>> = self.scene.molecules[mi]
-            .reps
-            .get(j)
-            .and_then(|r| r.sel.as_ref())
-            .map(|s| s.get_index_slice().to_vec());
-        // `Sel` isn't `Clone`, and it lives inside the rep we'd otherwise hold borrowed —
-        // so rebuild an equivalent one from its indices.
-        let Some(sel) = idx.and_then(|v| molar::prelude::Sel::from_vec(v).ok()) else {
-            self.charge_status = Some((j, "!select some atoms first".into()));
-            return;
-        };
-        let mol = &mut self.scene.molecules[mi];
-        match crate::charges::compute_espaloma(mol, &sel) {
-            Ok(edit) => {
-                let (lo, hi) = edit
-                    .after
-                    .iter()
-                    .fold((f32::MAX, f32::MIN), |(lo, hi), &q| (lo.min(q), hi.max(q)));
-                let n = edit.atoms.len();
-                mol.set_charges(&edit.atoms, &edit.after);
-                let id = mol.id;
-                self.history.record_struct(
-                    id,
-                    crate::history::StructEdit::Charges {
-                        atoms: edit.atoms,
-                        before: edit.before,
-                        after: edit.after,
-                    },
-                    "compute charges".into(),
-                );
-                self.charge_status =
-                    Some((j, format!("{n} atoms charged, {lo:+.3} … {hi:+.3} e")));
-                self.view_dirty = true;
+        // A **shared** rep of a molecular group (one of the shown member's first `n_shared`)
+        // stands for the same selection on every member, so charge them all — the point of a
+        // group is to treat the set as one thing, and only one member is visible at a time,
+        // which would make charging "the active one" look arbitrary. A member's *own* rep,
+        // and any ordinary molecule, is just itself.
+        let targets: Vec<usize> = {
+            let mol = &self.scene.molecules[mi];
+            match mol.group.filter(|_| j < mol.n_shared) {
+                Some(gid) => self
+                    .scene
+                    .group_index(gid)
+                    .map(|gi| {
+                        self.scene.groups[gi]
+                            .members
+                            .iter()
+                            .filter_map(|&id| self.scene.mol_index(id))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec![mi]),
+                None => vec![mi],
             }
-            Err(e) => self.charge_status = Some((j, format!("!{e}"))),
+        };
+        // The selection is `rep.sel` on the molecule that owns the rep; on the group's other
+        // members the shared rep isn't materialized, so re-evaluate its text against each.
+        let sel_text = self.scene.molecules[mi].reps.get(j).map(|r| r.sel_text.clone());
+
+        let mut edits = Vec::new();
+        let mut failure: Option<String> = None;
+        let mut failed = 0usize;
+        for t in &targets {
+            let sel = if *t == mi {
+                // `Sel` isn't `Clone` and lives inside the rep we'd otherwise hold borrowed,
+                // so rebuild an equivalent one from its indices.
+                self.scene.molecules[mi]
+                    .reps
+                    .get(j)
+                    .and_then(|r| r.sel.as_ref())
+                    .map(|s| s.get_index_slice().to_vec())
+                    .and_then(|v| molar::prelude::Sel::from_vec(v).ok())
+            } else {
+                sel_text
+                    .as_deref()
+                    .and_then(|text| self.scene.molecules[*t].data.evaluate(text).ok())
+                    .map(|(_, sel)| sel)
+            };
+            let Some(sel) = sel else {
+                failed += 1;
+                failure.get_or_insert_with(|| "select some atoms first".into());
+                continue;
+            };
+            let mol = &mut self.scene.molecules[*t];
+            match crate::charges::compute_espaloma(mol, &sel) {
+                Ok(edit) => {
+                    mol.set_charges(&edit.atoms, &edit.after);
+                    let id = mol.id;
+                    edits.push((
+                        id,
+                        crate::history::StructEdit::Charges {
+                            atoms: edit.atoms,
+                            before: edit.before,
+                            after: edit.after,
+                        },
+                    ));
+                }
+                Err(e) => {
+                    failed += 1;
+                    failure.get_or_insert(e);
+                }
+            }
         }
+
+        if targets.len() > 1 {
+            log::info!("charged {} of {} group molecules", edits.len(), targets.len());
+        }
+        if !edits.is_empty() {
+            // One step for the whole gesture, so a single Ctrl+Z takes back every member.
+            self.history.record_structs(edits, "compute charges".into());
+            self.view_dirty = true;
+        }
+        // Success needs no message — it shows in the colors. A partial failure across a
+        // group says how many, since the rest did succeed.
+        self.charge_status = failure.map(|e| {
+            let msg = if failed > 1 {
+                format!("{failed} of {} molecules could not be charged.\n\n{e}", targets.len())
+            } else {
+                e
+            };
+            (j, msg)
+        });
     }
 }
 
@@ -301,10 +416,23 @@ pub(super) fn draw_color_tab(
         ui.label("Charge");
         for k in ChargeKind::ALL {
             let tip = match k {
-                ChargeKind::Partial => "Per-atom partial charge (from the topology, or computed below)",
+                ChargeKind::Partial => "Per-atom partial charge (from the topology, or computed)",
                 ChargeKind::Formal => "Integer formal charge, where the structure records one (e.g. an SDF 'M  CHG')",
             };
             ui.radio_value(&mut kind, k, k.label()).on_hover_text(tip);
+            // The compute button sits with **Partial**, since that is the charge it
+            // assigns — formal charges are read from the structure, never computed.
+            // Icon-only: it's one action on an already-labelled option.
+            #[cfg(not(target_arch = "wasm32"))]
+            if k == ChargeKind::Partial {
+                compute = ui
+                    .add_enabled(
+                        kind == ChargeKind::Partial,
+                        egui::Button::new(icon::LIGHTNING),
+                    )
+                    .on_hover_text("Compute Espaloma charges on selection")
+                    .clicked();
+            }
         }
     });
     if kind != rep.charge_kind {
@@ -312,36 +440,19 @@ pub(super) fn draw_color_tab(
         rep.geom_dirty = true; // colors are baked into the geometry
     }
 
-    ui.add_space(4.0);
-    // Espaloma needs a `System` we own plus real bond orders, neither of which exists in
-    // the browser build, so the button is native-only.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let enabled = kind == ChargeKind::Partial;
-        ui.add_enabled_ui(enabled, |ui| {
-            compute = ui
-                .button(format!("{}  Compute charges", icon::LIGHTNING))
-                .on_hover_text("Compute Espaloma charges on selection")
-                .clicked();
-        });
-        if !enabled {
-            ui.weak("Formal charges are read from the structure, not computed.");
-        }
-    }
     #[cfg(target_arch = "wasm32")]
     ui.weak("Charge computation is not available in the browser.");
 
+    // Only failures are reported, and only until the next interaction (`App::ui` drops the
+    // status on any click/keypress) — a successful assignment shows in the colors, and a
+    // stale error hanging under the tab reads as if it were still true.
     if let Some(msg) = status {
         ui.add_space(4.0);
-        // Errors are multi-line advice (see `charges::explain`), so let them wrap.
-        let err = msg.starts_with('!');
-        let text = msg.strip_prefix('!').unwrap_or(msg);
+        // The advice is multi-line (see `charges::explain`), so let it wrap.
         ui.add(
-            egui::Label::new(if err {
-                egui::RichText::new(text).color(egui::Color32::from_rgb(230, 120, 120))
-            } else {
-                egui::RichText::new(text).weak()
-            })
+            egui::Label::new(
+                egui::RichText::new(msg).color(egui::Color32::from_rgb(230, 120, 120)),
+            )
             .wrap(),
         );
     }
@@ -1000,7 +1111,7 @@ impl App {
                     ui.painter().hline(
                         block.rect.x_range(),
                         y,
-                        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                        egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill),
                     );
                     if let Some(src) = block.dnd_release_payload::<usize>() {
                         // Confine reorder to this drawn region (shared vs own): ignore a
@@ -1022,9 +1133,13 @@ impl App {
         // color, or editable selection (those come once it's accepted).
         let mut accept_pending = false;
         let mut discard_pending = false;
-        // The pending selection belongs to the molecule, not the shared document —
-        // only show it in the own-reps pass.
-        if !is_shared && mol.pending.is_some() {
+        // The pending selection belongs to the molecule, not the shared document, so it is
+        // skipped in the shared pass. A **grouped** molecule skips it here entirely: its
+        // own-reps pass is buried behind two expanders and only rendered when the member
+        // already has own reps (a fresh SDF member has none), which left a lasso on a group
+        // with no way to accept it. The group draws it at its header instead — see
+        // `draw_pending_block`, called from `draw_group_entry`.
+        if !is_shared && mol.group.is_none() && mol.pending.is_some() {
             ui.horizontal(|ui| {
                 ui.add(
                     egui::Label::new(egui::RichText::new("selection").italics())

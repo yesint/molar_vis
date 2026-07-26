@@ -546,6 +546,8 @@ impl App {
             selection_mode,
             lasso_path: Vec::new(),
             partner_pick: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            debug_ui_frames: 0,
             charge_status: None,
             interactions_dialog: None,
             interactions_tab: crate::interactions::InteractionKind::HBond,

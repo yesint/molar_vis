@@ -7,9 +7,9 @@ use super::*;
 /// with core pixel radius `rpx`.
 pub(super) fn draw_glow_ring(painter: &egui::Painter, center: egui::Pos2, rpx: f32) {
     let glow = |a: u8| egui::Color32::from_rgba_unmultiplied(130, 215, 255, a);
-    painter.circle_stroke(center, rpx + 4.0, egui::Stroke::new(6.0, glow(35)));
-    painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0, glow(95)));
-    painter.circle_stroke(center, rpx, egui::Stroke::new(1.8, glow(235)));
+    painter.circle_stroke(center, rpx + 4.0, egui::Stroke::new(6.0_f32, glow(35)));
+    painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0_f32, glow(95)));
+    painter.circle_stroke(center, rpx, egui::Stroke::new(1.8_f32, glow(235)));
 }
 
 /// Draw the hover-pick highlight over the viewport: a glowing outline ring at the
@@ -91,7 +91,7 @@ pub(super) fn draw_info_box(painter: &egui::Painter, rect: egui::Rect, lines: &[
     painter.rect_stroke(
         box_rect,
         4.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
         egui::StrokeKind::Inside,
     );
     for (i, g) in galleys.into_iter().enumerate() {
@@ -157,7 +157,7 @@ pub(super) fn draw_axes_overlay(ui: &egui::Ui, rect: egui::Rect, camera: &Camera
 
     let painter = ui.painter_at(rect);
     for &(_, tip, col, lbl) in &drawn {
-        painter.line_segment([center, tip], egui::Stroke::new(2.0, col));
+        painter.line_segment([center, tip], egui::Stroke::new(2.0_f32, col));
         // Small head + label, set a constant gap beyond the tip (so foreshortened
         // axes don't bunch their labels against the gizmo).
         painter.circle_filled(tip, 2.0, col);

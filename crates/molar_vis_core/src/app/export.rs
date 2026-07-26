@@ -255,3 +255,57 @@ fn trigger_download(name: &str, bytes: &[u8]) {
     }
     let _ = web_sys::Url::revoke_object_url(&url);
 }
+
+// --- Headless UI capture (verification hook) ---------------------------------------
+
+/// Frames to let the UI settle before asking for the screenshot: panels lay out over the
+/// first couple of frames (fonts, `Popup`/`Window` sizing, the deferred debug presets).
+#[cfg(not(target_arch = "wasm32"))]
+const UI_CAPTURE_SETTLE_FRAMES: u32 = 4;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl App {
+    /// `MOLAR_VIS_DEBUG_SAVE_UI=<path>`: write the **whole egui surface** — panels, dialogs,
+    /// overlays and the 3D image alike — to a PNG, then quit.
+    ///
+    /// `MOLAR_VIS_DEBUG_SAVE_IMAGE` renders only the 3D scene, so every egui-side check (a
+    /// rep row, a settings tab, the draw palette) used to need a *real window* plus an
+    /// external screenshot tool — which on this Wayland box grabs whatever window is active,
+    /// i.e. unreliably the wrong one. `egui::ViewportCommand::Screenshot` captures the
+    /// surface from inside the app instead, so pairing this with `MOLAR_VIS_DEBUG_HIDDEN=1`
+    /// gets a panel screenshot with **no window on the desktop**.
+    ///
+    /// Unlike the `App::new` hooks this needs real frames (the request is answered by the
+    /// backend a frame later), so it self-closes when done rather than using
+    /// `MOLAR_VIS_DEBUG_EXIT=1` — run it under a short `timeout` as a backstop.
+    pub(super) fn service_debug_ui_capture(&mut self, ctx: &egui::Context) {
+        let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_UI") else {
+            return;
+        };
+        // A delivered screenshot arrives as an input event on a later frame.
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(img) = shot {
+            let (w, h) = (img.size[0] as u32, img.size[1] as u32);
+            match image::RgbaImage::from_raw(w, h, img.as_raw().to_vec()) {
+                Some(rgba) => match rgba.save(&path) {
+                    Ok(()) => log::info!("debug: saved UI screenshot ({w}×{h}) to {path}"),
+                    Err(e) => log::error!("debug UI screenshot save failed: {e}"),
+                },
+                None => log::error!("debug UI screenshot: unexpected pixel buffer size"),
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.debug_ui_frames += 1;
+        if self.debug_ui_frames == UI_CAPTURE_SETTLE_FRAMES {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        // The hook drives itself: keep frames coming even with no user input.
+        ctx.request_repaint();
+    }
+}

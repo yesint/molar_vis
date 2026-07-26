@@ -62,8 +62,11 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `martinize2`), `large_375k.gro` (375,548 atoms, generated — **not in git**; regenerate per
   `tests/README.md` with `gmx genconf`). `cg.pdb` (a Martini membrane bundle, all-helix; ~4 MB) is a
   committed CG check fixture.
-- Dev machine is **Wayland**; screenshot a running window with `spectacle -b -n -a -o out.png`
-  (**`-a` = active window — use this**; `-f` full-screen captures blank on this compositor).
+- Dev machine is **Wayland**. Prefer `MOLAR_VIS_DEBUG_SAVE_UI` + `_HIDDEN=1` (above) over any
+  external screenshot: `spectacle -b -n -a -o out.png` grabs the **active** window, which is often
+  *not* the app (it has captured the user's browser instead), and `-f` full-screen captures blank on
+  this compositor. If a real window is ever unavoidable, capture it *immediately* — a fresh window
+  only holds focus for a moment.
 - Headless verification env hooks (native only): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines|cartoon|surface`
   (+ `MOLAR_VIS_DEBUG_SURF=1` logs surface grid stats),
   `MOLAR_VIS_DEBUG_SEL="<selection>"`,
@@ -128,8 +131,15 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   run but before eframe's event loop presents a frame). **Pair the two** for fully non-interfering
   headless verification: `MOLAR_VIS_DEBUG_HIDDEN=1 MOLAR_VIS_DEBUG_EXIT=1 MOLAR_VIS_DEBUG_SAVE_IMAGE=…`
   writes the PNG offscreen and self-exits in <1 s — no window, no `timeout` needed. (This is the
-  **preferred** way to run the SAVE_IMAGE/RAYTRACE/SAVE_SESSION/SAVE_MOL hooks on a live desktop; only
-  the egui *panel/overlay* screenshots — handles, dialogs — still need a real visible window.) +
+  **preferred** way to run the SAVE_IMAGE/RAYTRACE/SAVE_SESSION/SAVE_MOL hooks on a live desktop.) +
+  `MOLAR_VIS_DEBUG_SAVE_UI=<path>` — write the **whole egui surface** (panels, dialogs, overlays *and*
+  the 3D image) to a PNG via `egui::ViewportCommand::Screenshot`, then quit. **Pair with
+  `MOLAR_VIS_DEBUG_HIDDEN=1` and egui-panel verification needs no visible window either** — which
+  matters because `spectacle -a` grabs whatever window is *active* and has captured the wrong one.
+  Unlike the `App::new` hooks it needs a few real frames (the backend answers the request a frame
+  later), so it can't be combined with `MOLAR_VIS_DEBUG_EXIT=1`; it self-closes when done, so just
+  run it under a short `timeout` as a backstop. Implemented in `app/export.rs`
+  (`service_debug_ui_capture`, driven at the end of `App::ui`). +
   `MOLAR_VIS_DEBUG_INTERACTIONS=1` (add an `Interactions` rep on mol 0 with a partner rep — mol 1's
   first rep if a second molecule is loaded, else a disjoint-half second rep on mol 0 — and expand its
   panel; exercises the cross-molecule contact detection + dashed-line build; pair with
@@ -395,7 +405,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   Arc-shared). **`StructEdit::Charges { atoms, before, after }`** (M31) is the espaloma assignment —
   shaped like `Coords` but with **no frame target**, since charges live in the topology rather than
   per trajectory frame (applied by `Molecule::set_charges`, which marks every rep `geom_dirty` because
-  colors are baked into the geometry). Structure is **not** in the document — `EditState`/`MolState` hold only reps+visibility;
+  colors are baked into the geometry). A `Step::Struct` holds a **`Vec<(MolId, StructEdit)>`**, so one
+  gesture that edits several molecules is one undo step (`History::record_structs`; undo replays it in
+  reverse) — a group-wide charge assignment needs that, and `record_struct` is the one-element case. Structure is **not** in the document — `EditState`/`MolState` hold only reps+visibility;
   a molecule's *existence* (add/delete) rides the document but its live structure is preserved across
   add/delete undo by reusing the `Molecule` (with its `System`) from the scene/`trash`. `undo(&mut
   Scene)`/`redo` apply one step in place (Doc → swap+`apply` committed; Struct → `StructEdit::apply`
@@ -1140,13 +1152,18 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   range 0..=8) giving the image counts along ±a,±b,±c; these
   are render-only so the tab returns a `view_dirty` bool instead of setting `geom_dirty`), and
   **[Color]** (`draw_color_tab`, **only shown for a color scheme that has options** — gated the same
-  way [Periodic] is gated on a box, so today only `Charge`: *partial* / *formal* **radio buttons**
-  (`rep.charge_kind`), a **[Compute charges]** button (tip *"Compute Espaloma charges on selection"*,
-  native-only — see `charges.rs`), and the outcome, either a charge-range summary or the failure's
-  advice, wrapped). Because the panel only sees the rep, the button is reported back to the app via
-  **`RepParamsOutcome`** (the same deferred-action pattern as the Interactions partner/settings
-  buttons) and `App::compute_rep_charges` runs it once the `&mut Molecule` borrow ends, recording one
-  `StructEdit::Charges` undo step and parking the message in `App::charge_status`. Tab in
+  way [Periodic] is gated on a box, so today only `Charge`): *partial* / *formal* **radio buttons**
+  (`rep.charge_kind`) with an **icon-only ⚡ button right after *Partial*** (tip *"Compute Espaloma
+  charges on selection"*, native-only — it sits with that option because partial is the charge it
+  assigns; formal charges are read from the structure, never computed). **Only failures are shown**,
+  wrapped and red — a success shows in the colors, and `App::ui` drops the message on the next
+  click/keypress/scroll so a stale error can't sit there reading as if it were still true. Because
+  the panel only sees the rep, the button is reported back via **`RepParamsOutcome`** (the same
+  deferred-action pattern as the Interactions partner/settings buttons) and
+  `App::compute_rep_charges` runs it once the `&mut Molecule` borrow ends. For a **shared rep of a
+  [`MolGroup`]** it charges **every member**, not just the shown one (a group is meant to be treated
+  as one set, and only one member is visible at a time), recording all of them as a **single**
+  `StructEdit::Charges` step via `History::record_structs` so one Ctrl+Z takes it all back. Tab in
   `rep.settings_tab: SettingsTab`. The tab bar uses the shared **`tab_bar(ui, &mut current, &[(T,
   label)…])`** helper — the **app-default tab style** (underline tabs: selected = bold + accent
   underline, others weak/clickable), reused by every tabbed UI (rep settings, the delete-frames
@@ -1882,7 +1899,14 @@ History labels via `describe_change` ("edit selection", "change coloring",
     (`draw_reps_for`): a non-editable italic "selection" label + **green ✓ accept** + **🗑 discard**,
     no style/color/material row. **Accept** commits it as a normal, fully-editable **Ball-and-Stick**
     rep over the same `index …` text (this push *is* the undoable step — "add representation");
-    **discard** drops it. `MOLAR_VIS_DEBUG_PENDING=<sel>` stages one headlessly.
+    **discard** drops it. For a **[`MolGroup`]** member the block is drawn by
+    `App::draw_pending_block` at the **group header** (just under the member cycle bar, outside the
+    `expanded` fold) rather than inline in `draw_reps_for` — the member's own-reps pass sits behind
+    the group expander *and* the nested "Molecules" sub-expander *and* the member's rep fold, and
+    isn't rendered at all until the member has own reps, which a freshly loaded SDF member doesn't:
+    a lasso on a group used to glow with no way to accept it. Accept still pushes onto the member
+    (past its shared prefix → its own rep), which is right since the captured `index …` text refers
+    to that member's atoms. `MOLAR_VIS_DEBUG_PENDING=<sel>` stages one headlessly.
   - **Style-specific eligibility** (shared by hover + lasso via `atom_in_rep(kind, name)`): a
     Cartoon rep is hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal
     OT1/OT2/OXT — what the ribbon is built from), never side chains; every other style is hit on

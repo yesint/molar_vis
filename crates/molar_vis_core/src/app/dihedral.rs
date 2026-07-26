@@ -604,7 +604,7 @@ impl App {
             self.atom_world(mi, axis.i).and_then(|w| self.world_to_pixel(w, rect, size_px)),
             self.atom_world(mi, axis.j).and_then(|w| self.world_to_pixel(w, rect, size_px)),
         ) {
-            painter.line_segment([a, b], egui::Stroke::new(4.0, AXIS_COLOR));
+            painter.line_segment([a, b], egui::Stroke::new(4.0_f32, AXIS_COLOR));
         }
 
         // Handles: a grip line from the axis endpoint to the neighbour, and a dot.
@@ -622,11 +622,11 @@ impl App {
                 continue;
             };
             let col = side_color(h.side);
-            painter.line_segment([anchor, hp], egui::Stroke::new(2.0, col.gamma_multiply(0.55)));
+            painter.line_segment([anchor, hp], egui::Stroke::new(2.0_f32, col.gamma_multiply(0.55)));
             let active = hover_h == Some(idx) || dragged == Some(idx);
             let r = if active { HANDLE_R + 2.0 } else { HANDLE_R };
             painter.circle_filled(hp, r, col);
-            painter.circle_stroke(hp, r, egui::Stroke::new(1.5, egui::Color32::WHITE));
+            painter.circle_stroke(hp, r, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
         }
     }
 
@@ -668,7 +668,7 @@ impl App {
             self.atom_world(mi, bond.i1).and_then(|w| self.world_to_pixel(w, rect, size_px)),
             self.atom_world(mi, bond.i2).and_then(|w| self.world_to_pixel(w, rect, size_px)),
         ) {
-            painter.line_segment([a, b], egui::Stroke::new(4.0, AXIS_COLOR.gamma_multiply(0.5)));
+            painter.line_segment([a, b], egui::Stroke::new(4.0_f32, AXIS_COLOR.gamma_multiply(0.5)));
         }
     }
 

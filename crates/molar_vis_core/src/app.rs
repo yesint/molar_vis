@@ -170,6 +170,10 @@ pub struct App {
     /// id, rep index)`, or `None`. A movable `egui::Window` (`draw_interactions_dialog`)
     /// edits the rep's `InteractionSettings`. Transient.
     interactions_dialog: Option<(MolId, usize)>,
+    /// Frames elapsed for the `MOLAR_VIS_DEBUG_SAVE_UI` verification hook (it needs a few
+    /// to let the panels settle before requesting egui's screenshot). Native-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    debug_ui_frames: u32,
     /// Result of the last [Compute charges] press, as `(rep index, message)` for the
     /// molecule it ran on — shown in that rep's **Color** tab. A leading `!` marks an
     /// error (rendered red); anything else is an informational summary. Transient.
@@ -880,6 +884,20 @@ impl eframe::App for App {
         // we re-render the 3D scene only when it actually changed (see viewport).
         let ctx = ui.ctx().clone();
 
+        // A charge-computation failure is transient: drop it on the next interaction, so a
+        // stale error can't sit under the Color tab reading as if it were still true. Tested
+        // *before* the panels draw, and `clicked()` fires on release, so the press that ran
+        // the computation is already past and the message survives to be seen.
+        if self.charge_status.is_some()
+            && ctx.input(|i| {
+                i.pointer.any_pressed()
+                    || i.smooth_scroll_delta != egui::Vec2::ZERO
+                    || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+            })
+        {
+            self.charge_status = None;
+        }
+
         // Native Python module: apply any jobs queued by the Python thread, and —
         // while that channel is connected — keep polling for more (egui only calls
         // `ui` on input/repaint, so without this a job sent while the window is idle
@@ -1047,6 +1065,11 @@ impl eframe::App for App {
         #[cfg(feature = "scripting")]
         self.draw_console(ui);
         self.draw_viewport(ui, frame);
+
+        // MOLAR_VIS_DEBUG_SAVE_UI=<path>: capture the whole egui surface (panels included)
+        // and quit — the offscreen alternative to screenshotting a real window.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.service_debug_ui_capture(&ctx);
 
         // Service a pending "Save image" request here: `frame` (the wgpu render state) is
         // available, and `draw_viewport` has just refreshed `last_size`. Native saves

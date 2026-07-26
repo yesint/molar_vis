@@ -948,6 +948,17 @@ impl App {
             }
         });
 
+        // A pending (lasso/click) selection on the shown member, with its accept/discard
+        // buttons — here rather than in the member's own-reps pass, which is buried behind
+        // two expanders and isn't drawn at all until the member has own reps. Outside the
+        // `expanded` block on purpose: a captured selection has to be actionable without
+        // first unfolding the group. See `App::draw_pending_block`.
+        if let Some(mi) = cur_mi {
+            ui.indent(egui::Id::new(("grouppending", gid)), |ui| {
+                view_dirty |= self.draw_pending_block(ui, mi);
+            });
+        }
+
         // Top-level expanded: the group's shared reps, then a nested "Molecules"
         // sub-expander (each opens/closes independently).
         if expanded {
@@ -1023,7 +1034,7 @@ impl App {
                                         ui.painter().hline(
                                             r.x_range(),
                                             r.bottom(),
-                                            egui::Stroke::new(1.0, ui.visuals().text_color()),
+                                            egui::Stroke::new(1.0_f32, ui.visuals().text_color()),
                                         );
                                     }
                                     if resp.clicked() {

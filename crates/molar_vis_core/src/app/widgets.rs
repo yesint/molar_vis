@@ -165,7 +165,7 @@ pub(super) fn tab_bar<T: Copy + PartialEq>(ui: &mut egui::Ui, current: &mut T, t
                 ui.painter().hline(
                     r.x_range(),
                     r.bottom() + 2.0,
-                    egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                    egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill),
                 );
             }
         }

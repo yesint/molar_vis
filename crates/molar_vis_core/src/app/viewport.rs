@@ -600,7 +600,7 @@ impl App {
                 let col = egui::Color32::from_rgb(130, 215, 255);
                 painter.add(egui::Shape::line(
                     self.lasso_path.clone(),
-                    egui::Stroke::new(1.5, col),
+                    egui::Stroke::new(1.5_f32, col),
                 ));
                 // Faint segment closing the loop back to the start.
                 if let (Some(&first), Some(&last)) =
@@ -608,7 +608,7 @@ impl App {
                 {
                     painter.line_segment(
                         [last, first],
-                        egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(130, 215, 255, 110)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(130, 215, 255, 110)),
                     );
                 }
             }

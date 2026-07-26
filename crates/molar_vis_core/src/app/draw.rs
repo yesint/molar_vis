@@ -382,14 +382,14 @@ impl App {
             ui.painter().rect_stroke(
                 chip,
                 4.0,
-                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color),
                 egui::StrokeKind::Inside,
             );
         } else if resp.hovered() {
             ui.painter().rect_stroke(
                 chip,
                 4.0,
-                egui::Stroke::new(1.0, egui::Color32::from_white_alpha(180)),
+                egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(180)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -423,7 +423,7 @@ impl App {
             let y = c.y - total / 2.0 + i as f32 * spacing;
             ui.painter().line_segment(
                 [egui::pos2(c.x - half_w, y), egui::pos2(c.x + half_w, y)],
-                egui::Stroke::new(1.8, col),
+                egui::Stroke::new(1.8_f32, col),
             );
         }
         resp

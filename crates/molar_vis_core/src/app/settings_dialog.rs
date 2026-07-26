@@ -367,7 +367,7 @@ pub(super) fn draw_axes_widget(
     painter.rect_stroke(
         screen_rect,
         4.0,
-        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.fg_stroke.color),
+        egui::Stroke::new(1.0_f32, ui.visuals().widgets.inactive.fg_stroke.color),
         egui::StrokeKind::Inside,
     );
 

@@ -20,7 +20,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::command::{parse_color, Command, RepRef};
+use super::command::{Command, RepRef};
 use super::console::{ConsoleLine, LineKind};
 
 type Queue = Rc<RefCell<Vec<Command>>>;

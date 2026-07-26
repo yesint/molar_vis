@@ -29,7 +29,7 @@ pub(super) fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: 
         RepKind::Lines => {
             // An irregular squiggle (uneven node spacing + heights), so it reads
             // as a hand-drawn line rather than a regular "M"/"W".
-            let s = Stroke::new(1.5, color);
+            let s = Stroke::new(1.5_f32, color);
             let nodes = [
                 (-0.95_f32, 0.30_f32),
                 (-0.55, -0.50),
@@ -77,7 +77,7 @@ pub(super) fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: 
             painter.circle_filled(a, r * 0.4, color);
             painter.circle_filled(b, r * 0.4, color);
             let dash = egui::Color32::from_rgb(70, 200, 90);
-            let s = Stroke::new(1.6, dash);
+            let s = Stroke::new(1.6_f32, dash);
             // Three dashes along the segment between the atoms.
             for k in 0..3 {
                 let t0 = 0.18 + k as f32 * 0.24;
@@ -181,13 +181,13 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             let step = (rect.width() - r * 2.0) / (cols.len() as f32 - 1.0).max(1.0);
             for (i, c) in cols.iter().enumerate() {
                 let x = rect.left() + r + step * i as f32;
-                painter.circle_stroke(pos2(x, y), r, Stroke::new(2.0, rgb3(*c)));
+                painter.circle_stroke(pos2(x, y), r, Stroke::new(2.0_f32, rgb3(*c)));
             }
         }
         ColorMethod::ResId => {
             // A backbone (horizontal line) with two residues hanging off it: one
             // up-left, one down-right, each a different color (color-by-residue).
-            let line = Stroke::new(1.5, Color32::from_gray(180));
+            let line = Stroke::new(1.5_f32, Color32::from_gray(180));
             let mid = rect.center().y;
             painter.line_segment(
                 [pos2(rect.left() + 2.0, mid), pos2(rect.right() - 2.0, mid)],
@@ -299,7 +299,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             painter.rect_stroke(
                 sw,
                 2.0,
-                Stroke::new(1.0, Color32::from_gray(90)),
+                Stroke::new(1.0_f32, Color32::from_gray(90)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -366,11 +366,11 @@ pub(super) fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bo
     ui.painter()
         .rect_filled(rect, 2.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
     let stroke = if selected {
-        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill)
+        egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill)
     } else if resp.hovered() {
-        egui::Stroke::new(1.5, ui.visuals().widgets.hovered.fg_stroke.color)
+        egui::Stroke::new(1.5_f32, ui.visuals().widgets.hovered.fg_stroke.color)
     } else {
-        egui::Stroke::new(1.0, egui::Color32::from_gray(80))
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80))
     };
     ui.painter()
         .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
@@ -613,7 +613,7 @@ pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: boo
         ui.painter().rect_stroke(
             rect,
             4.0,
-            egui::Stroke::new(1.5, ui.visuals().selection.bg_fill),
+            egui::Stroke::new(1.5_f32, ui.visuals().selection.bg_fill),
             egui::StrokeKind::Inside,
         );
     }

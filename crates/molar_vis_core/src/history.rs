@@ -607,9 +607,11 @@ enum Step {
     /// is undone (the "before"; redo stores the "after" symmetrically). Applied against
     /// the rolling `committed` baseline.
     Doc(EditState),
-    /// A structural/coordinate change to one molecule (self-contained before+after),
-    /// applied in place and independent of `committed`.
-    Struct(MolId, StructEdit),
+    /// One or more structural/coordinate changes (self-contained before+after), applied in
+    /// place and independent of `committed`. Usually a single molecule's delta; a list when
+    /// one gesture edits several — a group-wide charge assignment touches every member, and
+    /// a single Ctrl+Z has to take all of it back.
+    Struct(Vec<(MolId, StructEdit)>),
 }
 
 struct Entry {
@@ -664,7 +666,15 @@ impl History {
     /// settle-time [`maybe_record`](Self::maybe_record) stays silent for it (no
     /// double-record), and being pushed mid-frame it lands before that frame's doc step.
     pub fn record_struct(&mut self, mol: MolId, edit: StructEdit, label: String) {
-        self.push_undo(Step::Struct(mol, edit), label);
+        self.record_structs(vec![(mol, edit)], label);
+    }
+
+    /// Record several molecules' deltas as **one** step, so undo/redo takes them together.
+    pub fn record_structs(&mut self, edits: Vec<(MolId, StructEdit)>, label: String) {
+        if edits.is_empty() {
+            return;
+        }
+        self.push_undo(Step::Struct(edits), label);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -701,9 +711,10 @@ impl History {
         self.undo
             .iter()
             .filter_map(|e| match &e.step {
-                Step::Struct(mol, _) => Some(*mol),
+                Step::Struct(edits) => Some(edits.iter().map(|(mol, _)| *mol)),
                 Step::Doc(_) => None,
             })
+            .flatten()
             .collect()
     }
 
@@ -720,9 +731,12 @@ impl History {
                 self.committed.apply(scene);
                 Entry { step: Step::Doc(after), label }
             }
-            Step::Struct(mol, edit) => {
-                edit.apply(scene, mol, false);
-                Entry { step: Step::Struct(mol, edit), label }
+            Step::Struct(edits) => {
+                // Reverse order, so a compound step unwinds exactly as it was applied.
+                for (mol, edit) in edits.iter().rev() {
+                    edit.apply(scene, *mol, false);
+                }
+                Entry { step: Step::Struct(edits), label }
             }
         };
         let out = redo_entry.label.clone();
@@ -739,9 +753,11 @@ impl History {
                 self.committed.apply(scene);
                 Entry { step: Step::Doc(before), label: entry.label }
             }
-            Step::Struct(mol, edit) => {
-                edit.apply(scene, mol, true);
-                Entry { step: Step::Struct(mol, edit), label: entry.label }
+            Step::Struct(edits) => {
+                for (mol, edit) in &edits {
+                    edit.apply(scene, *mol, true);
+                }
+                Entry { step: Step::Struct(edits), label: entry.label }
             }
         };
         let out = undo_entry.label.clone();
@@ -935,6 +951,52 @@ mod tests {
         assert_eq!(charges_of(&scene, &atoms), before, "undo restores the old charges");
         hist.redo(&mut scene);
         assert_eq!(charges_of(&scene, &atoms), after, "redo re-applies them");
+    }
+
+    /// A gesture that edits several molecules records **one** step, so a single Ctrl+Z
+    /// takes all of it back — a group-wide charge assignment is the case that needs this.
+    #[test]
+    fn compound_struct_step_undoes_every_molecule() {
+        let mut scene = load_scene();
+        // A second molecule, so the step spans two.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
+        let raw = crate::data::load(Path::new(path)).expect("load 2lao.pdb");
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let ids: Vec<MolId> = scene.molecules.iter().map(|m| m.id).collect();
+        assert_eq!(ids.len(), 2);
+
+        let atoms = vec![0usize, 1];
+        let charges_of = |scene: &Scene, mi: usize| -> Vec<f32> {
+            let topo = scene.molecules[mi].data.topology();
+            atoms.iter().map(|&a| topo.get_atom(a).unwrap().get_charge()).collect()
+        };
+        let before: Vec<Vec<f32>> = (0..2).map(|mi| charges_of(&scene, mi)).collect();
+        let after = vec![-0.4f32, 0.4];
+
+        let mut hist = History::new(EditState::capture(&scene));
+        let mut edits = Vec::new();
+        for (mi, &id) in ids.iter().enumerate() {
+            scene.molecules[mi].set_charges(&atoms, &after);
+            edits.push((
+                id,
+                StructEdit::Charges {
+                    atoms: atoms.clone(),
+                    before: before[mi].clone(),
+                    after: after.clone(),
+                },
+            ));
+        }
+        hist.record_structs(edits, "compute charges".into());
+        assert_eq!(hist.undo_len(), 1, "one gesture → one step");
+
+        hist.undo(&mut scene);
+        for mi in 0..2 {
+            assert_eq!(charges_of(&scene, mi), before[mi], "molecule {mi} restored by one undo");
+        }
+        hist.redo(&mut scene);
+        for mi in 0..2 {
+            assert_eq!(charges_of(&scene, mi), after, "molecule {mi} re-charged by one redo");
+        }
     }
 
     /// Document and structural steps interleave on one timeline: undo walks them in
