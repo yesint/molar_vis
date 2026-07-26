@@ -254,6 +254,50 @@ mod tests {
         );
     }
 
+    /// No resolved bond may be longer than a covalent bond can be.
+    ///
+    /// The guess is bounded by `search_cutoff` by construction, so this only really tests the
+    /// *file's* half — and that is where the damage was: a PDB CONECT record names a **serial
+    /// number**, and a `TER` consumes one, so resolving it as `serial - 1` silently shifted
+    /// every bond past a chain break. In `jak2.pdb` that bonded each water's oxygen to the
+    /// previous water's hydrogens, drawing long bonds straight through the structure.
+    #[test]
+    fn no_resolved_bond_is_longer_than_a_covalent_bond() {
+        for name in ["jak2.pdb", "2lao.pdb", "2lao_cg.pdb", "cg.pdb"] {
+            let path = fixture(name);
+            if !path.exists() {
+                continue; // optional/large fixtures aren't all in git
+            }
+            let raw = crate::data::load(&path).unwrap_or_else(|e| panic!("load {name}: {e}"));
+            let st = raw.system.state();
+            // 0.3 nm is generous for any real covalent bond (the longest here are C-S/C-I at
+            // ~0.22 nm); CG pseudo-bonds reach ~0.5 nm, so allow those their own bound.
+            let limit = if name.contains("cg") { 0.75 } else { 0.3 };
+            // Measured under the **minimum image** where the structure has a box: a wrapped
+            // system's bonds legitimately span it in raw coordinates (that is precisely what
+            // the dashed PBC half-bonds render), so raw distance would flag those as broken.
+            let pbox = st.pbox.clone();
+            let mut worst = (0.0f32, [0usize, 0]);
+            for b in &raw.bonds {
+                let (p, q) = (st.coords[b.i1], st.coords[b.i2]);
+                let d2 = match pbox.as_ref() {
+                    Some(bx) => bx.distance_squared(&p, &q, PBC_FULL),
+                    None => (p - q).norm_squared(),
+                };
+                let d = d2.sqrt();
+                if d > worst.0 {
+                    worst = (d, [b.i1, b.i2]);
+                }
+            }
+            assert!(
+                worst.0 <= limit,
+                "{name}: bond {:?} is {:.3} nm long (limit {limit}) — connectivity is wrong",
+                worst.1,
+                worst.0
+            );
+        }
+    }
+
     /// A duplicated pair keeps the informative order (the file's) over a guess's
     /// `Unspecified`, whichever way round the endpoints were recorded.
     #[test]

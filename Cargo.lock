@@ -189,7 +189,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -1199,7 +1199,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2284,7 +2284,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=f161420#f1614208ee2d670894b0797b4f774ee84997e5f4"
+source = "git+https://github.com/yesint/molar.git?rev=6b5181b#6b5181b1a5ca769a8204b708bd795456a4b2956f"
 dependencies = [
  "anyhow",
  "clap",
@@ -2310,7 +2310,7 @@ dependencies = [
 [[package]]
 name = "molar_ff"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=f161420#f1614208ee2d670894b0797b4f774ee84997e5f4"
+source = "git+https://github.com/yesint/molar.git?rev=6b5181b#6b5181b1a5ca769a8204b708bd795456a4b2956f"
 dependencies = [
  "molar",
  "thiserror 2.0.18",
@@ -2320,7 +2320,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=f161420#f1614208ee2d670894b0797b4f774ee84997e5f4"
+source = "git+https://github.com/yesint/molar.git?rev=6b5181b#6b5181b1a5ca769a8204b708bd795456a4b2956f"
 dependencies = [
  "cc",
  "libloading",
@@ -2329,7 +2329,7 @@ dependencies = [
 [[package]]
 name = "molar_python"
 version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=f161420#f1614208ee2d670894b0797b4f774ee84997e5f4"
+source = "git+https://github.com/yesint/molar.git?rev=6b5181b#6b5181b1a5ca769a8204b708bd795456a4b2956f"
 dependencies = [
  "env_logger",
  "log",
@@ -3767,7 +3767,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3780,7 +3780,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4188,7 +4188,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5165,7 +5165,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
