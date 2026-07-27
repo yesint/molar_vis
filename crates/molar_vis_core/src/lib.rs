@@ -11,7 +11,9 @@ mod camera;
 mod charges;
 mod color;
 mod data;
-/// Loading a docking result (receptor + ligand poses) — see the module docs.
+/// Loading a docking result (receptor + ligand poses) — see the module docs. Native-only,
+/// like the dialog that drives it (`app::docking_dialog`): reading several files from disk.
+#[cfg(not(target_arch = "wasm32"))]
 mod docking;
 mod geometry;
 mod history;

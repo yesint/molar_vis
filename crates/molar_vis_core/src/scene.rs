@@ -72,6 +72,7 @@ pub struct MolGroup {
     /// moved is propagated to the other (see `App::sync_docking_frames`) — comparing against
     /// the last pair is what tells them apart, and it means playback of the receptor
     /// trajectory cycles the poses too. Transient view state: not undoable, not serialized.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the docking loader is native-only
     pub docking_sync: Option<(usize, usize)>,
 }
 
@@ -1066,6 +1067,8 @@ impl Molecule {
     /// atoms" into "the molecules these atoms are part of".
     ///
     /// Returns sorted, de-duplicated global indices; a seed with no bonds comes back alone.
+    // Consumed by the native-only charge assignment.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn connected_closure(&self, seeds: &[usize]) -> Vec<usize> {
         let adj = BondAdjacency::build(self.n_atoms, bond_storage(&self.bonds).iter_pairs());
         let mut seen = vec![false; self.n_atoms];

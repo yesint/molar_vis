@@ -205,7 +205,9 @@ pub enum StructEdit {
     },
     /// A per-atom partial-charge assignment (espaloma): the charged atoms and their
     /// charges before/after. Shaped like [`StructEdit::Coords`] but with no frame target —
-    /// charges live in the topology, not per trajectory frame.
+    /// charges live in the topology, not per trajectory frame. Only ever produced natively
+    /// (espaloma is a native-only dependency).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Charges {
         atoms: Vec<usize>,
         before: Vec<f32>,

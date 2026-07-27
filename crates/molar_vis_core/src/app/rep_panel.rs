@@ -311,6 +311,7 @@ impl App {
         // group is to treat the set as one thing, and only one member is visible at a time,
         // which would make charging "the active one" look arbitrary. A member's *own* rep,
         // and any ordinary molecule, is just itself.
+        use molar::prelude::IndexSliceProvider; // for `Sel::get_index_slice`
         let targets: Vec<usize> = {
             let mol = &self.scene.molecules[mi];
             match mol.group.filter(|_| j < mol.n_shared) {
@@ -410,6 +411,8 @@ pub(super) fn draw_color_tab(
         return false;
     }
     let mut kind = rep.charge_kind;
+    // Only the native branch below assigns it (the compute button is native-only).
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut compute = false;
 
     ui.horizontal(|ui| {

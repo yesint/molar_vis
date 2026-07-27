@@ -8,9 +8,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use eframe::egui;
-use molar::prelude::{
-    AtomLike, AtomProvider, IndexSliceProvider, Measure, ParticleIterProvider, SsAlgorithm, State,
-};
+use molar::prelude::{AtomLike, AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, State};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 

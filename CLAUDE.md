@@ -182,7 +182,8 @@ molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
 `espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
 ~600 kB ONNX model and pulls `tract`),
-rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
+fontdb **0.23** (**native only**, `fs` + `fontconfig`: resolves the desktop UI font + its bold face
+— see `theme.rs`), rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
 features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
 **`molar_vis_py` only** (native Python module, M26):
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
@@ -251,9 +252,25 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font, configures both
+- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and the system
+  UI font**, configures both
   the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
   `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
+  **System font + bold** (`install_system_fonts`, native): egui bundles only `Ubuntu-Light` and has
+  **no bold face anywhere**, so `RichText::strong()` can merely brighten the colour — and borrowing a
+  bold face from an unrelated family (DejaVu) reads as a foreign typeface beside it. So both weights
+  are taken from **one** family: the **desktop's** UI font. Note that is *not* fontconfig's generic
+  `sans-serif` — they routinely differ (a KDE session set to *SF Pro Display* still answers *Noto
+  Sans* for the generic alias), and querying the alias would ignore the user's actual choice.
+  `desktop_ui_font` reads it from, in order: the **`MOLAR_VIS_UI_FONT`** override, KDE's
+  `kdeglobals` (`[General] font=` — a Qt spec, family first), then GTK's `settings.ini`
+  (`gtk-font-name=`, family + trailing size); `None` falls back to the generic alias. `fontdb`
+  resolves family+weight to face bytes. The bundled fonts stay in the family lists *after* the
+  system ones, so emoji and any glyph the system face lacks still resolve.
+  Bold is exposed as `BOLD_FAMILY` / `theme::bold(size)` and used via `widgets::bold_name`; because
+  an **unbound `FontFamily::Name` makes egui panic**, `has_bold()` gates every use, and it is false
+  on wasm (no filesystem) or when the system yields no distinct bold — where `bold_name` degrades to
+  `strong()`.
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
   `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
@@ -1091,8 +1108,8 @@ next frame). The menus —
   `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
-expand-caret + **name** (emphasised with `RichText::strong()`; a group's *shown* member is
-additionally underlined). ⚠ **egui cannot render bold here**: its default fonts are
+expand-caret + **name** (**bold** via `widgets::bold_name` — the system font's bold face; see
+`theme.rs`; a group's *shown* member is additionally underlined). ⚠ **egui cannot render bold here**: its default fonts are
 Ubuntu-*Light* + Hack with **no bold face**, and `strong()` only swaps in a brighter colour. Real
 bold needs a bold TTF embedded and registered as a font family — see the note in ROADMAP.md (the atom/frame counts are no longer shown inline — they're a **hover
 tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
