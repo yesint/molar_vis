@@ -38,7 +38,16 @@ pub struct ChargeEdit {
 ///   equilibrated over the whole graph, so a fragment would be meaningless);
 /// * the molecule contains an element the model was never trained on.
 pub fn compute_espaloma(mol: &mut Molecule, sel: &Sel) -> Result<ChargeEdit, String> {
-    let atoms: Vec<usize> = sel.iter_index().collect();
+    // Grow the selection to the **complete molecules** it touches. Charges are equilibrated
+    // over a whole connected graph, so a selection that cuts a bond has no valid answer — and
+    // ordinary *viewing* selections cut bonds all the time (`not apolh`, which the docking
+    // loader sets, severs every C–H). Treating the selection as "which molecules to charge"
+    // rather than "which atoms" is the only reading that both matches the button and produces
+    // correct chemistry; the hidden atoms still get their charges, they just aren't painted.
+    let seeds: Vec<usize> = sel.iter_index().collect();
+    let atoms = mol.connected_closure(&seeds);
+    let sel = &Sel::from_vec(atoms.clone())
+        .map_err(|e| format!("can't select the complete molecule: {e}"))?;
     let sys = mol.data.system_mut().ok_or(
         "this molecule's data is owned by the host program; compute charges there instead",
     )?;

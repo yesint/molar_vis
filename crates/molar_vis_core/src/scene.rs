@@ -1056,6 +1056,41 @@ impl Molecule {
         self.n_atoms == 0
     }
 
+    /// Every atom reachable from `seeds` through the bond graph — i.e. the **complete
+    /// molecules** the seeds belong to.
+    ///
+    /// Needed wherever a per-molecule property is computed from a selection: partial charges
+    /// are equilibrated over a whole connected graph, so `molar_ff` rejects a selection that
+    /// cuts a bond. A selection like `not apolh` (a perfectly ordinary *viewing* selection,
+    /// and what the docking loader sets) cuts every C–H, so the closure is what turns "these
+    /// atoms" into "the molecules these atoms are part of".
+    ///
+    /// Returns sorted, de-duplicated global indices; a seed with no bonds comes back alone.
+    pub fn connected_closure(&self, seeds: &[usize]) -> Vec<usize> {
+        let adj = BondAdjacency::build(self.n_atoms, bond_storage(&self.bonds).iter_pairs());
+        let mut seen = vec![false; self.n_atoms];
+        let mut stack: Vec<usize> = Vec::new();
+        for &s in seeds {
+            if s < self.n_atoms && !seen[s] {
+                seen[s] = true;
+                stack.push(s);
+            }
+        }
+        let mut out = Vec::with_capacity(seeds.len());
+        while let Some(a) = stack.pop() {
+            out.push(a);
+            for nb in adj.neighbors(a) {
+                let n = nb.atom();
+                if n < self.n_atoms && !seen[n] {
+                    seen[n] = true;
+                    stack.push(n);
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     // --- Molecular perception bridge ---------------------------------------
     // molar's perception routines all take a prebuilt `BondAdjacency`, and the owned
     // `System`'s topology already carries our resolved connectivity (see
@@ -1471,6 +1506,43 @@ mod tests {
         assert_eq!(polh.1.len(), 1, "aspirin has one acid O-H");
         let apolh = mol.data.evaluate("apolh").expect("apolh must match");
         assert_eq!(apolh.1.len(), 7, "the remaining hydrogens are on carbon");
+    }
+
+    /// A viewing selection that hides hydrogens cuts every C–H bond, so a per-molecule
+    /// property computed from it (partial charges) has to be widened to whole molecules
+    /// first. This is what the [Compute charges] button does with the rep's selection —
+    /// without it, espaloma rejects the whole thing as "not bond-complete".
+    #[test]
+    fn connected_closure_completes_a_hydrogen_hiding_selection() {
+        let mol = load_first_record("ligands20.sdf"); // aspirin: 21 atoms, 8 of them H
+        let (_, visible) = mol.data.evaluate("not apolh").expect("not apolh");
+        let seeds: Vec<usize> = visible.iter_index().collect();
+        assert!(
+            seeds.len() < mol.n_atoms,
+            "the selection must actually hide something for this to test anything"
+        );
+
+        let closed = mol.connected_closure(&seeds);
+        assert_eq!(closed.len(), mol.n_atoms, "closure must recover the whole molecule");
+        assert_eq!(closed, (0..mol.n_atoms).collect::<Vec<_>>(), "sorted, complete, no dupes");
+    }
+
+    /// The closure follows bonds, so it takes the molecules the seeds touch — not everything.
+    #[test]
+    fn connected_closure_stops_at_molecule_boundaries() {
+        // 2lao is a protein plus a few hundred unbonded crystal waters.
+        let path = fixture("2lao.pdb");
+        let raw = crate::data::load(&path).expect("load 2lao.pdb");
+        let mol = Molecule::new(MolId(0), raw, &RepDefaults::default());
+
+        // A single protein atom pulls in its whole chain, but no waters.
+        let chain = mol.connected_closure(&[0]);
+        assert!(chain.len() > 1000, "the protein chain, not one atom: {}", chain.len());
+        assert!(chain.len() < mol.n_atoms, "but not the waters too: {}", chain.len());
+
+        // An unbonded water oxygen comes back on its own.
+        let last = mol.n_atoms - 1;
+        assert_eq!(mol.connected_closure(&[last]), vec![last]);
     }
 
     /// Aromatic-ring perception needs the file's Kekulé orders — a benzene of

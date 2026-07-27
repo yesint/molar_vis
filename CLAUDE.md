@@ -735,12 +735,17 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   bundle, and the browser has no way to obtain charges anyway; charge *coloring* works everywhere).
   `compute_espaloma(mol, sel)` predicts, writes the charges into the molecule, and returns a
   `ChargeEdit { atoms, before, after }` so the caller can record it as one undo step. The model needs
-  **chemistry, not coordinates** — explicit Kekulé orders and a bond-complete selection — so its two
-  likely failures are translated into advice rather than passed through raw: no bond orders → "load
-  the molecule from an SDF/MOL, or draw it in the structure editor" (distance-guessed PDB/GRO
-  connectivity is order-less, and *aromatized* bonds are rejected too — which is why
-  `ensure_interaction_rings` uses the non-mutating `aromatic_rings`); a cut bond → "widen the
-  selection to the complete molecule" (charges are equilibrated over the whole graph).
+  **chemistry, not coordinates**: explicit Kekulé orders and a *bond-complete* scope.
+  - **The selection picks which molecules, not which atoms.** Charges are equilibrated over a whole
+    connected graph, so `molar_ff` rejects a selection that cuts a bond — and ordinary *viewing*
+    selections cut bonds constantly (`not apolh`, which the docking loader sets, severs every C–H).
+    So the selection is first widened with **`Molecule::connected_closure`** to the complete
+    molecules it touches. Without that, charging a docking result's poses failed outright. The
+    hidden atoms still get their charges; they simply aren't painted.
+  - The remaining likely failure is translated into advice rather than passed through raw: no bond
+    orders → "load the molecule from an SDF/MOL, or draw it in the structure editor"
+    (distance-guessed PDB/GRO connectivity is order-less, and *aromatized* bonds are rejected too —
+    which is why `ensure_interaction_rings` uses the non-mutating `aromatic_rings`).
 - `interactions.rs` — **non-covalent interaction detection** (M29; the `Interactions` rep style):
   pure, WASM-safe, PLIP-derived. `detect(a, b, params)` takes two `InteractionSet`s (heavy `AtomInfo`
   atoms + aromatic `RingInfo` + `ChargeGroup` cations/anions) and returns line segments for the six
