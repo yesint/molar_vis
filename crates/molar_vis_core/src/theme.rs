@@ -14,40 +14,6 @@ use crate::settings::{AppearanceSettings, ThemeMode};
 
 /// Apply the molar_vis look. Call at startup and whenever the appearance settings
 /// change (it's idempotent and cheap).
-/// Name of the bold font family, for [`egui::FontFamily::Name`].
-///
-/// egui ships **no bold face** — its defaults are Ubuntu-*Light* and Hack, and
-/// `RichText::strong()` only swaps in a brighter colour — so genuinely bold text needs a bold
-/// font embedded and registered as its own family. Use it via [`bold`].
-pub const BOLD_FAMILY: &str = "bold";
-
-/// DejaVu Sans Bold, subset to Latin-1 plus the typographic/scientific characters the UI
-/// uses: 17 kB instead of the stock 692 kB, since the whole face carries ~6000 glyphs and we
-/// need ~130. Regenerate with `assets/subset-bold-font.sh` (needs fonttools).
-const BOLD_TTF: &[u8] = include_bytes!("../assets/DejaVuSans-Bold-subset.ttf");
-
-/// A [`egui::FontId`] in the bold family at `size`.
-pub fn bold(size: f32) -> egui::FontId {
-    egui::FontId::new(size, egui::FontFamily::Name(BOLD_FAMILY.into()))
-}
-
-/// Register the bold face as its own family, falling back to the proportional fonts for any
-/// glyph the subset doesn't carry — so non-Latin text renders in the light face rather than
-/// as missing-glyph boxes.
-fn install_bold(fonts: &mut egui::FontDefinitions) {
-    fonts.font_data.insert(
-        "DejaVuSans-Bold".to_owned(),
-        std::sync::Arc::new(egui::FontData::from_static(BOLD_TTF)),
-    );
-    let mut family = vec!["DejaVuSans-Bold".to_owned()];
-    if let Some(proportional) = fonts.families.get(&egui::FontFamily::Proportional) {
-        family.extend(proportional.iter().cloned());
-    }
-    fonts
-        .families
-        .insert(egui::FontFamily::Name(BOLD_FAMILY.into()), family);
-}
-
 pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
     // Pick which of the two configured styles is active. `System` follows the
     // host/browser color-scheme preference; the others pin it.
@@ -61,7 +27,6 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
     // panel) alongside the default fonts.
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    install_bold(&mut fonts);
     ctx.set_fonts(fonts);
 
     // Accent (selection highlight): stored linear RGBA → Color32 (WYSIWYG with the

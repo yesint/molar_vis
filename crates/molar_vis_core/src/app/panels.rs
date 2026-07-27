@@ -633,7 +633,7 @@ impl App {
                     // Name only; the atom/frame counts move to a hover tooltip.
                     let frames = mol.trajectory.n_frames().max(1);
                     // Bold: the molecule is a node of the tree, and its reps below are not.
-                    ui.label(bold_name(ui, mol.name.as_str())).on_hover_text(format!(
+                    ui.label(egui::RichText::new(mol.name.as_str()).strong()).on_hover_text(format!(
                         "{} atoms / {} frame{}",
                         mol.n_atoms,
                         frames,
@@ -905,7 +905,7 @@ impl App {
             }
             ui.add(egui::Label::new(icon::STACK).selectable(false))
                 .on_hover_text("Molecular group");
-            ui.label(bold_name(ui, &gname))
+            ui.label(egui::RichText::new(&gname).strong())
                 .on_hover_text(format!("group · {n_members} molecules"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 compact_actions(ui);
@@ -1032,7 +1032,7 @@ impl App {
                                     // Clickable name: underlines on hover, click shows it.
                                     // Bold like every molecule name; the *shown* member is
                                     // marked by its accent bar + underline instead.
-                                    let text = bold_name(ui, m.name.as_str());
+                                    let text = egui::RichText::new(m.name.as_str()).strong();
                                     let text = if shown { text.underline() } else { text };
                                     let resp = ui
                                         .add(egui::Label::new(text).sense(egui::Sense::click()))
