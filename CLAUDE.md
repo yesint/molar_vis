@@ -1091,8 +1091,13 @@ next frame). The menus —
   `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
-expand-caret + **name** (bold — a molecule/group is a node of the tree and its reps are not; a
-group's *shown* member is additionally underlined) (the atom/frame counts are no longer shown inline — they're a **hover
+expand-caret + **name** (bold via `widgets::bold_label` — a molecule/group is a node of the tree
+and its reps are not; a group's *shown* member is additionally underlined). **Note egui has no bold
+font**: its defaults are Ubuntu-*Light* + Hack, and `RichText::strong()` only swaps in a brighter
+colour — far too subtle to pick a name out of a list. Rather than embed a ~500 kB bold TTF (which
+the wasm bundle would pay for) `bold_label` paints the galley **twice, `FAUX_BOLD_OFFSET` apart**,
+thickening the strokes as a bold face would; it also draws its own underline, since that has to be
+painted by hand there too (the atom/frame counts are no longer shown inline — they're a **hover
 tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
 `Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old

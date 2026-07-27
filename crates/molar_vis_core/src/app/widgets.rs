@@ -121,6 +121,46 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
 /// A plain text label vertically centered the same way `overlay_button` centers its
 /// glyph (by ink bounds, at the toolbar button height) — so a label sitting next to
 /// `overlay_button` dropdowns lines up with them instead of riding high/low.
+/// How far apart (px) the two passes of [`bold_label`] are drawn.
+///
+/// Tuned by eye at the app's body size: enough to read as a heavier weight, little enough
+/// that the glyphs stay crisp rather than blurring into a smear.
+const FAUX_BOLD_OFFSET: f32 = 0.7;
+
+/// A label in **bold**, for the names of the tree's nodes (molecules, groups, members).
+///
+/// egui's default fonts are Ubuntu-**Light** and Hack — there is no bold face, and
+/// `RichText::strong()` only swaps in a brighter colour, which is far too subtle to pick a
+/// name out of a list of representations. Rather than embed a ~500 kB bold TTF (with the wasm
+/// bundle to pay for it) for one weight, the glyphs are painted **twice a fraction of a pixel
+/// apart**, which thickens the strokes the way a bold face would.
+///
+/// `sense` lets a caller make the name clickable (the group member rows do); `underline`
+/// draws a rule beneath it, since that has to be painted by hand here too.
+pub(super) fn bold_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    sense: egui::Sense,
+    underline: bool,
+) -> egui::Response {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().strong_text_color();
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, color);
+    // The second pass sticks out by the offset, so reserve it or the next widget overlaps.
+    let size = galley.size() + egui::vec2(FAUX_BOLD_OFFSET, 0.0);
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    // Vertically centered like `ui.label`, which lays its galley out in the same way.
+    let pos = egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5);
+    let painter = ui.painter();
+    painter.galley(pos, galley.clone(), color);
+    painter.galley(pos + egui::vec2(FAUX_BOLD_OFFSET, 0.0), galley.clone(), color);
+    if underline {
+        let y = pos.y + galley.size().y - 1.5;
+        painter.hline(rect.x_range(), y, egui::Stroke::new(1.0_f32, color));
+    }
+    resp
+}
+
 pub(super) fn toolbar_label(ui: &mut egui::Ui, text: &str) {
     const H: f32 = 26.0;
     let font = egui::TextStyle::Button.resolve(ui.style());
