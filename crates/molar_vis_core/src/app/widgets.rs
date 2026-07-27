@@ -121,6 +121,16 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
 /// A plain text label vertically centered the same way `overlay_button` centers its
 /// glyph (by ink bounds, at the toolbar button height) — so a label sitting next to
 /// `overlay_button` dropdowns lines up with them instead of riding high/low.
+/// A tree node's name (molecule / group / member) in **bold**.
+///
+/// egui's own `RichText::strong()` only swaps in a brighter colour — its default fonts have no
+/// bold face — so this selects the embedded bold family instead (see [`crate::theme::bold`]),
+/// at the current body size so it lines up with everything else on the row.
+pub(super) fn bold_name(ui: &egui::Ui, text: &str) -> egui::RichText {
+    let size = egui::TextStyle::Body.resolve(ui.style()).size;
+    egui::RichText::new(text).font(crate::theme::bold(size))
+}
+
 pub(super) fn toolbar_label(ui: &mut egui::Ui, text: &str) {
     const H: f32 = 26.0;
     let font = egui::TextStyle::Button.resolve(ui.style());

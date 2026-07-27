@@ -25,14 +25,6 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 - Movies
 - ~~Rendering of bonds over PBC as dashed "half-bonds" without artifacts across the box~~ — **shipped** (M16)
 
-## UI
-- **Bold text is not currently possible.** egui's default fonts are Ubuntu-*Light* and Hack — there
-  is no bold face in the app — and `RichText::strong()` only swaps in a brighter colour. Rendering
-  genuinely bold text (e.g. to make molecule names stand out in the tree) requires embedding a bold
-  TTF and registering it as a font family: `DejaVuSans-Bold` (~700 kB) or `NotoSans-Bold` (~450 kB)
-  whole, or ~30 kB subset to Latin-1 with `pyftsubset` (fonttools isn't installed here). The cost is
-  a binary asset in the repo plus that much added to the wasm bundle. Needs a decision.
-
 ## Selection & picking
 - ~~Pick modes: whole residues~~
 

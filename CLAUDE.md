@@ -251,9 +251,18 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font, configures both
+- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and the bold
+  face**, configures both
   the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
   `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
+  **Bold text** needs its own font family here (`BOLD_FAMILY` / `theme::bold(size)` →
+  `FontFamily::Name("bold")`, used via `widgets::bold_name`): egui ships **no bold face** — its
+  defaults are Ubuntu-*Light* + Hack — and `RichText::strong()` only swaps in a brighter colour, so
+  nothing settable through egui's text API renders bold. `install_bold` registers DejaVu Sans Bold,
+  **subset to 17 kB** from the stock 692 kB (the whole face carries ~6000 glyphs; we need Latin-1
+  plus ~30 typographic/scientific characters — regenerate with `assets/subset-bold-font.sh`, which
+  needs `pip install fonttools`). The family lists the proportional fonts after it, so a glyph the
+  subset lacks falls back to the light face instead of rendering as a missing-glyph box.
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
   `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
@@ -1091,10 +1100,8 @@ next frame). The menus —
   `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
-expand-caret + **name** (emphasised with `RichText::strong()`; a group's *shown* member is
-additionally underlined). ⚠ **egui cannot render bold here**: its default fonts are
-Ubuntu-*Light* + Hack with **no bold face**, and `strong()` only swaps in a brighter colour. Real
-bold needs a bold TTF embedded and registered as a font family — see the note in ROADMAP.md (the atom/frame counts are no longer shown inline — they're a **hover
+expand-caret + **name** (**bold** via `widgets::bold_name`; a group's *shown* member is
+additionally underlined) (the atom/frame counts are no longer shown inline — they're a **hover
 tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
 `Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old
