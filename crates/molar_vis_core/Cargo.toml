@@ -47,7 +47,6 @@ directories = "5"
 # bundle — and the browser build has no way to obtain charges anyway. Charge *coloring*
 # itself is platform-independent and lives in `color.rs`.
 molar_ff = { workspace = true }
-fontdb = { version = "0.23.0", default-features = false, features = ["fs", "fontconfig"] }
 
 # Browser runtime: the eframe `WebRunner` entry (`launch::run_web`) needs the
 # canvas + async glue; `wgpu`'s `webgl` feature gives a WebGL2 fallback for

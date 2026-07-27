@@ -121,20 +121,14 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
 /// A plain text label vertically centered the same way `overlay_button` centers its
 /// glyph (by ink bounds, at the toolbar button height) — so a label sitting next to
 /// `overlay_button` dropdowns lines up with them instead of riding high/low.
-/// A tree node's name (molecule / group / member), in **bold** where that is possible.
+/// A tree node's name (molecule / group / member) in **bold**.
 ///
-/// `RichText::strong()` alone only brightens the colour — egui's bundled fonts have no bold
-/// face — so this selects the **system** font's bold sibling (`theme::bold`, registered from
-/// the desktop's UI font). Where no bold face exists (wasm, or a single-weight system font) it
-/// degrades to `strong()`, which is the best egui can do unaided.
+/// egui's `RichText::strong()` only swaps in a brighter colour — its bundled fonts have no bold
+/// face — so this selects the embedded **Ubuntu Bold**, the base font's own bold sibling (see
+/// [`crate::theme::bold`]), at the current body size so it lines up with the rest of the row.
 pub(super) fn bold_name(ui: &egui::Ui, text: &str) -> egui::RichText {
-    let rich = egui::RichText::new(text);
-    if crate::theme::has_bold() {
-        let size = egui::TextStyle::Body.resolve(ui.style()).size;
-        rich.font(crate::theme::bold(size))
-    } else {
-        rich.strong()
-    }
+    let size = egui::TextStyle::Body.resolve(ui.style()).size;
+    egui::RichText::new(text).font(crate::theme::bold(size))
 }
 
 pub(super) fn toolbar_label(ui: &mut egui::Ui, text: &str) {

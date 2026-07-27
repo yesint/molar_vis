@@ -182,8 +182,7 @@ molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
 `espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
 ~600 kB ONNX model and pulls `tract`),
-fontdb **0.23** (**native only**, `fs` + `fontconfig`: resolves the desktop UI font + its bold face
-— see `theme.rs`), rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
+rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
 features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
 **`molar_vis_py` only** (native Python module, M26):
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
@@ -252,25 +251,25 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and the system
-  UI font**, configures both
+- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and the bold
+  face**, configures both
   the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
   `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
-  **System font + bold** (`install_system_fonts`, native): egui bundles only `Ubuntu-Light` and has
-  **no bold face anywhere**, so `RichText::strong()` can merely brighten the colour — and borrowing a
-  bold face from an unrelated family (DejaVu) reads as a foreign typeface beside it. So both weights
-  are taken from **one** family: the **desktop's** UI font. Note that is *not* fontconfig's generic
-  `sans-serif` — they routinely differ (a KDE session set to *SF Pro Display* still answers *Noto
-  Sans* for the generic alias), and querying the alias would ignore the user's actual choice.
-  `desktop_ui_font` reads it from, in order: the **`MOLAR_VIS_UI_FONT`** override, KDE's
-  `kdeglobals` (`[General] font=` — a Qt spec, family first), then GTK's `settings.ini`
-  (`gtk-font-name=`, family + trailing size); `None` falls back to the generic alias. `fontdb`
-  resolves family+weight to face bytes. The bundled fonts stay in the family lists *after* the
-  system ones, so emoji and any glyph the system face lacks still resolve.
-  Bold is exposed as `BOLD_FAMILY` / `theme::bold(size)` and used via `widgets::bold_name`; because
-  an **unbound `FontFamily::Name` makes egui panic**, `has_bold()` gates every use, and it is false
-  on wasm (no filesystem) or when the system yields no distinct bold — where `bold_name` degrades to
-  `strong()`.
+  **Bold text needs its own font** (`BOLD_FAMILY` / `theme::bold(size)` → `FontFamily::Name("bold")`,
+  used via `widgets::bold_name`): egui bundles **no bold face** — only `Ubuntu-Light` — and
+  `RichText::strong()` merely swaps in a brighter colour, so nothing settable through egui's text API
+  renders bold. `install_bold` embeds **Ubuntu Bold**, i.e. the base font's *own* bold sibling — a
+  bold face from any other family (DejaVu, or the desktop's UI font) reads as a second **typeface**
+  rather than as emphasis, which is the trap here. Subset to Latin-1 + ~30 typographic/scientific
+  characters: **17 kB** against the stock 324 kB (`assets/subset-bold-font.sh`, needs
+  `pip install fonttools` — a build-time step; only the `.ttf` ships). UFL 1.0, the same licence as
+  the Ubuntu-Light egui already bundles (`assets/Ubuntu-Bold-UFL.txt`). The family lists the
+  proportional fonts after it, so an emoji or a glyph the subset lacks falls back to the regular face
+  instead of a missing-glyph box. Embedded rather than looked up, so it needs no availability check
+  and behaves identically on native and wasm — an unbound `FontFamily::Name` would make egui panic.
+  (Rejected: **faux bold** by double-drawing the glyphs — a hack; and the **system UI font** — on
+  Linux the desktop's choice is not in fontconfig's generic alias, so honouring it meant either
+  per-DE config parsing or an XDG-portal D-Bus call, far too much machinery for one font weight.)
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
   `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
@@ -1108,7 +1107,7 @@ next frame). The menus —
   `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
-expand-caret + **name** (**bold** via `widgets::bold_name` — the system font's bold face; see
+expand-caret + **name** (**bold** via `widgets::bold_name` — the embedded Ubuntu Bold; see
 `theme.rs`; a group's *shown* member is additionally underlined). ⚠ **egui cannot render bold here**: its default fonts are
 Ubuntu-*Light* + Hack with **no bold face**, and `strong()` only swaps in a brighter colour. Real
 bold needs a bold TTF embedded and registered as a font family — see the note in ROADMAP.md (the atom/frame counts are no longer shown inline — they're a **hover
