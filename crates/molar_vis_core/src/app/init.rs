@@ -29,6 +29,18 @@ impl App {
             }
         };
 
+        // Verification hook: MOLAR_VIS_DEBUG_THEME=light|dark|system pins the theme without
+        // touching the saved config, so either palette can be screenshot headlessly.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // the hook below is native-only
+        let mut settings = settings;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(mode) = std::env::var("MOLAR_VIS_DEBUG_THEME") {
+            settings.appearance.theme = match mode.to_ascii_lowercase().as_str() {
+                "light" => ThemeMode::Light,
+                "dark" => ThemeMode::Dark,
+                _ => ThemeMode::System,
+            };
+        }
         crate::theme::apply(&cc.egui_ctx, &settings.appearance);
 
         let render_state = cc
@@ -550,6 +562,7 @@ impl App {
             partner_pick: None,
             #[cfg(not(target_arch = "wasm32"))]
             debug_ui_frames: 0,
+            themed_bg: None,
             charge_status: None,
             interactions_dialog: None,
             interactions_tab: crate::interactions::InteractionKind::HBond,
@@ -582,6 +595,11 @@ impl App {
             script: crate::script::ScriptSession::new(),
             jobs_rx: None,
         };
+
+        // Match the viewport background to the theme *now*, not on the first `ui()` frame:
+        // otherwise the opening frame flashes the other theme's background, and the
+        // `App::new` render hooks below (SAVE_IMAGE/RAYTRACE) would capture it.
+        app.follow_theme_background(&cc.egui_ctx);
 
         // Verification hook: MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>] enters dihedral-rotation
         // mode and selects the first rotatable bond of molecule <mol> (default 0), so

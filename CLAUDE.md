@@ -146,6 +146,8 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_SAVE_IMAGE`) +
   `MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[hbond|hydrophobic|salt|pistacking|pication|halogen]` (open the
   tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
+  `MOLAR_VIS_DEBUG_THEME=light|dark|system` (pin the theme without touching the saved config, so
+  either palette — and the viewport background that follows it — can be screenshot) +
   `MOLAR_VIS_DEBUG_DOCKING="<protein files>;<ligand files>"` (load a docking result the way the
   dialog's [Load] does — paths comma-separated within each half, e.g.
   `"tests/jak2.pdb,tests/jak2_traj.pdb;tests/jak2_inhs.sd"` — bypassing the file picker) +
@@ -253,7 +255,12 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
 - `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and the bold
   face**, configures both
-  the dark (custom high-contrast) and light styles + the accent/font-scale from settings, and
+  the dark and light styles — **both custom high-contrast** (egui's built-in light visuals are
+  mid-grey text on near-white, unreadable for a dense rep list, so the light palette is taken from
+  the **Purogrey** KDE colour scheme's own `[Colors:*]` groups: a mid-grey 198 window carrying
+  *black* text, brighter 226/235 shades for lists and input fields, inactive text only dimmed to 48,
+  and firmer hover/focus outlines because a fill change alone is easy to miss on grey) + the
+  accent/font-scale from settings, and
   `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
   **Bold text needs its own font** (`BOLD_FAMILY` / `theme::bold(size)` → `FontFamily::Name("bold")`,
   used via `widgets::bold_name`): egui bundles **no bold face** — only `Ubuntu-Light` — and

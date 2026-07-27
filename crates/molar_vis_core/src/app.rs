@@ -173,6 +173,10 @@ pub struct App {
     /// id, rep index)`, or `None`. A movable `egui::Window` (`draw_interactions_dialog`)
     /// edits the rep's `InteractionSettings`. Transient.
     interactions_dialog: Option<(MolId, usize)>,
+    /// The UI theme the viewport background was last matched to, so a theme change can be
+    /// detected (`System` mode also flips at runtime when the desktop does). See
+    /// `follow_theme_background`.
+    themed_bg: Option<egui::Theme>,
     /// Frames elapsed for the `MOLAR_VIS_DEBUG_SAVE_UI` verification hook (it needs a few
     /// to let the panels settle before requesting egui's screenshot). Native-only.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1070,6 +1074,9 @@ impl eframe::App for App {
         #[cfg(feature = "scripting")]
         self.draw_console(ui);
         self.draw_viewport(ui, frame);
+
+        // Keep the viewport background in step with the UI theme (see the method).
+        self.follow_theme_background(&ctx);
 
         // Flexible-docking pairs: propagate whichever of {shown pose, receptor frame} moved
         // this frame to the other. After the panels *and* the viewport, so it sees the pose

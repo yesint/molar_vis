@@ -105,10 +105,67 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
         style.visuals = v;
     });
 
-    // Light mode: egui's built-in light visuals + the accent.
+    // Light mode: egui's built-in light visuals are far too low-contrast for this UI —
+    // mid-grey text on near-white, which makes the rep rows and secondary labels hard to
+    // read. Replaced with a palette taken from the **Purogrey** KDE colour scheme, whose
+    // whole point is contrast: a mid-grey window (198) carrying *black* text, brighter
+    // panels for input areas, and inactive text only mildly dimmed (48 rather than a pale
+    // grey). Mirrors the structure of the dark palette above.
     ctx.style_mut_of(egui::Theme::Light, |style| {
         let mut v = egui::Visuals::light();
+        v.override_text_color = Some(LIGHT_TEXT);
+        v.panel_fill = LIGHT_WINDOW;
+        v.window_fill = LIGHT_WINDOW_ALT;
+        v.extreme_bg_color = LIGHT_VIEW_ALT;
+        v.faint_bg_color = LIGHT_WINDOW_ALT;
+        // Non-interactive = labels and separators; `inactive` = resting widgets. Both stay
+        // close to black, which is what keeps a dense rep row legible.
+        v.widgets.noninteractive.fg_stroke.color = LIGHT_TEXT_DIM;
+        v.widgets.noninteractive.bg_fill = LIGHT_WINDOW;
+        v.widgets.noninteractive.weak_bg_fill = LIGHT_WINDOW;
+        v.widgets.noninteractive.bg_stroke.color = LIGHT_LINE;
+        v.widgets.inactive.fg_stroke.color = LIGHT_TEXT;
+        v.widgets.inactive.bg_fill = LIGHT_BUTTON;
+        v.widgets.inactive.weak_bg_fill = LIGHT_BUTTON;
+        // Hover/press: lift the fill and firm up the outline, since on a grey panel a fill
+        // change alone is easy to miss.
+        v.widgets.hovered.bg_fill = LIGHT_VIEW;
+        v.widgets.hovered.weak_bg_fill = LIGHT_VIEW;
+        v.widgets.hovered.bg_stroke.color = LIGHT_DECORATION;
+        v.widgets.hovered.fg_stroke.color = LIGHT_TEXT;
+        v.widgets.active.bg_fill = LIGHT_VIEW_ALT;
+        v.widgets.active.weak_bg_fill = LIGHT_VIEW_ALT;
+        v.widgets.active.bg_stroke.color = LIGHT_FOCUS;
+        v.widgets.active.fg_stroke.color = LIGHT_TEXT;
+        v.widgets.open.bg_fill = LIGHT_VIEW;
+        v.widgets.open.weak_bg_fill = LIGHT_VIEW;
         v.selection.bg_fill = accent;
         style.visuals = v;
     });
 }
+
+// --- Purogrey-derived light palette ------------------------------------------------
+// Read from the scheme's own `[Colors:*]` groups rather than eyeballed, so the contrast
+// ratios are the ones that scheme was designed around.
+
+/// Window background — the panels (`Colors:Window/BackgroundNormal`).
+const LIGHT_WINDOW: Color32 = Color32::from_rgb(198, 198, 198);
+/// Slightly lifted window shade, for floating windows and faint row striping.
+const LIGHT_WINDOW_ALT: Color32 = Color32::from_rgb(207, 207, 207);
+/// View background — lists and input areas (`Colors:View/BackgroundNormal`).
+const LIGHT_VIEW: Color32 = Color32::from_rgb(226, 226, 226);
+/// Brightest shade, for text fields (`Colors:View/BackgroundAlternate`).
+const LIGHT_VIEW_ALT: Color32 = Color32::from_rgb(235, 235, 235);
+/// Resting button fill (`Colors:Button/BackgroundAlternate`).
+const LIGHT_BUTTON: Color32 = Color32::from_rgb(207, 207, 207);
+/// Primary text — **black**, as the scheme specifies (`Colors:Window/ForegroundNormal`).
+const LIGHT_TEXT: Color32 = Color32::from_rgb(0, 0, 0);
+/// Dimmed text (`Colors:Window/ForegroundInactive`) — still near-black, which is the
+/// difference between this and egui's washed-out light theme.
+const LIGHT_TEXT_DIM: Color32 = Color32::from_rgb(48, 48, 48);
+/// Separators / resting outlines (`Colors:Window/DecorationHover`).
+const LIGHT_LINE: Color32 = Color32::from_rgb(106, 106, 106);
+/// Hover outline (`Colors:Button/DecorationHover`).
+const LIGHT_DECORATION: Color32 = Color32::from_rgb(119, 119, 119);
+/// Focus outline (`Colors:Window/DecorationFocus`).
+const LIGHT_FOCUS: Color32 = Color32::from_rgb(71, 71, 71);

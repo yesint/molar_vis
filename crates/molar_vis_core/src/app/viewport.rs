@@ -863,3 +863,29 @@ pub(super) fn rep_atom_ids(mol: &scene::Molecule, rep_idx: usize) -> Vec<usize> 
     let bound = mol.data.bind_with_state(sel, mol.render_state());
     bound.iter_particle().map(|p| p.id).collect()
 }
+
+impl App {
+    /// Switch the viewport background when the UI theme changes: **white** under a light
+    /// theme, near-black under a dark one.
+    ///
+    /// A near-black viewport inside light-grey panels reads as a hole in the window, so the
+    /// two should agree. Runs every frame because `ThemeMode::System` can flip underneath us
+    /// when the desktop does, not only when the settings dialog is used.
+    ///
+    /// Only ever replaces one of the two presets ([`Background::is_theme_default`]): once a
+    /// background has been picked in the view settings — or restored from a session — it is
+    /// the user's, and a theme change must not overwrite it.
+    pub(super) fn follow_theme_background(&mut self, ctx: &egui::Context) {
+        let theme = ctx.theme();
+        if self.themed_bg == Some(theme) {
+            return;
+        }
+        let dark = theme == egui::Theme::Dark;
+        if self.camera.background.is_theme_default() {
+            // `Camera` derives `PartialEq`, so this re-renders through the normal
+            // camera-changed path with no extra dirty flag.
+            self.camera.background = crate::camera::Background::for_theme(dark);
+        }
+        self.themed_bg = Some(theme);
+    }
+}

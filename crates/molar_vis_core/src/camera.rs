@@ -136,6 +136,32 @@ impl Default for Background {
 }
 
 impl Background {
+    /// The background that goes with a light or dark UI: near-black for a dark UI, **white**
+    /// for a light one.
+    ///
+    /// A near-black viewport inside a light-grey panel reads as a hole in the window, and the
+    /// molecule's own dark-on-black shading is what the light theme is trying to get away
+    /// from. The gradient presets are kept in step so switching kind after a theme change
+    /// doesn't jump back to the other theme's palette.
+    pub fn for_theme(dark: bool) -> Self {
+        if dark {
+            Self::default()
+        } else {
+            Self {
+                kind: BgKind::Solid,
+                color: [1.0, 1.0, 1.0, 1.0],
+                top: [0.90, 0.93, 1.0, 1.0],
+                bottom: [1.0, 1.0, 1.0, 1.0],
+            }
+        }
+    }
+
+    /// Whether this is one of the two [`for_theme`](Self::for_theme) presets — i.e. the user
+    /// has not chosen a background of their own, so it is ours to switch when the theme does.
+    pub fn is_theme_default(&self) -> bool {
+        *self == Self::for_theme(true) || *self == Self::for_theme(false)
+    }
+
     /// Color depth-cue fog fades geometry toward (the solid color, or the
     /// gradient's midpoint).
     pub fn fog_color(&self) -> [f32; 4] {
