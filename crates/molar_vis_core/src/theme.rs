@@ -241,15 +241,15 @@ const POPUP_SHADOW_LIGHT: egui::Shadow = egui::Shadow {
 /// isn't a `const fn`.)
 const SHADOW_DARK: egui::Shadow = egui::Shadow {
     offset: [6, 12],
-    blur: 30,
-    spread: 2,
-    color: Color32::from_rgba_premultiplied(30, 30, 30, 30),
+    blur: 36,
+    spread: 3,
+    color: Color32::from_rgba_premultiplied(54, 54, 54, 54),
 };
 const POPUP_SHADOW_DARK: egui::Shadow = egui::Shadow {
     offset: [3, 7],
-    blur: 20,
-    spread: 1,
-    color: Color32::from_rgba_premultiplied(24, 24, 24, 24),
+    blur: 24,
+    spread: 2,
+    color: Color32::from_rgba_premultiplied(44, 44, 44, 44),
 };
 
 /// Set every text colour of a palette from just two: `text` for anything at rest, `dim` for

@@ -298,8 +298,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   dropdown/menu popups and tooltips) are several times deeper than egui's ~10 % black — and on
   **dark** they are *light*, a soft white bloom rather than a shadow: black has nothing to darken
   against a near-black panel (measured 20 → 8) and nothing at all against the dark viewport, which
-  is where a floating window actually sits, so the glow is what gives it separation (5.9 → 32.8 at
-  the edge, fading out over ~40 px). Both keep a downward offset so they read as elevation and not
+  is where a floating window actually sits, so the glow is what gives it separation (over the
+  viewport 5.9 → 52.8 at the edge, over the panel 21 → 65, fading out over ~40 px). Both keep a downward offset so they read as elevation and not
   as a selection glow. The viewport background follows the theme (`Background::for_theme`, applied by
   `App::follow_theme_background`, which replaces only the *preset* backgrounds so a custom one
   survives a theme switch).
