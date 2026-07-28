@@ -109,7 +109,11 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
         let mut v = egui::Visuals::dark();
         v.panel_fill = Color32::from_rgb(20, 21, 25);
         v.window_fill = Color32::from_rgb(28, 29, 34);
-        v.extreme_bg_color = Color32::from_rgb(12, 12, 15);
+        // Text fields. egui's dark preset sinks these *below* the panel (a "well"), which against
+        // this palette's near-black panel left the rep selection field indistinguishable from the
+        // background. They're the brightest surface instead — the same relationship the light
+        // palette has (fields 235 over a 207 window), so a field reads as a field in both.
+        v.extreme_bg_color = Color32::from_rgb(44, 45, 52);
         set_text_colors(&mut v, Color32::from_rgb(238, 238, 242), Color32::from_rgb(184, 186, 194));
         v.selection.bg_fill = accent;
         // A *selected* widget's text comes from `selection.stroke`, so it has to contrast with

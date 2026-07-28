@@ -51,19 +51,27 @@ pub(super) fn picker_button(
     label_w: f32,
     draw_icon: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
-    let txt = ui.visuals().text_color();
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), egui::FontId::proportional(14.0), txt);
+    // `PLACEHOLDER` now, real ink once the state is known (see `overlay_button`).
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(14.0),
+        egui::Color32::PLACEHOLDER,
+    );
     let (icon_w, caret_w, pad, gap) = (26.0_f32, 11.0_f32, 5.0_f32, 5.0_f32);
     // Reserve the widest option's label width (fixed button size); the current label is
     // drawn left-aligned within it.
     let w = pad + icon_w + gap + label_w.max(galley.size().x) + gap + caret_w + pad;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click());
-    if resp.hovered() {
+    // Painted as a **button** at rest, not just on hover: it *is* a dropdown, and against a
+    // panel of the same colour there was nothing to click on until the cursor found it. The
+    // fills come from the widget state, so it matches every other button in either theme.
+    let vis = ui.style().interact(&resp);
+    ui.painter().rect_filled(rect, 3.0, vis.weak_bg_fill);
+    if vis.bg_stroke.width > 0.0 {
         ui.painter()
-            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            .rect_stroke(rect, 3.0, vis.bg_stroke, egui::StrokeKind::Inside);
     }
+    let txt = vis.text_color();
     let icon_rect = egui::Rect::from_min_size(
         egui::pos2(rect.left() + pad, rect.center().y - 8.0),
         egui::vec2(icon_w, 16.0),
