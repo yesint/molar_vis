@@ -594,7 +594,7 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `CameraUniform` at `CAMERA_STRIDE`=256 — entry 0 is the base camera, one extra per **periodic
   image** = base view × `Mat4::from_translation(i·a+j·b+k·c)`, grown/`make_camera_bind_group`'d as
   needed), sphere/cylinder/line/**mesh** pipelines (each `[opaque, oit, glow]` — index `GLOW=2`
-  is additive cyan, depth-test `≤`, no depth-write) + a fullscreen **`composite_pipeline`**
+  is the selection glow — blended **over** the composited color, depth-test `≤`, no depth-write) + a fullscreen **`composite_pipeline`**
   (`oit_bgl`), `RepGpu` (per-rep buffers; mesh = vertex + u32 index buffer; buffers carry
   `COPY_DST`; `has_geometry()`), `upload()` (recreate buffers), **`update()`** (in-place
   `write_buffer` when element counts match, for coords-only frame changes), `render_scene()` (builds
@@ -2043,7 +2043,12 @@ History labels via `describe_change` ("edit selection", "change coloring",
     shell (`inflate_mesh`, `GLOW_INFLATE`=0.025 nm outward along normals) to test above it; impostor
     glows coincide exactly and aren't offset. A final additive **glow pass**
     (`render_scene` pass 4, pipeline index `GLOW=2`) draws it with the shaders' `fs_glow` — an
-    intense cyan **Fresnel rim** (bright at grazing angles + a strong body tint), **pulsing**: the
+    intense **Fresnel rim** (bright at grazing angles + a strong body tint) in a color the shaders
+    pick from the **backdrop** (`glow_color()`: a bright cyan on a dark background, a **gold** on a
+    light one — a highlighter on paper) and blend **over** the scene. It used to be one bright cyan blended
+    *additively*, which is invisible on a white background — adding to white cannot brighten it; the
+    egui-drawn cues (hover ring, lasso polygon, draw-mode rubber band) follow the same rule through
+    `Background::highlight`, the CPU twin of `glow_color()`. **Pulsing**: the
     camera uniform's `params.w` carries an animated multiplier (`0.70 + 0.30·sin(t·3.2)`, computed in
     `draw_viewport`) and while any selection is pending the viewport `request_repaint()`s + force-
     re-renders each frame so it breathes (idle = 0 GPU otherwise). Depth-tested `≤` against the scene

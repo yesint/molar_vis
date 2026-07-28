@@ -139,7 +139,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // Additive cyan "rim glow" for the active (pending) selection (see sphere.wgsl):
 // the ribbon, in its own style, glows brightest at grazing angles. Two-sided like
 // `shade`. Drawn depth-tested (≤), no depth-write, additive.
-const GLOW_COLOR: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+// Selection glow color, picked from the **background** (`fog_color` is the background, or a
+// gradient's midpoint): the glow is blended *over* the scene, so on a dark backdrop it wants to be
+// a bright cyan and on a light one a **gold** (a highlighter on paper). A single bright cyan
+// blended additively —
+// what this used to be — is invisible on a white background: adding to white cannot brighten it.
+const GLOW_DARK_BG: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+const GLOW_LIGHT_BG: vec3<f32> = vec3<f32>(0.90, 0.667, 0.0);
+
+fn glow_color() -> vec3<f32> {
+    let bg = camera.fog_color.rgb;
+    let luma = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
+    return select(GLOW_DARK_BG, GLOW_LIGHT_BG, luma > 0.35);
+}
 
 @fragment
 fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
@@ -153,7 +165,7 @@ fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
     let rim = pow(1.0 - ndotv, 1.5);
     // `camera.params.w` is the animated pulse multiplier (see render.rs).
     let alpha = clamp((0.45 + 1.15 * rim) * camera.params.w, 0.0, 1.0);
-    return vec4<f32>(GLOW_COLOR, alpha);
+    return vec4<f32>(glow_color(), alpha);
 }
 
 struct OitOut {

@@ -191,23 +191,27 @@ fn oit_targets() -> Vec<Option<wgpu::ColorTargetState>> {
     ]
 }
 
-/// Color-target descriptor for the selection-glow pass: a single target that adds
-/// the (cyan, Fresnel-weighted) glow onto the already-composited scene color —
-/// `dst + glow.rgb * glow.a`.
+/// Color-target descriptor for the selection-glow pass: the Fresnel-weighted glow blended
+/// **over** the already-composited scene color — `mix(dst, glow.rgb, glow.a)`.
+///
+/// It used to be *additive* (`dst + glow.rgb * glow.a`), which cannot work on a light background:
+/// adding to white leaves white, so the glow vanished exactly where the user needed it. Blending
+/// over works against any backdrop, and the shaders pick the glow color from the background
+/// (`glow_color()`), so a dark backdrop still gets the bright cyan it had.
 fn glow_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
-    let add = wgpu::BlendComponent {
+    let over = wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::SrcAlpha,
-        dst_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
         operation: wgpu::BlendOperation::Add,
     };
-    let add_a = wgpu::BlendComponent {
+    let over_a = wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::One,
-        dst_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
         operation: wgpu::BlendOperation::Add,
     };
     vec![Some(wgpu::ColorTargetState {
         format: color_format,
-        blend: Some(wgpu::BlendState { color: add, alpha: add_a }),
+        blend: Some(wgpu::BlendState { color: over, alpha: over_a }),
         write_mask: wgpu::ColorWrites::ALL,
     })]
 }
@@ -1549,7 +1553,7 @@ impl SceneRenderer {
             }
         }
 
-        // Pass 4 — active-selection glow: additive cyan over the composited color,
+        // Pass 4 — active-selection glow: a background-aware cyan blended over the composited color,
         // depth-tested `≤` against the scene depth (so occluded selection atoms
         // don't glow) with no depth-write. Drawn at the central image only.
         let has_glow = scene

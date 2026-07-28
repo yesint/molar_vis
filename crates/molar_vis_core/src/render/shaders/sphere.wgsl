@@ -225,7 +225,19 @@ fn compute_hit(in: VsOut) -> Hit {
 // selected geometry, in its own style, glows brightest at its grazing silhouette
 // (Fresnel) with a faint constant body tint. Drawn in a depth-tested (≤), no-write,
 // additive pass over the scene — see `render.rs`.
-const GLOW_COLOR: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+// Selection glow color, picked from the **background** (`fog_color` is the background, or a
+// gradient's midpoint): the glow is blended *over* the scene, so on a dark backdrop it wants to be
+// a bright cyan and on a light one a **gold** (a highlighter on paper). A single bright cyan
+// blended additively —
+// what this used to be — is invisible on a white background: adding to white cannot brighten it.
+const GLOW_DARK_BG: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
+const GLOW_LIGHT_BG: vec3<f32> = vec3<f32>(0.90, 0.667, 0.0);
+
+fn glow_color() -> vec3<f32> {
+    let bg = camera.fog_color.rgb;
+    let luma = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
+    return select(GLOW_DARK_BG, GLOW_LIGHT_BG, luma > 0.35);
+}
 
 // `camera.params.w` is the animated pulse multiplier (see render.rs); the rim term
 // is bright at grazing angles over a strong constant body, so the whole selection
@@ -241,7 +253,7 @@ fn fs_glow(in: VsOut) -> FsOut {
     let h = compute_hit(in);
     var out: FsOut;
     out.depth = h.depth;
-    out.color = vec4<f32>(GLOW_COLOR, glow_alpha(h.normal, h.view_dir));
+    out.color = vec4<f32>(glow_color(), glow_alpha(h.normal, h.view_dir));
     return out;
 }
 

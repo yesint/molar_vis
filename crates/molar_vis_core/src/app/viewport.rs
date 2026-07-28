@@ -607,7 +607,7 @@ impl App {
             // the enclosed (style-eligible) atoms as the active selection.
             if lasso_mode && self.lasso_path.len() >= 2 {
                 let painter = ui.painter_at(rect);
-                let col = egui::Color32::from_rgb(130, 215, 255);
+                let col = self.camera.background.highlight();
                 painter.add(egui::Shape::line(
                     self.lasso_path.clone(),
                     egui::Stroke::new(1.5_f32, col),
@@ -618,7 +618,7 @@ impl App {
                 {
                     painter.line_segment(
                         [last, first],
-                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(130, 215, 255, 110)),
+                        egui::Stroke::new(1.0_f32, self.camera.background.highlight_alpha(110)),
                     );
                 }
             }
