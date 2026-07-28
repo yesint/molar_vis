@@ -1820,6 +1820,10 @@ impl SceneRenderer {
             // bg.w carries the GI strength (0 = tier-1 direct shading; >0 = path-traced GI,
             // scaling the indirect/sky-ambient contribution).
             bg: [bg[0], bg[1], bg[2], gi_strength.clamp(0.0, 1.0)],
+            // Depth cue: the same values (and the same three falloff curves in the shader) the
+            // rasterizer fogs with, so a traced still keeps the fog of the view it was taken from.
+            cue: camera.cue_uniform(),
+            fog_color: camera.background.fog_color(),
             dims: [w, h, samples.max(1), frame_seed],
             accum: [0, 0, 0, 0], // set by Raytracer::render
         }

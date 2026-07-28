@@ -30,7 +30,9 @@ struct RtUniform {
     head_dir: vec4<f32>,        // xyz world dir toward the shading headlight
     ao: vec4<f32>,              // radius (nm), bias, strength, enabled
     shadow: vec4<f32>,          // strength, bias, enabled, _
-    bg: vec4<f32>,              // background (linear)
+    bg: vec4<f32>,              // background (linear); w = GI strength
+    cue: vec4<f32>,             // depth cue: near, far (eye-space), strength, mode
+    fog_color: vec4<f32>,       // color the fog fades toward
     dims: vec4<u32>,            // width, height, samples-this-step, frame_seed
     accum: vec4<u32>,           // prior_total_samples, reset(0/1), _, _
 };
@@ -308,6 +310,32 @@ fn jitter_cone(dir: vec3<f32>, softness: f32, u1: f32, u2: f32) -> vec3<f32> {
     return normalize(dir + r * (cos(phi) * t + sin(phi) * b));
 }
 
+// Depth cueing (fog), the same model and the same three curves as the rasterizer's shared
+// `apply_fog` — the trace is meant to reproduce the view, and a fogged view traced unfogged
+// loses all of its depth. `d` is the **axial** eye-space distance (distance from the camera
+// plane along the view axis), which is what `cue.x/.y` are expressed in; the view axis comes
+// from unprojecting the frustum centre, so no extra uniform is needed and it is correct for
+// both projections.
+fn view_axis() -> vec3<f32> {
+    let a = U.inv_view_proj * vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    let b = U.inv_view_proj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return normalize(b.xyz / b.w - a.xyz / a.w);
+}
+
+fn apply_fog(color: vec3<f32>, p: vec3<f32>, axis: vec3<f32>) -> vec3<f32> {
+    if (U.cue.z <= 0.0) { return color; }
+    let d = dot(p - U.eye.xyz, axis);
+    let t = clamp((d - U.cue.x) / max(U.cue.y - U.cue.x, 1e-6), 0.0, 1.0);
+    let k = 3.0;
+    var b = t; // linear
+    if (U.cue.w > 1.5) {
+        b = (1.0 - exp(-k * k * t * t)) / (1.0 - exp(-k * k)); // exp2
+    } else if (U.cue.w > 0.5) {
+        b = (1.0 - exp(-k * t)) / (1.0 - exp(-k)); // exp
+    }
+    return mix(color, U.fog_color.rgb, b * U.cue.z);
+}
+
 // Uniform sky-dome radiance gathered by GI bounce rays that escape the scene (the ambient/
 // indirect fill). Decoupled from the visible background (`U.bg`) so a dark backdrop still
 // lights the molecule; cavities self-shadow because their bounces hit geometry instead.
@@ -464,6 +492,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let samples = U.dims.z;
     let light = normalize(U.light_dir.xyz);
     let persp = U.eye.w > 0.5;
+    let axis = view_axis(); // for the depth-cue distance; constant per pixel
     var color = vec3<f32>(0.0);
 
     for (var s = 0u; s < samples; s = s + 1u) {
@@ -499,12 +528,15 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         // barely changes the look and it ramps up continuously to full path-traced GI.
         let gi_str = U.bg.w;
         let tier1 = shade_tier1(s, rd, persp, light, &seed);
+        var shaded: vec3<f32>;
         if (gi_str > 0.001) {
             let gi = shade_gi(s, persp, light, GI_BOUNCES, &seed);
-            color = color + mix(tier1, gi, gi_str);
+            shaded = mix(tier1, gi, gi_str);
         } else {
-            color = color + tier1;
+            shaded = tier1;
         }
+        // Fog last, on the finished color of the *primary* hit — where the rasterizer applies it.
+        color = color + apply_fog(shaded, s.p, axis);
     }
 
     // `color` holds this step's raw radiance sum over `samples` paths. Blend it into the

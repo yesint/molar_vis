@@ -542,6 +542,11 @@ pub struct RtUniform {
     pub shadow: [f32; 4],
     /// background color (linear), w unused.
     pub bg: [f32; 4],
+    /// Depth cue (fog), exactly as the rasterizer's camera uniform carries it:
+    /// `near, far` (eye-space distances), `strength`, `mode` (0 linear / 1 exp / 2 exp²).
+    pub cue: [f32; 4],
+    /// Color the fog fades toward (the background, or a gradient's midpoint), w unused.
+    pub fog_color: [f32; 4],
     /// width, height, samples-this-step, frame_seed. Set by `render`.
     pub dims: [u32; 4],
     /// Progressive accumulation: prior_total_samples, reset(0/1), _, _. Set by `render`.
