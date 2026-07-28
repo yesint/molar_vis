@@ -252,6 +252,31 @@ const POPUP_SHADOW_DARK: egui::Shadow = egui::Shadow {
     color: Color32::from_rgba_premultiplied(44, 44, 44, 44),
 };
 
+/// Green for an affirmative control (the pending selection's **accept** ✓) and red for an error
+/// message, per theme.
+///
+/// These have to be *derived*, not fixed: the pale green and salmon red the panel used to hardcode
+/// were picked against a near-black panel, and on the light theme's mid-grey they are barely
+/// distinguishable from the background — the accept button was effectively invisible. Keyed off
+/// `dark_mode` (unlike the selection glow, which follows the *viewport* background, not the UI
+/// theme — see [`crate::camera::Background::highlight`]).
+pub fn ok_color(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        Color32::from_rgb(120, 220, 120)
+    } else {
+        Color32::from_rgb(20, 110, 45)
+    }
+}
+
+/// Error/danger text, the counterpart of [`ok_color`].
+pub fn danger_color(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        Color32::from_rgb(240, 120, 120)
+    } else {
+        Color32::from_rgb(170, 30, 30)
+    }
+}
+
 /// Set every text colour of a palette from just two: `text` for anything at rest, `dim` for
 /// secondary labels.
 ///

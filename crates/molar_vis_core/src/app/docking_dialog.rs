@@ -161,7 +161,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(e).color(egui::Color32::from_rgb(230, 120, 120)),
+                        egui::RichText::new(e).color(crate::theme::danger_color(ui.visuals())),
                     )
                     .wrap(),
                 );
