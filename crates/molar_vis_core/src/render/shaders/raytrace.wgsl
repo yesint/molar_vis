@@ -128,8 +128,18 @@ fn ray_sphere(s: Sphere, ro: vec3<f32>, rd: vec3<f32>) -> f32 {
     return -1.0;
 }
 
-// Capless finite cylinder (joints are covered by separate sphere prims).
+// Ray-cast a **capsule**: the finite cylinder wall over h ∈ [0, seg] plus a hemispherical cap
+// at each end. This mirrors the rasterizer's `cylinder.wgsl::compute_hit` — since bonds became
+// two-tone capsules, Licorice/Ball-and-Stick emit an atom sphere only for *bondless* atoms, so a
+// capless cylinder here left every bond an open tube (you could see down its dark interior) with
+// no atom ends at all. Nearest valid hit of {wall, cap0, cap1}; `rd` is unit length, so the
+// ray-sphere tests are monic.
+//
+// `m.w & FLAG_FLAT_ENDS` suppresses the caps, for primitives standing in for the rasterizer's
+// flat-ended **line** quads: a dashed line's gaps are only a few pixels, so rounded ends bridged
+// them and every dashed contact line traced as a solid one.
 fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>) -> f32 {
+    let flat = (c.m.w & 1u) != 0u;
     let p0 = c.c0.xyz;
     let r = c.c0.w;
     let axis = c.c1.xyz - p0;
@@ -137,18 +147,40 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>) -> f32 {
     if (seg < 1e-9) { return -1.0; }
     let ua = axis / seg;
     let oc = ro - p0;
+    var best = -1.0;
+
+    // Wall: infinite cylinder, then clip h to the segment.
     let rd_p = rd - ua * dot(rd, ua);
     let oc_p = oc - ua * dot(oc, ua);
     let a = dot(rd_p, rd_p);
     let b = 2.0 * dot(rd_p, oc_p);
     let cc = dot(oc_p, oc_p) - r * r;
     let disc = b * b - 4.0 * a * cc;
-    if (disc < 0.0 || a < 1e-12) { return -1.0; }
-    let t = (-b - sqrt(disc)) / (2.0 * a);
-    if (t <= 1e-4) { return -1.0; }
-    let h = dot(ro + t * rd - p0, ua);
-    if (h < 0.0 || h > seg) { return -1.0; }
-    return t;
+    if (disc >= 0.0 && a >= 1e-12) {
+        let t = (-b - sqrt(disc)) / (2.0 * a);
+        let h = dot(ro + t * rd - p0, ua);
+        if (t > 1e-4 && h >= 0.0 && h <= seg) { best = t; }
+    }
+    if (flat) { return best; }
+    // Cap at p0 — only its outward (h ≤ 0) hemisphere; the rest is inside the wall.
+    let b0 = dot(rd, oc);
+    let c0 = dot(oc, oc) - r * r;
+    let d0 = b0 * b0 - c0;
+    if (d0 >= 0.0) {
+        let t = -b0 - sqrt(d0);
+        if (t > 1e-4 && (best < 0.0 || t < best) && dot(ro + t * rd - p0, ua) <= 0.0) { best = t; }
+    }
+    // Cap at p1 — only its outward (h ≥ seg) hemisphere.
+    let far = p0 + ua * seg;
+    let ocf = ro - far;
+    let b1 = dot(rd, ocf);
+    let c1 = dot(ocf, ocf) - r * r;
+    let d1 = b1 * b1 - c1;
+    if (d1 >= 0.0) {
+        let t = -b1 - sqrt(d1);
+        if (t > 1e-4 && (best < 0.0 || t < best) && dot(ro + t * rd - p0, ua) >= seg) { best = t; }
+    }
+    return best;
 }
 
 // Möller–Trumbore; returns (t, u, v), t < 0 = miss.
@@ -313,11 +345,17 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         let axis = cy.c1.xyz - cy.c0.xyz;
         let seg = length(axis);
         let ua = axis / max(seg, 1e-9);
-        let ap = cy.c0.xyz + ua * clamp(dot(p - cy.c0.xyz, ua), 0.0, seg);
+        let h = dot(p - cy.c0.xyz, ua);
+        // Clamped nearest axis point ⇒ the wall's radial normal *and* both caps' spherical ones.
+        let ap = cy.c0.xyz + ua * clamp(h, 0.0, seg);
         nrm = normalize(p - ap);
-        base = unpack_color(cy.m.x);
+        // Two-tone half-bond coloring, split at the midpoint exactly as the rasterizer does:
+        // `m.x` is the p0 half, `m.z` the p1 half. Tracing only `m.x` painted every bond in its
+        // first atom's color, so a C–F bond came out all grey and the fluorine vanished.
+        let packed = select(cy.m.z, cy.m.x, h < seg * 0.5);
+        base = unpack_color(packed);
         mat_raw = cy.m.y;
-        opacity = unpack_opacity(cy.m.x);
+        opacity = unpack_opacity(packed);
     } else {
         let tri = triangles[idx];
         let a = mesh_verts[tri.x];

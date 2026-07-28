@@ -467,7 +467,7 @@ fn charged_groups(
 /// lines. Returns empty geometry if the partner is unset / stale / self / has no selection.
 /// Reads two molecules, so it runs outside the `&mut`-iterator rebuild loop (the ring
 /// caches of both molecules must already be populated — see `rebuild_dirty`).
-pub(super) fn build_interactions(
+pub(crate) fn build_interactions(
     scene: &Scene,
     self_mi: usize,
     rep_idx: usize,

@@ -1755,9 +1755,27 @@ impl SceneRenderer {
 
     /// Gather the scene's primitives + build the BVH and upload them to the ray tracer.
     /// Call when geometry changes (or before a file render). No-op without a ray tracer.
-    pub fn prepare_raytrace(&mut self, rs: &RenderState, scene: &Scene, dashed_pbc: bool) {
+    ///
+    /// The camera is needed because some geometry is view-dependent — multi-order bond strand
+    /// offsets and the pixel widths of lines are both resolved against the screen — so the scene
+    /// must be re-gathered when the camera moves; see `App::rt_scene_dirty`. `viewport` is the
+    /// **logical** viewport size, which is what those pixel quantities are measured against.
+    pub fn prepare_raytrace(
+        &mut self,
+        rs: &RenderState,
+        scene: &Scene,
+        camera: &crate::camera::Camera,
+        viewport: [u32; 2],
+        dashed_pbc: bool,
+    ) {
         if let Some(rt) = self.raytracer.as_mut() {
-            let rt_scene = raytrace::RtScene::gather(scene, dashed_pbc);
+            let (w, h) = (viewport[0].max(1) as f32, viewport[1].max(1) as f32);
+            let view = raytrace::RtView {
+                view: camera.view(),
+                proj: camera.proj(w / h),
+                viewport_h: h,
+            };
+            let rt_scene = raytrace::RtScene::gather(scene, view, dashed_pbc);
             rt.upload(rs, &rt_scene);
         }
     }

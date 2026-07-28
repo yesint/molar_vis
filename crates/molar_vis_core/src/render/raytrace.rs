@@ -44,8 +44,10 @@ pub struct GpuSphere {
     pub m: [u32; 4],
 }
 
-/// A (capless) cylinder primitive: `c0 = (p0.xyz, radius)`, `c1 = (p1.xyz, _)`,
-/// `m = (color, mat, _, _)`. Sphere caps at joints come from separate sphere prims.
+/// A **capsule** primitive (cylinder wall + a hemispherical cap at each end, like the
+/// rasterizer's bonds): `c0 = (p0.xyz, radius)`, `c1 = (p1.xyz, _)`,
+/// `m = (color_p0, mat, color_p1, flags)` — two-tone, split at the midpoint.
+/// `flags & FLAG_FLAT_ENDS` drops the caps (for stand-ins for flat-ended line quads).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuCylinder {
@@ -128,11 +130,11 @@ impl RtScene {
     /// Gather all visible primitives from the scene (re-running `geometry::build` per
     /// visible representation, exactly as `rebuild_dirty` does — same displayed frame /
     /// smoothing) and build the BVH. `dashed_pbc` matches the live render's setting.
-    pub fn gather(scene: &Scene, dashed_pbc: bool) -> Self {
+    pub fn gather(scene: &Scene, view: RtView, dashed_pbc: bool) -> Self {
         let mut s = Self::default();
         let mut aabbs: Vec<Aabb> = Vec::new();
         let mut tags: Vec<u32> = Vec::new();
-        s.collect(scene, dashed_pbc, &mut aabbs, &mut tags);
+        s.collect(scene, view, dashed_pbc, &mut aabbs, &mut tags);
         if aabbs.is_empty() {
             return s;
         }
@@ -144,11 +146,18 @@ impl RtScene {
 
     /// Re-run `geometry::build` for every visible rep and append its spheres, cylinders,
     /// and mesh triangles, accumulating each primitive's AABB + type-tag.
-    fn collect(&mut self, scene: &Scene, dashed_pbc: bool, aabbs: &mut Vec<Aabb>, tags: &mut Vec<u32>) {
+    fn collect(
+        &mut self,
+        scene: &Scene,
+        view: RtView,
+        dashed_pbc: bool,
+        aabbs: &mut Vec<Aabb>,
+        tags: &mut Vec<u32>,
+    ) {
         use crate::geometry;
         use crate::secstruct::SsMap;
 
-        for mol in &scene.molecules {
+        for (mi, mol) in scene.molecules.iter().enumerate() {
             if !mol.visible {
                 continue;
             }
@@ -156,8 +165,23 @@ impl RtScene {
                 Some(frame) => frame,
                 None => mol.data.state(),
             };
-            for rep in &mol.reps {
+            for (ri, rep) in mol.reps.iter().enumerate() {
                 if !rep.visible {
+                    continue;
+                }
+                // Interaction dashes are built from *two* molecules, so they don't come out of
+                // `geometry::build` (which returns nothing for this style) but from the same
+                // second-pass builder `rebuild_dirty` uses. Without this the ray trace lost every
+                // contact line — the one thing a docking picture is *about*.
+                if matches!(rep.params, crate::geometry::RepParams::Interactions { .. }) {
+                    let geom = crate::app::build::build_interactions(scene, mi, ri);
+                    for seg in geom.lines.chunks_exact(2) {
+                        if let Some(gc) = line_capsule(&seg[0], &seg[1], view) {
+                            aabbs.push(cylinder_aabb(&gc));
+                            tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
+                            self.cylinders.push(gc);
+                        }
+                    }
                     continue;
                 }
                 let Some(sel) = rep.sel.as_ref() else { continue };
@@ -190,14 +214,33 @@ impl RtScene {
                     self.spheres.push(gs);
                 }
                 for cy in &geom.cylinders {
+                    // Multi-order bonds' parallel strands are shifted by the *rasterizer's vertex
+                    // shader*, from the camera, so they stay side-by-side at any angle (see
+                    // `cylinder.wgsl`). The tracer has no vertex stage, so the same shift is baked
+                    // in here — otherwise a double/triple/aromatic bond traced as a single strand,
+                    // its siblings hidden inside it.
+                    let [p0, p1] = strand_offset(cy, view.view);
                     let gc = GpuCylinder {
-                        c0: [cy.p0[0], cy.p0[1], cy.p0[2], cy.radius],
-                        c1: [cy.p1[0], cy.p1[1], cy.p1[2], 0.0],
-                        m: [cy.color, cy.mat, 0, 0],
+                        c0: [p0[0], p0[1], p0[2], cy.radius],
+                        c1: [p1[0], p1[1], p1[2], 0.0],
+                        m: [cy.color, cy.mat, cy.color1, 0],
                     };
                     aabbs.push(cylinder_aabb(&gc));
                     tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
                     self.cylinders.push(gc);
+                }
+                // Lines (the Lines rep, interaction dashes, the periodic box) are screen-space
+                // quads in the rasterizer — a constant *pixel* width, which a ray has no notion
+                // of. Traced as **thin capsules** whose world radius is that pixel width
+                // converted at the traced camera, so the trace shows what the raster shows: a
+                // lines-only receptor used to vanish completely from a ray-traced docking view,
+                // which is the whole backdrop of the picture.
+                for seg in geom.lines.chunks_exact(2) {
+                    if let Some(gc) = line_capsule(&seg[0], &seg[1], view) {
+                        aabbs.push(cylinder_aabb(&gc));
+                        tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
+                        self.cylinders.push(gc);
+                    }
                 }
                 // Mesh: append vertices (offset triangle indices into the shared array).
                 let base = self.mesh_verts.len() as u32;
@@ -253,6 +296,97 @@ fn sphere_aabb(s: &GpuSphere) -> Aabb {
     let center = Vec3::new(s.c[0], s.c[1], s.c[2]);
     let r = Vec3::splat(s.c[3].max(0.0));
     Aabb { min: center - r, max: center + r }
+}
+
+/// Cylinder flag: no end caps — the primitive stands in for a flat-ended line quad. Rounded ends
+/// would lengthen each dash of a dashed line by its radius at both ends, which at line widths of a
+/// few pixels is enough to close the gaps and turn a dashed contact line into a solid one.
+const FLAG_FLAT_ENDS: u32 = 1;
+
+/// The camera the scene is being gathered *for*. Two pieces of geometry are view-dependent —
+/// multi-order bond strand offsets and the pixel widths of lines — so unlike the rest of the
+/// primitives they can't be baked once; see `App::rt_scene_dirty`.
+#[derive(Clone, Copy)]
+pub struct RtView {
+    pub view: glam::Mat4,
+    pub proj: glam::Mat4,
+    /// Logical viewport height in pixels — what a "width in px" is measured against. The
+    /// **logical** one, not the output image's, so a 2× save keeps line weights proportional to
+    /// the view it was taken from, exactly as the rasterized capture does.
+    pub viewport_h: f32,
+}
+
+impl RtView {
+    /// World units per screen pixel at `p`. In view space `ndc_y = proj[1][1]·y / w`, and a pixel
+    /// is `2/height` of NDC — so one pixel spans `2·w / (proj[1][1]·height)` world units. Exact
+    /// for both projections (an orthographic `w` is 1, giving the constant scale it should).
+    fn world_per_px(&self, p: glam::Vec3) -> f32 {
+        let clip = self.proj * self.view * p.extend(1.0);
+        2.0 * clip.w.abs().max(1e-6) / (self.proj.y_axis.y.abs().max(1e-6) * self.viewport_h.max(1.0))
+    }
+}
+
+/// One line segment as a thin capsule: the pixel width becomes a world radius at the traced
+/// camera, and the multi-order strand offset (also in pixels) becomes a world shift along the
+/// segment's screen perpendicular. Returns `None` for a degenerate segment.
+///
+/// The material is **flat** (ambient 1, no diffuse or specular) so a line traces as the unlit
+/// constant color the rasterizer draws, rather than as a shaded tube — a line is a schematic,
+/// not a physical stick. AO/shadow still multiply it, as they do every other surface.
+fn line_capsule(
+    v0: &crate::render::line::LineVertex,
+    v1: &crate::render::line::LineVertex,
+    view: RtView,
+) -> Option<GpuCylinder> {
+    const FLAT_MAT: u32 = 0xff; // ambient = 255, diffuse/specular/shininess = 0
+    let p0 = glam::Vec3::from(v0.pos);
+    let p1 = glam::Vec3::from(v1.pos);
+    if p0.distance_squared(p1) < 1e-12 {
+        return None;
+    }
+    // One scale for the whole segment (a capsule has a single radius): its midpoint's.
+    let scale = view.world_per_px((p0 + p1) * 0.5);
+    let radius = (0.5 * v0.width.max(0.5) * scale).max(1e-5);
+    let (mut a, mut b) = (p0, p1);
+    if v0.offset_px != 0.0 {
+        let a0 = view.view.transform_point3(p0);
+        let a1 = view.view.transform_point3(p1);
+        let ax = a1 - a0;
+        let dir = if ax.length() > 1e-8 { ax.normalize() } else { glam::Vec3::X };
+        let sp = dir.cross(glam::Vec3::Z);
+        let sp = if sp.length() > 1e-4 { sp.normalize() } else { glam::Vec3::X };
+        let shift = view.view.inverse().transform_vector3(sp) * (v0.offset_px * scale);
+        a += shift;
+        b += shift;
+    }
+    Some(GpuCylinder {
+        c0: [a[0], a[1], a[2], radius],
+        c1: [b[0], b[1], b[2], 0.0],
+        m: [v0.color, FLAT_MAT, v1.color, FLAG_FLAT_ENDS],
+    })
+}
+
+/// A multi-order bond strand's endpoints, with the same screen-plane shift the rasterizer's
+/// vertex shader applies: the screen plane in view space is XY, so the bond's screen
+/// perpendicular is `cross(axis_view, +Z)` — perpendicular to the bond *and* in the screen plane,
+/// which is what keeps the strands side-by-side instead of collapsing edge-on. Computed in view
+/// space and rotated back to world, since the tracer's primitives are world-space.
+/// `offset = [0, 0]` (single/unspecified bonds) is a no-op.
+fn strand_offset(cy: &crate::render::cylinder::CylinderInstance, view: glam::Mat4) -> [glam::Vec3; 2] {
+    let p0 = glam::Vec3::from(cy.p0);
+    let p1 = glam::Vec3::from(cy.p1);
+    if cy.offset[1] == 0.0 {
+        return [p0, p1];
+    }
+    let a0 = view.transform_point3(p0);
+    let a1 = view.transform_point3(p1);
+    let ax = a1 - a0;
+    let dir = if ax.length() > 1e-8 { ax.normalize() } else { glam::Vec3::X };
+    let sp = dir.cross(glam::Vec3::Z);
+    let sp = if sp.length() > 1e-4 { sp.normalize() } else { glam::Vec3::X };
+    // View→world is a pure rotation+translation, so the shift only needs the rotation part.
+    let shift = view.inverse().transform_vector3(sp) * (cy.offset[0] * cy.offset[1]);
+    [p0 + shift, p1 + shift]
 }
 
 /// Cylinder AABB = union of the two end-spheres (`p0±r`, `p1±r`) — correct and never

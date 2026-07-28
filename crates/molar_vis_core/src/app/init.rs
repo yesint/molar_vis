@@ -815,8 +815,13 @@ impl App {
                     );
                     let samples = dim("MOLAR_VIS_DEBUG_RAYTRACE_SAMPLES", 128);
                     app.rebuild_dirty(rs);
-                    app.renderer
-                        .prepare_raytrace(rs, &app.scene, app.settings.behavior.dashed_pbc_bonds);
+                    app.renderer.prepare_raytrace(
+                        rs,
+                        &app.scene,
+                        &app.camera,
+                        [w, h],
+                        app.settings.behavior.dashed_pbc_bonds,
+                    );
                     match app.renderer.capture_begin_raytrace(rs, w, h, &app.camera, samples) {
                         Some(cap) => {
                             let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());

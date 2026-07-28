@@ -144,8 +144,12 @@ impl App {
             let size_changed = size_px != self.last_size;
             let raster_dirty = geom_changed || cam_changed || size_changed || self.view_dirty || pulsing;
 
-            if geom_changed {
-                self.rt_scene_dirty = true; // re-gather the tracer's scene before the next trace
+            // Re-gather the tracer's scene before the next trace. The camera counts, not just the
+            // geometry: multi-order bond strands are offset along the screen perpendicular, so a
+            // rotation changes the primitives themselves (a trace is only started on demand, so
+            // this costs one gather per trace at worst — negligible beside the trace).
+            if geom_changed || cam_changed {
+                self.rt_scene_dirty = true;
             }
 
             // Ray-traced still (PyMOL-`ray` style): pressing **R** ray-traces the current view
@@ -188,7 +192,13 @@ impl App {
                 if self.rt_warm_shown {
                     if self.rt_scene_dirty {
                         let dashed = self.settings.behavior.dashed_pbc_bonds;
-                        self.renderer.prepare_raytrace(render_state, &self.scene, dashed);
+                        self.renderer.prepare_raytrace(
+                            render_state,
+                            &self.scene,
+                            &self.camera,
+                            size_px,
+                            dashed,
+                        );
                         self.rt_scene_dirty = false;
                     }
                     let samples = self.camera.rt_sample_target();

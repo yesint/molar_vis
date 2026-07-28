@@ -619,18 +619,35 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
 - `render/raytrace.rs` + `render/shaders/raytrace.wgsl` — **GPU ray tracer** (Tachyon / PyMOL-`ray`
   quality: ray-traced ambient occlusion + shadows + Blinn-Phong, all rep types). **WebGPU/native
   only** (needs compute + storage buffers; gated on `DownlevelFlags::COMPUTE_SHADERS` → `Option<Raytracer>`
-  on `SceneRenderer`, `None` on WebGL2). **CPU side**: `RtScene::gather` re-runs `geometry::build` per
+  on `SceneRenderer`, `None` on WebGL2). **CPU side**: `RtScene::gather(scene, RtView, dashed_pbc)` re-runs `geometry::build` per
   visible rep (same displayed frame/smoothing as `rebuild_dirty`) into flat GPU-friendly primitive
   arrays — analytic **spheres** + **cylinders** and shared-vertex **triangles** (cartoon/surface) —
   then a hand-rolled **binned-SAH BVH** over all of them (32-byte SoA nodes, `count==0`⇒interior with
   contiguous children, leaves carry **type-tagged** `(type<<30)|index` prim refs). **GPU side**: a
   **compute** pass (`cs_trace`) reads the prims + BVH from storage buffers and, per pixel, accumulates
   `samples` paths (camera ray via `inv(proj·view)` unproject — persp+ortho; explicit-stack BVH
-  traversal w/ robust slab test; analytic ray-sphere/ray-cylinder lifted from the impostor shaders +
+  traversal w/ robust slab test; analytic ray-sphere/ray-**capsule** lifted from the impostor shaders +
   Möller–Trumbore; per hit: Blinn-Phong shading × a cast shadow × AO; sub-pixel jitter = AA; PCG RNG)
   into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
   `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
+  **Matching the rasterizer's geometry is a standing requirement, and four things had drifted** (all
+  fixed; the trace is now checked side-by-side against a `_SAVE_IMAGE` of the same view): a bond is a
+  **two-tone capsule**, so the tracer's cylinder needs *both* the hemispherical end caps
+  (Licorice/Ball-and-Stick emit an atom sphere only for **bondless** atoms, so a capless cylinder
+  left every bond an open tube with no atom ends) and the **midpoint colour split** (`m.z` = the p1
+  half; tracing only `m.x` painted every bond its first atom's colour, so a C–F bond came out all
+  grey); a **multi-order** bond's parallel strands are offset by the rasterizer's *vertex shader*
+  from the camera, so `strand_offset` bakes the same shift in at gather time (hence `RtView`, and why
+  `rt_scene_dirty` is set on a camera change too); and **lines** — the Lines rep, interaction dashes,
+  the periodic box — are screen-space quads a ray knows nothing about, so `line_capsule` converts
+  each segment's *pixel* width to a world radius at the traced camera (`RtView::world_per_px`, exact
+  for both projections) with a **flat-ends flag** (`FLAG_FLAT_ENDS` in `m.w`) that suppresses the
+  caps, since rounded ends lengthen each dash enough to close a dashed line's gaps. Lines get an
+  ambient-only material so they trace as the unlit constant colour the rasterizer draws. Interaction
+  dashes come from *two* molecules, so they don't come out of `geometry::build` at all — the gather
+  calls the same `app::build::build_interactions` (now `pub(crate)`) the second `rebuild_dirty` pass
+  uses.
   **The shading deliberately mirrors the rasterizer's `shade_material` so the trace matches the
   realtime view** (the user's reference, esp. with AO/shadows OFF — a fixed inflated ambient made the
   trace ~55 % too bright): Blinn-Phong `base·(mat.x + mat.y·N·L) + spec` lit by the **same view-space
@@ -1838,8 +1855,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
   the dialog); **partner-pick mode** (`App::partner_pick`, `app/viewport.rs`) — [Choose…] enters a
   mode where hovering a rep's geometry highlights the whole rep (finger cursor, via `pick::PickHit.rep`)
   and a click assigns it, **and** clicking a rep's **panel row** also assigns it, Esc / empty-click
-  cancels, one undo checkpoint (`assign_partner`). Interaction lines aren't ray-traced (consistent with
-  the Lines rep / box / aromatic circles). Verified: 80 tests (grid-vs-brute-force, water-dimer ±H,
+  cancels, one undo checkpoint (`assign_partner`). Interaction lines **are** ray-traced (as thin
+  flat-ended capsules, like every other line — see the `render/raytrace.rs` bullet). Verified: 80 tests (grid-vs-brute-force, water-dimer ±H,
   hydrophobic dedup, halogen angle, salt bridge, π-stacking offset, π-cation, group-following partner),
   native+wasm+py green,
   clippy clean; headless renders of a 2lao interface split (H-bond/hydrophobic/salt-bridge dashes) + the

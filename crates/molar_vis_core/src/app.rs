@@ -35,7 +35,9 @@ use crate::trajectory::{LoadMode, LoadMsg, LoadOptions, LoopMode, Trajectory};
 
 use egui_phosphor::regular as icon;
 
-mod build;
+// `pub(crate)`: the ray tracer gathers interaction dashes through `build::build_interactions`
+// too, so the trace shows the same contact lines the raster does.
+pub(crate) mod build;
 mod console;
 mod dihedral;
 #[cfg(not(target_arch = "wasm32"))]
