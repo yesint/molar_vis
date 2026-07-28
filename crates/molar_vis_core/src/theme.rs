@@ -136,25 +136,28 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
         v.widgets.noninteractive.bg_fill = LIGHT_WINDOW;
         v.widgets.noninteractive.weak_bg_fill = LIGHT_WINDOW;
         v.widgets.noninteractive.bg_stroke.color = LIGHT_LINE;
-        // Two different fills, and the distinction matters on a grey window: `weak_bg_fill` is a
+        // Resting widgets are distinguished by **fill**, not by an outline, and that is a
+        // constraint rather than a preference: a resting `bg_stroke` of nonzero width makes
+        // buttons that are frameless at rest (`Button::selectable` — every icon toggle in the rep
+        // rows, and every menu row) **jump 1 px on hover**. `Style::button_style` pre-subtracts
+        // the stroke width from `inner_margin` so a border doesn't change a *framed* button's
+        // size, but the frameless branch drops the stroke and keeps the shrunken margin. See
+        // `hover_does_not_resize_widgets`.
+        //
+        // Two fills, and the distinction matters on a grey window: `weak_bg_fill` is a
         // button/dropdown **face**, `bg_fill` is an *indicator* interior — a checkbox box, a
-        // slider rail. Purogrey uses its bright View shade for indicators, and with the window at
-        // 198–207 that's also the only value that keeps a slider rail from vanishing into the
-        // dialog it sits on (a rail painted in the button shade was invisible).
+        // slider rail. Both take Purogrey's bright View shade, which is what keeps a rail from
+        // vanishing into the 207 dialog it sits on and gives a button a silhouette without a
+        // border.
         v.widgets.inactive.bg_fill = LIGHT_VIEW;
-        v.widgets.inactive.weak_bg_fill = LIGHT_BUTTON;
-        // …and a resting outline, for the same reason: a 207 button face on a 207 window body has
-        // no silhouette of its own, so the edge has to be drawn. egui's light preset leaves this
-        // stroke at **width 0**, so the whole stroke is replaced — setting only `.color` (as the
-        // hover/active arms below can, those default to width 1) changes nothing.
-        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, LIGHT_BORDER);
-        // Hover/press: lift the fill and firm up the outline, since on a grey panel a fill
-        // change alone is easy to miss.
-        v.widgets.hovered.bg_fill = LIGHT_VIEW_ALT;
-        v.widgets.hovered.weak_bg_fill = LIGHT_VIEW;
+        v.widgets.inactive.weak_bg_fill = LIGHT_VIEW;
+        // Hover/press lift the fill further and firm up the outline (drawn only in these framed
+        // states, so it costs no layout), since on a grey panel a fill change alone is easy to miss.
+        v.widgets.hovered.bg_fill = LIGHT_HOVER;
+        v.widgets.hovered.weak_bg_fill = LIGHT_HOVER;
         v.widgets.hovered.bg_stroke.color = LIGHT_DECORATION;
-        v.widgets.active.bg_fill = LIGHT_VIEW_ALT;
-        v.widgets.active.weak_bg_fill = LIGHT_VIEW_ALT;
+        v.widgets.active.bg_fill = LIGHT_PRESS;
+        v.widgets.active.weak_bg_fill = LIGHT_PRESS;
         v.widgets.active.bg_stroke.color = LIGHT_FOCUS;
         v.widgets.open.bg_fill = LIGHT_VIEW;
         // `widgets.open.weak_bg_fill` is also what `Window` paints its **title bar** with, so
@@ -185,8 +188,10 @@ const LIGHT_WINDOW_ALT: Color32 = Color32::from_rgb(207, 207, 207);
 const LIGHT_VIEW: Color32 = Color32::from_rgb(226, 226, 226);
 /// Brightest shade, for text fields (`Colors:View/BackgroundAlternate`).
 const LIGHT_VIEW_ALT: Color32 = Color32::from_rgb(235, 235, 235);
-/// Resting button fill (`Colors:Button/BackgroundAlternate`).
-const LIGHT_BUTTON: Color32 = Color32::from_rgb(207, 207, 207);
+/// Hovered widget fill — a step above the resting View shade.
+const LIGHT_HOVER: Color32 = Color32::from_rgb(238, 238, 238);
+/// Pressed/active widget fill — a step above that again.
+const LIGHT_PRESS: Color32 = Color32::from_rgb(248, 248, 248);
 /// Primary text — **black**, as the scheme specifies (`Colors:Window/ForegroundNormal`).
 const LIGHT_TEXT: Color32 = Color32::from_rgb(0, 0, 0);
 /// Dimmed text (`Colors:Window/ForegroundInactive`) — still near-black, which is the
@@ -196,9 +201,6 @@ const LIGHT_TEXT_DIM: Color32 = Color32::from_rgb(48, 48, 48);
 const LIGHT_LINE: Color32 = Color32::from_rgb(106, 106, 106);
 /// Hover outline (`Colors:Button/DecorationHover`).
 const LIGHT_DECORATION: Color32 = Color32::from_rgb(119, 119, 119);
-/// Resting widget outline — between the window shade and the hover decoration, so a button at
-/// rest is bounded without the outline itself becoming the loudest thing in a dense row.
-const LIGHT_BORDER: Color32 = Color32::from_rgb(166, 166, 166);
 /// Focus outline (`Colors:Window/DecorationFocus`).
 const LIGHT_FOCUS: Color32 = Color32::from_rgb(71, 71, 71);
 /// Selected-row plate (`Colors:Selection/BackgroundNormal`) — deliberately dark, so the
@@ -302,6 +304,64 @@ mod tests {
             Color32::WHITE,
         ] {
             assert!(contrasting_text(pale).r() < 60, "{pale:?} needs dark ink");
+        }
+    }
+
+    /// Hovering a widget must not **resize** it — in either theme.
+    ///
+    /// egui's `Style::button_style` subtracts the resting `bg_stroke.width` from `inner_margin`
+    /// so that adding a border doesn't change a *framed* button's size. But a button that is
+    /// frameless at rest (`Button::selectable` — every icon toggle in the rep rows, and every
+    /// menu row) drops the stroke and keeps the shrunken margin, so a resting border of width 1
+    /// made those widgets **1 px smaller at rest than on hover**: the row twitched under the
+    /// cursor. Light-theme-only at the time, because only that palette had such a border.
+    #[test]
+    fn hover_does_not_resize_widgets() {
+        use std::cell::RefCell;
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let ctx = egui::Context::default();
+            apply(&ctx, &AppearanceSettings { theme, ..Default::default() });
+            let seen: RefCell<Vec<(&str, egui::Rect)>> = RefCell::new(Vec::new());
+            // One frame with the pointer at `pointer`; yields each probe widget's rect.
+            let frame = |pointer: egui::Pos2| {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 300.0),
+                    )),
+                    events: vec![egui::Event::PointerMoved(pointer)],
+                    ..Default::default()
+                };
+                seen.borrow_mut().clear();
+                ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let r = ui.button("Button").rect;
+                        seen.borrow_mut().push(("button", r));
+                        // Frameless at rest — the case that broke.
+                        let r = ui.selectable_label(false, "Toggle").rect;
+                        seen.borrow_mut().push(("selectable_label", r));
+                        let r = ui.menu_button("Menu", |_| {}).response.rect;
+                        seen.borrow_mut().push(("menu_button", r));
+                    });
+                });
+                seen.borrow().clone()
+            };
+            // egui reads a widget's state from the *previous* frame's response, so every
+            // measurement is the second of two identical frames.
+            let corner = egui::pos2(399.0, 299.0);
+            frame(corner);
+            let rest = frame(corner);
+            for (i, (name, rect)) in rest.iter().enumerate() {
+                frame(rect.center());
+                let hovered = frame(rect.center())[i].1;
+                assert_eq!(
+                    rect.size(),
+                    hovered.size(),
+                    "{theme:?}: {name} resizes on hover ({:?} → {:?})",
+                    rect.size(),
+                    hovered.size()
+                );
+            }
         }
     }
 }

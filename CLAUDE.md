@@ -283,13 +283,15 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   per-DE config parsing or an XDG-portal D-Bus call, far too much machinery for one font weight.)
   **Text colours go through `set_text_colors(v, text, dim)`**, never `override_text_color` — see the
   gotcha in *Conventions*; `weak_text_color` is set explicitly too, since egui's derived
-  `text × weak_text_alpha` fades secondary labels further than this UI can afford. Two light-palette
-  levers exist only because a grey window has no free contrast: `widgets.inactive.bg_fill` is
-  Purogrey's bright **View** shade (indicator interiors — a checkbox box, a **slider rail**, which
-  painted in the button shade was invisible on the 207 window it sat on) while `weak_bg_fill` stays
-  the button face; and `inactive.bg_stroke` is a resting **outline** (`LIGHT_BORDER`), because a 207
-  button on a 207 window has no silhouette of its own — note egui's light preset leaves that stroke
-  at **width 0**, so the whole `Stroke` has to be replaced, not just its `.color`. `window_shadow` /
+  `text × weak_text_alpha` fades secondary labels further than this UI can afford. A grey window
+  gives no contrast for free, so the light palette puts resting widgets a shade **above** it
+  (`inactive.bg_fill`/`weak_bg_fill` = Purogrey's bright **View** shade, with hover/press stepping
+  up again) — by **fill, never a resting outline**: a nonzero `inactive.bg_stroke.width` makes every
+  frameless-at-rest button (`Button::selectable`, i.e. the icon toggles and all menu rows) **jump
+  1 px on hover**, because `Style::button_style` pre-subtracts the stroke width from `inner_margin`
+  to keep a *framed* button's size constant and the frameless branch drops the stroke but keeps the
+  shrunken margin. `hover_does_not_resize_widgets` pins that (it drives two egui frames per state,
+  since a widget's state comes from the previous frame's response). `window_shadow` /
   `popup_shadow` are several times deeper than egui's ~10 % black, which vanished against either
   palette. The viewport background follows the theme (`Background::for_theme`, applied by
   `App::follow_theme_background`, which replaces only the *preset* backgrounds so a custom one
