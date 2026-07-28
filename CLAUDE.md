@@ -630,7 +630,12 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   Möller–Trumbore; per hit: Blinn-Phong shading × a cast shadow × AO; sub-pixel jitter = AA; PCG RNG)
   into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
-  `shadow`/`background` so the trace matches the controls; materials via the shared `unpack_mat`.
+  `shadow`/`background`/**`depth_cue`** so the trace matches the controls — the fog is the shared
+  rasterizer model verbatim (the same `near/far/strength/mode` from `cue_uniform`, the same three
+  falloff curves, applied last to the primary hit's finished colour), since a fogged view traced
+  unfogged comes back flat; its axial eye-space distance needs no extra uniform because the view
+  axis comes from unprojecting the frustum centre (`view_axis`), correct for both projections.
+  Materials via the shared `unpack_mat`.
   **Matching the rasterizer's geometry is a standing requirement, and four things had drifted** (all
   fixed; the trace is now checked side-by-side against a `_SAVE_IMAGE` of the same view): a bond is a
   **two-tone capsule**, so the tracer's cylinder needs *both* the hemispherical end caps
