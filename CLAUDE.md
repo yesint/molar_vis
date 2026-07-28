@@ -291,9 +291,11 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   1 px on hover**, because `Style::button_style` pre-subtracts the stroke width from `inner_margin`
   to keep a *framed* button's size constant and the frameless branch drops the stroke but keeps the
   shrunken margin. `hover_does_not_resize_widgets` pins that (it drives two egui frames per state,
-  since a widget's state comes from the previous frame's response). `window_shadow` /
-  `popup_shadow` are several times deeper than egui's ~10 % black, which vanished against either
-  palette. The viewport background follows the theme (`Background::for_theme`, applied by
+  since a widget's state comes from the previous frame's response). Text fields
+  (`extreme_bg_color`) are the **brightest** surface in *both* palettes — egui's dark preset sinks
+  them below the panel instead, which against this near-black panel made the rep selection field
+  vanish into it. `window_shadow` / `popup_shadow` are several times deeper than egui's ~10 % black,
+  which vanished against either palette. The viewport background follows the theme (`Background::for_theme`, applied by
   `App::follow_theme_background`, which replaces only the *preset* backgrounds so a custom one
   survives a theme switch).
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
@@ -1266,7 +1268,9 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   label)…])`** helper — the **app-default tab style** (underline tabs: selected = bold + accent
   underline, others weak/clickable), reused by every tabbed UI (rep settings, the delete-frames
   dialog, …) so they stay consistent. Style and color are **icon+text** buttons built by the shared
-  `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
+  `picker_button(label, draw_icon)` helper (drawn glyph + label + caret, painted as a **button at
+  rest** — fill/stroke/ink from the widget state, so a dropdown reads as clickable against a
+  same-coloured panel and matches the buttons beside it → `egui::Popup::menu`
   of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` (which takes the panel's
   `ink` colour, since the **molecular** colours it depicts are fixed but a pale one — carbon grey,
   the charge ramp's white centre — dissolves into a light panel without the ink-derived hairline it
