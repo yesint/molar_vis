@@ -294,8 +294,13 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   since a widget's state comes from the previous frame's response). Text fields
   (`extreme_bg_color`) are the **brightest** surface in *both* palettes — egui's dark preset sinks
   them below the panel instead, which against this near-black panel made the rep selection field
-  vanish into it. `window_shadow` / `popup_shadow` are several times deeper than egui's ~10 % black,
-  which vanished against either palette. The viewport background follows the theme (`Background::for_theme`, applied by
+  vanish into it. `window_shadow` / `popup_shadow` (windows and dialogs;
+  dropdown/menu popups and tooltips) are several times deeper than egui's ~10 % black — and on
+  **dark** they are *light*, a soft white bloom rather than a shadow: black has nothing to darken
+  against a near-black panel (measured 20 → 8) and nothing at all against the dark viewport, which
+  is where a floating window actually sits, so the glow is what gives it separation (5.9 → 32.8 at
+  the edge, fading out over ~40 px). Both keep a downward offset so they read as elevation and not
+  as a selection glow. The viewport background follows the theme (`Background::for_theme`, applied by
   `App::follow_theme_background`, which replaces only the *preset* backgrounds so a custom one
   survives a theme switch).
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):

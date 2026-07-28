@@ -232,18 +232,24 @@ const POPUP_SHADOW_LIGHT: egui::Shadow = egui::Shadow {
     spread: 1,
     color: Color32::from_black_alpha(75),
 };
-/// Deeper still on dark, where a black shadow has less to work with.
+/// On dark the shadow is **light**, not black: a black shadow has nothing to darken against a
+/// near-black panel (measured: 20 → 8, a swing you have to look for) and *nothing at all* against
+/// the viewport, which in this theme is nearly black — so a floating window had no separation
+/// where it overlaps the 3D view, which is exactly where it floats. A soft white bloom, kept
+/// offset downward so it still reads as elevation rather than as a selection glow.
+/// (Spelled premultiplied — white at alpha `a` is `(a, a, a, a)` — because `from_white_alpha`
+/// isn't a `const fn`.)
 const SHADOW_DARK: egui::Shadow = egui::Shadow {
-    offset: [8, 14],
-    blur: 28,
+    offset: [6, 12],
+    blur: 30,
     spread: 2,
-    color: Color32::from_black_alpha(160),
+    color: Color32::from_rgba_premultiplied(30, 30, 30, 30),
 };
 const POPUP_SHADOW_DARK: egui::Shadow = egui::Shadow {
-    offset: [4, 8],
-    blur: 18,
+    offset: [3, 7],
+    blur: 20,
     spread: 1,
-    color: Color32::from_black_alpha(140),
+    color: Color32::from_rgba_premultiplied(24, 24, 24, 24),
 };
 
 /// Set every text colour of a palette from just two: `text` for anything at rest, `dim` for
