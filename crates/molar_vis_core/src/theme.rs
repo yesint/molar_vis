@@ -19,16 +19,20 @@ use crate::settings::{AppearanceSettings, ThemeMode};
 /// unbound `FontFamily::Name` makes egui panic at layout time. Use it via [`bold`].
 pub const BOLD_FAMILY: &str = "bold";
 
-/// **Ubuntu Bold** — the bold sibling of egui's bundled `Ubuntu-Light`.
+/// **Ubuntu Regular** (400) — the base UI face, replacing egui's bundled Ubuntu-**Light** (300),
+/// which reads too thin at these sizes.
+const REGULAR_TTF: &[u8] = include_bytes!("../assets/Ubuntu-Regular-subset.ttf");
+
+/// **Ubuntu Bold** (700) — for emphasis.
 ///
 /// egui ships no bold face at all, and `RichText::strong()` only swaps in a brighter colour, so
 /// bold text needs a font of its own. Taking one from an unrelated family (DejaVu, or the
-/// system UI font) makes bold text read as a *second typeface* rather than as emphasis — so this
-/// is deliberately the same family as the base font, just at weight 700.
+/// system UI font) makes bold text read as a *second typeface* rather than as emphasis — so both
+/// faces here are the same family as each other, differing only in weight.
 ///
-/// Subset to Latin-1 plus the typographic/scientific characters the UI uses: 17 kB against the
-/// stock face's 324 kB. Regenerate with `assets/subset-bold-font.sh`. Licensed under the Ubuntu
-/// Font Licence 1.0 (`assets/Ubuntu-Bold-UFL.txt`), like the Ubuntu-Light egui already bundles.
+/// Both are subset to Latin-1 plus the typographic/scientific characters the UI uses: ~18 kB
+/// each against the stock ~344 kB. Regenerate with `assets/subset-fonts.sh`. Ubuntu Font Licence
+/// 1.0 (`assets/Ubuntu-UFL.txt`), the same licence as the Ubuntu-Light egui already bundles.
 const BOLD_TTF: &[u8] = include_bytes!("../assets/Ubuntu-Bold-subset.ttf");
 
 /// A [`egui::FontId`] at `size` in the bold family.
@@ -36,21 +40,30 @@ pub fn bold(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(BOLD_FAMILY.into()))
 }
 
-/// Register the bold face as its own family, listing the proportional fonts after it so any
-/// glyph the subset lacks (or an emoji) falls back to the regular face instead of rendering as
-/// a missing-glyph box.
-fn install_bold(fonts: &mut egui::FontDefinitions) {
+/// Put Ubuntu **Regular** at the head of the proportional family and register **Bold** as its
+/// own family.
+///
+/// Both keep egui's bundled fonts *after* them as fallbacks, so an emoji or any glyph outside
+/// the Latin-1 subset still resolves (to Ubuntu-Light) instead of rendering as a missing-glyph
+/// box.
+fn install_fonts(fonts: &mut egui::FontDefinitions) {
+    fonts.font_data.insert(
+        "Ubuntu-Regular".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(REGULAR_TTF)),
+    );
     fonts.font_data.insert(
         "Ubuntu-Bold".to_owned(),
         std::sync::Arc::new(egui::FontData::from_static(BOLD_TTF)),
     );
-    let mut family = vec!["Ubuntu-Bold".to_owned()];
-    if let Some(proportional) = fonts.families.get(&egui::FontFamily::Proportional) {
-        family.extend(proportional.iter().cloned());
-    }
+    let proportional = fonts.families.entry(egui::FontFamily::Proportional).or_default();
+    proportional.insert(0, "Ubuntu-Regular".to_owned());
+    let fallbacks = proportional.clone();
+
+    let mut bold = vec!["Ubuntu-Bold".to_owned()];
+    bold.extend(fallbacks);
     fonts
         .families
-        .insert(egui::FontFamily::Name(BOLD_FAMILY.into()), family);
+        .insert(egui::FontFamily::Name(BOLD_FAMILY.into()), bold);
 }
 
 pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
@@ -66,7 +79,7 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
     // panel) alongside the default fonts.
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    install_bold(&mut fonts);
+    install_fonts(&mut fonts);
     ctx.set_fonts(fonts);
 
     // Accent (selection highlight): stored linear RGBA → Color32 (WYSIWYG with the
@@ -94,14 +107,16 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
     // High-contrast dark palette (the original look) + accent.
     ctx.style_mut_of(egui::Theme::Dark, |style| {
         let mut v = egui::Visuals::dark();
-        v.override_text_color = Some(Color32::from_rgb(238, 238, 242));
         v.panel_fill = Color32::from_rgb(20, 21, 25);
         v.window_fill = Color32::from_rgb(28, 29, 34);
         v.extreme_bg_color = Color32::from_rgb(12, 12, 15);
-        // Brighter "weak"/non-interactive text so secondary labels stay readable.
-        v.widgets.noninteractive.fg_stroke.color = Color32::from_rgb(196, 198, 205);
-        v.widgets.inactive.fg_stroke.color = Color32::from_rgb(220, 222, 228);
+        set_text_colors(&mut v, Color32::from_rgb(238, 238, 242), Color32::from_rgb(184, 186, 194));
         v.selection.bg_fill = accent;
+        // A *selected* widget's text comes from `selection.stroke`, so it has to contrast with
+        // the accent — which is user-configurable, hence measured rather than paired by hand.
+        v.selection.stroke = egui::Stroke::new(1.0_f32, contrasting_text(accent));
+        v.window_shadow = SHADOW_DARK;
+        v.popup_shadow = POPUP_SHADOW_DARK;
         style.visuals = v;
     });
 
@@ -113,33 +128,47 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
     // grey). Mirrors the structure of the dark palette above.
     ctx.style_mut_of(egui::Theme::Light, |style| {
         let mut v = egui::Visuals::light();
-        v.override_text_color = Some(LIGHT_TEXT);
         v.panel_fill = LIGHT_WINDOW;
         v.window_fill = LIGHT_WINDOW_ALT;
         v.extreme_bg_color = LIGHT_VIEW_ALT;
         v.faint_bg_color = LIGHT_WINDOW_ALT;
-        // Non-interactive = labels and separators; `inactive` = resting widgets. Both stay
-        // close to black, which is what keeps a dense rep row legible.
-        v.widgets.noninteractive.fg_stroke.color = LIGHT_TEXT_DIM;
+        set_text_colors(&mut v, LIGHT_TEXT, LIGHT_TEXT_DIM);
         v.widgets.noninteractive.bg_fill = LIGHT_WINDOW;
         v.widgets.noninteractive.weak_bg_fill = LIGHT_WINDOW;
         v.widgets.noninteractive.bg_stroke.color = LIGHT_LINE;
-        v.widgets.inactive.fg_stroke.color = LIGHT_TEXT;
-        v.widgets.inactive.bg_fill = LIGHT_BUTTON;
+        // Two different fills, and the distinction matters on a grey window: `weak_bg_fill` is a
+        // button/dropdown **face**, `bg_fill` is an *indicator* interior — a checkbox box, a
+        // slider rail. Purogrey uses its bright View shade for indicators, and with the window at
+        // 198–207 that's also the only value that keeps a slider rail from vanishing into the
+        // dialog it sits on (a rail painted in the button shade was invisible).
+        v.widgets.inactive.bg_fill = LIGHT_VIEW;
         v.widgets.inactive.weak_bg_fill = LIGHT_BUTTON;
+        // …and a resting outline, for the same reason: a 207 button face on a 207 window body has
+        // no silhouette of its own, so the edge has to be drawn. egui's light preset leaves this
+        // stroke at **width 0**, so the whole stroke is replaced — setting only `.color` (as the
+        // hover/active arms below can, those default to width 1) changes nothing.
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, LIGHT_BORDER);
         // Hover/press: lift the fill and firm up the outline, since on a grey panel a fill
         // change alone is easy to miss.
-        v.widgets.hovered.bg_fill = LIGHT_VIEW;
+        v.widgets.hovered.bg_fill = LIGHT_VIEW_ALT;
         v.widgets.hovered.weak_bg_fill = LIGHT_VIEW;
         v.widgets.hovered.bg_stroke.color = LIGHT_DECORATION;
-        v.widgets.hovered.fg_stroke.color = LIGHT_TEXT;
         v.widgets.active.bg_fill = LIGHT_VIEW_ALT;
         v.widgets.active.weak_bg_fill = LIGHT_VIEW_ALT;
         v.widgets.active.bg_stroke.color = LIGHT_FOCUS;
-        v.widgets.active.fg_stroke.color = LIGHT_TEXT;
         v.widgets.open.bg_fill = LIGHT_VIEW;
-        v.widgets.open.weak_bg_fill = LIGHT_VIEW;
-        v.selection.bg_fill = accent;
+        // `widgets.open.weak_bg_fill` is also what `Window` paints its **title bar** with, so
+        // it has to sit *below* `window_fill` or the bar looks lighter than the dialog it
+        // captions. Purogrey's own titlebar is dark (WM 87) with light text, but this colour
+        // doubles as the fill of open dropdowns — whose text is black — so it goes one shade
+        // down from the window instead of all the way dark.
+        v.widgets.open.weak_bg_fill = LIGHT_TITLEBAR;
+        // Purogrey's selection: a dark grey plate with near-white text, not the tinted-blue-
+        // with-black-text egui defaults to.
+        v.selection.bg_fill = LIGHT_SELECTION_BG;
+        v.selection.stroke = egui::Stroke::new(1.0_f32, LIGHT_SELECTION_FG);
+        v.window_shadow = SHADOW_LIGHT;
+        v.popup_shadow = POPUP_SHADOW_LIGHT;
         style.visuals = v;
     });
 }
@@ -167,5 +196,112 @@ const LIGHT_TEXT_DIM: Color32 = Color32::from_rgb(48, 48, 48);
 const LIGHT_LINE: Color32 = Color32::from_rgb(106, 106, 106);
 /// Hover outline (`Colors:Button/DecorationHover`).
 const LIGHT_DECORATION: Color32 = Color32::from_rgb(119, 119, 119);
+/// Resting widget outline — between the window shade and the hover decoration, so a button at
+/// rest is bounded without the outline itself becoming the loudest thing in a dense row.
+const LIGHT_BORDER: Color32 = Color32::from_rgb(166, 166, 166);
 /// Focus outline (`Colors:Window/DecorationFocus`).
 const LIGHT_FOCUS: Color32 = Color32::from_rgb(71, 71, 71);
+/// Selected-row plate (`Colors:Selection/BackgroundNormal`) — deliberately dark, so the
+/// near-white [`LIGHT_SELECTION_FG`] on top of it is unmistakable.
+const LIGHT_SELECTION_BG: Color32 = Color32::from_rgb(94, 94, 94);
+/// Selected-row text (`Colors:Selection/ForegroundNormal`).
+const LIGHT_SELECTION_FG: Color32 = Color32::from_rgb(241, 241, 241);
+/// Dialog title bars: one shade below the window body so the caption reads as a caption.
+const LIGHT_TITLEBAR: Color32 = Color32::from_rgb(184, 184, 184);
+
+// --- Shadows -----------------------------------------------------------------------
+// egui's defaults are ~10 % black, which all but vanishes against either palette — a
+// floating dialog then has no visible separation from the panel behind it. These are
+// several times deeper, and offset further, so windows read as *above* the UI.
+
+const SHADOW_LIGHT: egui::Shadow = egui::Shadow {
+    offset: [8, 14],
+    blur: 28,
+    spread: 2,
+    color: Color32::from_black_alpha(90),
+};
+const POPUP_SHADOW_LIGHT: egui::Shadow = egui::Shadow {
+    offset: [4, 8],
+    blur: 18,
+    spread: 1,
+    color: Color32::from_black_alpha(75),
+};
+/// Deeper still on dark, where a black shadow has less to work with.
+const SHADOW_DARK: egui::Shadow = egui::Shadow {
+    offset: [8, 14],
+    blur: 28,
+    spread: 2,
+    color: Color32::from_black_alpha(160),
+};
+const POPUP_SHADOW_DARK: egui::Shadow = egui::Shadow {
+    offset: [4, 8],
+    blur: 18,
+    spread: 1,
+    color: Color32::from_black_alpha(140),
+};
+
+/// Set every text colour of a palette from just two: `text` for anything at rest, `dim` for
+/// secondary labels.
+///
+/// The obvious lever, `visuals.override_text_color`, is a **trap**: it forces one colour on
+/// *all* widget text, including a **selected** widget's — so a selected toggle painted with the
+/// selection colour kept the panel's text colour and could come out black-glyph-on-dark-plate
+/// (or white-on-light, if the accent were pale). Setting the per-state strokes instead lets
+/// egui pick `selection.stroke` when a widget is selected, which is the whole point of that
+/// field. `Visuals::text_color()` reads `noninteractive`, so our own painters follow along.
+fn set_text_colors(v: &mut egui::Visuals, text: Color32, dim: Color32) {
+    for st in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        st.fg_stroke.color = text;
+    }
+    // Secondary labels (counts, the fps footer, suggestion hints). Left to egui this is
+    // `text × weak_text_alpha`, which on either palette fades further than these UIs can
+    // afford — both themes deliberately keep their dim text close to the primary one.
+    v.weak_text_color = Some(dim);
+}
+
+/// Black or white, whichever is legible on `bg`.
+///
+/// Used for the text of *selected* widgets, whose colour egui takes from
+/// `visuals.selection.stroke` — the accent is user-configurable, so the pairing can't be
+/// hardcoded. Rec. 601 luma, which tracks perceived brightness closely enough for a
+/// two-way choice.
+fn contrasting_text(bg: Color32) -> Color32 {
+    let luma = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    if luma > 140.0 {
+        Color32::from_rgb(16, 16, 16)
+    } else {
+        Color32::from_rgb(244, 244, 246)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The accent is user-configurable, so the *selected* ink has to be derived from it — a
+    /// dark accent needs a light glyph and a pale one a dark glyph. Getting this backwards
+    /// is invisible in code review and glaring on screen (a black glyph on a dark plate).
+    #[test]
+    fn selected_ink_contrasts_with_the_accent() {
+        for dark in [
+            Color32::from_rgb(54, 96, 167),  // the default blue accent
+            Color32::from_rgb(94, 94, 94),   // Purogrey's selection grey
+            Color32::BLACK,
+        ] {
+            assert!(contrasting_text(dark).r() > 200, "{dark:?} needs light ink");
+        }
+        for pale in [
+            Color32::from_rgb(255, 214, 10), // amber
+            Color32::from_rgb(160, 220, 160),
+            Color32::WHITE,
+        ] {
+            assert!(contrasting_text(pale).r() < 60, "{pale:?} needs dark ink");
+        }
+    }
+}

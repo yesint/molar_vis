@@ -260,8 +260,12 @@ fn trigger_download(name: &str, bytes: &[u8]) {
 
 /// Frames to let the UI settle before asking for the screenshot: panels lay out over the
 /// first couple of frames (fonts, `Popup`/`Window` sizing, the deferred debug presets).
+///
+/// It has to cover egui's `Area` **fade-in** too, which is a function of *wall time* (~0.15 s),
+/// not of frames: at a few ms per frame a handful of frames caught every dialog half
+/// transparent, which reads as a theme bug in a screenshot when it is only an animation.
 #[cfg(not(target_arch = "wasm32"))]
-const UI_CAPTURE_SETTLE_FRAMES: u32 = 4;
+const UI_CAPTURE_SETTLE_FRAMES: u32 = 48;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl App {

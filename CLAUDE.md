@@ -136,8 +136,10 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   the 3D image) to a PNG via `egui::ViewportCommand::Screenshot`, then quit. **Pair with
   `MOLAR_VIS_DEBUG_HIDDEN=1` and egui-panel verification needs no visible window either** — which
   matters because `spectacle -a` grabs whatever window is *active* and has captured the wrong one.
-  Unlike the `App::new` hooks it needs a few real frames (the backend answers the request a frame
-  later), so it can't be combined with `MOLAR_VIS_DEBUG_EXIT=1`; it self-closes when done, so just
+  Unlike the `App::new` hooks it needs real frames (the backend answers the request a frame later,
+  and the capture waits out egui's `Area` **fade-in**, which is a function of wall time — too few
+  frames and every dialog is caught half transparent, which reads as a theme bug), so it can't be
+  combined with `MOLAR_VIS_DEBUG_EXIT=1`; it self-closes when done, so just
   run it under a short `timeout` as a backstop. Implemented in `app/export.rs`
   (`service_debug_ui_capture`, driven at the end of `App::ui`). +
   `MOLAR_VIS_DEBUG_INTERACTIONS=1` (add an `Interactions` rep on mol 0 with a partner rep — mol 1's
@@ -253,8 +255,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and the bold
-  face**, configures both
+- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and both Ubuntu
+  faces** (`install_fonts`: **Ubuntu Regular** at the head of the proportional family — egui's own
+  default is Ubuntu-*Light*, too thin at this type scale — plus Ubuntu Bold as its own family, see
+  below), configures both
   the dark and light styles — **both custom high-contrast** (egui's built-in light visuals are
   mid-grey text on near-white, unreadable for a dense rep list, so the light palette is taken from
   the **Purogrey** KDE colour scheme's own `[Colors:*]` groups: a mid-grey 198 window carrying
@@ -265,18 +269,31 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   **Bold text needs its own font** (`BOLD_FAMILY` / `theme::bold(size)` → `FontFamily::Name("bold")`,
   used via `widgets::bold_name`): egui bundles **no bold face** — only `Ubuntu-Light` — and
   `RichText::strong()` merely swaps in a brighter colour, so nothing settable through egui's text API
-  renders bold. `install_bold` embeds **Ubuntu Bold**, i.e. the base font's *own* bold sibling — a
+  renders bold. `install_fonts` embeds **Ubuntu Bold**, i.e. the base font's *own* bold sibling — a
   bold face from any other family (DejaVu, or the desktop's UI font) reads as a second **typeface**
-  rather than as emphasis, which is the trap here. Subset to Latin-1 + ~30 typographic/scientific
-  characters: **17 kB** against the stock 324 kB (`assets/subset-bold-font.sh`, needs
+  rather than as emphasis, which is the trap here. Both faces are subset to Latin-1 + ~30
+  typographic/scientific characters: **~18 kB** each against the stock 324 kB (`assets/subset-fonts.sh`, needs
   `pip install fonttools` — a build-time step; only the `.ttf` ships). UFL 1.0, the same licence as
-  the Ubuntu-Light egui already bundles (`assets/Ubuntu-Bold-UFL.txt`). The family lists the
+  the Ubuntu-Light egui already bundles (`assets/Ubuntu-UFL.txt`). The family lists the
   proportional fonts after it, so an emoji or a glyph the subset lacks falls back to the regular face
   instead of a missing-glyph box. Embedded rather than looked up, so it needs no availability check
   and behaves identically on native and wasm — an unbound `FontFamily::Name` would make egui panic.
   (Rejected: **faux bold** by double-drawing the glyphs — a hack; and the **system UI font** — on
   Linux the desktop's choice is not in fontconfig's generic alias, so honouring it meant either
   per-DE config parsing or an XDG-portal D-Bus call, far too much machinery for one font weight.)
+  **Text colours go through `set_text_colors(v, text, dim)`**, never `override_text_color` — see the
+  gotcha in *Conventions*; `weak_text_color` is set explicitly too, since egui's derived
+  `text × weak_text_alpha` fades secondary labels further than this UI can afford. Two light-palette
+  levers exist only because a grey window has no free contrast: `widgets.inactive.bg_fill` is
+  Purogrey's bright **View** shade (indicator interiors — a checkbox box, a **slider rail**, which
+  painted in the button shade was invisible on the 207 window it sat on) while `weak_bg_fill` stays
+  the button face; and `inactive.bg_stroke` is a resting **outline** (`LIGHT_BORDER`), because a 207
+  button on a 207 window has no silhouette of its own — note egui's light preset leaves that stroke
+  at **width 0**, so the whole `Stroke` has to be replaced, not just its `.color`. `window_shadow` /
+  `popup_shadow` are several times deeper than egui's ~10 % black, which vanished against either
+  palette. The viewport background follows the theme (`Background::for_theme`, applied by
+  `App::follow_theme_background`, which replaces only the *preset* backgrounds so a custom one
+  survives a theme switch).
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
   `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
@@ -1057,9 +1074,18 @@ molar 2.0/2.1 flipped `Topology` to **struct-of-arrays** storage. The consequenc
   `immediate_size` (replaces `push_constant_ranges`); `multiview_mask: Option<NonZero<u32>>`;
   `DepthStencilState { depth_write_enabled: Option<bool>, depth_compare: Option<_> }`;
   `RenderPassColorAttachment.depth_slice`; `RenderPassDescriptor.multiview_mask`.
-- The theme sets `visuals.override_text_color`, so **frameless buttons show no hover
-  feedback** — use `selectable_label` (frameless-resting, highlights on hover) or framed
-  widgets for clickable icons.
+- **Never set `visuals.override_text_color`** (the theme used to, and it was a trap): it forces one
+  colour on *all* widget text — including a **selected** widget's, whose colour egui otherwise takes
+  from `visuals.selection.stroke`. A toggle painted with the selection plate then kept the panel's
+  ink and came out **black-glyph-on-dark-plate** in the light theme. `theme::set_text_colors` sets
+  the five per-state `fg_stroke`s instead. Both palettes give every *resting* state the same ink,
+  so **frameless buttons still show no text hover feedback** — use `selectable_label` (frameless at
+  rest, highlights its background on hover) or a framed widget for a clickable icon.
+- A widget you paint yourself must take its ink from `Style::interact_selectable(&resp, active)`
+  (`vis.text_color()`), **not** `ui.visuals().text_color()` — the latter is the panel's ink and is
+  wrong the moment the widget paints a selection plate behind it (`widgets::overlay_button`,
+  `draw::bond_order_icon`). Lay the galley out with `Color32::PLACEHOLDER` and pass the real colour
+  to `Painter::galley`, since the state isn't known until the `Response` exists.
 - Icons: `egui_phosphor::regular::{EYE, EYE_SLASH, TRASH, COPY, PLUS, PERSPECTIVE, CUBE}`;
   the font is installed in `theme::apply` via `egui_phosphor::add_to_fonts`.
 - **Wayland IME workaround** (`defuse_broken_ime` at the top of `App::ui`, Linux-gated):
@@ -1115,10 +1141,8 @@ next frame). The menus —
 
 Then one **molecule row** each:
 expand-caret + **name** (**bold** via `widgets::bold_name` — the embedded Ubuntu Bold; see
-`theme.rs`; a group's *shown* member is additionally underlined). ⚠ **egui cannot render bold here**: its default fonts are
-Ubuntu-*Light* + Hack with **no bold face**, and `strong()` only swaps in a brighter colour. Real
-bold needs a bold TTF embedded and registered as a font family — see the note in ROADMAP.md (the atom/frame counts are no longer shown inline — they're a **hover
-tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
+`theme.rs`; a group's *shown* member is additionally underlined) (the atom/frame counts are no
+longer shown inline — they're a **hover tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
 `Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old
 standalone trash/box buttons): **Save molecule…** (`FLOPPY_DISK` → `save_molecule`, native),
@@ -1241,7 +1265,10 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   underline, others weak/clickable), reused by every tabbed UI (rep settings, the delete-frames
   dialog, …) so they stay consistent. Style and color are **icon+text** buttons built by the shared
   `picker_button(label, draw_icon)` helper (drawn glyph + label + caret → `egui::Popup::menu`
-  of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` draws each
+  of icon+label rows). `paint_style_icon` draws each `RepKind`; `paint_color_icon` (which takes the panel's
+  `ink` colour, since the **molecular** colours it depicts are fixed but a pale one — carbon grey,
+  the charge ramp's white centre — dissolves into a light panel without the ink-derived hairline it
+  outlines every swatch with) draws each
   `ColorMethod` (Element = CPK dots, Chain = interlocking colored links, ResID =
   backbone-with-residues diagram, ResName = "ALA" on rainbow, Index = "123" colored digits,
   Beta = "B" on rainbow, **Solid = a filled swatch of the chosen color**). The `Solid` row is a

@@ -414,7 +414,8 @@ impl App {
             vis.weak_bg_fill
         };
         ui.painter().rect_filled(rect, 4.0, fill);
-        let col = ui.visuals().text_color();
+        // The selection plate is dark, so the lines follow the *selected* ink colour too.
+        let col = vis.text_color();
         let c = rect.center();
         let half_w = 7.0;
         let spacing = 4.0;

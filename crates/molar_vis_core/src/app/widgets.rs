@@ -95,8 +95,13 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
     const H: f32 = 26.0;
     const R: f32 = 4.0;
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let txt = ui.visuals().text_color();
-    let galley = ui.painter().layout_no_wrap(content.to_owned(), font, txt);
+    // Laid out with `PLACEHOLDER`, which `Painter::galley` fills in from the colour passed
+    // below — the ink colour isn't known yet (it depends on the button's own state, which
+    // needs its `Response`), and an *active* button must take it from the selection rather
+    // than the panel, or its glyph sits unreadably on the selection plate.
+    let galley = ui
+        .painter()
+        .layout_no_wrap(content.to_owned(), font, egui::Color32::PLACEHOLDER);
     let w = (galley.size().x + 14.0).max(H);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, H), egui::Sense::click());
     let vis = ui.style().interact_selectable(&resp, active);
@@ -114,7 +119,7 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
     // font's per-glyph vertical metrics.
     let ink = galley.mesh_bounds;
     ui.painter()
-        .galley(rect.center() - ink.center().to_vec2(), galley, txt);
+        .galley(rect.center() - ink.center().to_vec2(), galley, vis.text_color());
     resp
 }
 

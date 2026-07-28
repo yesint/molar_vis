@@ -141,13 +141,26 @@ pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) -> Optio
     cloned_old
 }
 
-/// Draw a small icon depicting a color scheme into `rect` (uses the scheme's own
-/// colors, so unlike the style icons it is not theme-tinted).
-pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMethod) {
+/// Draw a small icon depicting a color scheme into `rect`.
+///
+/// The **molecular** colours a scheme depicts (CPK elements, the rainbow and charge ramps) are
+/// fixed — they're what the 3D view paints, so the icon must show them verbatim. What adapts to
+/// the theme is everything *around* them: `ink` is the panel's text colour, from which the
+/// icons' structural strokes (the ResId backbone) and the hairline that outlines each filled
+/// swatch are derived. That hairline is what keeps a pale colour (carbon grey, the charge ramp's
+/// white centre) from dissolving into a light panel, and a dark one from dissolving into a dark
+/// panel, without repainting the chemistry.
+pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMethod, ink: egui::Color32) {
     use crate::color;
     use egui::{pos2, Color32, Stroke};
     let rgb3 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let rgb4 = |c: [u8; 4]| Color32::from_rgb(c[0], c[1], c[2]);
+    // A hairline in the panel's own ink, faint enough to read as an edge and not as a drawn
+    // outline. `gamma_multiply` fades toward transparent, so it blends with whatever is behind.
+    let hair = Stroke::new(1.0_f32, ink.gamma_multiply(0.5));
+    let outline_circle = |c: egui::Pos2, r: f32| painter.circle_stroke(c, r, hair);
+    let outline_rect =
+        |r: egui::Rect, rounding: f32| painter.rect_stroke(r, rounding, hair, egui::StrokeKind::Inside);
     // Fill `rect` with a rainbow gradient (background for text-on-rainbow icons).
     let rainbow_bg = || {
         let n = 14usize;
@@ -161,6 +174,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
                 Color32::from_rgb(c[0], c[1], c[2]),
             );
         }
+        painter.rect_stroke(rect, 0.0, hair, egui::StrokeKind::Inside);
     };
 
     match method {
@@ -170,7 +184,9 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             let y = rect.center().y;
             let w = rect.width();
             for (k, an) in [0.22_f32, 0.5, 0.78].iter().zip([6u8, 8, 7]) {
-                painter.circle_filled(pos2(rect.left() + k * w, y), r, rgb4(color::element_color(an)));
+                let c = pos2(rect.left() + k * w, y);
+                painter.circle_filled(c, r, rgb4(color::element_color(an)));
+                outline_circle(c, r);
             }
         }
         ColorMethod::Chain => {
@@ -187,7 +203,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
         ColorMethod::ResId => {
             // A backbone (horizontal line) with two residues hanging off it: one
             // up-left, one down-right, each a different color (color-by-residue).
-            let line = Stroke::new(1.5_f32, Color32::from_gray(180));
+            let line = Stroke::new(1.5_f32, ink.gamma_multiply(0.85));
             let mid = rect.center().y;
             painter.line_segment(
                 [pos2(rect.left() + 2.0, mid), pos2(rect.right() - 2.0, mid)],
@@ -197,10 +213,12 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             let top = rect.top() + 2.5;
             painter.line_segment([pos2(x1, mid), pos2(x1, top)], line);
             painter.circle_filled(pos2(x1, top), 2.6, rgb3(color::PALETTE[0]));
+            outline_circle(pos2(x1, top), 2.6);
             let x2 = rect.left() + rect.width() * 0.67;
             let bot = rect.bottom() - 2.5;
             painter.line_segment([pos2(x2, mid), pos2(x2, bot)], line);
             painter.circle_filled(pos2(x2, bot), 2.6, rgb3(color::PALETTE[3]));
+            outline_circle(pos2(x2, bot), 2.6);
         }
         ColorMethod::ResName => {
             // "ALA" on a rainbow background.
@@ -258,7 +276,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             painter.add(egui::Shape::convex_polygon(
                 head,
                 Color32::from_rgb(255, 200, 40),
-                Stroke::NONE,
+                hair,
             ));
         }
         ColorMethod::Charge => {
@@ -276,6 +294,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
                     rgb4(color::charge_ramp(t)),
                 );
             }
+            outline_rect(bar, 0.0);
             let font = egui::FontId::proportional(10.0);
             painter.text(
                 pos2(bar.left() + 3.0, bar.center().y),
@@ -296,12 +315,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             // A filled swatch of the chosen color, with a subtle border.
             let sw = rect.shrink(2.0);
             painter.rect_filled(sw, 2.0, rgb4(c));
-            painter.rect_stroke(
-                sw,
-                2.0,
-                Stroke::new(1.0_f32, Color32::from_gray(90)),
-                egui::StrokeKind::Inside,
-            );
+            outline_rect(sw, 2.0);
         }
     }
 }
@@ -317,7 +331,7 @@ pub(super) fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: boo
     }
     let icon_rect =
         egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
-    paint_color_icon(ui.painter(), icon_rect, method);
+    paint_color_icon(ui.painter(), icon_rect, method, ui.visuals().text_color());
     ui.painter().text(
         egui::pos2(icon_rect.right() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -394,7 +408,8 @@ pub(super) fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     use egui::containers::menu::{MenuConfig, SubMenu};
     let method = rep.color;
     let lw = max_label_width(ui, ColorMethod::ALL.iter().map(|&m| m.label()));
-    let resp = picker_button(ui, method.label(), lw, |p, r| paint_color_icon(p, r, method));
+    let ink = ui.visuals().text_color();
+    let resp = picker_button(ui, method.label(), lw, |p, r| paint_color_icon(p, r, method, ink));
 
     egui::Popup::menu(&resp).show(|ui| {
         // The built-in per-atom schemes: pick one and close.
