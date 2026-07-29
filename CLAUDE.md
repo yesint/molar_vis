@@ -186,8 +186,8 @@ molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
 `espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
 ~600 kB ONNX model and pulls `tract`),
-**egui-stylesheet 0.1** (the theme sheets — a **path dep on the sibling repo** `../egui-stylesheet`,
-outside this workspace; it pulls `toml` and turns on egui's `serde` feature),
+**egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
+`../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature),
 rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
 features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
 **`molar_vis_py` only** (native Python module, M26):
@@ -195,10 +195,11 @@ pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings)
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
 **Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
-`[patch]`). `Cargo.lock` pins the resolved git revisions. ⚠ **One exception right now**:
-`egui-stylesheet` is a **path** dep on `../egui-stylesheet`, so a clone of this repo alone does not
-build. Give that crate a home (its own GitHub repo, or crates.io) and switch the workspace dep to a
-git rev / version — the same arrangement `molar` has — to restore that. To develop molar/powersasa
+`[patch]`). `Cargo.lock` pins the resolved git revisions. **`egui-stylesheet`** is a plain
+**crates.io** dep (`"0.1"`) — it's published, repo `github.com/yesint/egui-stylesheet`, local
+checkout at `../egui-stylesheet`. To develop it alongside molar_vis, temporarily add a
+`[patch.crates-io] egui-stylesheet = { path = "../egui-stylesheet" }` — but don't commit it; release
+a new version and bump the requirement here instead. To develop molar/powersasa
 locally, temporarily add a `[patch."…powersasa-llm.git"] powersasa = { path = "…" }`
 and/or point `molar` at a local path — but don't commit those. **The user's local molar
 checkout is at `../molar`** (i.e. `/home/semen/work/Projects/molar`; a git clone of
@@ -260,8 +261,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- **`egui-stylesheet`** (`../egui-stylesheet`, a **sibling crate, deliberately not a workspace
-  member**) — builds an `egui::Style` from a TOML **style sheet**: a `parent` egui preset
+- **`egui-stylesheet`** (**published crate**, `crates.io/crates/egui-stylesheet`, repo
+  `github.com/yesint/egui-stylesheet`; local checkout at `../egui-stylesheet`, deliberately *not* a
+  workspace member) — builds an `egui::Style` from a TOML **style sheet**: a `parent` egui preset
   (`dark`/`light`) plus only the fields that change. Extracted from this project once it stopped
   being molecule-specific; it has its own git repo, tests (6 + a doc test) and README (which
   documents the format), and is publishable as-is. How it works: serialize the parent `Visuals` to

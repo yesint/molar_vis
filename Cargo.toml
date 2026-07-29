@@ -24,10 +24,14 @@ bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The theme sheets (`crates/molar_vis_core/themes/*.toml`) are read by this crate, kept **outside**
-# this workspace so it stays a general-purpose egui utility (and can be published on its own).
-# A path dep for now — point it at a git rev the way `molar` is once it has a home.
-egui-stylesheet = { path = "../egui-stylesheet" }
+# The theme sheets (`crates/molar_vis_core/themes/*.toml`) are read by this crate: a general-purpose
+# egui utility that lives outside this workspace (repo: github.com/yesint/egui-stylesheet), so it can
+# be reused on its own. Published to crates.io, so this is a plain registry dep. To develop the two
+# together, temporarily add
+#   [patch.crates-io]
+#   egui-stylesheet = { path = "../egui-stylesheet" }
+# and don't commit it.
+egui-stylesheet = "0.1"
 # molar (default features => Float = f32), from GitHub so the crate is installable
 # without a local sibling checkout. molar pulls its own powersasa git dependency.
 # Pinned to **molar 2.1** (rev 8f66104): struct-of-arrays `AtomStorage`/`BondStorage`
