@@ -30,8 +30,6 @@ mod secstruct;
 mod session;
 mod settings;
 mod spatial;
-/// Reusable, app-independent: build an `egui::Style` from a TOML style sheet.
-pub mod style_sheet;
 mod suggest;
 mod theme;
 mod trajectory;

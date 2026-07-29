@@ -10,7 +10,7 @@ authors = ["Semen Yesylevskyy"]
 repository = "https://github.com/yesint/molar_vis"
 
 [workspace.dependencies]
-egui = { version = "0.34", features = ["serde"] }
+egui = "0.34"
 eframe = { version = "0.34", default-features = false, features = [
     "wgpu",
     "default_fonts",
@@ -24,7 +24,10 @@ bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+# The theme sheets (`crates/molar_vis_core/themes/*.toml`) are read by this crate, kept **outside**
+# this workspace so it stays a general-purpose egui utility (and can be published on its own).
+# A path dep for now — point it at a git rev the way `molar` is once it has a home.
+egui-stylesheet = { path = "../egui-stylesheet" }
 # molar (default features => Float = f32), from GitHub so the crate is installable
 # without a local sibling checkout. molar pulls its own powersasa git dependency.
 # Pinned to **molar 2.1** (rev 8f66104): struct-of-arrays `AtomStorage`/`BondStorage`

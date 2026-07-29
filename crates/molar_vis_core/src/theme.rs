@@ -3,7 +3,7 @@
 //!
 //! The styling itself is data — `themes/dark.toml` and `themes/light.toml`, each a parent egui
 //! preset plus overrides, `include_str!`d into the binary and applied by the app-independent
-//! [`crate::style_sheet`] module. This file is only the glue: which sheet is which, the fonts
+//! [`egui_stylesheet`] crate. This file is only the glue: which sheet is which, the fonts
 //! (which are not part of `Style`), the user's accent from [`AppearanceSettings`], and the handful
 //! of colors egui has no field for (see [`Extras`]).
 //!
@@ -17,7 +17,7 @@ use eframe::egui;
 use egui::Color32;
 
 use crate::settings::{AppearanceSettings, ThemeMode};
-use crate::style_sheet::{self, StyleSheet};
+use egui_stylesheet::{self as style_sheet, StyleSheet};
 
 /// Apply the molar_vis look. Call at startup and whenever the appearance settings
 /// change (it's idempotent and cheap).

@@ -179,14 +179,15 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 ## Tech stack (working versions)
 
-eframe / egui (with the **`serde`** feature, for the TOML style sheets) / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
+eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
 molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 `default-features=false` → `Float=f32`; pulls `powersasa` transitively from git; **edition 2024,
 MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
 `espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
 ~600 kB ONNX model and pulls `tract`),
-toml **0.9** (`parse`+`serde`, no `write`: reading the embedded theme sheets),
+**egui-stylesheet 0.1** (the theme sheets — a **path dep on the sibling repo** `../egui-stylesheet`,
+outside this workspace; it pulls `toml` and turns on egui's `serde` feature),
 rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
 features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
 **`molar_vis_py` only** (native Python module, M26):
@@ -194,7 +195,10 @@ pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings)
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
 **Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
-`[patch]`). `Cargo.lock` pins the resolved git revisions. To develop molar/powersasa
+`[patch]`). `Cargo.lock` pins the resolved git revisions. ⚠ **One exception right now**:
+`egui-stylesheet` is a **path** dep on `../egui-stylesheet`, so a clone of this repo alone does not
+build. Give that crate a home (its own GitHub repo, or crates.io) and switch the workspace dep to a
+git rev / version — the same arrangement `molar` has — to restore that. To develop molar/powersasa
 locally, temporarily add a `[patch."…powersasa-llm.git"] powersasa = { path = "…" }`
 and/or point `molar` at a local path — but don't commit those. **The user's local molar
 checkout is at `../molar`** (i.e. `/home/semen/work/Projects/molar`; a git clone of
@@ -256,29 +260,28 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- `style_sheet.rs` — **reusable, app-independent**: builds an `egui::Style` from a small TOML
-  **style sheet** — a `parent` egui preset (`dark`/`light`) plus only the fields that change. `pub mod`
-  so it can be lifted into another egui app (or its own crate) unchanged; its deps are egui (with the
-  **`serde` feature**, newly enabled), `serde_json` and `toml`. How it works: serialize the parent
-  `Visuals` to JSON, deep-merge the sheet's `[visuals]` table, deserialize back — so **every** egui
-  field is settable by its own name with no per-field dispatcher to maintain, and fields egui *adds*
-  keep their new defaults instead of being frozen. JSON (not TOML) is the merge medium because
-  `Visuals` has `Option` fields and TOML cannot represent `None`. Sheet sections: `[palette]` (named
-  colours, referenced as `"$name"`), `[visuals]` (egui field paths verbatim, dotted or as
-  sub-tables), `[text]` (sugar: `normal`/`dim` → the five per-state `fg_stroke`s + `weak_text_color`),
-  `[metrics]` (the `Style` knobs outside `Visuals` — type scale, `item_spacing`, `button_padding`),
-  `[extras]` (colours egui has **no field** for; the host app names them). Values are `#rgb`,
-  `#rrggbb`, `#rrggbbaa` (**premultiplied** on the way in, as `Color32` requires), `"$name"`, or a raw
-  `[r,g,b,a]`. A **misspelled field path is an error**, not a silent no-op (serde ignores unknown
-  fields, so every override is checked against the parent's shape first) — the one failure mode a
-  hand-edited file can't be allowed to have. `apply` **assigns** the parent + overrides rather than
-  merging into the live visuals, so it's idempotent. Also exports the two generic helpers
-  `set_text_colors` and `contrasting_text`. 6 unit tests (overrides land / parent shows through /
-  idempotent / typos, bad colours and wrong shapes all rejected). **Prior art was searched**: the
-  file-based crates (`egui-theme`, `egui-thematic`, `egui-stylist`) store a *full* `Style` dump, are
-  editor-centric, and lag egui by 1–15 versions; the palette crates (`catppuccin-egui`,
-  `egui-themes`, `egui-aesthetix`) define themes in code. None does parent + partial overrides from a
-  file, hence this ~450-line module.
+- **`egui-stylesheet`** (`../egui-stylesheet`, a **sibling crate, deliberately not a workspace
+  member**) — builds an `egui::Style` from a TOML **style sheet**: a `parent` egui preset
+  (`dark`/`light`) plus only the fields that change. Extracted from this project once it stopped
+  being molecule-specific; it has its own git repo, tests (6 + a doc test) and README (which
+  documents the format), and is publishable as-is. How it works: serialize the parent `Visuals` to
+  JSON, deep-merge the sheet's `[visuals]` table, deserialize back — so **every** egui field is
+  settable by its own name with no per-field dispatcher to maintain, and fields egui *adds* keep
+  their new defaults instead of being frozen. JSON (not TOML) is the merge medium because `Visuals`
+  has `Option` fields and TOML cannot represent `None`. Sheet sections: `[palette]` (named colours,
+  referenced as `"$name"`), `[visuals]` (egui field paths verbatim, dotted or as sub-tables),
+  `[text]` (sugar: `normal`/`dim` → the five per-state `fg_stroke`s + `weak_text_color`),
+  `[metrics]` (the `Style` knobs outside `Visuals`), `[extras]` (colours egui has **no field** for;
+  the host app names them). Values are `#rgb`, `#rrggbb`, `#rrggbbaa` (**premultiplied**, as
+  `Color32` requires), `"$name"`, or a raw `[r,g,b,a]`. A **misspelled field path is an error**, not
+  a silent no-op (serde ignores unknown fields, so every override is checked against the parent's
+  shape first) — the one failure mode a hand-edited file can't be allowed to have. `apply`
+  **assigns** the parent + overrides rather than merging into the live visuals, so it's idempotent.
+  Also exports `set_text_colors` and `contrasting_text`. It requires egui's **`serde`** feature,
+  which it enables itself. **Prior art was searched**: the file-based crates (`egui-theme`,
+  `egui-thematic`, `egui-stylist`) store a *full* `Style` dump, are editor-centric, and lag egui by
+  1–15 versions; the palette crates (`catppuccin-egui`, `egui-themes`, `egui-aesthetix`) define
+  themes in code. None does parent + partial overrides from a file.
 - `themes/dark.toml`, `themes/light.toml` — **the app's actual theming, as data**: `include_str!`d
   into the binary (so no runtime file IO, and a `LazyLock` parses each once — tens of µs), applied by
   `style_sheet`. Everything that used to be a `const` in `theme.rs` lives here, with the reasoning

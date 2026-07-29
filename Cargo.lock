@@ -1072,6 +1072,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-stylesheet"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.34.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2432,6 +2441,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-phosphor",
+ "egui-stylesheet",
  "egui-wgpu",
  "getrandom 0.3.4",
  "glam 0.32.1",
@@ -2444,7 +2454,6 @@ dependencies = [
  "rhai",
  "serde",
  "serde_json",
- "toml",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
