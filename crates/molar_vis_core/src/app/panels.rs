@@ -739,7 +739,11 @@ impl App {
                 }
                 open = mol.reps_open;
             }
-            if open {
+            // `draw_reps_for` also draws any pending selection, so "has content" is either —
+            // and an empty indent would leave a dangling guide line (see `draw_group_entry`).
+            let has_rows =
+                !self.scene.molecules[i].reps.is_empty() || self.scene.molecules[i].pending.is_some();
+            if open && has_rows {
                 let len = self.scene.molecules[i].reps.len();
                 ui.indent(egui::Id::new(("reps", i)), |ui| {
                     view_dirty |= self.draw_reps_for(ui, i, 0, len, false);
@@ -967,7 +971,9 @@ impl App {
         // two expanders and isn't drawn at all until the member has own reps. Outside the
         // `expanded` block on purpose: a captured selection has to be actionable without
         // first unfolding the group. See `App::draw_pending_block`.
-        if let Some(mi) = cur_mi {
+        // Entered only when there *is* one: an empty `ui.indent` still paints its indent guide, so
+        // the block showed up as a stray short dash under the cycle bar with nothing beside it.
+        if let Some(mi) = cur_mi.filter(|&mi| self.scene.molecules[mi].pending.is_some()) {
             ui.indent(egui::Id::new(("grouppending", gid)), |ui| {
                 view_dirty |= self.draw_pending_block(ui, mi);
             });
@@ -977,7 +983,8 @@ impl App {
         // sub-expander (each opens/closes independently).
         if expanded {
             // Shared reps: the shown member's prefix, drawn under the group header.
-            if let Some(mi) = cur_mi {
+            // Again only when non-empty (a group whose shared reps were all deleted) — see above.
+            if let Some(mi) = cur_mi.filter(|&mi| self.scene.molecules[mi].n_shared > 0) {
                 let n_shared = self.scene.molecules[mi].n_shared;
                 ui.indent(egui::Id::new(("shared", gid)), |ui| {
                     view_dirty |= self.draw_reps_for(ui, mi, 0, n_shared, true);
