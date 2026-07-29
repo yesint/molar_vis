@@ -1,0 +1,57 @@
+# molar_vis — dark theme.
+#
+# A style sheet: egui's own `dark` preset plus the overrides below (see `src/style_sheet.rs` for
+# the format). Embedded in the binary with `include_str!`, so editing it needs a rebuild; a
+# user-supplied file would be read the same way.
+
+name = "molar_vis dark"
+parent = "dark"
+
+[palette]
+panel = "#141519"      # the left panel and the menu bar
+window = "#1c1d22"     # floating windows and dialogs
+field = "#2c2d34"      # text fields — the *brightest* surface, see below
+text = "#eeeef2"
+text_dim = "#b8bac2"
+# The selection plate is the user's accent color (Settings ▸ Appearance), applied by the app
+# over whatever this file sets, together with an ink color measured against it.
+
+[visuals]
+panel_fill = "$panel"
+window_fill = "$window"
+# egui's dark preset sinks text fields *below* the panel (a "well"), which against a near-black
+# panel left the rep selection field indistinguishable from its background. They are the brightest
+# surface instead — the same relationship the light sheet has (field 235 over a 207 window), so a
+# field reads as a field in both themes.
+extreme_bg_color = "$field"
+# Shadows: egui's default is ~10% black, which has nothing to darken against a near-black panel
+# (measured 20 → 8) and *nothing at all* against the dark 3-D viewport, which is where a floating
+# window actually sits. So on dark they are **light** — a soft white bloom — kept offset downward
+# so they still read as elevation rather than as a selection glow.
+window_shadow = { offset = [6, 12], blur = 36, spread = 3, color = "#ffffff36" }
+popup_shadow = { offset = [3, 7], blur = 24, spread = 2, color = "#ffffff2c" }
+
+[text]
+normal = "$text"
+dim = "$text_dim"
+
+[metrics]
+heading = 24.0
+body = 17.0
+button = 17.0
+monospace = 15.0
+small = 13.5
+item_spacing = [8.0, 7.0]
+button_padding = [8.0, 4.0]
+
+[extras]
+# Colors egui has no field for. It models only `warn_fg_color` and `error_fg_color`; an
+# affirmative green (the pending selection's accept ✓) has to be named here.
+ok = "#78dc78"
+# The selection glow drawn *in the 3-D scene* (GPU) and the cues egui draws over it — the hover
+# ring, the lasso polygon, the draw-mode rubber band. Which one applies follows the **viewport
+# background**, not this theme: a bright cyan reads on a dark backdrop and vanishes on a white one,
+# which takes a gold instead (a highlighter on paper). Both are listed in both sheets so either
+# theme can be used with either background.
+glow_on_dark_bg = "#82d7ff"
+glow_on_light_bg = "#e6aa00"

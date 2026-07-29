@@ -8,7 +8,7 @@ use super::pickers::*;
 /// selection is valid but matched **zero atoms** (molar's "empty" error, surfaced
 /// as a non-destructive warning — the text stays editable).
 pub(super) fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
-    let red = crate::theme::danger_color(ui.visuals());
+    let red = ui.visuals().error_fg_color;
     let painter = ui.painter();
     painter.rect_stroke(
         rect,
@@ -45,7 +45,7 @@ pub(super) fn sel_text_edit(
     width: f32,
     error_span: Option<std::ops::Range<usize>>,
 ) -> egui::Response {
-    let red = crate::theme::danger_color(ui.visuals());
+    let red = ui.visuals().error_fg_color;
     let fmt = |font_id: egui::FontId, color: egui::Color32| egui::text::TextFormat {
         font_id,
         color,
@@ -270,7 +270,7 @@ impl App {
                     .selectable_label(
                         false,
                         egui::RichText::new(icon::CHECK)
-                            .color(crate::theme::ok_color(ui.visuals())),
+                            .color(crate::theme::ok_color(ui)),
                     )
                     .on_hover_text("Accept as a representation")
                     .clicked()
@@ -454,7 +454,7 @@ pub(super) fn draw_color_tab(
         // The advice is multi-line (see `charges::explain`), so let it wrap.
         ui.add(
             egui::Label::new(
-                egui::RichText::new(msg).color(crate::theme::danger_color(ui.visuals())),
+                egui::RichText::new(msg).color(ui.visuals().error_fg_color),
             )
             .wrap(),
         );
@@ -965,7 +965,7 @@ impl App {
                     if let Some(err) = &rep.sel_error {
                         ui.horizontal(|ui| {
                             ui.add_space(row2_indent);
-                            let red = crate::theme::danger_color(ui.visuals());
+                            let red = ui.visuals().error_fg_color;
                             ui.colored_label(red, err);
                         });
                     }
@@ -1158,7 +1158,7 @@ impl App {
                         .selectable_label(
                             false,
                             egui::RichText::new(icon::CHECK)
-                                .color(crate::theme::ok_color(ui.visuals())),
+                                .color(crate::theme::ok_color(ui)),
                         )
                         .on_hover_text("Accept as a representation");
                     if accept.clicked() {

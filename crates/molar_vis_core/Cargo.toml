@@ -29,6 +29,7 @@ rhai = { workspace = true, optional = true }
 egui-phosphor = "0.12.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 # Pure-Rust PNG encode for "Save image" (offscreen render → file/download). Lean
 # feature set (png only) keeps the wasm bundle small; `imageops` rides along for the
 # SSAA→output downsample. Works on native + wasm.

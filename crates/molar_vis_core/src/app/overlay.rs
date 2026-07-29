@@ -5,15 +5,15 @@ use super::*;
 /// The glow ring shared by hover-picking and the active-selection highlight: a faint thick halo
 /// fading inward to a bright thin core, centered at `center` with core pixel radius `rpx`.
 ///
-/// `bg` supplies the color, which has to follow the backdrop — the bright cyan this used to
-/// hardcode is nearly invisible on a white viewport.
+/// `color` comes from [`crate::theme::glow_color`] — the same value the 3-D glow is drawn in, so
+/// the ring and the geometry it circles agree, on any backdrop.
 pub(super) fn draw_glow_ring(
     painter: &egui::Painter,
     center: egui::Pos2,
     rpx: f32,
-    bg: &crate::camera::Background,
+    color: egui::Color32,
 ) {
-    let glow = |a: u8| bg.highlight_alpha(a);
+    let glow = |a: u8| egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a);
     painter.circle_stroke(center, rpx + 4.0, egui::Stroke::new(6.0_f32, glow(35)));
     painter.circle_stroke(center, rpx + 1.5, egui::Stroke::new(3.0_f32, glow(95)));
     painter.circle_stroke(center, rpx, egui::Stroke::new(1.8_f32, glow(235)));
@@ -53,7 +53,7 @@ pub(super) fn draw_pick_overlay(
         .clamp(3.0, rect.width());
 
     let painter = ui.painter_at(rect);
-    draw_glow_ring(&painter, center, rpx, &camera.background);
+    draw_glow_ring(&painter, center, rpx, crate::theme::glow_color(ui.ctx(), &camera.background));
 
     // Lower-left info box: "name resname resid" / "x, y, z" (real coords, nm).
     draw_info_box(

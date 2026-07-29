@@ -1,0 +1,98 @@
+# molar_vis — light theme.
+#
+# egui's built-in light visuals are far too low-contrast for this UI (mid-grey text on near-white,
+# which makes a dense rep list hard to read), so almost every surface is replaced. The values come
+# from the **Purogrey** KDE color scheme's own `[Colors:*]` groups rather than being eyeballed, so
+# the contrast ratios are the ones that scheme was designed around.
+
+name = "molar_vis light (Purogrey)"
+parent = "light"
+
+[palette]
+window = "#c6c6c6"      # Colors:Window/BackgroundNormal — the panels
+window_alt = "#cfcfcf"  # a lifted shade, for floating windows and faint striping
+view = "#e2e2e2"        # Colors:View/BackgroundNormal — lists, indicators, button faces
+view_alt = "#ebebeb"    # Colors:View/BackgroundAlternate — text fields
+hover = "#eeeeee"       # a step above the resting face
+press = "#f8f8f8"       # a step above that again
+text = "#000000"        # Colors:Window/ForegroundNormal — black, as the scheme specifies
+text_dim = "#303030"    # Colors:Window/ForegroundInactive — still near-black
+line = "#6a6a6a"        # Colors:Window/DecorationHover — separators
+decoration = "#777777"  # Colors:Button/DecorationHover — hover outline
+focus = "#474747"       # Colors:Window/DecorationFocus — pressed outline
+selection_bg = "#5e5e5e" # Colors:Selection/BackgroundNormal — deliberately dark…
+selection_fg = "#f1f1f1" # Colors:Selection/ForegroundNormal — …so near-white ink is unmistakable
+titlebar = "#b8b8b8"    # one shade *below* the window body
+danger = "#aa1e1e"
+
+[visuals]
+panel_fill = "$window"
+window_fill = "$window_alt"
+extreme_bg_color = "$view_alt"
+faint_bg_color = "$window_alt"
+
+# Labels and separators.
+widgets.noninteractive.bg_fill = "$window"
+widgets.noninteractive.weak_bg_fill = "$window"
+widgets.noninteractive.bg_stroke.color = "$line"
+
+# Resting widgets are distinguished by **fill**, never by an outline, and that is a constraint
+# rather than a preference: a resting `bg_stroke` of nonzero width makes buttons that are frameless
+# at rest (`Button::selectable` — every icon toggle in the rep rows, and every menu row) jump 1 px
+# on hover. `Style::button_style` pre-subtracts the stroke width from `inner_margin` so a border
+# doesn't change a *framed* button's size, but the frameless branch drops the stroke and keeps the
+# shrunken margin. Pinned by `theme::tests::hover_does_not_resize_widgets`.
+#
+# Two fills, and the distinction matters on a grey window: `weak_bg_fill` is a button/dropdown
+# **face**, `bg_fill` is an *indicator* interior — a checkbox box, a slider rail. Both take the
+# bright View shade, which is what keeps a rail from vanishing into the 207 dialog it sits on and
+# gives a button a silhouette without a border.
+widgets.inactive.bg_fill = "$view"
+widgets.inactive.weak_bg_fill = "$view"
+
+# Hover/press lift the fill further and firm up the outline (drawn only in these framed states, so
+# it costs no layout), since on a grey panel a fill change alone is easy to miss.
+widgets.hovered.bg_fill = "$hover"
+widgets.hovered.weak_bg_fill = "$hover"
+widgets.hovered.bg_stroke.color = "$decoration"
+widgets.active.bg_fill = "$press"
+widgets.active.weak_bg_fill = "$press"
+widgets.active.bg_stroke.color = "$focus"
+
+widgets.open.bg_fill = "$view"
+# `widgets.open.weak_bg_fill` is also what `Window` paints its **title bar** with, so it has to sit
+# *below* `window_fill` or the bar looks lighter than the dialog it captions. Purogrey's own title
+# bar is dark (WM 87) with light text, but this color doubles as the fill of open dropdowns — whose
+# text is black — so it goes one shade down from the window instead of all the way dark.
+widgets.open.weak_bg_fill = "$titlebar"
+
+# Purogrey's selection: a dark grey plate with near-white text, not the tinted-blue-with-black-text
+# egui defaults to. `selection.stroke` is where egui takes a *selected* widget's text color from.
+selection.bg_fill = "$selection_bg"
+selection.stroke = { width = 1.0, color = "$selection_fg" }
+
+# The salmon red egui uses is fine on black and washes out on grey.
+error_fg_color = "$danger"
+
+window_shadow = { offset = [8, 14], blur = 28, spread = 2, color = "#0000005a" }
+popup_shadow = { offset = [4, 8], blur = 18, spread = 1, color = "#0000004b" }
+
+[text]
+normal = "$text"
+dim = "$text_dim"
+
+[metrics]
+heading = 24.0
+body = 17.0
+button = 17.0
+monospace = 15.0
+small = 13.5
+item_spacing = [8.0, 7.0]
+button_padding = [8.0, 4.0]
+
+[extras]
+# See dark.toml — egui models only warn/error, so the accept ✓'s green is named here. Deep enough
+# to read on the mid-grey window; the pale green that works on black is invisible here.
+ok = "#146e2d"
+glow_on_dark_bg = "#82d7ff"
+glow_on_light_bg = "#e6aa00"

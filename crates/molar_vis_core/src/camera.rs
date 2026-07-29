@@ -163,31 +163,12 @@ impl Background {
     }
 
     /// Whether this backdrop is *light*, i.e. whether a highlight drawn over it has to be dark
-    /// rather than bright. Rec. 601 luma of the fog color (the backdrop, or a gradient's
-    /// midpoint), in the same linear space — and against the same threshold — the shaders'
-    /// `glow_color()` uses, so the GPU glow and the egui-drawn cues agree.
+    /// rather than bright — the input to `theme::glow_color`, which picks the selection-highlight
+    /// color for both the GPU glow and the cues egui draws over the viewport. Rec. 601 luma of the
+    /// fog color (the backdrop, or a gradient's midpoint).
     pub fn is_light(&self) -> bool {
         let c = self.fog_color();
         0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 0.35
-    }
-
-    /// Selection-highlight color for cues drawn *by egui* over the viewport — the hover ring, the
-    /// lasso polygon, the draw-mode rubber band. The CPU twin of the shaders' `glow_color()`
-    /// (`GLOW_DARK_BG` / `GLOW_LIGHT_BG` in sphere.wgsl et al.), and it has to stay in step with
-    /// them: a bright cyan reads on a dark backdrop and vanishes on a white one, which takes a
-    /// **gold** instead — a highlighter on paper.
-    pub fn highlight(&self) -> egui::Color32 {
-        if self.is_light() {
-            egui::Color32::from_rgb(230, 170, 0)
-        } else {
-            egui::Color32::from_rgb(130, 215, 255)
-        }
-    }
-
-    /// [`Self::highlight`] at `alpha`.
-    pub fn highlight_alpha(&self, alpha: u8) -> egui::Color32 {
-        let c = self.highlight();
-        egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
     }
 
     /// Color depth-cue fog fades geometry toward (the solid color, or the

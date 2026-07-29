@@ -26,6 +26,11 @@ pub struct CameraUniform {
     /// the molecule. The weighted-blended OIT shaders normalize each fragment's
     /// eye-space depth across this range so nearer transparent layers dominate.
     pub depth_range: [f32; 4],
+    /// Selection-glow color, rgb + unused. Chosen on the CPU (from the *viewport background*, via
+    /// `theme::glow_color`) rather than in the shaders, so the GPU glow and the cues egui draws
+    /// over the viewport are the same decision made once — they used to be a hardcoded pair on
+    /// each side, which is two places to keep in step.
+    pub glow_color: [f32; 4],
 }
 
 impl CameraUniform {
@@ -39,6 +44,7 @@ impl CameraUniform {
         fog_color: [f32; 4],
         depth_range: [f32; 2],
         glow_pulse: f32,
+        glow_color: [f32; 4],
     ) -> Self {
         Self {
             view: view.to_cols_array_2d(),
@@ -47,6 +53,7 @@ impl CameraUniform {
             cue,
             fog_color,
             depth_range: [depth_range[0], depth_range[1], 0.0, 0.0],
+            glow_color,
         }
     }
 }

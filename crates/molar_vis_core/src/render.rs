@@ -197,7 +197,7 @@ fn oit_targets() -> Vec<Option<wgpu::ColorTargetState>> {
 /// It used to be *additive* (`dst + glow.rgb * glow.a`), which cannot work on a light background:
 /// adding to white leaves white, so the glow vanished exactly where the user needed it. Blending
 /// over works against any backdrop, and the shaders pick the glow color from the background
-/// (`glow_color()`), so a dark backdrop still gets the bright cyan it had.
+/// (`SceneRenderer::set_glow_color`), so a dark backdrop still gets the bright cyan it had.
 fn glow_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
     let over = wgpu::BlendComponent {
         src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -537,6 +537,9 @@ pub struct SceneRenderer {
     ssaa: u32,
     /// Cast-shadow depth-map resolution (square). From the program settings.
     shadow_res: u32,
+    /// Selection-glow color, set by the app from the active theme + viewport background
+    /// ([`set_glow_color`](Self::set_glow_color)); rides the camera uniform into the glow shaders.
+    glow_color: [f32; 4],
 
     camera_bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
@@ -902,6 +905,8 @@ impl SceneRenderer {
             egui_texture,
             ssaa,
             shadow_res,
+            // Overwritten from the theme before the first render; this is the dark-backdrop cyan.
+            glow_color: [0.51, 0.84, 1.0, 1.0],
             camera_bgl,
             camera_buf,
             camera_bind_group,
@@ -1257,15 +1262,18 @@ impl SceneRenderer {
         let viewport = [size_px[0] as f32, size_px[1] as f32];
         // Depth-cue fog fades geometry toward the background color.
         let fog = background.fog_color();
+        let glow = self.glow_color;
         let make_cam = |v: Mat4| {
-            CameraUniform::new(v, proj, perspective, viewport, cue, fog, depth_range, glow_pulse)
+            CameraUniform::new(
+                v, proj, perspective, viewport, cue, fog, depth_range, glow_pulse, glow,
+            )
         };
         // Entry 0 = base camera with the (animated) glow pulse; entry 1 = the same
         // base camera but with a *steady* pulse (1.0), used to draw the hover
         // highlight without it breathing. Periodic-image cameras follow from index 2.
         let mut cameras: Vec<CameraUniform> = vec![
             make_cam(view),
-            CameraUniform::new(view, proj, perspective, viewport, cue, fog, depth_range, 1.0),
+            CameraUniform::new(view, proj, perspective, viewport, cue, fog, depth_range, 1.0, glow),
         ];
         let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
         for mol in &scene.molecules {
@@ -1323,7 +1331,7 @@ impl SceneRenderer {
             // Ortho (perspective = false) so the impostors ray-cast with parallel
             // rays in light space when filling the depth map.
             cameras.push(CameraUniform::new(
-                light_view, light_proj, false, viewport, cue, BG, depth_range, 1.0,
+                light_view, light_proj, false, viewport, cue, BG, depth_range, 1.0, glow,
             ));
             (cameras.len() as u32 - 1, light_proj * light_view * inv_view)
         } else {
@@ -1750,6 +1758,14 @@ impl SceneRenderer {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
         CaptureReadback { buffer, out, render, padded_bpr, bgra, ready }
+    }
+
+    /// Set the color of the active-selection glow. The app derives it from the theme's
+    /// `[extras]` and the *viewport background* (see `theme::glow_color`), so the shaders don't
+    /// have to know either — and the egui-drawn cues can't drift away from the 3-D glow.
+    pub fn set_glow_color(&mut self, c: egui::Color32) {
+        let f = |v: u8| v as f32 / 255.0;
+        self.glow_color = [f(c.r()), f(c.g()), f(c.b()), 1.0];
     }
 
     /// Whether the GPU ray tracer is available (WebGPU/native; not WebGL2).

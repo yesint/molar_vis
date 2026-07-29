@@ -1,16 +1,23 @@
-//! Global egui styling: larger fonts and a higher-contrast dark theme.
+//! The application's look: the embedded fonts, and the two **style sheets** that define its dark
+//! and light themes.
 //!
-//! Driven by [`AppearanceSettings`] (theme mode, font scale, accent color) so the
-//! look is user-configurable + persisted. egui keeps a separate style for dark and
-//! light mode; we configure **both** (custom high-contrast dark palette, egui's
-//! built-in light) plus the shared font scale / spacing / accent, then
-//! [`set_theme`](egui::Context::set_theme) picks which is active — so `System`
-//! mode follows the host preference and looks right either way.
+//! The styling itself is data — `themes/dark.toml` and `themes/light.toml`, each a parent egui
+//! preset plus overrides, `include_str!`d into the binary and applied by the app-independent
+//! [`crate::style_sheet`] module. This file is only the glue: which sheet is which, the fonts
+//! (which are not part of `Style`), the user's accent from [`AppearanceSettings`], and the handful
+//! of colors egui has no field for (see [`Extras`]).
+//!
+//! egui keeps a separate `Style` per theme; both are configured on every [`apply`], and
+//! [`set_theme`](egui::Context::set_theme) picks which is live — so `System` mode follows the host
+//! preference and looks right either way.
+
+use std::sync::LazyLock;
 
 use eframe::egui;
-use egui::{Color32, FontFamily, FontId, TextStyle};
+use egui::Color32;
 
 use crate::settings::{AppearanceSettings, ThemeMode};
+use crate::style_sheet::{self, StyleSheet};
 
 /// Apply the molar_vis look. Call at startup and whenever the appearance settings
 /// change (it's idempotent and cheap).
@@ -75,8 +82,8 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
         ThemeMode::System => egui::ThemePreference::System,
     });
 
-    // Merge in the Phosphor icon font (eye / trash / gear / … glyphs used by the
-    // panel) alongside the default fonts.
+    // Fonts are not part of `Style`, so they stay here rather than in a sheet: the Phosphor icon
+    // font (eye / trash / gear / … glyphs) merged with the two embedded Ubuntu faces.
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     install_fonts(&mut fonts);
@@ -88,232 +95,128 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
         egui::Rgba::from_rgba_unmultiplied(a.accent[0], a.accent[1], a.accent[2], a.accent[3])
             .into();
 
-    // Larger, more legible type scale + breathing room — applied to *both* the dark
-    // and light styles (theme-independent).
-    let s = a.font_scale.clamp(0.5, 3.0);
-    ctx.all_styles_mut(|style| {
-        style.text_styles = [
-            (TextStyle::Heading, FontId::new(24.0 * s, FontFamily::Proportional)),
-            (TextStyle::Body, FontId::new(17.0 * s, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(17.0 * s, FontFamily::Proportional)),
-            (TextStyle::Monospace, FontId::new(15.0 * s, FontFamily::Monospace)),
-            (TextStyle::Small, FontId::new(13.5 * s, FontFamily::Proportional)),
-        ]
-        .into();
-        style.spacing.item_spacing = egui::vec2(8.0, 7.0);
-        style.spacing.button_padding = egui::vec2(8.0, 4.0);
-    });
-
-    // High-contrast dark palette (the original look) + accent.
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
-        let mut v = egui::Visuals::dark();
-        v.panel_fill = Color32::from_rgb(20, 21, 25);
-        v.window_fill = Color32::from_rgb(28, 29, 34);
-        // Text fields. egui's dark preset sinks these *below* the panel (a "well"), which against
-        // this palette's near-black panel left the rep selection field indistinguishable from the
-        // background. They're the brightest surface instead — the same relationship the light
-        // palette has (fields 235 over a 207 window), so a field reads as a field in both.
-        v.extreme_bg_color = Color32::from_rgb(44, 45, 52);
-        set_text_colors(&mut v, Color32::from_rgb(238, 238, 242), Color32::from_rgb(184, 186, 194));
-        v.selection.bg_fill = accent;
-        // A *selected* widget's text comes from `selection.stroke`, so it has to contrast with
-        // the accent — which is user-configurable, hence measured rather than paired by hand.
-        v.selection.stroke = egui::Stroke::new(1.0_f32, contrasting_text(accent));
-        v.window_shadow = SHADOW_DARK;
-        v.popup_shadow = POPUP_SHADOW_DARK;
-        style.visuals = v;
-    });
-
-    // Light mode: egui's built-in light visuals are far too low-contrast for this UI —
-    // mid-grey text on near-white, which makes the rep rows and secondary labels hard to
-    // read. Replaced with a palette taken from the **Purogrey** KDE colour scheme, whose
-    // whole point is contrast: a mid-grey window (198) carrying *black* text, brighter
-    // panels for input areas, and inactive text only mildly dimmed (48 rather than a pale
-    // grey). Mirrors the structure of the dark palette above.
-    ctx.style_mut_of(egui::Theme::Light, |style| {
-        let mut v = egui::Visuals::light();
-        v.panel_fill = LIGHT_WINDOW;
-        v.window_fill = LIGHT_WINDOW_ALT;
-        v.extreme_bg_color = LIGHT_VIEW_ALT;
-        v.faint_bg_color = LIGHT_WINDOW_ALT;
-        set_text_colors(&mut v, LIGHT_TEXT, LIGHT_TEXT_DIM);
-        v.widgets.noninteractive.bg_fill = LIGHT_WINDOW;
-        v.widgets.noninteractive.weak_bg_fill = LIGHT_WINDOW;
-        v.widgets.noninteractive.bg_stroke.color = LIGHT_LINE;
-        // Resting widgets are distinguished by **fill**, not by an outline, and that is a
-        // constraint rather than a preference: a resting `bg_stroke` of nonzero width makes
-        // buttons that are frameless at rest (`Button::selectable` — every icon toggle in the rep
-        // rows, and every menu row) **jump 1 px on hover**. `Style::button_style` pre-subtracts
-        // the stroke width from `inner_margin` so a border doesn't change a *framed* button's
-        // size, but the frameless branch drops the stroke and keeps the shrunken margin. See
-        // `hover_does_not_resize_widgets`.
-        //
-        // Two fills, and the distinction matters on a grey window: `weak_bg_fill` is a
-        // button/dropdown **face**, `bg_fill` is an *indicator* interior — a checkbox box, a
-        // slider rail. Both take Purogrey's bright View shade, which is what keeps a rail from
-        // vanishing into the 207 dialog it sits on and gives a button a silhouette without a
-        // border.
-        v.widgets.inactive.bg_fill = LIGHT_VIEW;
-        v.widgets.inactive.weak_bg_fill = LIGHT_VIEW;
-        // Hover/press lift the fill further and firm up the outline (drawn only in these framed
-        // states, so it costs no layout), since on a grey panel a fill change alone is easy to miss.
-        v.widgets.hovered.bg_fill = LIGHT_HOVER;
-        v.widgets.hovered.weak_bg_fill = LIGHT_HOVER;
-        v.widgets.hovered.bg_stroke.color = LIGHT_DECORATION;
-        v.widgets.active.bg_fill = LIGHT_PRESS;
-        v.widgets.active.weak_bg_fill = LIGHT_PRESS;
-        v.widgets.active.bg_stroke.color = LIGHT_FOCUS;
-        v.widgets.open.bg_fill = LIGHT_VIEW;
-        // `widgets.open.weak_bg_fill` is also what `Window` paints its **title bar** with, so
-        // it has to sit *below* `window_fill` or the bar looks lighter than the dialog it
-        // captions. Purogrey's own titlebar is dark (WM 87) with light text, but this colour
-        // doubles as the fill of open dropdowns — whose text is black — so it goes one shade
-        // down from the window instead of all the way dark.
-        v.widgets.open.weak_bg_fill = LIGHT_TITLEBAR;
-        // Purogrey's selection: a dark grey plate with near-white text, not the tinted-blue-
-        // with-black-text egui defaults to.
-        v.selection.bg_fill = LIGHT_SELECTION_BG;
-        v.selection.stroke = egui::Stroke::new(1.0_f32, LIGHT_SELECTION_FG);
-        v.window_shadow = SHADOW_LIGHT;
-        v.popup_shadow = POPUP_SHADOW_LIGHT;
-        style.visuals = v;
-    });
-}
-
-// --- Purogrey-derived light palette ------------------------------------------------
-// Read from the scheme's own `[Colors:*]` groups rather than eyeballed, so the contrast
-// ratios are the ones that scheme was designed around.
-
-/// Window background — the panels (`Colors:Window/BackgroundNormal`).
-const LIGHT_WINDOW: Color32 = Color32::from_rgb(198, 198, 198);
-/// Slightly lifted window shade, for floating windows and faint row striping.
-const LIGHT_WINDOW_ALT: Color32 = Color32::from_rgb(207, 207, 207);
-/// View background — lists and input areas (`Colors:View/BackgroundNormal`).
-const LIGHT_VIEW: Color32 = Color32::from_rgb(226, 226, 226);
-/// Brightest shade, for text fields (`Colors:View/BackgroundAlternate`).
-const LIGHT_VIEW_ALT: Color32 = Color32::from_rgb(235, 235, 235);
-/// Hovered widget fill — a step above the resting View shade.
-const LIGHT_HOVER: Color32 = Color32::from_rgb(238, 238, 238);
-/// Pressed/active widget fill — a step above that again.
-const LIGHT_PRESS: Color32 = Color32::from_rgb(248, 248, 248);
-/// Primary text — **black**, as the scheme specifies (`Colors:Window/ForegroundNormal`).
-const LIGHT_TEXT: Color32 = Color32::from_rgb(0, 0, 0);
-/// Dimmed text (`Colors:Window/ForegroundInactive`) — still near-black, which is the
-/// difference between this and egui's washed-out light theme.
-const LIGHT_TEXT_DIM: Color32 = Color32::from_rgb(48, 48, 48);
-/// Separators / resting outlines (`Colors:Window/DecorationHover`).
-const LIGHT_LINE: Color32 = Color32::from_rgb(106, 106, 106);
-/// Hover outline (`Colors:Button/DecorationHover`).
-const LIGHT_DECORATION: Color32 = Color32::from_rgb(119, 119, 119);
-/// Focus outline (`Colors:Window/DecorationFocus`).
-const LIGHT_FOCUS: Color32 = Color32::from_rgb(71, 71, 71);
-/// Selected-row plate (`Colors:Selection/BackgroundNormal`) — deliberately dark, so the
-/// near-white [`LIGHT_SELECTION_FG`] on top of it is unmistakable.
-const LIGHT_SELECTION_BG: Color32 = Color32::from_rgb(94, 94, 94);
-/// Selected-row text (`Colors:Selection/ForegroundNormal`).
-const LIGHT_SELECTION_FG: Color32 = Color32::from_rgb(241, 241, 241);
-/// Dialog title bars: one shade below the window body so the caption reads as a caption.
-const LIGHT_TITLEBAR: Color32 = Color32::from_rgb(184, 184, 184);
-
-// --- Shadows -----------------------------------------------------------------------
-// egui's defaults are ~10 % black, which all but vanishes against either palette — a
-// floating dialog then has no visible separation from the panel behind it. These are
-// several times deeper, and offset further, so windows read as *above* the UI.
-
-const SHADOW_LIGHT: egui::Shadow = egui::Shadow {
-    offset: [8, 14],
-    blur: 28,
-    spread: 2,
-    color: Color32::from_black_alpha(90),
-};
-const POPUP_SHADOW_LIGHT: egui::Shadow = egui::Shadow {
-    offset: [4, 8],
-    blur: 18,
-    spread: 1,
-    color: Color32::from_black_alpha(75),
-};
-/// On dark the shadow is **light**, not black: a black shadow has nothing to darken against a
-/// near-black panel (measured: 20 → 8, a swing you have to look for) and *nothing at all* against
-/// the viewport, which in this theme is nearly black — so a floating window had no separation
-/// where it overlaps the 3D view, which is exactly where it floats. A soft white bloom, kept
-/// offset downward so it still reads as elevation rather than as a selection glow.
-/// (Spelled premultiplied — white at alpha `a` is `(a, a, a, a)` — because `from_white_alpha`
-/// isn't a `const fn`.)
-const SHADOW_DARK: egui::Shadow = egui::Shadow {
-    offset: [6, 12],
-    blur: 36,
-    spread: 3,
-    color: Color32::from_rgba_premultiplied(54, 54, 54, 54),
-};
-const POPUP_SHADOW_DARK: egui::Shadow = egui::Shadow {
-    offset: [3, 7],
-    blur: 24,
-    spread: 2,
-    color: Color32::from_rgba_premultiplied(44, 44, 44, 44),
-};
-
-/// Green for an affirmative control (the pending selection's **accept** ✓) and red for an error
-/// message, per theme.
-///
-/// These have to be *derived*, not fixed: the pale green and salmon red the panel used to hardcode
-/// were picked against a near-black panel, and on the light theme's mid-grey they are barely
-/// distinguishable from the background — the accept button was effectively invisible. Keyed off
-/// `dark_mode` (unlike the selection glow, which follows the *viewport* background, not the UI
-/// theme — see [`crate::camera::Background::highlight`]).
-pub fn ok_color(visuals: &egui::Visuals) -> Color32 {
-    if visuals.dark_mode {
-        Color32::from_rgb(120, 220, 120)
-    } else {
-        Color32::from_rgb(20, 110, 45)
+    for (theme, sheet) in [(egui::Theme::Dark, &*DARK), (egui::Theme::Light, &*LIGHT)] {
+        ctx.style_mut_of(theme, |style| {
+            if let Err(e) = sheet.apply(style, a.font_scale) {
+                // The built-in sheets are validated by `built_in_sheets_apply`, so this can only
+                // fire for a sheet loaded from elsewhere: keep the previous style and say so.
+                log::error!("theme {:?}: {e}", sheet.name);
+                return;
+            }
+            // The accent is a *setting*, so it overrides the sheet — on dark only, where the
+            // palette is built around it; the light sheet uses Purogrey's own selection grey.
+            if theme == egui::Theme::Dark {
+                style.visuals.selection.bg_fill = accent;
+                // egui takes a **selected** widget's text color from `selection.stroke`, and the
+                // accent is user-configurable, so the pairing is measured rather than written down.
+                style.visuals.selection.stroke =
+                    egui::Stroke::new(1.0_f32, style_sheet::contrasting_text(accent));
+            }
+        });
+        // Stash the sheet's `[extras]` for the accessors below, keyed by theme — the *live* theme
+        // can change without `apply` running (`System` mode follows the host), so both are kept
+        // and the reader picks by `dark_mode`.
+        let extras = Extras::from_sheet(sheet);
+        ctx.data_mut(|d| d.insert_temp(extras_id(theme == egui::Theme::Dark), extras));
     }
 }
 
-/// Error/danger text, the counterpart of [`ok_color`].
-pub fn danger_color(visuals: &egui::Visuals) -> Color32 {
-    if visuals.dark_mode {
-        Color32::from_rgb(240, 120, 120)
-    } else {
-        Color32::from_rgb(170, 30, 30)
+/// The colors egui's `Visuals` has no field for. It models exactly two semantic colors —
+/// `warn_fg_color` and `error_fg_color` — so anything else has to be named in a sheet's
+/// `[extras]` table and looked up here.
+///
+/// Everything that *does* have an egui field goes through the style instead: an error message
+/// reads `ui.visuals().error_fg_color`, not a helper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Extras {
+    /// An affirmative control — the pending selection's accept ✓.
+    pub ok: Color32,
+    /// Selection highlight over a **dark** 3-D backdrop (the GPU glow and the cues egui draws
+    /// over the viewport).
+    pub glow_on_dark_bg: Color32,
+    /// …and over a **light** one, where a bright cyan would vanish.
+    pub glow_on_light_bg: Color32,
+}
+
+impl Default for Extras {
+    fn default() -> Self {
+        Self {
+            ok: Color32::GREEN,
+            glow_on_dark_bg: Color32::from_rgb(130, 215, 255),
+            glow_on_light_bg: Color32::from_rgb(230, 170, 0),
+        }
     }
 }
 
-/// Set every text colour of a palette from just two: `text` for anything at rest, `dim` for
-/// secondary labels.
-///
-/// The obvious lever, `visuals.override_text_color`, is a **trap**: it forces one colour on
-/// *all* widget text, including a **selected** widget's — so a selected toggle painted with the
-/// selection colour kept the panel's text colour and could come out black-glyph-on-dark-plate
-/// (or white-on-light, if the accent were pale). Setting the per-state strokes instead lets
-/// egui pick `selection.stroke` when a widget is selected, which is the whole point of that
-/// field. `Visuals::text_color()` reads `noninteractive`, so our own painters follow along.
-fn set_text_colors(v: &mut egui::Visuals, text: Color32, dim: Color32) {
-    for st in [
-        &mut v.widgets.noninteractive,
-        &mut v.widgets.inactive,
-        &mut v.widgets.hovered,
-        &mut v.widgets.active,
-        &mut v.widgets.open,
-    ] {
-        st.fg_stroke.color = text;
+impl Extras {
+    fn from_sheet(sheet: &StyleSheet) -> Self {
+        let d = Self::default();
+        Self {
+            ok: sheet.extra("ok").unwrap_or(d.ok),
+            glow_on_dark_bg: sheet.extra("glow_on_dark_bg").unwrap_or(d.glow_on_dark_bg),
+            glow_on_light_bg: sheet.extra("glow_on_light_bg").unwrap_or(d.glow_on_light_bg),
+        }
     }
-    // Secondary labels (counts, the fps footer, suggestion hints). Left to egui this is
-    // `text × weak_text_alpha`, which on either palette fades further than these UIs can
-    // afford — both themes deliberately keep their dim text close to the primary one.
-    v.weak_text_color = Some(dim);
 }
 
-/// Black or white, whichever is legible on `bg`.
+/// The active theme's extras. Falls back to [`Extras::default`] before the first [`apply`].
+pub fn extras(ctx: &egui::Context) -> Extras {
+    let dark = ctx.global_style().visuals.dark_mode;
+    ctx.data(|d| d.get_temp(extras_id(dark))).unwrap_or_default()
+}
+
+/// Color for an affirmative control, from the active theme's `[extras] ok`.
+pub fn ok_color(ui: &egui::Ui) -> Color32 {
+    extras(ui.ctx()).ok
+}
+
+/// Selection-highlight color for the given 3-D backdrop — the hover ring, the lasso polygon, the
+/// draw-mode rubber band, and (via the camera uniform) the GPU selection glow itself.
 ///
-/// Used for the text of *selected* widgets, whose colour egui takes from
-/// `visuals.selection.stroke` — the accent is user-configurable, so the pairing can't be
-/// hardcoded. Rec. 601 luma, which tracks perceived brightness closely enough for a
-/// two-way choice.
-fn contrasting_text(bg: Color32) -> Color32 {
-    let luma = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
-    if luma > 140.0 {
-        Color32::from_rgb(16, 16, 16)
+/// Keyed off the **viewport background**, not the UI theme: a cue drawn over the render has to
+/// contrast with the render. One source for both the egui-drawn cues and the shaders, so they
+/// cannot drift apart.
+pub fn glow_color(ctx: &egui::Context, background: &crate::camera::Background) -> Color32 {
+    let e = extras(ctx);
+    if background.is_light() {
+        e.glow_on_light_bg
     } else {
-        Color32::from_rgb(244, 244, 246)
+        e.glow_on_dark_bg
+    }
+}
+
+/// [`glow_color`] at `alpha` — for the layered hover ring.
+pub fn glow_color_alpha(
+    ctx: &egui::Context,
+    background: &crate::camera::Background,
+    alpha: u8,
+) -> Color32 {
+    let c = glow_color(ctx, background);
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
+fn extras_id(dark: bool) -> egui::Id {
+    egui::Id::new(("molar_vis_theme_extras", dark))
+}
+
+/// The built-in sheets, parsed once per process. Parsing is ~20 µs, but there is no reason to
+/// redo it on every settings change.
+static DARK: LazyLock<StyleSheet> = LazyLock::new(|| load("dark", include_str!("../themes/dark.toml")));
+static LIGHT: LazyLock<StyleSheet> =
+    LazyLock::new(|| load("light", include_str!("../themes/light.toml")));
+
+/// Parse a built-in sheet. A failure here is a bug in a file that ships *inside the binary*, and
+/// `built_in_sheets_apply` catches it in CI — but a release build should still start, so it falls
+/// back to the bare egui preset rather than panicking.
+fn load(which: &str, src: &str) -> StyleSheet {
+    match StyleSheet::parse(src) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("built-in {which} theme is invalid ({e}); falling back to egui's preset");
+            let parent = if which == "light" { "light" } else { "dark" };
+            StyleSheet::parse(&format!("name = \"fallback\"\nparent = \"{parent}\"\n"))
+                .expect("the minimal fallback sheet parses")
+        }
     }
 }
 
@@ -321,25 +224,38 @@ fn contrasting_text(bg: Color32) -> Color32 {
 mod tests {
     use super::*;
 
-    /// The accent is user-configurable, so the *selected* ink has to be derived from it — a
-    /// dark accent needs a light glyph and a pale one a dark glyph. Getting this backwards
-    /// is invisible in code review and glaring on screen (a black glyph on a dark plate).
+    /// The sheets ship *inside the binary*, so "does the theme file parse and apply" is a
+    /// compile-and-test question, not something a user should discover at startup. Checks a few
+    /// values from each file so a typo'd hex or a renamed egui field can't pass silently.
     #[test]
-    fn selected_ink_contrasts_with_the_accent() {
-        for dark in [
-            Color32::from_rgb(54, 96, 167),  // the default blue accent
-            Color32::from_rgb(94, 94, 94),   // Purogrey's selection grey
-            Color32::BLACK,
-        ] {
-            assert!(contrasting_text(dark).r() > 200, "{dark:?} needs light ink");
-        }
-        for pale in [
-            Color32::from_rgb(255, 214, 10), // amber
-            Color32::from_rgb(160, 220, 160),
-            Color32::WHITE,
-        ] {
-            assert!(contrasting_text(pale).r() < 60, "{pale:?} needs dark ink");
-        }
+    fn built_in_sheets_apply() {
+        let mut style = egui::Style::default();
+        DARK.apply(&mut style, 1.0).expect("dark sheet");
+        assert!(style.visuals.dark_mode);
+        assert_eq!(style.visuals.panel_fill, Color32::from_rgb(20, 21, 25));
+        // Text fields sit *above* the panel in both themes (egui's dark preset sinks them below).
+        assert!(
+            style_sheet::luma(style.visuals.extreme_bg_color)
+                > style_sheet::luma(style.visuals.panel_fill)
+        );
+        // A dark backdrop needs a *light* shadow to show at all: white, premultiplied, so all
+        // four channels carry the alpha (a black shadow would have rgb 0 and alpha > 0).
+        let sh = style.visuals.window_shadow.color;
+        assert!(sh.a() > 0, "the dark theme must cast a shadow at all");
+        assert_eq!((sh.r(), sh.g(), sh.b()), (sh.a(), sh.a(), sh.a()), "expected a white bloom");
+
+        let mut style = egui::Style::default();
+        LIGHT.apply(&mut style, 1.0).expect("light sheet");
+        assert!(!style.visuals.dark_mode);
+        assert_eq!(style.visuals.panel_fill, Color32::from_rgb(198, 198, 198));
+        assert_eq!(style.visuals.widgets.inactive.fg_stroke.color, Color32::BLACK);
+        // A resting outline is what made frameless buttons resize on hover: it must stay off.
+        assert_eq!(style.visuals.widgets.inactive.bg_stroke.width, 0.0);
+        // Semantic colors: the error red is an egui field, the accept green an extra.
+        assert_eq!(style.visuals.error_fg_color, Color32::from_rgb(170, 30, 30));
+        assert_eq!(LIGHT.extra("ok"), Some(Color32::from_rgb(20, 110, 45)));
+        assert!(LIGHT.extra("glow_on_light_bg").is_some());
+        assert_eq!(DARK.extra("glow_on_dark_bg"), LIGHT.extra("glow_on_dark_bg"));
     }
 
     /// Hovering a widget must not **resize** it — in either theme.
@@ -368,16 +284,14 @@ mod tests {
                     ..Default::default()
                 };
                 seen.borrow_mut().clear();
-                ctx.run(input, |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        let r = ui.button("Button").rect;
-                        seen.borrow_mut().push(("button", r));
-                        // Frameless at rest — the case that broke.
-                        let r = ui.selectable_label(false, "Toggle").rect;
-                        seen.borrow_mut().push(("selectable_label", r));
-                        let r = ui.menu_button("Menu", |_| {}).response.rect;
-                        seen.borrow_mut().push(("menu_button", r));
-                    });
+                let _ = ctx.run_ui(input, |ui| {
+                    let r = ui.button("Button").rect;
+                    seen.borrow_mut().push(("button", r));
+                    // Frameless at rest — the case that broke.
+                    let r = ui.selectable_label(false, "Toggle").rect;
+                    seen.borrow_mut().push(("selectable_label", r));
+                    let r = ui.menu_button("Menu", |_| {}).response.rect;
+                    seen.borrow_mut().push(("menu_button", r));
                 });
                 seen.borrow().clone()
             };

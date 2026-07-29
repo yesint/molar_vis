@@ -10,7 +10,7 @@ authors = ["Semen Yesylevskyy"]
 repository = "https://github.com/yesint/molar_vis"
 
 [workspace.dependencies]
-egui = "0.34"
+egui = { version = "0.34", features = ["serde"] }
 eframe = { version = "0.34", default-features = false, features = [
     "wgpu",
     "default_fonts",
@@ -24,6 +24,7 @@ bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 # molar (default features => Float = f32), from GitHub so the crate is installable
 # without a local sibling checkout. molar pulls its own powersasa git dependency.
 # Pinned to **molar 2.1** (rev 8f66104): struct-of-arrays `AtomStorage`/`BondStorage`

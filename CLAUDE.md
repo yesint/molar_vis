@@ -179,13 +179,14 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 ## Tech stack (working versions)
 
-eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
+eframe / egui (with the **`serde`** feature, for the TOML style sheets) / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
 molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 `default-features=false` → `Float=f32`; pulls `powersasa` transitively from git; **edition 2024,
 MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
 `espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
 ~600 kB ONNX model and pulls `tract`),
+toml **0.9** (`parse`+`serde`, no `write`: reading the embedded theme sheets),
 rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
 features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
 **`molar_vis_py` only** (native Python module, M26):
@@ -255,54 +256,69 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     from `draw_input`. A twist is recorded as a `StructEdit::Coords` step (only the rotated atoms'
     before/after positions), so it's **undoable on any molecule** (see the `history.rs` bullet).
     `MOLAR_VIS_DEBUG_DIHEDRAL[=<mol>]` (+ `_ROTATE=<deg>`) exercises it headlessly.
-- `theme.rs` — `apply(ctx, &AppearanceSettings)`: installs the Phosphor icon font **and both Ubuntu
-  faces** (`install_fonts`: **Ubuntu Regular** at the head of the proportional family — egui's own
-  default is Ubuntu-*Light*, too thin at this type scale — plus Ubuntu Bold as its own family, see
-  below), configures both
-  the dark and light styles — **both custom high-contrast** (egui's built-in light visuals are
-  mid-grey text on near-white, unreadable for a dense rep list, so the light palette is taken from
-  the **Purogrey** KDE colour scheme's own `[Colors:*]` groups: a mid-grey 198 window carrying
-  *black* text, brighter 226/235 shades for lists and input fields, inactive text only dimmed to 48,
-  and firmer hover/focus outlines because a fill change alone is easy to miss on grey) + the
-  accent/font-scale from settings, and
-  `set_theme`s the chosen `ThemeMode` (Dark/Light/System). Called at launch and on a settings change.
-  **Bold text needs its own font** (`BOLD_FAMILY` / `theme::bold(size)` → `FontFamily::Name("bold")`,
-  used via `widgets::bold_name`): egui bundles **no bold face** — only `Ubuntu-Light` — and
-  `RichText::strong()` merely swaps in a brighter colour, so nothing settable through egui's text API
-  renders bold. `install_fonts` embeds **Ubuntu Bold**, i.e. the base font's *own* bold sibling — a
-  bold face from any other family (DejaVu, or the desktop's UI font) reads as a second **typeface**
-  rather than as emphasis, which is the trap here. Both faces are subset to Latin-1 + ~30
-  typographic/scientific characters: **~18 kB** each against the stock 324 kB (`assets/subset-fonts.sh`, needs
-  `pip install fonttools` — a build-time step; only the `.ttf` ships). UFL 1.0, the same licence as
-  the Ubuntu-Light egui already bundles (`assets/Ubuntu-UFL.txt`). The family lists the
-  proportional fonts after it, so an emoji or a glyph the subset lacks falls back to the regular face
-  instead of a missing-glyph box. Embedded rather than looked up, so it needs no availability check
-  and behaves identically on native and wasm — an unbound `FontFamily::Name` would make egui panic.
-  (Rejected: **faux bold** by double-drawing the glyphs — a hack; and the **system UI font** — on
-  Linux the desktop's choice is not in fontconfig's generic alias, so honouring it meant either
-  per-DE config parsing or an XDG-portal D-Bus call, far too much machinery for one font weight.)
-  **Text colours go through `set_text_colors(v, text, dim)`**, never `override_text_color` — see the
-  gotcha in *Conventions*; `weak_text_color` is set explicitly too, since egui's derived
-  `text × weak_text_alpha` fades secondary labels further than this UI can afford. A grey window
-  gives no contrast for free, so the light palette puts resting widgets a shade **above** it
-  (`inactive.bg_fill`/`weak_bg_fill` = Purogrey's bright **View** shade, with hover/press stepping
-  up again) — by **fill, never a resting outline**: a nonzero `inactive.bg_stroke.width` makes every
-  frameless-at-rest button (`Button::selectable`, i.e. the icon toggles and all menu rows) **jump
-  1 px on hover**, because `Style::button_style` pre-subtracts the stroke width from `inner_margin`
-  to keep a *framed* button's size constant and the frameless branch drops the stroke but keeps the
-  shrunken margin. `hover_does_not_resize_widgets` pins that (it drives two egui frames per state,
-  since a widget's state comes from the previous frame's response). Text fields
-  (`extreme_bg_color`) are the **brightest** surface in *both* palettes — egui's dark preset sinks
-  them below the panel instead, which against this near-black panel made the rep selection field
-  vanish into it. `window_shadow` / `popup_shadow` (windows and dialogs;
-  dropdown/menu popups and tooltips) are several times deeper than egui's ~10 % black — and on
-  **dark** they are *light*, a soft white bloom rather than a shadow: black has nothing to darken
-  against a near-black panel (measured 20 → 8) and nothing at all against the dark viewport, which
-  is where a floating window actually sits, so the glow is what gives it separation (over the
-  viewport 5.9 → 52.8 at the edge, over the panel 21 → 65, fading out over ~40 px). Both keep a downward offset so they read as elevation and not
-  as a selection glow. The viewport background follows the theme (`Background::for_theme`, applied by
-  `App::follow_theme_background`, which replaces only the *preset* backgrounds so a custom one
-  survives a theme switch).
+- `style_sheet.rs` — **reusable, app-independent**: builds an `egui::Style` from a small TOML
+  **style sheet** — a `parent` egui preset (`dark`/`light`) plus only the fields that change. `pub mod`
+  so it can be lifted into another egui app (or its own crate) unchanged; its deps are egui (with the
+  **`serde` feature**, newly enabled), `serde_json` and `toml`. How it works: serialize the parent
+  `Visuals` to JSON, deep-merge the sheet's `[visuals]` table, deserialize back — so **every** egui
+  field is settable by its own name with no per-field dispatcher to maintain, and fields egui *adds*
+  keep their new defaults instead of being frozen. JSON (not TOML) is the merge medium because
+  `Visuals` has `Option` fields and TOML cannot represent `None`. Sheet sections: `[palette]` (named
+  colours, referenced as `"$name"`), `[visuals]` (egui field paths verbatim, dotted or as
+  sub-tables), `[text]` (sugar: `normal`/`dim` → the five per-state `fg_stroke`s + `weak_text_color`),
+  `[metrics]` (the `Style` knobs outside `Visuals` — type scale, `item_spacing`, `button_padding`),
+  `[extras]` (colours egui has **no field** for; the host app names them). Values are `#rgb`,
+  `#rrggbb`, `#rrggbbaa` (**premultiplied** on the way in, as `Color32` requires), `"$name"`, or a raw
+  `[r,g,b,a]`. A **misspelled field path is an error**, not a silent no-op (serde ignores unknown
+  fields, so every override is checked against the parent's shape first) — the one failure mode a
+  hand-edited file can't be allowed to have. `apply` **assigns** the parent + overrides rather than
+  merging into the live visuals, so it's idempotent. Also exports the two generic helpers
+  `set_text_colors` and `contrasting_text`. 6 unit tests (overrides land / parent shows through /
+  idempotent / typos, bad colours and wrong shapes all rejected). **Prior art was searched**: the
+  file-based crates (`egui-theme`, `egui-thematic`, `egui-stylist`) store a *full* `Style` dump, are
+  editor-centric, and lag egui by 1–15 versions; the palette crates (`catppuccin-egui`,
+  `egui-themes`, `egui-aesthetix`) define themes in code. None does parent + partial overrides from a
+  file, hence this ~450-line module.
+- `themes/dark.toml`, `themes/light.toml` — **the app's actual theming, as data**: `include_str!`d
+  into the binary (so no runtime file IO, and a `LazyLock` parses each once — tens of µs), applied by
+  `style_sheet`. Everything that used to be a `const` in `theme.rs` lives here, with the reasoning
+  in comments: the near-black dark panel with text fields *above* it and a **light** (white-bloom)
+  shadow — a black shadow has nothing to darken against a dark panel or the dark viewport; and the
+  light palette read off the **Purogrey** KDE scheme's own `[Colors:*]` groups (mid-grey 198 window,
+  *black* text, bright 226/235 for indicators and fields, dark selection plate with near-white ink,
+  a title bar one shade *below* the window body, and **no resting outline** — that's the 1 px
+  hover-resize trap, see *Conventions*).
+- `theme.rs` — the thin app layer over the above: which sheet is which, the **fonts** (not part of
+  `Style`), the user's accent from `AppearanceSettings`, and `[extras]` lookup. `apply(ctx,
+  &AppearanceSettings)` sets both themes' styles from the sheets, then `set_theme`s the chosen
+  `ThemeMode` (Dark/Light/System) — so `System` follows the host either way. The **accent** is a
+  *setting*, so it overrides the sheet: on dark it becomes `selection.bg_fill`, paired with an ink
+  colour *measured* against it (`contrasting_text`), since a user-chosen colour can't have its
+  pairing written down. **`Extras`** carries the colours egui models no field for — `ok` (the accept
+  ✓) and the two selection-glow colours — cached per theme in `ctx.data_mut()` and read via
+  `theme::ok_color(ui)` / `theme::glow_color(ctx, background)`; everything egui *does* model goes
+  through the style instead (an error message reads `ui.visuals().error_fg_color`). The glow colour
+  is picked **once** here and travels to the shaders in the camera uniform
+  (`SceneRenderer::set_glow_color`), so the 3-D glow and the egui-drawn cues (hover ring, lasso,
+  rubber band) cannot drift apart. **Bold text needs its own font** (`BOLD_FAMILY` /
+  `theme::bold(size)` → `FontFamily::Name("bold")`, used via `widgets::bold_name`): egui bundles
+  **no bold face** — only `Ubuntu-Light` — and `RichText::strong()` merely swaps in a brighter
+  colour. `install_fonts` embeds **Ubuntu Regular** (at the head of the proportional family; egui's
+  own default is Ubuntu-*Light*, too thin at this type scale) and **Ubuntu Bold**, i.e. the base
+  font's *own* bold sibling — a bold face from another family (DejaVu, or the desktop's UI font)
+  reads as a second **typeface** rather than as emphasis, which is the trap here. Both are subset to
+  Latin-1 + ~30 typographic/scientific characters: **~18 kB** each against the stock 324 kB
+  (`assets/subset-fonts.sh`, needs `pip install fonttools` — a build-time step; only the `.ttf`
+  ships). UFL 1.0, the same licence as the Ubuntu-Light egui already bundles
+  (`assets/Ubuntu-UFL.txt`). The families list the proportional fonts after them, so an emoji or a
+  glyph the subset lacks falls back to the regular face instead of a missing-glyph box. Embedded
+  rather than looked up, so it needs no availability check and behaves identically on native and
+  wasm — an unbound `FontFamily::Name` would make egui panic. (Rejected: **faux bold** by
+  double-drawing the glyphs — a hack; and the **system UI font** — on Linux the desktop's choice is
+  not in fontconfig's generic alias, so honouring it meant either per-DE config parsing or an
+  XDG-portal D-Bus call, far too much machinery for one font weight.) The viewport background follows
+  the theme (`Background::for_theme`, applied by `App::follow_theme_background`, which replaces only
+  the *preset* backgrounds so a custom one survives a theme switch).
 - `camera.rs` — quaternion arcball `Camera`. VMD mouse nav (in `app.rs::draw_viewport`):
   LMB orbit · **Shift+LMB `roll`** (screen-plane, about the view axis) · RMB (or MMB)
   `pan` · **Shift+RMB `zoom_drag`** (dolly along view Z) · wheel `zoom_scroll` (**zoom-to-cursor**:
@@ -1112,13 +1128,17 @@ molar 2.0/2.1 flipped `Topology` to **struct-of-arrays** storage. The consequenc
   the five per-state `fg_stroke`s instead. Both palettes give every *resting* state the same ink,
   so **frameless buttons still show no text hover feedback** — use `selectable_label` (frameless at
   rest, highlights its background on hover) or a framed widget for a clickable icon.
-- **Semantic colours in the panel go through `theme::ok_color` / `theme::danger_color`** (keyed off
-  `visuals.dark_mode`), never a literal: the pale green and salmon red that used to be hardcoded were
-  picked against a near-black panel and are all but invisible on the light theme's mid-grey — the
-  pending selection's **accept ✓** could not be seen at all. (Distinct from the selection glow, which
-  follows the *viewport* background rather than the UI theme — `Background::highlight`.) Colours drawn
-  over the 3D view — the axes gizmo, the dihedral overlay, the modifier-hint pill — keep their own
-  literals; they sit on the render, not on a panel.
+- **No hand-made colour track beside egui's.** A semantic colour that egui models is read from the
+  style — an error message is `ui.visuals().error_fg_color`, not a helper. egui models only
+  `warn_fg_color` / `error_fg_color`, so anything else (the accept ✓'s green, the selection-glow
+  colours) is named in a sheet's `[extras]` and read via `theme::ok_color` / `theme::glow_color`.
+  Never a literal in a widget: the pale green and salmon red that used to be hardcoded were picked
+  against a near-black panel and were all but invisible on the light theme's mid-grey — the pending
+  selection's **accept ✓** could not be seen at all. Note the glow follows the *viewport background*,
+  not the UI theme (a cue over the render must contrast with the render), and reaches the shaders
+  through the camera uniform so there is one decision, not a CPU/GPU pair. Colours drawn over the 3-D
+  view — the axes gizmo, the dihedral overlay, the modifier-hint pill — keep their own literals; they
+  sit on the render, not on a panel.
 - A widget you paint yourself must take its ink from `Style::interact_selectable(&resp, active)`
   (`vis.text_color()`), **not** `ui.visuals().text_color()` — the latter is the panel's ink and is
   wrong the moment the widget paints a selection plate behind it (`widgets::overlay_button`,
@@ -2050,12 +2070,13 @@ History labels via `describe_change` ("edit selection", "change coloring",
     shell (`inflate_mesh`, `GLOW_INFLATE`=0.025 nm outward along normals) to test above it; impostor
     glows coincide exactly and aren't offset. A final additive **glow pass**
     (`render_scene` pass 4, pipeline index `GLOW=2`) draws it with the shaders' `fs_glow` — an
-    intense **Fresnel rim** (bright at grazing angles + a strong body tint) in a color the shaders
-    pick from the **backdrop** (`glow_color()`: a bright cyan on a dark background, a **gold** on a
-    light one — a highlighter on paper) and blend **over** the scene. It used to be one bright cyan blended
+    intense **Fresnel rim** (bright at grazing angles + a strong body tint) in a color chosen on the CPU
+    from the **viewport backdrop** (`theme::glow_color`, from the theme's `[extras]`: a bright cyan on
+    a dark background, a **gold** on a light one — a highlighter on paper) and carried to the shaders
+    in the camera uniform, then blended **over** the scene. It used to be one bright cyan blended
     *additively*, which is invisible on a white background — adding to white cannot brighten it; the
-    egui-drawn cues (hover ring, lasso polygon, draw-mode rubber band) follow the same rule through
-    `Background::highlight`, the CPU twin of `glow_color()`. **Pulsing**: the
+    egui-drawn cues (hover ring, lasso polygon, draw-mode rubber band) read the *same* value, so they
+    cannot drift from the 3-D glow. **Pulsing**: the
     camera uniform's `params.w` carries an animated multiplier (`0.70 + 0.30·sin(t·3.2)`, computed in
     `draw_viewport`) and while any selection is pending the viewport `request_repaint()`s + force-
     re-renders each frame so it breathes (idle = 0 GPU otherwise). Depth-tested `≤` against the scene

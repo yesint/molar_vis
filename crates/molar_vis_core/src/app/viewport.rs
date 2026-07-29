@@ -139,6 +139,10 @@ impl App {
             if pulsing {
                 ui.ctx().request_repaint();
             }
+            // The glow's *color* comes from the theme's `[extras]` and the viewport background —
+            // one decision, shared by the shaders and the cues egui draws over the scene below.
+            self.renderer
+                .set_glow_color(crate::theme::glow_color(ui.ctx(), &self.camera.background));
 
             let cam_changed = self.last_render_camera != Some(self.camera);
             let size_changed = size_px != self.last_size;
@@ -607,7 +611,7 @@ impl App {
             // the enclosed (style-eligible) atoms as the active selection.
             if lasso_mode && self.lasso_path.len() >= 2 {
                 let painter = ui.painter_at(rect);
-                let col = self.camera.background.highlight();
+                let col = crate::theme::glow_color(ui.ctx(), &self.camera.background);
                 painter.add(egui::Shape::line(
                     self.lasso_path.clone(),
                     egui::Stroke::new(1.5_f32, col),
@@ -618,7 +622,10 @@ impl App {
                 {
                     painter.line_segment(
                         [last, first],
-                        egui::Stroke::new(1.0_f32, self.camera.background.highlight_alpha(110)),
+                        egui::Stroke::new(
+                            1.0_f32,
+                            crate::theme::glow_color_alpha(ui.ctx(), &self.camera.background, 110),
+                        ),
                     );
                 }
             }

@@ -280,7 +280,7 @@ impl App {
                 }
                 None => {
                     ui.colored_label(
-                        crate::theme::danger_color(ui.visuals()),
+                        ui.visuals().error_fg_color,
                         "molecule no longer exists",
                     );
                 }
@@ -381,7 +381,7 @@ impl App {
                 }
                 None => {
                     ui.colored_label(
-                        crate::theme::danger_color(ui.visuals()),
+                        ui.visuals().error_fg_color,
                         "molecule no longer exists",
                     );
                 }
@@ -455,7 +455,7 @@ impl App {
             });
 
             if let Some(err) = &dialog.error {
-                ui.colored_label(crate::theme::danger_color(ui.visuals()), err);
+                ui.colored_label(ui.visuals().error_fg_color, err);
             }
 
             ui.separator();

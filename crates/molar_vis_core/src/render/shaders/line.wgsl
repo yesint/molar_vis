@@ -10,6 +10,9 @@ struct Camera {
     cue: vec4<f32>,    // depth cue: near, far, strength, mode
     fog_color: vec4<f32>,
     depth_range: vec4<f32>, // OIT: eye-space [front, back, _, _]
+    // Selection-glow color (rgb), chosen on the CPU from the viewport background so the
+    // glow and the cues egui draws over the scene are one decision. See `theme::glow_color`.
+    glow_color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -118,24 +121,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 // Additive cyan glow for the active (pending) selection (see sphere.wgsl). Lines
 // are flat, so the glow is a constant additive cyan along the selected bonds.
-// Selection glow color, picked from the **background** (`fog_color` is the background, or a
-// gradient's midpoint): the glow is blended *over* the scene, so on a dark backdrop it wants to be
-// a bright cyan and on a light one a **gold** (a highlighter on paper). A single bright cyan
-// blended additively —
-// what this used to be — is invisible on a white background: adding to white cannot brighten it.
-const GLOW_DARK_BG: vec3<f32> = vec3<f32>(0.51, 0.84, 1.0);
-const GLOW_LIGHT_BG: vec3<f32> = vec3<f32>(0.90, 0.667, 0.0);
-
-fn glow_color() -> vec3<f32> {
-    let bg = camera.fog_color.rgb;
-    let luma = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
-    return select(GLOW_DARK_BG, GLOW_LIGHT_BG, luma > 0.35);
-}
 
 @fragment
 fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
     // `camera.params.w` is the animated pulse multiplier (see render.rs).
-    return vec4<f32>(glow_color(), clamp(0.85 * camera.params.w, 0.0, 1.0));
+    return vec4<f32>(camera.glow_color.rgb, clamp(0.85 * camera.params.w, 0.0, 1.0));
 }
 
 struct OitOut {

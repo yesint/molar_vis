@@ -158,7 +158,10 @@ impl App {
                 let painter = ui.painter_at(rect);
                 painter.line_segment(
                     [start, current],
-                    egui::Stroke::new(2.0_f32, self.camera.background.highlight()),
+                    egui::Stroke::new(
+                        2.0_f32,
+                        crate::theme::glow_color(ui.ctx(), &self.camera.background),
+                    ),
                 );
                 ui.ctx().request_repaint();
             }
@@ -273,7 +276,8 @@ impl App {
                     if let Some(c) = self.atom_world(mi, i).and_then(px_of) {
                         // Ring sized to the atom's drawn sphere (tracks zoom).
                         let rpx = self.atom_screen_radius(mi, i, rect, size_px);
-                        draw_glow_ring(&painter, c, rpx, &self.camera.background);
+                        let col = crate::theme::glow_color(ui.ctx(), &self.camera.background);
+                        draw_glow_ring(&painter, c, rpx, col);
                     }
                 }
                 Some(HitTarget::Bond(k)) => {
