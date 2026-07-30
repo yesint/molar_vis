@@ -25,6 +25,86 @@ pub(super) fn mark_empty_selection(ui: &egui::Ui, rect: egui::Rect) {
     );
 }
 
+/// What a click on the pending-selection stub asked for.
+enum PendingAction {
+    /// Commit it as a normal, editable representation.
+    Accept,
+    /// Throw the capture away.
+    Discard,
+}
+
+/// The active (pending) selection stub — the tree row standing in for a lasso/click capture
+/// until it is accepted as a representation — plus its accept / discard buttons.
+///
+/// It is **colour-coded to the selection glow and pulses with it**: `glow` is
+/// [`crate::theme::glow_color`] and `pulse` is [`App::glow_pulse`], the same two values that
+/// drive the highlighted geometry in the viewport. The stub is that geometry's panel-side face,
+/// so it has to be recognizable as the same object — drawn as one more dim italic label among
+/// the reps it was easy to miss entirely, which made a captured selection look like something
+/// that couldn't be committed.
+///
+/// The glow colour is keyed to the **viewport backdrop**, not to the panel, so it paints the
+/// plate, the border and the marquee glyph but deliberately *not* the label ink: a light cyan
+/// on the light theme's mid-grey panel would be text at a fraction of the panel's contrast.
+fn pending_stub(
+    ui: &mut egui::Ui,
+    n_atoms: usize,
+    glow: egui::Color32,
+    pulse: f32,
+    reveal: bool,
+) -> Option<PendingAction> {
+    // The pulse rides the *alpha* of every glow-coloured part, so the whole stub breathes at
+    // once — and at the trough it fades toward the panel rather than toward some other colour.
+    // A fully suppressed glow (0.0, while a ray-traced still is held) would take the stub with
+    // it; this is a control rather than part of the render, so it then just stops breathing.
+    let pulse = if pulse <= 0.0 { 1.0 } else { pulse };
+    let tint = |a: f32| {
+        egui::Color32::from_rgba_unmultiplied(glow.r(), glow.g(), glow.b(), (a * pulse) as u8)
+    };
+    let mut action = None;
+    let frame = egui::Frame::default()
+        .fill(tint(56.0))
+        .stroke(egui::Stroke::new(1.0_f32, tint(230.0)))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(5, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                ui.add(
+                    egui::Label::new(egui::RichText::new(icon::SELECTION).color(tint(255.0)))
+                        .selectable(false),
+                );
+                ui.add(egui::Label::new(bold_name(ui, "selection")).selectable(false));
+                ui.add(
+                    egui::Label::new(egui::RichText::new(format!("{n_atoms} atoms")).weak())
+                        .selectable(false),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    compact_actions(ui);
+                    if icon_button(ui, icon::TRASH, "Discard selection").clicked() {
+                        action = Some(PendingAction::Discard);
+                    }
+                    if ui
+                        .selectable_label(
+                            false,
+                            egui::RichText::new(icon::CHECK).color(crate::theme::ok_color(ui)),
+                        )
+                        .on_hover_text("Accept as a representation")
+                        .clicked()
+                    {
+                        action = Some(PendingAction::Accept);
+                    }
+                });
+            });
+        });
+    // A just-captured selection scrolls its own stub into view — the capture happened in the
+    // viewport, and this row is the panel's only sign of it (see [`crate::scene::Reveal`]).
+    if reveal {
+        ui.scroll_to_rect(frame.response.rect, Some(egui::Align::Center));
+    }
+    action
+}
+
 /// Drop a rep's stale selection feedback (error message, in-field red highlight,
 /// and the empty-match warning) — called while the user is editing the text, so
 /// the old evaluation's markers don't linger over text they no longer match. The
@@ -285,70 +365,6 @@ pub(super) fn draw_rep_params(
         rep.geom_dirty = true;
     }
     out
-}
-
-impl Scene {
-    /// The active (pending) selection block for molecule `mi` — the italic "selection"
-    /// label plus accept / discard — drawn standalone, for a molecule whose reps are *not*
-    /// laid out by a plain [`Self::draw_reps_for`] pass.
-    ///
-    /// That is the [`MolGroup`] case. A group's members are listed behind the group's own
-    /// expander *and* a nested "Molecules" sub-expander *and* each member's rep fold, and
-    /// the own-reps pass isn't rendered at all when the member has no own reps — which is
-    /// exactly the state a freshly loaded SDF member is in. So a lasso or click selection on
-    /// a group member glowed with no way to accept it. Drawn at the group header instead,
-    /// unconditionally on the shown member, so it's visible the moment a selection exists.
-    ///
-    /// Accepting pushes a Ball-and-Stick rep onto the *member* (past its shared prefix, so
-    /// it becomes that member's own rep) — right, since the captured `index …` selection
-    /// refers to that member's atoms and means nothing on its siblings.
-    pub(super) fn draw_pending_block(&mut self, ui: &mut egui::Ui, mi: usize) -> bool {
-        let mol = &mut self.molecules[mi];
-        if mol.pending.is_none() {
-            return false;
-        }
-        let mut accept = false;
-        let mut discard = false;
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::Label::new(egui::RichText::new("selection").italics()).selectable(false),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                compact_actions(ui);
-                if icon_button(ui, icon::TRASH, "Discard selection").clicked() {
-                    discard = true;
-                }
-                if ui
-                    .selectable_label(
-                        false,
-                        egui::RichText::new(icon::CHECK)
-                            .color(crate::theme::ok_color(ui)),
-                    )
-                    .on_hover_text("Accept as a representation")
-                    .clicked()
-                {
-                    accept = true;
-                }
-            });
-        });
-        ui.add_space(6.0);
-
-        if accept {
-            if let Some(p) = mol.pending.take() {
-                let mut rep = Representation::new(RepKind::BallAndStick);
-                rep.sel_text = p.sel_text;
-                mol.reps.push(rep);
-                mol.selected_rep = Some(mol.reps.len() - 1);
-                mol.reps_open = true;
-            }
-            mol.glow_dirty = true; // clear the glow geometry
-        }
-        if discard {
-            mol.pending = None;
-            mol.glow_dirty = true;
-        }
-        accept || discard
-    }
 }
 
 impl App {
@@ -924,6 +940,16 @@ impl App {
 
         // Read before the `&mut mol` borrow below, since the params panel needs it inside.
         let charge_status = self.charge_status.clone();
+        // Likewise the selection-glow colour + pulse the pending stub is painted with: both are
+        // read off `self` as a whole, which the `&mut mol` borrow below rules out.
+        let glow = crate::theme::glow_color(ui.ctx(), &self.camera.background);
+        let (glow_pulse, _) = self.glow_pulse(ui.ctx());
+        // Whether one of this pass's rows was asked to be scrolled into view — see
+        // [`crate::scene::Reveal`]. The request is dropped by `draw_left_panel` after the pass.
+        let reveal = self.scene.reveal.filter(|r| match *r {
+            Reveal::Pending(id) => id == mol_id,
+            Reveal::Rep(id, j) => id == mol_id && (start..end).contains(&j),
+        });
         let mol = &mut self.scene.molecules[mi];
 
         // The single thing this pass asked for — see [`RepAction`]. Set from inside the row
@@ -1222,6 +1248,12 @@ impl App {
                 }
             }
 
+            // The rep an accepted selection just became: bring its row on screen. It is
+            // appended at the end of a fold that may well be off the bottom of the list.
+            if reveal == Some(Reveal::Rep(mol_id, j)) {
+                ui.scroll_to_rect(block.rect, Some(egui::Align::Center));
+            }
+
             // Reorder drop target spans the whole two-row block (disabled while
             // choosing a partner, where the block is a partner-pick target instead).
             if !picking_partner {
@@ -1253,39 +1285,25 @@ impl App {
             ui.add_space(6.0);
         }
 
-        // The active (pending) selection — e.g. just captured by a lasso — appears
-        // below the reps with a minimal interface: a non-editable "selection" label
-        // plus accept (commit as a Ball-and-Stick rep) / discard buttons. No style,
-        // color, or editable selection (those come once it's accepted).
-        // The pending selection belongs to the molecule, not the shared document, so it is
-        // skipped in the shared pass. A **grouped** molecule skips it here entirely: its
-        // own-reps pass is buried behind two expanders and only rendered when the member
-        // already has own reps (a fresh SDF member has none), which left a lasso on a group
-        // with no way to accept it. The group draws it at its header instead — see
-        // `draw_pending_block`, called from `draw_group_entry`.
-        if !is_shared && mol.group.is_none() && mol.pending.is_some() {
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new("selection").italics())
-                        .selectable(false),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    compact_actions(ui);
-                    if icon_button(ui, icon::TRASH, "Discard selection").clicked() {
-                        action = Some(RepAction::DiscardPending);
-                    }
-                    let accept = ui
-                        .selectable_label(
-                            false,
-                            egui::RichText::new(icon::CHECK)
-                                .color(crate::theme::ok_color(ui)),
-                        )
-                        .on_hover_text("Accept as a representation");
-                    if accept.clicked() {
-                        action = Some(RepAction::AcceptPending);
-                    }
-                });
-            });
+        // The active (pending) selection — e.g. just captured by a lasso — appears below the
+        // reps as the glow-coloured [`pending_stub`]: the atom count plus accept (commit as a
+        // Ball-and-Stick rep) / discard. No style, color, or editable selection (those come
+        // once it's accepted).
+        // The pending selection belongs to the molecule, not to the shared document, so it is
+        // skipped in the shared pass — including a group member's, where it belongs with the
+        // *member's own* rows: the atoms it captured are that member's, and its siblings know
+        // nothing about them. Reaching those rows means unfolding the group, its "Molecules"
+        // list and the member's own fold, which is [`Scene::reveal_pending`]'s job; the caller
+        // must also draw this pass when the member has no own reps yet (a fresh SDF member
+        // has none), or a lasso on it would glow with no way to accept it.
+        let pending_atoms = mol.pending.as_ref().map(|p| p.atoms.len()).filter(|_| !is_shared);
+        if let Some(n_atoms) = pending_atoms {
+            let scroll = reveal == Some(Reveal::Pending(mol_id));
+            match pending_stub(ui, n_atoms, glow, glow_pulse, scroll) {
+                Some(PendingAction::Accept) => action = Some(RepAction::AcceptPending),
+                Some(PendingAction::Discard) => action = Some(RepAction::DiscardPending),
+                None => {}
+            }
             ui.add_space(6.0);
         }
 
@@ -1313,7 +1331,15 @@ impl App {
                     view_dirty = true;
                 }
                 RepAction::AcceptPending => {
-                    self.scene.molecules[mi].accept_pending_selection();
+                    let mol = &mut self.scene.molecules[mi];
+                    let n_before = mol.reps.len();
+                    mol.accept_pending_selection();
+                    // The committed rep is appended last — at the end of a fold that may be
+                    // off-screen, and for a group member behind three of them. Unfold and
+                    // scroll to it, so the accept visibly *lands* somewhere.
+                    if mol.reps.len() > n_before {
+                        self.scene.reveal_rep(mi, self.scene.molecules[mi].reps.len() - 1);
+                    }
                     view_dirty = true;
                 }
                 RepAction::DiscardPending => {

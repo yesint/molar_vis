@@ -9,6 +9,36 @@ use super::widgets::px_to_ndc;
 const RT_STEP_SUBMITS: u32 = 4;
 
 impl App {
+    /// The selection-glow intensity multiplier for this frame, plus whether it is *animating*.
+    ///
+    /// One formula, read by the 3-D glow pass **and** by the pending-selection stub in the left
+    /// panel — the stub is the tree-side face of the very geometry that is glowing, so the two
+    /// have to breathe in phase; computed twice they would drift into reading as two unrelated
+    /// cues. The panel is laid out before the viewport, but both sample the same frame time, so
+    /// the value is identical within a frame.
+    ///
+    /// `0.0` while a viewport **still** is warming/tracing/held: the glow isn't part of the trace,
+    /// so animating it would only keep the still from ever settling (see [`Self::draw_viewport`]).
+    /// A steady `1.0` when nothing is highlighted, so a non-animating caller still gets full
+    /// intensity.
+    pub(super) fn glow_pulse(&self, ctx: &egui::Context) -> (f32, bool) {
+        let tracing = matches!(self.rt.warm, Some(RtKind::Still))
+            || matches!(self.rt.job, Some(RtJob::Still))
+            || self.rt.still;
+        if tracing {
+            return (0.0, false);
+        }
+        let has_glow = self
+            .scene
+            .molecules
+            .iter()
+            .any(|m| m.visible && (m.pending.is_some() || m.hover.is_some()));
+        if !has_glow {
+            return (1.0, false);
+        }
+        let t = ctx.input(|i| i.time) as f32;
+        (0.70 + 0.30 * (t * 3.2).sin(), true)
+    }
 
     /// Central panel: rebuild dirty geometry, route VMD-style mouse navigation,
     /// re-render the 3D scene only when needed, and blit it as an egui image.
@@ -118,30 +148,14 @@ impl App {
                 ((rect.height() * ppp).round() as u32).max(1),
             ];
 
-            // A ray trace is requested (warming), running, or being held → suppress the
-            // pulsing selection glow: it isn't part of the trace (the gather ignores it), and
-            // the still that's shown has no glow, so animating/forcing-a-redraw for it would
-            // only stop the still from ever settling. The realtime raster drawn *behind* the
-            // trace is rendered with the glow hidden (`glow_pulse = 0`) so it doesn't flash.
-            // Only a viewport **still** (R key) replaces the live view, so only it hides the
-            // glow; a Save renders offscreen, leaving the live view (and its glow) interactive.
-            let tracing = matches!(self.rt.warm, Some(RtKind::Still))
-                || matches!(self.rt.job, Some(RtJob::Still))
-                || self.rt.still;
-            let has_glow = self
-                .scene
-                .molecules
-                .iter()
-                .any(|m| m.visible && (m.pending.is_some() || m.hover.is_some()));
-            let pulsing = has_glow && !tracing;
-            let glow_pulse = if tracing {
-                0.0
-            } else if pulsing {
-                let t = ui.input(|i| i.time) as f32;
-                0.70 + 0.30 * (t * 3.2).sin()
-            } else {
-                1.0
-            };
+            // The pulse (and whether it animates) comes from `glow_pulse`, shared with the
+            // panel's pending-selection stub. It reports no animation while a viewport **still**
+            // is warming/tracing/held: the glow isn't part of the trace (the gather ignores it),
+            // so animating/forcing-a-redraw for it would only stop the still from ever settling.
+            // The realtime raster drawn *behind* the trace is rendered with the glow hidden
+            // (`glow_pulse = 0`) so it doesn't flash. Only a viewport still (R key) replaces the
+            // live view; a Save renders offscreen, leaving the live view (and its glow) interactive.
+            let (glow_pulse, pulsing) = self.glow_pulse(ui.ctx());
             if pulsing {
                 ui.ctx().request_repaint();
             }
@@ -856,6 +870,11 @@ impl Scene {
     /// pending sets for a `Replace` is the caller's job.
     pub(super) fn merge_into_pending(&mut self, mi: usize, hits: Vec<usize>, op: LassoOp) {
         let mol = &mut self.molecules[mi];
+        // A *new* capture unfolds the tree to its stub and scrolls it into view; merging into
+        // one that already exists (Shift-clicking more atoms) doesn't, or the panel would snap
+        // back every click — and if the user has since folded that branch away, that was their
+        // call. See [`Scene::reveal_pending`].
+        let is_new = mol.pending.is_none();
         let mut set: std::collections::BTreeSet<usize> = mol
             .pending
             .as_ref()
@@ -870,15 +889,21 @@ impl Scene {
             }
         }
         let atoms: Vec<usize> = set.into_iter().collect();
-        match pick::index_selection_string(&atoms) {
+        let created = match pick::index_selection_string(&atoms) {
             Some(sel_text) => {
                 mol.pending = Some(scene::PendingSelection { sel_text, atoms });
-                mol.reps_open = true;
+                is_new
             }
             // Empty result (e.g. subtracted everything) → no active selection.
-            None => mol.pending = None,
-        }
+            None => {
+                mol.pending = None;
+                false
+            }
+        };
         mol.glow_dirty = true;
+        if created {
+            self.reveal_pending(mi);
+        }
     }
 }
 

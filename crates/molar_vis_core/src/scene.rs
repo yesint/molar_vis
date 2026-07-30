@@ -391,6 +391,22 @@ pub struct PendingSelection {
     pub atoms: Vec<usize>,
 }
 
+/// A panel row the tree should be unfolded to and scrolled to on the next draw — a one-shot
+/// request, consumed by the pass that draws that row (see [`Scene::reveal_pending`]).
+///
+/// Selections are made in the **viewport**, so the row standing for one can easily be somewhere
+/// the tree isn't currently showing — a [`MolGroup`] member's rows sit behind the group's fold,
+/// its nested "Molecules" fold *and* the member's own-rep fold, and any row can be scrolled out
+/// of the list. Nothing about a lasso drag says "now go look in the panel", so the panel comes
+/// to the user instead of the other way round.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Reveal {
+    /// The molecule's pending-selection stub.
+    Pending(MolId),
+    /// The molecule's rep at that index — e.g. the one an accepted selection just became.
+    Rep(MolId, usize),
+}
+
 /// The hover detail "lens": the atoms within `radius` of the cursor view-line
 /// (`ray_o`, `ray_d` in world space), shown as a faded ball-and-stick aid over a
 /// Cartoon/Surface rep. The geometry is rebuilt from this when the ray moves.
@@ -1323,6 +1339,9 @@ pub struct Scene {
     /// rather than on `App` makes that one owner's invariant: every removal path goes through
     /// [`Scene::trash_molecule`], which drops the loader with the molecule.
     pub loaders: HashMap<MolId, Receiver<LoadMsg>>,
+    /// A row the panel should scroll into view on its next draw, consumed by the pass that
+    /// draws it. Transient view state (never saved, never undone) — see [`Reveal`].
+    pub reveal: Option<Reveal>,
     /// The browser's equivalent: an incremental reader per molecule, stepped a batch of frames
     /// per frame (no threads in wasm). Pruned by the same paths.
     #[cfg(target_arch = "wasm32")]
@@ -1432,6 +1451,39 @@ impl Scene {
     /// Index of a group by stable id.
     pub fn group_index(&self, id: GroupId) -> Option<usize> {
         self.groups.iter().position(|g| g.id == id)
+    }
+
+    /// Unfold the tree down to molecule `mi`'s **own** rows and ask the panel to scroll its
+    /// pending-selection stub into view.
+    ///
+    /// A selection is captured in the viewport, so the stub is the only thing that says one
+    /// exists as far as the panel is concerned — it has to be *on screen* without the user
+    /// hunting for it. For a [`MolGroup`] member that means opening three folds, since the
+    /// member's rows are the deepest thing in the panel; the stub used to be drawn up at the
+    /// group header to dodge them, which showed the capture as the *group's* rather than as
+    /// the shown member's, which is whose atoms it actually is.
+    pub fn reveal_pending(&mut self, mi: usize) {
+        self.unfold_to(mi);
+        self.reveal = self.molecules.get(mi).map(|m| Reveal::Pending(m.id));
+    }
+
+    /// As [`Self::reveal_pending`], for rep `j` of molecule `mi` — the accepted selection's
+    /// new representation, which is otherwise appended out of sight at the end of a fold.
+    pub fn reveal_rep(&mut self, mi: usize, j: usize) {
+        self.unfold_to(mi);
+        self.reveal = self.molecules.get(mi).map(|m| Reveal::Rep(m.id, j));
+    }
+
+    /// Open every fold hiding molecule `mi`'s own rows: its rep fold, plus — for a group
+    /// member — the group entry and the nested "Molecules" list it sits inside.
+    fn unfold_to(&mut self, mi: usize) {
+        let Some(mol) = self.molecules.get_mut(mi) else { return };
+        mol.reps_open = true;
+        let Some(gid) = mol.group else { return };
+        if let Some(gi) = self.group_index(gid) {
+            self.groups[gi].expanded = true;
+            self.groups[gi].members_expanded = true;
+        }
     }
 
     /// Enforce the group invariant: the shown member (`members[current]`) is visible
@@ -1880,5 +1932,51 @@ mod rep_surgery_tests {
         assert!(mol.pending.is_none());
         assert_eq!(mol.reps.len(), 1, "discarding must not add a rep");
         assert!(mol.glow_dirty);
+    }
+
+    /// A group member's rows are the deepest thing in the panel — behind the group entry, the
+    /// nested "Molecules" list *and* the member's own fold, all of which a freshly loaded group
+    /// has closed. So a selection captured on the shown member must open all three and name its
+    /// stub as the row to scroll to, or the capture is invisible in the tree.
+    #[test]
+    fn revealing_a_group_member_row_opens_every_fold_hiding_it() {
+        let mut scene = Scene::default();
+        let mut member = mol_with_reps(1);
+        member.id = MolId(7);
+        member.group = Some(GroupId(0));
+        member.reps_open = false;
+        scene.molecules.push(member);
+        scene.groups.push(MolGroup {
+            id: GroupId(0),
+            name: "ligands.sdf".into(),
+            source: MoleculeSource::Bytes { name: "ligands.sdf".into() },
+            members: vec![MolId(7)],
+            current: 0,
+            visible: true,
+            expanded: false,
+            members_expanded: false,
+            docking_sync: None,
+        });
+
+        scene.reveal_pending(0);
+        assert_eq!(scene.reveal, Some(Reveal::Pending(MolId(7))));
+        assert!(scene.molecules[0].reps_open, "the member's own-rep fold");
+        assert!(scene.groups[0].expanded, "the group entry");
+        assert!(scene.groups[0].members_expanded, "the nested Molecules list");
+
+        // Accepting points it at the new rep instead — same unfolding, different row.
+        scene.groups[0].expanded = false;
+        scene.reveal_rep(0, 3);
+        assert_eq!(scene.reveal, Some(Reveal::Rep(MolId(7), 3)));
+        assert!(scene.groups[0].expanded);
+
+        // An ungrouped molecule has only its own fold to open, and no group to look up.
+        let mut scene = Scene::default();
+        let mut mol = mol_with_reps(1);
+        mol.reps_open = false;
+        scene.molecules.push(mol);
+        scene.reveal_pending(0);
+        assert!(scene.molecules[0].reps_open);
+        assert_eq!(scene.reveal, Some(Reveal::Pending(MolId(0))));
     }
 }

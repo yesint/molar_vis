@@ -94,9 +94,13 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   the glow/info overlay can be screenshot headlessly; also logs a GPU-vs-CPU pick comparison —
   `pick ok: gpu == cpu == …` — at `RUST_LOG=molar_vis_core=info`) +
   `MOLAR_VIS_DEBUG_SELMODE=residues|boundh` (set the lasso selection-expansion mode; default Atoms) +
-  `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection on **every** molecule as an
+  `MOLAR_VIS_DEBUG_PENDING=<selection>` (stage that selection on every **visible** molecule as an
   active/pending selection — exercises the lasso glow highlight + per-molecule accept/discard UI,
-  incl. the multi-molecule case, without a mouse drag) +
+  incl. the multi-molecule case, without a mouse drag. Staged through `merge_into_pending`, the
+  path the lasso and click-select take, so it also exercises the tree unfolding + scroll-to a real
+  capture triggers; *visible* because that is what a lasso can hit — in a group only the shown
+  member) + `MOLAR_VIS_DEBUG_ACCEPT_PENDING=1` (then press each stub's ✓, so the committed rep's
+  row being unfolded to and scrolled into view is checkable in a `_SAVE_UI` shot) +
   `MOLAR_VIS_DEBUG_AXES=1` (show the VMD-style orientation-axes gizmo) +
   `MOLAR_VIS_DEBUG_MATERIAL=<name>` (set mol 0's first rep material, e.g. Transparent) +
   `MOLAR_VIS_DEBUG_FOCUS=<selection>` (zoom the camera to fit that selection — exercises
@@ -2089,17 +2093,33 @@ History labels via `describe_change` ("edit selection", "change coloring",
     its current style* — **not** a 2-D overlay. `glow_dirty` rebuilds it when the pending set or
     coords change, **or when any rep's geometry is rebuilt** (so the glow follows a live style/
     selection change); central image only. (2) a **minimal panel block** under the reps
-    (`draw_reps_for`): a non-editable italic "selection" label + **green ✓ accept** + **🗑 discard**,
-    no style/color/material row. **Accept** commits it as a normal, fully-editable **Ball-and-Stick**
+    (`draw_reps_for` → the shared **`pending_stub`**): a marquee glyph + bold "selection" + the atom
+    count + **green ✓ accept** + **🗑 discard**, no style/color/material row. The stub is **painted
+    in the glow colour and pulses with the glow** — its plate, border and glyph take their alpha from
+    `theme::glow_color` × **`App::glow_pulse`**, the *same* two values that drive the highlighted
+    geometry (one formula, sampled by the panel and the viewport in the same frame, so they can't
+    drift into reading as two unrelated cues). It used to be one more dim italic label among the
+    reps and was easy to miss entirely, which made a captured selection look uncommittable. The glow
+    colour follows the **viewport backdrop**, not the panel, so it is deliberately *not* used as
+    label ink (a light cyan on the light theme's panel would be text at a fraction of its contrast);
+    and a suppressed glow (pulse 0, while a ray-traced still is held) leaves the stub at full
+    intensity rather than invisible — it is a control, not part of the render, so it only stops
+    breathing. **Accept** commits it as a normal, fully-editable **Ball-and-Stick**
     rep over the same `index …` text (this push *is* the undoable step — "add representation");
-    **discard** drops it. For a **[`MolGroup`]** member the block is drawn by
-    `App::draw_pending_block` at the **group header** (just under the member cycle bar, outside the
-    `expanded` fold) rather than inline in `draw_reps_for` — the member's own-reps pass sits behind
-    the group expander *and* the nested "Molecules" sub-expander *and* the member's rep fold, and
-    isn't rendered at all until the member has own reps, which a freshly loaded SDF member doesn't:
-    a lasso on a group used to glow with no way to accept it. Accept still pushes onto the member
-    (past its shared prefix → its own rep), which is right since the captured `index …` text refers
-    to that member's atoms. `MOLAR_VIS_DEBUG_PENDING=<sel>` stages one headlessly.
+    **discard** drops it. For a **[`MolGroup`]** member the stub belongs with **that member's own
+    rows**, not with the group — the atoms it captured are the *shown member's*, and its siblings
+    know nothing about them (accept likewise pushes onto the member, past its shared prefix). Those
+    rows are the deepest thing in the panel, behind the group entry *and* the nested "Molecules"
+    list *and* the member's rep fold, all closed on a fresh group — so **the tree comes to the
+    selection**: `Scene::reveal_pending` opens all three folds and parks a one-shot
+    **`Reveal::Pending(mol)`** in `Scene::reveal`, which the pass that draws the stub honours with
+    `ui.scroll_to_rect` (the member's own-reps pass therefore runs even with *no* own reps, which a
+    freshly loaded SDF member has). Set on a *new* capture only — merging more atoms into an
+    existing one doesn't re-scroll, and a branch the user has since folded away stays folded.
+    **Accept** does the same for the rep it created (`reveal_rep` → `Reveal::Rep(mol, j)`), which is
+    otherwise appended out of sight at the end of a fold. Unconsumed requests are dropped after one
+    panel pass (`draw_left_panel`), so one naming a row that has since been deleted can't fire late.
+    `MOLAR_VIS_DEBUG_PENDING=<sel>` (+ `_ACCEPT_PENDING=1`) stages/commits one headlessly.
   - **Style-specific eligibility** (shared by hover + lasso via `atom_in_rep(kind, name)`): a
     Cartoon rep is hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal
     OT1/OT2/OXT — what the ribbon is built from), never side chains; every other style is hit on

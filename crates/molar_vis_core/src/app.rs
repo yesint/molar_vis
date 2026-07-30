@@ -22,7 +22,9 @@ use crate::pick::{self, PickMode, SelectionMode};
 use crate::render::SceneRenderer;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::SphereInstance;
-use crate::scene::{self, GroupId, MolId, MoleculeSource, Representation, Scene, SettingsTab};
+use crate::scene::{
+    self, GroupId, MolId, MoleculeSource, Representation, Reveal, Scene, SettingsTab,
+};
 use crate::secstruct::SsMap;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::session::{Session, ViewState};

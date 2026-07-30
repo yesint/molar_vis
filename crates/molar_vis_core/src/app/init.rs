@@ -476,22 +476,38 @@ impl App {
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_PENDING=<selection> stages that selection
-        // as an active (pending) selection on **every** molecule — exercises the lasso
+        // as an active (pending) selection on every **visible** molecule — exercises the lasso
         // glow + per-molecule accept/discard UI (incl. the multi-molecule case) without
-        // simulating a mouse drag.
+        // simulating a mouse drag. Visible only, because that is what a lasso can capture: in
+        // a [`MolGroup`] just one member is shown, and it is that member the stub belongs to.
+        // Staged through `merge_into_pending`, the path the lasso and click-select take, so the
+        // hook also exercises the tree unfolding + scroll-to that a real capture triggers.
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_PENDING") {
-            for mol in &mut scene.molecules {
-                if let Ok((_, sel)) = mol.data.evaluate(&sel_text) {
-                    let atoms: Vec<usize> = {
-                        let bound = mol.data.bind(&sel);
-                        bound.iter_particle().map(|p| p.id).collect()
-                    };
-                    if atoms.is_empty() {
+            for mi in 0..scene.molecules.len() {
+                let mol = &scene.molecules[mi];
+                if !mol.visible {
+                    continue;
+                }
+                let Ok((_, sel)) = mol.data.evaluate(&sel_text) else { continue };
+                let atoms: Vec<usize> =
+                    mol.data.bind(&sel).iter_particle().map(|p| p.id).collect();
+                if atoms.is_empty() {
+                    continue;
+                }
+                scene.merge_into_pending(mi, atoms, LassoOp::Replace);
+            }
+
+            // …and MOLAR_VIS_DEBUG_ACCEPT_PENDING=1 then presses the stub's ✓ on each, through
+            // the same two calls the panel's Accept action makes — so the committed rep's row
+            // being unfolded to and scrolled into view is checkable in a `_SAVE_UI` shot (a
+            // click on the stub can't be simulated headlessly).
+            if std::env::var("MOLAR_VIS_DEBUG_ACCEPT_PENDING").is_ok() {
+                for mi in 0..scene.molecules.len() {
+                    if scene.molecules[mi].pending.is_none() {
                         continue;
                     }
-                    mol.pending = Some(scene::PendingSelection { sel_text: sel_text.clone(), atoms });
-                    mol.reps_open = true;
-                    mol.glow_dirty = true;
+                    scene.molecules[mi].accept_pending_selection();
+                    scene.reveal_rep(mi, scene.molecules[mi].reps.len() - 1);
                 }
             }
         }

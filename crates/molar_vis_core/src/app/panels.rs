@@ -84,11 +84,21 @@ impl App {
                 // sits at the panel edge and never overlaps the right-aligned row
                 // buttons/menus. Molecules are listed directly (no section headers).
                 ui.style_mut().spacing.scroll.floating = false;
+                // A row asked to be scrolled into view (see [`Reveal`]) gets exactly this one
+                // pass to be drawn — the row itself calls `scroll_to_rect`. Anything still
+                // standing afterwards named a row that no longer exists (its rep or molecule
+                // was deleted meanwhile), so it is dropped rather than left to fire later;
+                // a request raised *during* the pass (accepting a selection) differs from this
+                // snapshot and so survives to be honoured on the next one.
+                let offered = self.scene.reveal;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         view_dirty |= self.draw_molecule_list(ui);
                     });
+                if self.scene.reveal == offered {
+                    self.scene.reveal = None;
+                }
             });
         view_dirty
     }
@@ -1011,18 +1021,10 @@ impl App {
             }
         });
 
-        // A pending (lasso/click) selection on the shown member, with its accept/discard
-        // buttons — here rather than in the member's own-reps pass, which is buried behind
-        // two expanders and isn't drawn at all until the member has own reps. Outside the
-        // `expanded` block on purpose: a captured selection has to be actionable without
-        // first unfolding the group. See `Scene::draw_pending_block`.
-        // Entered only when there *is* one: an empty `ui.indent` still paints its indent guide, so
-        // the block showed up as a stray short dash under the cycle bar with nothing beside it.
-        if let Some(mi) = cur_mi.filter(|&mi| self.scene.molecules[mi].pending.is_some()) {
-            ui.indent(egui::Id::new(("grouppending", gid)), |ui| {
-                view_dirty |= self.scene.draw_pending_block(ui, mi);
-            });
-        }
+        // (A pending selection on the shown member is drawn with that **member's own rows**,
+        // down in the member list — it captured that member's atoms, not the group's. Getting
+        // there means unfolding this entry, the "Molecules" list and the member's own fold,
+        // which `Scene::reveal_pending` does when the selection is made.)
 
         // Top-level expanded: the group's shared reps, then a nested "Molecules"
         // sub-expander (each opens/closes independently).
@@ -1159,12 +1161,16 @@ impl App {
                                 mopen = m.reps_open;
                             }
                             if mopen {
-                                let (start, end) = {
+                                // The own-reps pass also draws this member's pending-selection
+                                // stub, so it runs for a member with *no* own reps too — a
+                                // freshly loaded SDF member has none, and a lasso on it would
+                                // otherwise glow with no way to accept it.
+                                let (start, end, pending) = {
                                     let m = &self.scene.molecules[mmi];
-                                    (m.n_shared, m.reps.len())
+                                    (m.n_shared, m.reps.len(), m.pending.is_some())
                                 };
                                 ui.indent(egui::Id::new(("ownreps", mid)), |ui| {
-                                    if start < end {
+                                    if start < end || pending {
                                         view_dirty |= self.draw_reps_for(ui, mmi, start, end, false);
                                     } else {
                                         ui.weak("(no own representations)");
