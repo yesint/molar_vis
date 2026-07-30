@@ -120,10 +120,10 @@ impl App {
                     // closes on a click outside it (see `view_settings_window`).
                     let anchor = ui
                         .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let resp = overlay_button(ui, icon::LIST, self.view_menu_open)
+                            let resp = overlay_button(ui, icon::LIST, self.view_menu.open)
                                 .on_hover_text("View settings (camera, lighting, scene)");
                             if resp.clicked() {
-                                self.view_menu_open = !self.view_menu_open;
+                                self.view_menu.open = !self.view_menu.open;
                             }
                             resp.rect
                         })
@@ -139,8 +139,8 @@ impl App {
     /// child popup (a dropdown / color picker) is open, nor when the click is on the
     /// hamburger button itself (`anchor`).
     pub(super) fn view_settings_window(&mut self, ctx: &egui::Context, anchor: egui::Rect) {
-        if !self.view_menu_open {
-            self.view_menu_rect = None;
+        if !self.view_menu.open {
+            self.view_menu.last_rect = None;
             return;
         }
         let inner = egui::Window::new("view_settings")
@@ -159,7 +159,7 @@ impl App {
                 ui.set_min_width(248.0);
                 tab_bar(
                     ui,
-                    &mut self.view_tab,
+                    &mut self.view_menu.tab,
                     &[
                         (ViewTab::Camera, "Camera"),
                         (ViewTab::Lighting, "Lighting"),
@@ -167,15 +167,15 @@ impl App {
                     ],
                 );
                 ui.add_space(6.0);
-                match self.view_tab {
+                match self.view_menu.tab {
                     ViewTab::Camera => self.view_tab_camera(ui),
                     ViewTab::Lighting => self.view_tab_lighting(ui),
                     ViewTab::Scene => self.view_tab_scene(ui),
                 }
             });
         // Close on a click outside the window. **Test against the rect drawn _last_
-        // frame** (`view_menu_rect`), not this frame's: clicking a tab switches
-        // `view_tab` and `Window::show` immediately re-lays-out the (right-pivoted)
+        // frame** (`ViewMenu::last_rect`), not this frame's: clicking a tab switches
+        // the tab and `Window::show` immediately re-lays-out the (right-pivoted)
         // window for the new tab — a narrower tab moves the left edge right, so the
         // freshly-updated rect (and `layer_id_at`, which reads the same just-updated
         // area state) no longer covers the leftmost tab the click actually landed on,
@@ -183,16 +183,16 @@ impl App {
         // user saw and clicked. A child popup (dropdown / color picker) keeps it open
         // via `Popup::is_any_open`; clicks on the hamburger (`anchor`) are its toggle.
         if let Some(inner) = inner {
-            let hit_rect = self.view_menu_rect.unwrap_or(inner.response.rect);
+            let hit_rect = self.view_menu.last_rect.unwrap_or(inner.response.rect);
             let clicked = ctx.input(|i| i.pointer.any_click());
             if clicked && !egui::Popup::is_any_open(ctx) {
                 if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
                     if !hit_rect.contains(p) && !anchor.contains(p) {
-                        self.view_menu_open = false;
+                        self.view_menu.open = false;
                     }
                 }
             }
-            self.view_menu_rect = Some(inner.response.rect);
+            self.view_menu.last_rect = Some(inner.response.rect);
         }
     }
 
@@ -505,8 +505,11 @@ impl App {
                     .on_hover_text("Program settings")
                     .clicked()
                 {
-                    if self.settings_draft.is_none() {
-                        self.settings_draft = Some(self.settings.clone());
+                    if self.settings_dialog.is_none() {
+                        self.settings_dialog = Some(SettingsDialog {
+                            draft: self.settings.clone(),
+                            tab: SettingsPage::default(),
+                        });
                     }
                     ui.close();
                 }
@@ -574,7 +577,7 @@ impl App {
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut save_mol: Option<usize> = None;
         let mut open_del_frames: Option<MolId> = None;
-        let mut rename: Option<(MolId, String)> = None;
+        let mut rename: Option<RenameDialog> = None;
         // A camera "zoom to fit" request (whole-molecule bbox), applied after the
         // loop so it doesn't conflict with the `&mut` molecule borrow.
         let mut focus: Option<(glam::Vec3, glam::Vec3)> = None;
@@ -658,7 +661,10 @@ impl App {
                                 ui.close();
                             }
                             if ui.button(format!("{}  Rename…", icon::PENCIL_SIMPLE)).clicked() {
-                                rename = Some((mol.id, mol.name.clone()));
+                                rename = Some(RenameDialog {
+                                    mol: mol.id,
+                                    name: mol.name.clone(),
+                                });
                                 ui.close();
                             }
                             if ui
@@ -807,7 +813,7 @@ impl App {
             self.delete_frames_dialog = Some(DeleteFramesDialog::new(id));
         }
         if rename.is_some() {
-            self.rename_mol = rename;
+            self.rename_dialog = rename;
         }
         if let Some(id) = open_load {
             // Native: the load dialog (file picker + range/stride/sync-async).

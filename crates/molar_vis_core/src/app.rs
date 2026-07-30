@@ -97,17 +97,14 @@ pub struct App {
     scene: Scene,
     /// Persisted program settings (theme, render quality, new-document defaults,
     /// behavior). Loaded on launch from the platform config dir; edited via the
-    /// settings dialog (see `settings_draft`).
+    /// settings dialog (see [`SettingsDialog`]).
     settings: Settings,
     /// Effective defaults for a new representation = `settings.reps`, with the kind
     /// overridden by the `MOLAR_VIS_DEBUG_REP` env hook. Recomputed when settings
     /// change. Used for the initial rep of each loaded molecule + the add-rep button.
     rep_defaults: RepDefaults,
-    /// Working copy of the settings while the settings dialog is open (edit-then-
-    /// apply); `None` when the dialog is closed.
-    settings_draft: Option<Settings>,
-    /// Active tab in the settings dialog.
-    settings_tab: SettingsPage,
+    /// Open program-settings dialog (the draft being edited + its active tab), if any.
+    settings_dialog: Option<SettingsDialog>,
     /// Camera at the last 3D render; `None` forces a render.
     last_render_camera: Option<Camera>,
     last_size: [u32; 2],
@@ -151,7 +148,7 @@ pub struct App {
     /// Open "Render ▸ Image…" save dialog (the chosen output scale), if any.
     image_dialog: Option<ImageDialog>,
     /// Open "rename molecule" dialog: the target molecule + the edit buffer.
-    rename_mol: Option<(MolId, String)>,
+    rename_dialog: Option<RenameDialog>,
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,
@@ -170,10 +167,10 @@ pub struct App {
     /// set, hovering a rep's geometry (viewport) or a rep row (panel) highlights it and
     /// clicking assigns it as the partner. Esc / empty-click cancels. Transient.
     partner_pick: Option<(MolId, usize)>,
-    /// The Interactions rep whose per-type **Settings** dialog is open, as `(molecule
-    /// id, rep index)`, or `None`. A movable `egui::Window` (`draw_interactions_dialog`)
-    /// edits the rep's `InteractionSettings`. Transient.
-    interactions_dialog: Option<(MolId, usize)>,
+    /// Open per-type **Settings** dialog of an Interactions rep, if any: which rep, plus
+    /// the active type tab. A movable `egui::Window` (`draw_interactions_dialog`) edits
+    /// the rep's `InteractionSettings`. Transient.
+    interactions_dialog: Option<InteractionsDialog>,
     /// The UI theme the viewport background was last matched to, so a theme change can be
     /// detected (`System` mode also flips at runtime when the desktop does). See
     /// `follow_theme_background`.
@@ -186,8 +183,6 @@ pub struct App {
     /// molecule it ran on — shown in that rep's **Color** tab. A leading `!` marks an
     /// error (rendered red); anything else is an informational summary. Transient.
     charge_status: Option<(usize, String)>,
-    /// Which interaction-type tab is active in that dialog. Transient.
-    interactions_tab: crate::interactions::InteractionKind,
     /// Last cursor NDC the hover detail lens was rebuilt at, so it only rebuilds as
     /// the cursor actually moves (the fade follows the ray, so any move rebuilds).
     last_lens_ndc: Option<(f32, f32)>,
@@ -205,18 +200,9 @@ pub struct App {
     axes_on: bool,
     /// Which viewport corner the axes gizmo is anchored to.
     axes_corner: Corner,
-    /// Active tab in the top-bar "view settings" (hamburger) menu.
-    view_tab: ViewTab,
-    /// Whether the view-settings (hamburger) window is open. A real `Window` rather
-    /// than a `Popup` so nested click-to-open dropdowns / color pickers work; closed
-    /// manually on a click outside it (see `view_settings_window`).
-    view_menu_open: bool,
-    /// The view-settings window's rect **as drawn last frame** — the geometry the user
-    /// actually clicked on. The close-on-click-outside test must use this, not the
-    /// current frame's rect: switching tabs re-lays-out the (right-pivoted) window in
-    /// the *same* frame, so the freshly-narrowed rect no longer covers the leftmost
-    /// tab the click landed on (see `view_settings_window`).
-    view_menu_rect: Option<egui::Rect>,
+    /// The top-bar "view settings" (hamburger) menu: open state, active tab, and the
+    /// close-on-click-outside geometry. See [`ViewMenu`].
+    view_menu: ViewMenu,
     /// Browser file-open channel: the async `<input type=file>` picker reads the
     /// chosen file and sends `(filename, bytes)` here; `ui()` drains it and loads
     /// the structure. Cloned per pick; the receiver is polled each frame. Wasm only.
@@ -341,6 +327,49 @@ enum RtJob {
 struct ImageDialog {
     /// Output size as a multiple of the viewport (1× / 2× / 4×).
     scale: u32,
+}
+
+/// The program-settings dialog: a working copy of the settings (edit-then-apply — **Save**
+/// commits, **Cancel**/Escape discards) plus its active tab.
+struct SettingsDialog {
+    draft: Settings,
+    tab: SettingsPage,
+}
+
+/// The per-type **Settings** dialog of an Interactions rep: which rep it edits (by molecule
+/// id, so a reorder can't retarget it) plus the active interaction-type tab.
+struct InteractionsDialog {
+    mol: MolId,
+    rep: usize,
+    tab: crate::interactions::InteractionKind,
+}
+
+/// The "rename molecule" dialog: the target molecule and the edit buffer.
+struct RenameDialog {
+    mol: MolId,
+    name: String,
+}
+
+/// The top-bar view-settings (hamburger) menu.
+///
+/// Unlike the transient dialogs this is **not** an `Option` whose `Some` means "open": the
+/// menu is a toolbar popover the user flips open and shut constantly, and `tab` is sticky
+/// across that — reopening lands on the tab last used, not back on Camera. So `open` rides
+/// inside, and only `last_rect` is optional.
+#[derive(Default)]
+struct ViewMenu {
+    /// Whether the window is showing. A real `Window` rather than a `Popup` so nested
+    /// click-to-open dropdowns / color pickers work; closed manually on a click outside it
+    /// (see `view_settings_window`).
+    open: bool,
+    /// Active tab (Camera / Lighting / Scene).
+    tab: ViewTab,
+    /// The window's rect **as drawn last frame** — the geometry the user actually clicked
+    /// on. The close-on-click-outside test must use this, not the current frame's rect:
+    /// switching tabs re-lays-out the (right-pivoted) window in the *same* frame, so the
+    /// freshly-narrowed rect no longer covers the leftmost tab the click landed on (see
+    /// `view_settings_window`). Cleared when the menu closes, never mid-life.
+    last_rect: Option<egui::Rect>,
 }
 
 /// How a lasso gesture combines with the molecule's existing active selection.

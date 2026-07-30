@@ -1254,7 +1254,11 @@ impl App {
         }
         // Open the interaction-settings dialog for this rep.
         if let Some(j) = open_settings {
-            self.interactions_dialog = Some((mol_id, j));
+            self.interactions_dialog = Some(InteractionsDialog {
+                mol: mol_id,
+                rep: j,
+                tab: crate::interactions::InteractionKind::HBond,
+            });
         }
         // Compute espaloma partial charges for a rep's selection.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1289,16 +1293,18 @@ impl App {
     /// The Interactions **Settings** dialog (a movable `egui::Window`): a tab per
     /// interaction type, each exposing that type's full parameter set (enable + all
     /// cutoffs/angles), plus a shared line-width + Defaults footer, for the rep in
-    /// `self.interactions_dialog`. Any edit marks the rep `geom_dirty` so its contacts
+    /// [`App::interactions_dialog`]. Any edit marks the rep `geom_dirty` so its contacts
     /// rebuild. Closed via the window ✕ or when the target rep vanishes.
     pub(super) fn draw_interactions_dialog(&mut self, ctx: &egui::Context) {
         use crate::interactions::InteractionKind as K;
-        let Some((mol_id, ri)) = self.interactions_dialog else {
+        // Taken out for the duration, so the tab can be edited by `&mut` while the closure
+        // also borrows `self.scene` — and put back below unless the dialog was closed.
+        let Some(mut dialog) = self.interactions_dialog.take() else {
             return;
         };
+        let (mol_id, ri) = (dialog.mol, dialog.rep);
         let Some(mi) = self.scene.mol_index(mol_id) else {
-            self.interactions_dialog = None;
-            return;
+            return; // the rep's molecule is gone → the dialog closes with it
         };
         let mut open = true;
         egui::Window::new("Interaction settings")
@@ -1310,7 +1316,7 @@ impl App {
                 // A tab per interaction type (a colored dot marks each type's line color).
                 tab_bar(
                     ui,
-                    &mut self.interactions_tab,
+                    &mut dialog.tab,
                     &[
                         (K::HBond, "H-bonds"),
                         (K::Hydrophobic, "Hydrophobic"),
@@ -1321,7 +1327,7 @@ impl App {
                     ],
                 );
                 ui.separator();
-                let tab = self.interactions_tab;
+                let tab = dialog.tab;
                 let Some(rep) = self.scene.molecules.get_mut(mi).and_then(|m| m.reps.get_mut(ri))
                 else {
                     return;
@@ -1447,8 +1453,8 @@ impl App {
                     rep.geom_dirty = true;
                 }
             });
-        if !open {
-            self.interactions_dialog = None;
+        if open {
+            self.interactions_dialog = Some(dialog); // still open — keep the active tab
         }
     }
 }

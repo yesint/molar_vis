@@ -490,7 +490,7 @@ impl App {
 
     /// Modal to rename a molecule's displayed name (set from the molecule menu).
     pub(super) fn draw_rename_dialog(&mut self, ctx: &egui::Context) {
-        let Some((id, mut name)) = self.rename_mol.take() else {
+        let Some(RenameDialog { mol: id, mut name }) = self.rename_dialog.take() else {
             return;
         };
         let mut commit = false;
@@ -524,7 +524,8 @@ impl App {
                 mol.name = name.trim().to_string();
             }
         } else if !cancel && !modal.should_close() {
-            self.rename_mol = Some((id, name)); // still open — keep the edit buffer
+            // Still open — keep the edit buffer.
+            self.rename_dialog = Some(RenameDialog { mol: id, name });
         }
     }
 

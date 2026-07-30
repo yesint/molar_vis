@@ -531,8 +531,7 @@ impl App {
             scene,
             settings,
             rep_defaults,
-            settings_draft: None,
-            settings_tab: SettingsPage::default(),
+            settings_dialog: None,
             last_render_camera: None,
             last_size: [0, 0],
             view_dirty: true,
@@ -554,7 +553,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             docking_dialog: None,
             delete_frames_dialog: None,
-            rename_mol: None,
+            rename_dialog: None,
             loaders: HashMap::new(),
             pick_mode,
             selection_mode,
@@ -565,7 +564,6 @@ impl App {
             themed_bg: None,
             charge_status: None,
             interactions_dialog: None,
-            interactions_tab: crate::interactions::InteractionKind::HBond,
             last_lens_ndc: None,
             #[cfg(not(target_arch = "wasm32"))]
             hover_pick: None,
@@ -573,9 +571,10 @@ impl App {
             last_pick_px: None,
             axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
             axes_corner: Corner::BottomRight,
-            view_tab: ViewTab::default(),
-            view_menu_open: std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok(),
-            view_menu_rect: None,
+            view_menu: ViewMenu {
+                open: std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok(),
+                ..Default::default()
+            },
             #[cfg(target_arch = "wasm32")]
             file_tx,
             #[cfg(target_arch = "wasm32")]
@@ -858,14 +857,16 @@ impl App {
         // be screenshot. Pair with MOLAR_VIS_DEBUG_DEFAULTS=1 to keep the shown values
         // reproducible regardless of the saved config.
         if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_SETTINGS") {
-            app.settings_draft = Some(app.settings.clone());
-            app.settings_tab = match tab.to_ascii_lowercase().as_str() {
-                "rendering" => SettingsPage::Rendering,
-                "view" => SettingsPage::View,
-                "reps" | "representations" => SettingsPage::Representations,
-                "behavior" => SettingsPage::Behavior,
-                _ => SettingsPage::Appearance,
-            };
+            app.settings_dialog = Some(SettingsDialog {
+                draft: app.settings.clone(),
+                tab: match tab.to_ascii_lowercase().as_str() {
+                    "rendering" => SettingsPage::Rendering,
+                    "view" => SettingsPage::View,
+                    "reps" | "representations" => SettingsPage::Representations,
+                    "behavior" => SettingsPage::Behavior,
+                    _ => SettingsPage::Appearance,
+                },
+            });
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[type] opens the
@@ -879,16 +880,19 @@ impl App {
                     .iter()
                     .position(|r| matches!(r.kind, RepKind::Interactions))
                 {
-                    app.interactions_dialog = Some((mol.id, ri));
                     use crate::interactions::InteractionKind as K;
-                    app.interactions_tab = match tab.to_ascii_lowercase().as_str() {
-                        "hydrophobic" => K::Hydrophobic,
-                        "salt" | "saltbridge" => K::SaltBridge,
-                        "pistacking" | "pi-stack" | "pistack" => K::PiStacking,
-                        "pication" | "pi-cation" => K::PiCation,
-                        "halogen" => K::Halogen,
-                        _ => K::HBond,
-                    };
+                    app.interactions_dialog = Some(InteractionsDialog {
+                        mol: mol.id,
+                        rep: ri,
+                        tab: match tab.to_ascii_lowercase().as_str() {
+                            "hydrophobic" => K::Hydrophobic,
+                            "salt" | "saltbridge" => K::SaltBridge,
+                            "pistacking" | "pi-stack" | "pistack" => K::PiStacking,
+                            "pication" | "pi-cation" => K::PiCation,
+                            "halogen" => K::Halogen,
+                            _ => K::HBond,
+                        },
+                    });
                 }
             }
         }

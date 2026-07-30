@@ -415,14 +415,13 @@ impl App {
     /// every frame, so its top edge jumps up/down as the per-tab content height
     /// changes; a Window keeps its position, and with a **fixed width** it can only
     /// grow/shrink at the **bottom** (top stays put). Edits a working copy
-    /// (`settings_draft`); **Save** commits + applies + persists, **Cancel** / Escape
+    /// ([`SettingsDialog::draft`]); **Save** commits + applies + persists, **Cancel** / Escape
     /// discards. The View tab can push its defaults onto the current camera ("Apply to
     /// current view") without saving.
     pub(super) fn draw_settings_dialog(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        let Some(mut draft) = self.settings_draft.take() else {
+        let Some(SettingsDialog { mut draft, mut tab }) = self.settings_dialog.take() else {
             return;
         };
-        let mut tab = self.settings_tab;
         let mut save = false;
         let mut cancel = false;
         let mut apply_view = false;
@@ -482,7 +481,6 @@ impl App {
                 });
             });
 
-        self.settings_tab = tab;
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             cancel = true;
         }
@@ -509,7 +507,7 @@ impl App {
                 self.last_render_camera = None;
                 ctx.request_repaint();
             }
-            self.settings_draft = Some(draft);
+            self.settings_dialog = Some(SettingsDialog { draft, tab });
         }
     }
 
