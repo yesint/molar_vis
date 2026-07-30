@@ -20,9 +20,31 @@ pub(super) fn icon_button(ui: &mut egui::Ui, glyph: &str, hover: &str) -> egui::
     ui.selectable_label(false, glyph).on_hover_text(hover)
 }
 
+/// Horizontal gap between compact action icons. Also the gap to pass an
+/// [`egui::containers::Sides`] whose sides are compact groups — `Sides` reads its default
+/// gap from the *parent* `Ui`, which hasn't been tightened, so without this the seam
+/// between the two sides would be wider than the seams within them.
+pub(super) const COMPACT_SPACING: f32 = 2.0;
+
+/// Paint `galley` centred in `rect` by its **ink** bounds rather than its font line-box.
+///
+/// Every container egui offers aligns text on the line-box, which includes ascender/descender
+/// space the glyph may not use — so a Phosphor icon or a short label comes out visibly high or
+/// low inside a fixed-height frame. Measuring `Galley::mesh_bounds` instead puts the drawn
+/// pixels dead centre. There is no egui equivalent, hence this.
+pub(super) fn paint_ink_centered(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    galley: std::sync::Arc<egui::Galley>,
+    color: egui::Color32,
+) {
+    let ink = galley.mesh_bounds;
+    painter.galley(rect.center() - ink.center().to_vec2(), galley, color);
+}
+
 /// Tighten spacing for a group of action icons (call first in the group's `ui`).
 pub(super) fn compact_actions(ui: &mut egui::Ui) {
-    ui.spacing_mut().item_spacing.x = 2.0;
+    ui.spacing_mut().item_spacing.x = COMPACT_SPACING;
     ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
 }
 
@@ -123,17 +145,10 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
         ui.painter()
             .rect_stroke(rect, R, vis.bg_stroke, egui::StrokeKind::Inside);
     }
-    // Center the glyph/label by its ink, so it sits dead-centre regardless of the
-    // font's per-glyph vertical metrics.
-    let ink = galley.mesh_bounds;
-    ui.painter()
-        .galley(rect.center() - ink.center().to_vec2(), galley, vis.text_color());
+    paint_ink_centered(ui.painter(), rect, galley, vis.text_color());
     resp
 }
 
-/// A plain text label vertically centered the same way `overlay_button` centers its
-/// glyph (by ink bounds, at the toolbar button height) — so a label sitting next to
-/// `overlay_button` dropdowns lines up with them instead of riding high/low.
 /// A tree node's name (molecule / group / member) in **bold**.
 ///
 /// egui's `RichText::strong()` only swaps in a brighter colour — its bundled fonts have no bold
@@ -144,22 +159,18 @@ pub(super) fn bold_name(ui: &egui::Ui, text: &str) -> egui::RichText {
     egui::RichText::new(text).font(crate::theme::bold(size))
 }
 
+/// A plain text label vertically centered the same way [`overlay_button`] centers its glyph
+/// (by ink bounds, at the toolbar button height) — so a label sitting next to `overlay_button`
+/// dropdowns lines up with them instead of riding high/low.
 pub(super) fn toolbar_label(ui: &mut egui::Ui, text: &str) {
     const H: f32 = 26.0;
     let font = egui::TextStyle::Button.resolve(ui.style());
     let col = ui.visuals().text_color();
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, col);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(galley.size().x, H), egui::Sense::hover());
-    let ink = galley.mesh_bounds;
-    ui.painter()
-        .galley(rect.center() - ink.center().to_vec2(), galley, col);
+    paint_ink_centered(ui.painter(), rect, galley, col);
 }
 
-/// Parameter controls for a representation, shown inline under its row as a tidy
-/// two-column table (parameter name on the left, control on the right).
-/// Returns `true` if a render-only change was made (periodic-image params) so the
-/// caller can flag the viewport dirty; geometry changes set `rep.geom_dirty`
-/// directly. `has_box` gates the **Periodic** tab (only meaningful with a box).
 /// The app's standard **tab bar**: underline-style tabs (the selected tab is bold
 /// with an accent underline; the others are weak, clickable text) instead of
 /// disconnected toggle buttons. Sets `*current` to the clicked tab and returns

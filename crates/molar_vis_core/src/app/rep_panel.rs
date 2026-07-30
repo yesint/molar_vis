@@ -91,6 +91,11 @@ pub(super) struct RepParamsOutcome {
     pub compute_charges: bool,
 }
 
+/// Parameter controls for a representation, shown inline under its row as a tidy
+/// two-column table (parameter name on the left, control on the right).
+/// Returns `true` if a render-only change was made (periodic-image params) so the
+/// caller can flag the viewport dirty; geometry changes set `rep.geom_dirty`
+/// directly. `has_box` gates the **Periodic** tab (only meaningful with a box).
 pub(super) fn draw_rep_params(
     ui: &mut egui::Ui,
     rep: &mut Representation,
@@ -661,47 +666,70 @@ pub(super) fn draw_traj_bar(ui: &mut egui::Ui, traj: &mut Trajectory) -> bool {
     });
 
     // Row 2: first · back · [full-width scrub slider] · forward · last.
-    ui.horizontal(|ui| {
-        compact_actions(ui);
-        if icon_button(ui, icon::SKIP_BACK, "First frame").clicked() {
-            traj.set_playing(false);
-            traj.set_current(0);
-        }
-        if icon_button(ui, icon::CARET_LEFT, "Step back").clicked() {
-            traj.set_playing(false);
-            traj.step(-1);
-        }
+    //
+    // `Sides::shrink_left` **measures** the two trailing buttons and gives the slider side
+    // whatever is left. The alternative — subtracting a hardcoded reserve from
+    // `available_width()` — has to predict the rendered width of buttons that have not been
+    // added yet, from theme data (button padding, item spacing, Phosphor glyph metrics);
+    // it left 2 px of slack, so any of those changing pushed the buttons out of the row.
+    // The right side lays out right-to-left, so "Last" is added *before* "Step forward" to
+    // keep the on-screen order `▶| ⏭`.
+    //
+    // `Sides::show` builds both closures before running either, so the right one cannot also
+    // hold `&mut traj`: it reports its clicks back and they are applied below, in the order
+    // the single-closure version evaluated them.
+    let (_, (to_last, forward)) = egui::containers::Sides::new()
+        .shrink_left()
+        .spacing(COMPACT_SPACING)
+        .show(
+            ui,
+            |ui| {
+                compact_actions(ui);
+                if icon_button(ui, icon::SKIP_BACK, "First frame").clicked() {
+                    traj.set_playing(false);
+                    traj.set_current(0);
+                }
+                if icon_button(ui, icon::CARET_LEFT, "Step back").clicked() {
+                    traj.set_playing(false);
+                    traj.step(-1);
+                }
 
-        // The slider stretches across the row between the flanking step buttons.
-        // Zoomed: a ±25-frame window around the current frame (finer scrubbing on a
-        // long trajectory); otherwise the full range.
-        let (lo, hi) = if traj.slider_zoom && n > 50 {
-            (traj.current.saturating_sub(25), (traj.current + 25).min(last))
-        } else {
-            (0, last)
-        };
-        // Reserve room for the two trailing buttons (forward, last) + spacing.
-        let reserve = 52.0;
-        ui.spacing_mut().slider_width = (ui.available_width() - reserve).max(40.0);
-        let mut cur = traj.current;
-        let resp = ui.add(egui::Slider::new(&mut cur, lo..=hi).show_value(false));
-        if resp.changed() {
-            traj.set_playing(false);
-            traj.set_current(cur);
-        }
-        if let Some(t) = traj.current_time() {
-            resp.on_hover_text(format!("frame {} — t = {:.3}", traj.current, t));
-        }
-
-        if icon_button(ui, icon::CARET_RIGHT, "Step forward").clicked() {
-            traj.set_playing(false);
-            traj.step(1);
-        }
-        if icon_button(ui, icon::SKIP_FORWARD, "Last frame").clicked() {
-            traj.set_playing(false);
-            traj.set_current(last);
-        }
-    });
+                // The slider stretches across the row between the flanking step buttons.
+                // Zoomed: a ±25-frame window around the current frame (finer scrubbing on
+                // a long trajectory); otherwise the full range.
+                let (lo, hi) = if traj.slider_zoom && n > 50 {
+                    (traj.current.saturating_sub(25), (traj.current + 25).min(last))
+                } else {
+                    (0, last)
+                };
+                // This Ui's max rect is already bounded by the right side's measured width,
+                // so what's left after the two leading buttons is exactly the slider's.
+                ui.spacing_mut().slider_width = ui.available_width().max(40.0);
+                let mut cur = traj.current;
+                let resp = ui.add(egui::Slider::new(&mut cur, lo..=hi).show_value(false));
+                if resp.changed() {
+                    traj.set_playing(false);
+                    traj.set_current(cur);
+                }
+                if let Some(t) = traj.current_time() {
+                    resp.on_hover_text(format!("frame {} — t = {:.3}", traj.current, t));
+                }
+            },
+            |ui| {
+                compact_actions(ui);
+                let to_last = icon_button(ui, icon::SKIP_FORWARD, "Last frame").clicked();
+                let forward = icon_button(ui, icon::CARET_RIGHT, "Step forward").clicked();
+                (to_last, forward)
+            },
+        );
+    if forward {
+        traj.set_playing(false);
+        traj.step(1);
+    }
+    if to_last {
+        traj.set_playing(false);
+        traj.set_current(last);
+    }
 
     traj.current != before
 }
@@ -718,42 +746,58 @@ pub(super) fn draw_group_bar(ui: &mut egui::Ui, names: &[String], current: usize
     }
     let last = n_members - 1;
     let mut cur = current.min(last);
-    ui.horizontal(|ui| {
-        compact_actions(ui);
-        if icon_button(ui, icon::SKIP_BACK, "First molecule").clicked() {
-            cur = 0;
-        }
-        if icon_button(ui, icon::CARET_LEFT, "Previous molecule").clicked() {
-            cur = cur.saturating_sub(1);
-        }
-        // The slider stretches between the flanking step buttons (room reserved for
-        // the trailing next/last buttons + spacing).
-        let reserve = 52.0;
-        ui.spacing_mut().slider_width = (ui.available_width() - reserve).max(40.0);
-        let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
-        // Tooltip anchored **under the knob** (not at the cursor), showing "N/M name"
-        // for the member the knob points at — updates live while dragging.
-        if resp.hovered() || resp.dragged() {
-            let name = names.get(cur).map(|s| s.as_str()).unwrap_or("");
-            let frac = if last > 0 { cur as f32 / last as f32 } else { 0.0 };
-            let knob_x = resp.rect.left() + frac * resp.rect.width();
-            let pos = egui::pos2(knob_x, resp.rect.bottom() + 4.0);
-            egui::Area::new(egui::Id::new("group_cycle_tooltip"))
-                .order(egui::Order::Tooltip)
-                .fixed_pos(pos)
-                .pivot(egui::Align2::CENTER_TOP)
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style())
-                        .show(ui, |ui| ui.label(format!("{}/{} {}", cur + 1, n_members, name)));
-                });
-        }
-        if icon_button(ui, icon::CARET_RIGHT, "Next molecule").clicked() {
-            cur = (cur + 1).min(last);
-        }
-        if icon_button(ui, icon::SKIP_FORWARD, "Last molecule").clicked() {
-            cur = last;
-        }
-    });
+    // `Sides::shrink_left` measures the trailing buttons; see the same call in
+    // `draw_traj_bar` for why that beats a hardcoded reserve, and why the right side reports
+    // its clicks instead of mutating `cur`. The right side lays out right-to-left, so "Last"
+    // is added *before* "Next".
+    let (_, (to_last, next)) = egui::containers::Sides::new()
+        .shrink_left()
+        .spacing(COMPACT_SPACING)
+        .show(
+            ui,
+            |ui| {
+                compact_actions(ui);
+                if icon_button(ui, icon::SKIP_BACK, "First molecule").clicked() {
+                    cur = 0;
+                }
+                if icon_button(ui, icon::CARET_LEFT, "Previous molecule").clicked() {
+                    cur = cur.saturating_sub(1);
+                }
+                // The slider takes whatever the two leading buttons leave of this Ui,
+                // which the right side has already bounded.
+                ui.spacing_mut().slider_width = ui.available_width().max(40.0);
+                let resp = ui.add(egui::Slider::new(&mut cur, 0..=last).show_value(false));
+                // Tooltip anchored **under the knob** (not at the cursor), showing "N/M
+                // name" for the member the knob points at — updates live while dragging.
+                if resp.hovered() || resp.dragged() {
+                    let name = names.get(cur).map(|s| s.as_str()).unwrap_or("");
+                    let frac = if last > 0 { cur as f32 / last as f32 } else { 0.0 };
+                    let knob_x = resp.rect.left() + frac * resp.rect.width();
+                    let pos = egui::pos2(knob_x, resp.rect.bottom() + 4.0);
+                    egui::Area::new(egui::Id::new("group_cycle_tooltip"))
+                        .order(egui::Order::Tooltip)
+                        .fixed_pos(pos)
+                        .pivot(egui::Align2::CENTER_TOP)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                ui.label(format!("{}/{} {}", cur + 1, n_members, name))
+                            });
+                        });
+                }
+            },
+            |ui| {
+                compact_actions(ui);
+                let to_last = icon_button(ui, icon::SKIP_FORWARD, "Last molecule").clicked();
+                let next = icon_button(ui, icon::CARET_RIGHT, "Next molecule").clicked();
+                (to_last, next)
+            },
+        );
+    if next {
+        cur = (cur + 1).min(last);
+    }
+    if to_last {
+        cur = last;
+    }
     (cur != current).then_some(cur)
 }
 impl App {
@@ -856,6 +900,9 @@ impl App {
             let rep = &mut mol.reps[j];
             // Whether the selection is valid but empty (0 atoms) — flags the field.
             let sel_empty = rep.sel_empty;
+            // Read before the row is laid out: the two `Sides` closures can't both hold
+            // `&mut rep`, so the action side works from a copy and reports its clicks back.
+            let rep_visible = rep.visible;
 
             // Each rep is two rows, grouped: row 1 = handle | selection | actions,
             // row 2 = style | color | gear. The whole block is the reorder target.
@@ -898,67 +945,96 @@ impl App {
                                 new_editing = None;
                             }
                         } else {
-                            // Actions on the right; selection field fills the rest.
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                compact_actions(ui);
-                                if icon_button(ui, icon::TRASH, "Delete").clicked() {
-                                    delete = Some(j);
-                                }
-                                // Save just the selected atoms to a structure file
-                                // (sits left of delete). Native only.
-                                #[cfg(not(target_arch = "wasm32"))]
-                                if icon_button(ui, icon::FLOPPY_DISK, "Save selection to file")
-                                    .clicked()
-                                {
-                                    save_rep = Some(j);
-                                }
-                                if icon_button(ui, icon::COPY, "Duplicate").clicked() {
-                                    duplicate = Some(j);
-                                }
-                                // (Update-every-frame moved to the Settings ▸ Traj tab.)
-                                // Eye: open when shown, crossed when hidden.
-                                let eye = if rep.visible { icon::EYE } else { icon::EYE_SLASH };
-                                if ui
-                                    .selectable_label(rep.visible, eye)
-                                    .on_hover_text(if rep.visible { "Hide" } else { "Show" })
-                                    .clicked()
-                                {
-                                    rep.visible = !rep.visible;
-                                    view_dirty = true;
-                                }
-                                // Zoom the camera to fit this selection.
-                                if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to selection")
-                                    .clicked()
-                                {
-                                    zoom_rep = Some(j);
-                                }
-                                // Selection field fills the remaining width.
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        let width = ui.available_width();
-                                        let resp = sel_text_edit(
-                                            ui,
-                                            &mut rep.sel_text,
-                                            sel_id,
-                                            width,
-                                            rep.sel_error_span.clone(),
-                                        );
-                                        if resp.changed() {
-                                            clear_sel_feedback(rep);
-                                        }
-                                        if sel_empty && !resp.changed() {
-                                            mark_empty_selection(ui, resp.rect);
-                                        }
-                                        if resp.gained_focus() {
-                                            new_editing = Some((mi, j));
-                                        }
-                                        if resp.lost_focus() {
-                                            rep.sel_dirty = true;
-                                        }
-                                    },
-                                );
-                            });
+                            // Selection field on the left filling the rest, actions on the
+                            // right. `Sides::shrink_left` measures the action group and
+                            // bounds the field's Ui with what's left — replacing the
+                            // pre-`Sides` workaround (a `right_to_left` wrapping a
+                            // `left_to_right` that read `available_width()`), one nesting
+                            // level shallower. The right closure is right-to-left just as
+                            // that wrapper was, so the action order is unchanged.
+                            //
+                            // Both closures are built before either runs, so only one may
+                            // hold `&mut rep`: the actions report their clicks back, and the
+                            // eye toggle is applied after.
+                            let (_, toggle_eye) = egui::containers::Sides::new()
+                                    .shrink_left()
+                                    .spacing(COMPACT_SPACING)
+                                    .show(
+                                        ui,
+                                        |ui| {
+                                            // The field's max rect is now bounded, so it can
+                                            // simply ask for everything.
+                                            let resp = sel_text_edit(
+                                                ui,
+                                                &mut rep.sel_text,
+                                                sel_id,
+                                                f32::INFINITY,
+                                                rep.sel_error_span.clone(),
+                                            );
+                                            if resp.changed() {
+                                                clear_sel_feedback(rep);
+                                            }
+                                            if sel_empty && !resp.changed() {
+                                                mark_empty_selection(ui, resp.rect);
+                                            }
+                                            if resp.gained_focus() {
+                                                new_editing = Some((mi, j));
+                                            }
+                                            if resp.lost_focus() {
+                                                rep.sel_dirty = true;
+                                            }
+                                        },
+                                        |ui| {
+                                            compact_actions(ui);
+                                            if icon_button(ui, icon::TRASH, "Delete").clicked() {
+                                                delete = Some(j);
+                                            }
+                                            // Save just the selected atoms to a structure
+                                            // file (sits left of delete). Native only.
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            if icon_button(
+                                                ui,
+                                                icon::FLOPPY_DISK,
+                                                "Save selection to file",
+                                            )
+                                            .clicked()
+                                            {
+                                                save_rep = Some(j);
+                                            }
+                                            if icon_button(ui, icon::COPY, "Duplicate").clicked() {
+                                                duplicate = Some(j);
+                                            }
+                                            // (Update-every-frame moved to Settings ▸ Traj.)
+                                            // Eye: open when shown, crossed when hidden.
+                                            let eye = if rep_visible {
+                                                icon::EYE
+                                            } else {
+                                                icon::EYE_SLASH
+                                            };
+                                            let toggle = ui
+                                                .selectable_label(rep_visible, eye)
+                                                .on_hover_text(match rep_visible {
+                                                    true => "Hide",
+                                                    false => "Show",
+                                                })
+                                                .clicked();
+                                            // Zoom the camera to fit this selection.
+                                            if icon_button(
+                                                ui,
+                                                icon::MAGNIFYING_GLASS_PLUS,
+                                                "Zoom to selection",
+                                            )
+                                            .clicked()
+                                            {
+                                                zoom_rep = Some(j);
+                                            }
+                                            toggle
+                                        },
+                                    );
+                            if toggle_eye {
+                                rep.visible = !rep_visible;
+                                view_dirty = true;
+                            }
                         }
                     });
 

@@ -398,8 +398,7 @@ impl App {
         let txt = if lum > 140.0 { egui::Color32::BLACK } else { egui::Color32::WHITE };
         let font = egui::TextStyle::Button.resolve(ui.style());
         let galley = ui.painter().layout_no_wrap(symbol.to_owned(), font, txt);
-        let ink = galley.mesh_bounds;
-        ui.painter().galley(rect.center() - ink.center().to_vec2(), galley, txt);
+        paint_ink_centered(ui.painter(), rect, galley, txt);
         resp
     }
 
