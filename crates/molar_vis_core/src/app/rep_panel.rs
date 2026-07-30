@@ -80,6 +80,57 @@ pub(super) fn sel_text_edit(
     )
 }
 
+/// The one thing a rep row asked for this frame.
+///
+/// A single `Option<RepAction>` rather than the eleven independent `Option`s this used to be,
+/// because four of these variants — `Reorder`, `Duplicate`, `CloneForInteractions`, `Delete` —
+/// mutate the rep list **by index**. Applying two in one frame would leave the second one's
+/// index pointing at the wrong rep. With separate slots that only held because at most one
+/// button can be clicked per pointer per frame, an unenforced invariant whose failure mode is
+/// silent (the neighbouring rep deleted). As one slot it is enforced by the type, and the
+/// apply site is a single exhaustive `match` whose arm order no longer matters.
+///
+/// The rep-list surgery itself lives on [`Molecule`] (`reorder_rep`, `duplicate_rep`,
+/// `insert_rep_above`, `delete_rep`), where it is unit-tested — see `scene::rep_surgery_tests`.
+///
+/// Note what is deliberately *not* here: `view_dirty`. It legitimately accumulates from many
+/// widgets in one frame (a visibility toggle, a periodic-image spinner, a params edit), so it
+/// stays a separate additive `bool`. That is the convention across the panel layer — an
+/// outcome is `{ view_dirty: bool, action: Option<A> }`: the flag is additive, the action is
+/// exclusive (see [`RepParamsOutcome`], [`GroupOutcome`](super::panels::GroupOutcome)).
+pub(super) enum RepAction {
+    /// Drag-reorder: move rep `from` into the gap before position `to`.
+    Reorder { from: usize, to: usize },
+    /// Duplicate rep `j`, inserting the copy just after it.
+    Duplicate(usize),
+    /// Rep `j` was switched to Interactions: re-insert `clone` (its old style, still visible)
+    /// just above it, so the molecule's look isn't lost — an Interactions rep draws only
+    /// contact lines. Boxed: a `Representation` is ~850 bytes and every other variant is a
+    /// couple of words, so inline it would set the size of the whole enum.
+    CloneForInteractions { at: usize, clone: Box<Representation> },
+    Delete(usize),
+    /// Commit the active (pending) selection as a Ball-and-Stick rep.
+    AcceptPending,
+    /// Drop the active (pending) selection.
+    DiscardPending,
+    /// Zoom the camera to fit rep `j`'s selection.
+    ZoomTo(usize),
+    /// Enter partner-pick mode for Interactions rep `j` (its [⊕ Choose…] button).
+    StartPartnerPick(usize),
+    /// Focus the camera on an Interactions rep's partner (its clickable label).
+    FocusPartner(MoleculeSource, usize),
+    /// A rep row was clicked *while* choosing a partner → assign it as the partner.
+    ChoosePartner(usize),
+    /// Open the per-type Interactions settings dialog for rep `j`.
+    OpenInteractionSettings(usize),
+    /// Run espaloma partial-charge prediction on rep `j`'s selection.
+    ComputeCharges(usize),
+    /// Write rep `j`'s selected atoms to a structure file. Native only — molar writes to the
+    /// filesystem, so the browser never draws the button.
+    #[cfg(not(target_arch = "wasm32"))]
+    SaveSelection(usize),
+}
+
 /// What the rep-settings panel wants the app to do next (the panel only sees the rep, so
 /// anything needing the molecule is reported back — same pattern as the Interactions
 /// partner/settings buttons).
@@ -875,25 +926,9 @@ impl App {
         let charge_status = self.charge_status.clone();
         let mol = &mut self.scene.molecules[mi];
 
-        let mut delete: Option<usize> = None;
-        let mut duplicate: Option<usize> = None;
-        let mut reorder: Option<(usize, usize)> = None;
-        let mut zoom_rep: Option<usize> = None;
-        // Interactions partner controls: which rep opened partner-pick, which partner
-        // (mol id + rep) to focus, and — while picking — which rep row was clicked as
-        // the partner. Applied after the `mol` borrow ends.
-        let mut start_partner_pick: Option<usize> = None;
-        let mut focus_partner: Option<(MoleculeSource, usize)> = None;
-        let mut chosen_partner: Option<usize> = None;
-        let mut open_settings: Option<usize> = None;
-        // Which rep asked for espaloma charges (needs `&mut Molecule`, so it runs after
-        // the borrow below ends).
-        let mut compute_charges: Option<usize> = None;
-        // When a rep is switched to Interactions, the pre-switch clone (old style) to
-        // re-insert so the molecule's look is preserved: (rep index, cloned rep).
-        let mut clone_rep: Option<(usize, Representation)> = None;
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-        let mut save_rep: Option<usize> = None;
+        // The single thing this pass asked for — see [`RepAction`]. Set from inside the row
+        // closures (which hold `&mut mol`), applied once they have all ended.
+        let mut action: Option<RepAction> = None;
 
         for j in start..end {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
@@ -987,7 +1022,7 @@ impl App {
                                         |ui| {
                                             compact_actions(ui);
                                             if icon_button(ui, icon::TRASH, "Delete").clicked() {
-                                                delete = Some(j);
+                                                action = Some(RepAction::Delete(j));
                                             }
                                             // Save just the selected atoms to a structure
                                             // file (sits left of delete). Native only.
@@ -999,10 +1034,10 @@ impl App {
                                             )
                                             .clicked()
                                             {
-                                                save_rep = Some(j);
+                                                action = Some(RepAction::SaveSelection(j));
                                             }
                                             if icon_button(ui, icon::COPY, "Duplicate").clicked() {
-                                                duplicate = Some(j);
+                                                action = Some(RepAction::Duplicate(j));
                                             }
                                             // (Update-every-frame moved to Settings ▸ Traj.)
                                             // Eye: open when shown, crossed when hidden.
@@ -1026,7 +1061,7 @@ impl App {
                                             )
                                             .clicked()
                                             {
-                                                zoom_rep = Some(j);
+                                                action = Some(RepAction::ZoomTo(j));
                                             }
                                             toggle
                                         },
@@ -1069,7 +1104,10 @@ impl App {
                         }
                         if let Some(clone) = style_picker(ui, rep) {
                             // Switched to Interactions → keep the old-style rep (below).
-                            clone_rep = Some((j, clone));
+                            action = Some(RepAction::CloneForInteractions {
+                                at: j,
+                                clone: Box::new(clone),
+                            });
                         }
                         if matches!(rep.kind, RepKind::Interactions) {
                             // An Interactions rep colors lines by contact type and draws
@@ -1088,7 +1126,10 @@ impl App {
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)
                                         .on_hover_text("Focus this partner rep");
                                     if link.clicked() {
-                                        focus_partner = rep.partner.clone();
+                                        action = rep
+                                            .partner
+                                            .clone()
+                                            .map(|(src, pr)| RepAction::FocusPartner(src, pr));
                                     }
                                 } else {
                                     ui.weak(label.as_str());
@@ -1101,7 +1142,7 @@ impl App {
                                     )
                                     .clicked()
                                 {
-                                    start_partner_pick = Some(j);
+                                    action = Some(RepAction::StartPartnerPick(j));
                                 }
                             }
                         } else {
@@ -1135,7 +1176,7 @@ impl App {
                                         )
                                         .clicked()
                                     {
-                                        open_settings = Some(j);
+                                        action = Some(RepAction::OpenInteractionSettings(j));
                                     }
                                 });
                             }
@@ -1150,7 +1191,7 @@ impl App {
                                 .map(|(_, m)| m.as_str());
                             let out = draw_rep_params(ui, rep, has_box, status);
                             if out.compute_charges {
-                                compute_charges = Some(j);
+                                action = Some(RepAction::ComputeCharges(j));
                             }
                             out.view_dirty
                         }
@@ -1177,7 +1218,7 @@ impl App {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 if pick.clicked() {
-                    chosen_partner = Some(j);
+                    action = Some(RepAction::ChoosePartner(j));
                 }
             }
 
@@ -1200,7 +1241,10 @@ impl App {
                         // drag that originated in the other list (their payloads share the
                         // `usize` type), so the `n_shared` boundary can't be crossed.
                         if (start..end).contains(&*src) {
-                            reorder = Some((*src, if before { j } else { j + 1 }));
+                            action = Some(RepAction::Reorder {
+                                from: *src,
+                                to: if before { j } else { j + 1 },
+                            });
                         }
                     }
                 }
@@ -1213,8 +1257,6 @@ impl App {
         // below the reps with a minimal interface: a non-editable "selection" label
         // plus accept (commit as a Ball-and-Stick rep) / discard buttons. No style,
         // color, or editable selection (those come once it's accepted).
-        let mut accept_pending = false;
-        let mut discard_pending = false;
         // The pending selection belongs to the molecule, not the shared document, so it is
         // skipped in the shared pass. A **grouped** molecule skips it here entirely: its
         // own-reps pass is buried behind two expanders and only rendered when the member
@@ -1230,7 +1272,7 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     compact_actions(ui);
                     if icon_button(ui, icon::TRASH, "Discard selection").clicked() {
-                        discard_pending = true;
+                        action = Some(RepAction::DiscardPending);
                     }
                     let accept = ui
                         .selectable_label(
@@ -1240,125 +1282,84 @@ impl App {
                         )
                         .on_hover_text("Accept as a representation");
                     if accept.clicked() {
-                        accept_pending = true;
+                        action = Some(RepAction::AcceptPending);
                     }
                 });
             });
             ui.add_space(6.0);
         }
 
-        if let Some((from, to)) = reorder {
-            if to != from && to != from + 1 {
-                let item = mol.reps.remove(from);
-                let target = (if from < to { to - 1 } else { to }).min(mol.reps.len());
-                mol.reps.insert(target, item);
-                mol.selected_rep = Some(target);
-                view_dirty = true;
-            }
-        }
-        if let Some(j) = duplicate {
-            let dup = mol.reps[j].duplicate();
-            mol.reps.insert(j + 1, dup);
-            mol.selected_rep = Some(j + 1);
-            // A duplicated shared rep stays inside the shared prefix.
-            if is_shared {
-                mol.n_shared += 1;
-            }
-            view_dirty = true;
-        }
-        // A rep switched to Interactions: re-insert its old-style clone just above it
-        // (kept visible) so the molecule's previous look isn't lost.
-        if let Some((j, clone)) = clone_rep {
-            mol.reps.insert(j, clone);
-            mol.selected_rep = Some(j + 1); // the Interactions rep (now shifted down)
-            if is_shared {
-                mol.n_shared += 1;
-            }
-            view_dirty = true;
-        }
-        if let Some(j) = delete {
-            mol.reps.remove(j);
-            if is_shared {
-                mol.n_shared = mol.n_shared.saturating_sub(1);
-            }
-            mol.selected_rep = if mol.reps.is_empty() {
-                None
-            } else {
-                Some(j.min(mol.reps.len() - 1))
-            };
-            view_dirty = true;
-        }
-        if accept_pending {
-            if let Some(p) = mol.pending.take() {
-                // Commit as a normal, fully editable Ball-and-Stick representation.
-                let mut rep = Representation::new(RepKind::BallAndStick);
-                rep.sel_text = p.sel_text;
-                mol.reps.push(rep);
-                mol.selected_rep = Some(mol.reps.len() - 1);
-                mol.reps_open = true;
-            }
-            mol.glow_dirty = true; // clear the glow geometry
-            view_dirty = true;
-        }
-        if discard_pending {
-            mol.pending = None;
-            mol.glow_dirty = true; // clear the glow geometry
-            view_dirty = true;
-        }
-
-        // Zoom the camera to fit a rep's selection (camera is a disjoint field
-        // from the scene, so this is fine while `mol` is borrowed).
-        if let Some(j) = zoom_rep {
-            if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
-                let (min, max) = mol.sel_bbox(sel);
-                self.camera.focus_bbox(min, max);
-                view_dirty = true;
-            }
-        }
-
-        // Save a rep's selection to a file (after the `mol` borrow above ends).
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(j) = save_rep {
-            self.save_rep_selection(mi, j);
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = save_rep;
-
-        // Enter partner-pick mode for an Interactions rep (the [Choose…] button).
-        if let Some(j) = start_partner_pick {
-            self.partner_pick = Some((mol_id, j));
-        }
-        // Open the interaction-settings dialog for this rep.
-        if let Some(j) = open_settings {
-            self.interactions_dialog = Some(InteractionsDialog {
-                mol: mol_id,
-                rep: j,
-                tab: crate::interactions::InteractionKind::HBond,
-            });
-        }
-        // Compute espaloma partial charges for a rep's selection.
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(j) = compute_charges {
-            self.compute_rep_charges(mi, j);
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = compute_charges;
-        // A rep row was clicked while choosing a partner → assign it.
-        if let Some(j) = chosen_partner {
-            self.assign_partner(mi, j);
-        }
-        // Focus the camera on a clicked partner rep (reads the partner molecule, so it
-        // runs after the `mol` borrow above ends).
-        if let Some((src, pr)) = focus_partner {
-            let bbox = self
-                .scene
-                .molecules
-                .iter()
-                .find(|m| m.source == src)
-                .and_then(|pmol| Some(pmol.sel_bbox(pmol.reps.get(pr)?.sel.as_ref()?)));
-            if let Some((min, max)) = bbox {
-                self.camera.focus_bbox(min, max);
-                view_dirty = true;
+        // --- Apply the one action this pass asked for. -----------------------------------
+        //
+        // One exhaustive `match`, so the arm order carries no meaning (it used to: four
+        // index-mutating blocks ran in sequence and a second one would have indexed into the
+        // list the first had already changed). Each arm re-borrows only what it needs, which
+        // is what lets the `&mut Molecule` arms and the `&mut self` arms share one match.
+        if let Some(action) = action {
+            match action {
+                RepAction::Reorder { from, to } => {
+                    view_dirty |= self.scene.molecules[mi].reorder_rep(from, to);
+                }
+                RepAction::Duplicate(j) => {
+                    self.scene.molecules[mi].duplicate_rep(j, is_shared);
+                    view_dirty = true;
+                }
+                RepAction::CloneForInteractions { at, clone } => {
+                    self.scene.molecules[mi].insert_rep_above(at, *clone, is_shared);
+                    view_dirty = true;
+                }
+                RepAction::Delete(j) => {
+                    self.scene.molecules[mi].delete_rep(j, is_shared);
+                    view_dirty = true;
+                }
+                RepAction::AcceptPending => {
+                    self.scene.molecules[mi].accept_pending_selection();
+                    view_dirty = true;
+                }
+                RepAction::DiscardPending => {
+                    self.scene.molecules[mi].discard_pending_selection();
+                    view_dirty = true;
+                }
+                RepAction::ZoomTo(j) => {
+                    let mol = &self.scene.molecules[mi];
+                    if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
+                        let (min, max) = mol.sel_bbox(sel);
+                        self.camera.focus_bbox(min, max);
+                        view_dirty = true;
+                    }
+                }
+                RepAction::StartPartnerPick(j) => self.partner_pick = Some((mol_id, j)),
+                RepAction::OpenInteractionSettings(j) => {
+                    self.interactions_dialog = Some(InteractionsDialog {
+                        mol: mol_id,
+                        rep: j,
+                        tab: crate::interactions::InteractionKind::HBond,
+                    });
+                }
+                // A rep row clicked while choosing a partner → assign it.
+                RepAction::ChoosePartner(j) => self.assign_partner(mi, j),
+                // Focus the camera on a clicked partner rep — it reads *another* molecule,
+                // which is why this could never run inside the row closures.
+                RepAction::FocusPartner(src, pr) => {
+                    let bbox = self
+                        .scene
+                        .molecules
+                        .iter()
+                        .find(|m| m.source == src)
+                        .and_then(|pmol| Some(pmol.sel_bbox(pmol.reps.get(pr)?.sel.as_ref()?)));
+                    if let Some((min, max)) = bbox {
+                        self.camera.focus_bbox(min, max);
+                        view_dirty = true;
+                    }
+                }
+                RepAction::ComputeCharges(j) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.compute_rep_charges(mi, j);
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = j; // espaloma is native-only (the button isn't drawn on wasm)
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                RepAction::SaveSelection(j) => self.save_rep_selection(mi, j),
             }
         }
 

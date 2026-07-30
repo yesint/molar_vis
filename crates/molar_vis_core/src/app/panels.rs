@@ -6,6 +6,57 @@ use super::rep_panel::*;
 #[cfg(target_arch = "wasm32")]
 use super::loaders::pick_file;
 
+/// The one thing a group entry asked for this frame.
+///
+/// One `Option<GroupAction>` in place of the eight `bool`s and three `Option`s this used to
+/// be — the same reasoning as [`RepAction`](super::rep_panel::RepAction): several of these
+/// mutate lists by index, and only one can happen per pointer per frame, so a single slot says
+/// that rather than leaving it as an unenforced convention.
+pub(super) enum GroupAction {
+    /// Fold/unfold the group (shared reps + the "Molecules" sub-expander).
+    ToggleExpand,
+    /// Fold/unfold the nested member list.
+    ToggleMembers,
+    /// Show/hide the whole group.
+    ToggleEye,
+    /// Append a shared rep to the shown member's shared prefix.
+    AddSharedRep,
+    /// Zoom-to-fit the shown member (the header magnifier).
+    Focus,
+    /// Open the shown member in the drawing editor.
+    Edit,
+    /// Write every member to one multi-record file. Native only (see
+    /// [`RepAction::SaveSelection`](super::rep_panel::RepAction::SaveSelection)).
+    #[cfg(not(target_arch = "wasm32"))]
+    Save,
+    /// Show member `n` and re-center the camera on it (cycle bar, or a member name clicked).
+    ShowMember(usize),
+    /// Append an own rep to member `mid`.
+    AddMemberRep(MolId),
+    /// Delete the whole group — escalated (see [`GroupOutcome::escalate`]).
+    DeleteGroup(GroupId),
+    /// Delete one member — escalated.
+    DeleteMember(MolId),
+}
+
+/// What drawing one group entry produced: an additive flag plus an exclusive action, the
+/// convention shared with [`RepParamsOutcome`](super::rep_panel::RepParamsOutcome).
+pub(super) struct GroupOutcome {
+    /// The view needs re-rendering. Additive — many widgets in one frame can set it.
+    pub(super) view_dirty: bool,
+    /// A deletion the entry **cannot** apply itself, because removing a molecule shifts the
+    /// entry indices its caller is iterating over. Everything else the entry applies in place,
+    /// so this is `None` for all of it. Replaces the codebase's only `&mut Option<T>`
+    /// out-param pair, which hid exactly this constraint.
+    pub(super) escalate: Option<GroupEscalation>,
+}
+
+/// A deletion deferred to `draw_molecule_list`, which owns the entry ordering.
+pub(super) enum GroupEscalation {
+    Group(GroupId),
+    Member(MolId),
+}
+
 impl App {
     pub(super) fn draw_left_panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut view_dirty = false;
@@ -617,8 +668,14 @@ impl App {
             let i = match entry {
                 Entry::Mol(i) => i,
                 Entry::Group(gi) => {
-                    view_dirty |=
-                        self.draw_group_entry(ui, gi, &mut delete_group, &mut delete_member);
+                    let out = self.draw_group_entry(ui, gi);
+                    view_dirty |= out.view_dirty;
+                    // Applied after the loop: a deletion shifts the entry indices.
+                    match out.escalate {
+                        Some(GroupEscalation::Group(id)) => delete_group = Some(id),
+                        Some(GroupEscalation::Member(id)) => delete_member = Some(id),
+                        None => {}
+                    }
                     continue;
                 }
             };
@@ -836,13 +893,7 @@ impl App {
     /// switch with camera re-fit, eye, expand, add shared/own rep); a "Delete group"
     /// is deferred to the caller via `delete_group` (it removes molecules, which would
     /// shift the outer loop's indices). Returns whether the view needs re-rendering.
-    pub(super) fn draw_group_entry(
-        &mut self,
-        ui: &mut egui::Ui,
-        gi: usize,
-        delete_group: &mut Option<GroupId>,
-        delete_member: &mut Option<MolId>,
-    ) -> bool {
+    pub(super) fn draw_group_entry(&mut self, ui: &mut egui::Ui, gi: usize) -> GroupOutcome {
         let mut view_dirty = false;
         // Snapshot display data so the UI closures don't hold a scene borrow.
         let gid = self.scene.groups[gi].id;
@@ -873,19 +924,9 @@ impl App {
             .zip(members.get(current).copied())
             .is_some_and(|(t, cur)| t == cur);
 
-        // Deferred (set in closures, applied at the end so closures stay borrow-free).
-        let mut do_toggle_expand = false;
-        let mut do_toggle_members = false;
-        let mut do_toggle_eye = false;
-        let mut do_add_shared = false;
-        let mut do_focus = false;
-        let mut do_edit = false;
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
-        let mut do_save = false;
-        let mut do_delete = false;
-        let mut new_current: Option<usize> = None;
-        let mut add_member: Option<MolId> = None;
-        let mut del_member: Option<MolId> = None;
+        // The single thing this entry asked for — see [`GroupAction`]. Set inside the UI
+        // closures (which must stay borrow-free), applied once they have all ended.
+        let mut action: Option<GroupAction> = None;
 
         // Header row.
         ui.horizontal(|ui| {
@@ -895,7 +936,7 @@ impl App {
                 .on_hover_text("Shared representations + Molecules")
                 .clicked()
             {
-                do_toggle_expand = true;
+                action = Some(GroupAction::ToggleExpand);
             }
             ui.add(egui::Label::new(icon::STACK).selectable(false))
                 .on_hover_text("Molecular group");
@@ -910,11 +951,11 @@ impl App {
                         .on_hover_text("Save all members to a multi-molecule file")
                         .clicked()
                     {
-                        do_save = true;
+                        action = Some(GroupAction::Save);
                         ui.close();
                     }
                     if ui.button(format!("{}  Delete group", icon::TRASH)).clicked() {
-                        do_delete = true;
+                        action = Some(GroupAction::DeleteGroup(gid));
                         ui.close();
                     }
                 })
@@ -926,7 +967,7 @@ impl App {
                     .on_hover_text(if gvisible { "Hide group" } else { "Show group" })
                     .clicked()
                 {
-                    do_toggle_eye = true;
+                    action = Some(GroupAction::ToggleEye);
                 }
                 // Edit: open the currently-shown member in the drawing editor.
                 if ui
@@ -934,17 +975,17 @@ impl App {
                     .on_hover_text("Edit shown molecule (draw mode)")
                     .clicked()
                 {
-                    do_edit = true;
+                    action = Some(GroupAction::Edit);
                 }
                 if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to shown molecule").clicked() {
-                    do_focus = true;
+                    action = Some(GroupAction::Focus);
                 }
                 if ui
                     .button(format!("{} rep", icon::PLUS))
                     .on_hover_text("Add a shared representation (applies to every member)")
                     .clicked()
                 {
-                    do_add_shared = true;
+                    action = Some(GroupAction::AddSharedRep);
                 }
             });
         });
@@ -952,7 +993,7 @@ impl App {
         // Member cycle bar (which molecule is shown). Tooltip shows "N/M <name>".
         ui.indent(egui::Id::new(("groupbar", gid)), |ui| {
             if let Some(nc) = draw_group_bar(ui, &member_names, current) {
-                new_current = Some(nc);
+                action = Some(GroupAction::ShowMember(nc));
             }
         });
 
@@ -994,7 +1035,7 @@ impl App {
                         .on_hover_text("Member molecules")
                         .clicked()
                     {
-                        do_toggle_members = true;
+                        action = Some(GroupAction::ToggleMembers);
                     }
                     ui.weak(format!("({n_members})"));
                 });
@@ -1050,7 +1091,7 @@ impl App {
                                     if resp.clicked() {
                                         // Clicking a name shows it AND centers the
                                         // camera on it (partial focus — pan, no zoom).
-                                        new_current = Some(pos);
+                                        action = Some(GroupAction::ShowMember(pos));
                                     }
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
@@ -1064,7 +1105,7 @@ impl App {
                                                     ))
                                                     .clicked()
                                                 {
-                                                    del_member = Some(mid);
+                                                    action = Some(GroupAction::DeleteMember(mid));
                                                     ui.close();
                                                 }
                                             })
@@ -1077,7 +1118,7 @@ impl App {
                                                 )
                                                 .clicked()
                                             {
-                                                add_member = Some(mid);
+                                                action = Some(GroupAction::AddMemberRep(mid));
                                             }
                                         },
                                     );
@@ -1122,86 +1163,85 @@ impl App {
         }
         ui.add_space(4.0);
 
-        // --- apply deferred actions (indices into `scene.molecules` stay valid: none
-        // of these add or remove molecules; "Delete group" is deferred to the caller).
-        if do_toggle_expand {
-            self.scene.groups[gi].expanded = !self.scene.groups[gi].expanded;
-        }
-        if do_toggle_members {
-            self.scene.groups[gi].members_expanded = !self.scene.groups[gi].members_expanded;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if do_save {
-            self.save_group(gi);
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = do_save;
-        if do_toggle_eye {
-            self.scene.groups[gi].visible = !self.scene.groups[gi].visible;
-            self.scene.apply_group_visibility(gi);
-            view_dirty = true;
-        }
-        if do_focus {
-            // Full zoom-to-fit the shown member (the magnifier means "zoom").
-            if let Some((min, max)) = cur_bbox {
-                self.camera.focus_bbox(min, max);
+        // --- Apply the one action this entry asked for. ----------------------------------
+        //
+        // One exhaustive `match`; none of these arms adds or removes a molecule, so indices
+        // into `scene.molecules` stay valid throughout. The two deletions that *would* shift
+        // them are escalated to the caller instead.
+        let mut escalate = None;
+        match action {
+            None => {}
+            Some(GroupAction::ToggleExpand) => {
+                let g = &mut self.scene.groups[gi];
+                g.expanded = !g.expanded;
+            }
+            Some(GroupAction::ToggleMembers) => {
+                let g = &mut self.scene.groups[gi];
+                g.members_expanded = !g.members_expanded;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(GroupAction::Save) => self.save_group(gi),
+            Some(GroupAction::ToggleEye) => {
+                self.scene.groups[gi].visible = !self.scene.groups[gi].visible;
+                self.scene.apply_group_visibility(gi);
                 view_dirty = true;
             }
-        }
-        if do_edit {
-            // Open the currently-shown member in the drawing editor.
-            if let Some(mi) = cur_mi {
-                self.open_in_editor(mi);
-                view_dirty = true;
-            }
-        }
-        if let Some(nc) = new_current {
-            // Partial focus: switch the shown member and CENTER the camera on it (pan
-            // the target only, keeping the current zoom). Applies to both the cycle bar
-            // (slider/arrows) and clicking a member name. Not gated on `switch`'s return
-            // so clicking the already-shown member re-centers it.
-            self.scene.switch_group_member(gi, nc);
-            if let Some(&id) = self.scene.groups[gi].members.get(nc) {
-                if let Some(mi) = self.scene.mol_index(id) {
-                    let (min, max) = self.scene.molecules[mi].current_bbox();
-                    self.camera.target = 0.5 * (min + max);
-                }
-            }
-            view_dirty = true;
-        }
-        if do_add_shared {
-            // Append a shared rep at the end of the shown member's shared prefix.
-            let cur = self.scene.groups[gi].current;
-            if let Some(&cur_id) = self.scene.groups[gi].members.get(cur) {
-                if let Some(mmi) = self.scene.mol_index(cur_id) {
-                    let rep = Representation::from_defaults(&self.rep_defaults);
-                    let m = &mut self.scene.molecules[mmi];
-                    let ns = m.n_shared.min(m.reps.len());
-                    m.reps.insert(ns, rep);
-                    m.n_shared = ns + 1;
-                    m.selected_rep = Some(ns);
+            Some(GroupAction::Focus) => {
+                // Full zoom-to-fit the shown member (the magnifier means "zoom").
+                if let Some((min, max)) = cur_bbox {
+                    self.camera.focus_bbox(min, max);
                     view_dirty = true;
                 }
             }
-        }
-        if let Some(mid) = add_member {
-            if let Some(mmi) = self.scene.mol_index(mid) {
-                let rep = Representation::from_defaults(&self.rep_defaults);
-                let m = &mut self.scene.molecules[mmi];
-                m.reps.push(rep);
-                m.selected_rep = Some(m.reps.len() - 1);
-                m.reps_open = true;
+            Some(GroupAction::Edit) => {
+                // Open the currently-shown member in the drawing editor.
+                if let Some(mi) = cur_mi {
+                    self.open_in_editor(mi);
+                    view_dirty = true;
+                }
+            }
+            Some(GroupAction::ShowMember(nc)) => {
+                // Partial focus: switch the shown member and CENTER the camera on it (pan the
+                // target only, keeping the current zoom). Applies to both the cycle bar
+                // (slider/arrows) and clicking a member name. Not gated on `switch`'s return,
+                // so clicking the already-shown member re-centers it.
+                self.scene.switch_group_member(gi, nc);
+                if let Some(&id) = self.scene.groups[gi].members.get(nc) {
+                    if let Some(mi) = self.scene.mol_index(id) {
+                        let (min, max) = self.scene.molecules[mi].current_bbox();
+                        self.camera.target = 0.5 * (min + max);
+                    }
+                }
                 view_dirty = true;
             }
+            Some(GroupAction::AddSharedRep) => {
+                // Append a shared rep at the end of the shown member's shared prefix.
+                let cur = self.scene.groups[gi].current;
+                if let Some(&cur_id) = self.scene.groups[gi].members.get(cur) {
+                    if let Some(mmi) = self.scene.mol_index(cur_id) {
+                        let rep = Representation::from_defaults(&self.rep_defaults);
+                        let m = &mut self.scene.molecules[mmi];
+                        let ns = m.n_shared.min(m.reps.len());
+                        m.reps.insert(ns, rep);
+                        m.n_shared = ns + 1;
+                        m.selected_rep = Some(ns);
+                        view_dirty = true;
+                    }
+                }
+            }
+            Some(GroupAction::AddMemberRep(mid)) => {
+                if let Some(mmi) = self.scene.mol_index(mid) {
+                    let rep = Representation::from_defaults(&self.rep_defaults);
+                    let m = &mut self.scene.molecules[mmi];
+                    m.reps.push(rep);
+                    m.selected_rep = Some(m.reps.len() - 1);
+                    m.reps_open = true;
+                    view_dirty = true;
+                }
+            }
+            Some(GroupAction::DeleteGroup(id)) => escalate = Some(GroupEscalation::Group(id)),
+            Some(GroupAction::DeleteMember(id)) => escalate = Some(GroupEscalation::Member(id)),
         }
-        if do_delete {
-            *delete_group = Some(gid);
-        }
-        if del_member.is_some() {
-            // Deferred to the caller: removing a molecule shifts the entry indices the
-            // outer loop iterates over.
-            *delete_member = del_member;
-        }
-        view_dirty
+        GroupOutcome { view_dirty, escalate }
     }
 }

@@ -754,6 +754,91 @@ impl Molecule {
             .unwrap_or_else(|| self.data.state())
     }
 
+    // --- Representation-list surgery -------------------------------------------------
+    //
+    // The four index-mutating panel actions. They live here, off the panel, because their
+    // index arithmetic is the part that can go quietly wrong (delete the neighbour, duplicate
+    // into the wrong half of a group's shared prefix) and here it can be tested without a UI.
+    //
+    // `is_shared` = the row was drawn in a [`MolGroup`]'s **shared** prefix (`0..n_shared`), so
+    // adding or removing there has to move the prefix boundary with it or the group's shared
+    // and own reps silently swap membership.
+
+    /// Move rep `from` to just before position `to` (drag-reorder). Returns whether anything
+    /// moved — `to == from` and `to == from + 1` both land it back where it started.
+    pub fn reorder_rep(&mut self, from: usize, to: usize) -> bool {
+        if to == from || to == from + 1 || from >= self.reps.len() {
+            return false;
+        }
+        let item = self.reps.remove(from);
+        // Removing shifts everything after `from` down by one, so a rightward target is one
+        // less than it looked before the removal.
+        let target = (if from < to { to - 1 } else { to }).min(self.reps.len());
+        self.reps.insert(target, item);
+        self.selected_rep = Some(target);
+        true
+    }
+
+    /// Insert a copy of rep `j` just after it.
+    pub fn duplicate_rep(&mut self, j: usize, is_shared: bool) {
+        if j >= self.reps.len() {
+            return;
+        }
+        let dup = self.reps[j].duplicate();
+        self.reps.insert(j + 1, dup);
+        self.selected_rep = Some(j + 1);
+        if is_shared {
+            self.n_shared += 1;
+        }
+    }
+
+    /// Insert `rep` **at** `at`, pushing the rep that was there down. Used when a rep is
+    /// switched to Interactions and its old-style clone is re-inserted above it, so
+    /// `selected_rep` follows the *pushed-down* rep rather than the newcomer.
+    pub fn insert_rep_above(&mut self, at: usize, rep: Representation, is_shared: bool) {
+        let at = at.min(self.reps.len());
+        self.reps.insert(at, rep);
+        self.selected_rep = Some(at + 1);
+        if is_shared {
+            self.n_shared += 1;
+        }
+    }
+
+    /// Remove rep `j`, keeping the selection on a rep that still exists.
+    pub fn delete_rep(&mut self, j: usize, is_shared: bool) {
+        if j >= self.reps.len() {
+            return;
+        }
+        self.reps.remove(j);
+        if is_shared {
+            self.n_shared = self.n_shared.saturating_sub(1);
+        }
+        self.selected_rep = if self.reps.is_empty() {
+            None
+        } else {
+            Some(j.min(self.reps.len() - 1))
+        };
+    }
+
+    /// Commit the active (pending) selection as a normal, fully editable Ball-and-Stick rep —
+    /// the undoable half of the lasso's two-step commit.
+    pub fn accept_pending_selection(&mut self) {
+        if let Some(p) = self.pending.take() {
+            let mut rep = Representation::new(RepKind::BallAndStick);
+            rep.sel_text = p.sel_text;
+            self.reps.push(rep);
+            self.selected_rep = Some(self.reps.len() - 1);
+            self.reps_open = true;
+        }
+        self.glow_dirty = true; // clear the glow geometry
+    }
+
+    /// Drop the active (pending) selection without committing it.
+    pub fn discard_pending_selection(&mut self) {
+        self.pending = None;
+        self.glow_dirty = true;
+    }
+
     /// Bounding box (nm) of selection `sel` at the currently displayed frame.
     pub fn sel_bbox(&self, sel: &Sel) -> (Vec3, Vec3) {
         let (min, max) = self.data.bind_with_state(sel, self.render_state()).min_max();
@@ -1627,5 +1712,173 @@ mod tests {
         let published: Vec<BondOrder> =
             mol.data.topology().bonds.iter().map(|b| b.order()).collect();
         assert_eq!(published, after);
+    }
+}
+
+/// The representation-list surgery behind the four index-mutating panel actions
+/// ([`Molecule::reorder_rep`] / `duplicate_rep` / `insert_rep_above` / `delete_rep`).
+///
+/// This is the arithmetic the rep panel used to do inline, and the reason the panel now hands
+/// down a single [`RepAction`](crate::app) rather than eleven independent `Option`s: applying
+/// two of these in one frame would leave the second one's index pointing at the wrong rep.
+/// Each is checked for where the reps end up, where the selection lands, and — for a group's
+/// **shared** prefix — that `n_shared` moves with the edit, since that boundary is the only
+/// thing separating a group's shared reps from the shown member's own.
+#[cfg(test)]
+mod rep_surgery_tests {
+    use super::*;
+    use crate::data::bonds::BondParams;
+    use crate::settings::RepDefaults;
+
+    /// A molecule with `n` reps whose selection texts are "0", "1", … so a reordering can be
+    /// read off directly.
+    fn mol_with_reps(n: usize) -> Molecule {
+        let path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"));
+        let raw = crate::data::load_with(path, &BondParams::default()).expect("load 2lao.pdb");
+        let mut mol = Molecule::new(MolId(0), raw, &RepDefaults::default());
+        mol.reps.clear();
+        for i in 0..n {
+            let mut rep = Representation::new(RepKind::Lines);
+            rep.sel_text = i.to_string();
+            mol.reps.push(rep);
+        }
+        mol
+    }
+
+    fn order(mol: &Molecule) -> Vec<String> {
+        mol.reps.iter().map(|r| r.sel_text.clone()).collect()
+    }
+
+    /// Dragging must land the rep where it was dropped — in both directions — and the two
+    /// drops that mean "back where it started" must be no-ops rather than shuffling anything.
+    #[test]
+    fn reorder_moves_the_dragged_rep_and_follows_it_with_the_selection() {
+        // Downward: 1 dropped before position 4 ends up after "3".
+        let mut mol = mol_with_reps(5);
+        assert!(mol.reorder_rep(1, 4));
+        assert_eq!(order(&mol), ["0", "2", "3", "1", "4"]);
+        assert_eq!(mol.selected_rep, Some(3), "the selection follows the moved rep");
+
+        // Upward: 3 dropped before position 1.
+        let mut mol = mol_with_reps(5);
+        assert!(mol.reorder_rep(3, 1));
+        assert_eq!(order(&mol), ["0", "3", "1", "2", "4"]);
+        assert_eq!(mol.selected_rep, Some(1));
+
+        // To the very ends.
+        let mut mol = mol_with_reps(4);
+        assert!(mol.reorder_rep(0, 4));
+        assert_eq!(order(&mol), ["1", "2", "3", "0"]);
+        let mut mol = mol_with_reps(4);
+        assert!(mol.reorder_rep(3, 0));
+        assert_eq!(order(&mol), ["3", "0", "1", "2"]);
+
+        // The two no-op drops: onto itself, and into the gap just after itself.
+        for to in [2, 3] {
+            let mut mol = mol_with_reps(5);
+            assert!(!mol.reorder_rep(2, to), "drop {to} of rep 2 must be a no-op");
+            assert_eq!(order(&mol), ["0", "1", "2", "3", "4"]);
+        }
+        // An out-of-range source (a stale drag payload) must not panic or reshuffle.
+        let mut mol = mol_with_reps(3);
+        assert!(!mol.reorder_rep(9, 0));
+        assert_eq!(order(&mol), ["0", "1", "2"]);
+    }
+
+    /// A duplicate lands immediately after its original and becomes the selection; done inside
+    /// a group's shared prefix it must extend that prefix.
+    #[test]
+    fn duplicate_inserts_after_the_original_and_extends_a_shared_prefix() {
+        let mut mol = mol_with_reps(3);
+        mol.duplicate_rep(1, false);
+        assert_eq!(order(&mol), ["0", "1", "1", "2"]);
+        assert_eq!(mol.selected_rep, Some(2));
+        assert_eq!(mol.n_shared, 0, "an own rep must not move the shared boundary");
+
+        let mut mol = mol_with_reps(4);
+        mol.n_shared = 2; // reps 0,1 are the group's shared prefix
+        mol.duplicate_rep(0, true);
+        assert_eq!(order(&mol), ["0", "0", "1", "2", "3"]);
+        assert_eq!(mol.n_shared, 3, "a duplicated shared rep stays inside the prefix");
+    }
+
+    /// Switching a rep to Interactions re-inserts a clone of its old style **above** it, and
+    /// the selection must stay on the (now shifted down) Interactions rep, not the clone.
+    #[test]
+    fn insert_above_selects_the_pushed_down_rep() {
+        let mut mol = mol_with_reps(3);
+        let mut clone = Representation::new(RepKind::Cartoon);
+        clone.sel_text = "clone".into();
+        mol.insert_rep_above(1, clone, false);
+        assert_eq!(order(&mol), ["0", "clone", "1", "2"]);
+        assert_eq!(mol.selected_rep, Some(2), "the selection stays on the original rep");
+
+        let mut mol = mol_with_reps(3);
+        mol.n_shared = 1;
+        mol.insert_rep_above(0, Representation::new(RepKind::Cartoon), true);
+        assert_eq!(mol.n_shared, 2);
+    }
+
+    /// A delete must leave the selection on a rep that still exists — including when the last
+    /// rep goes, and when the list empties — and shrink a shared prefix it came from.
+    #[test]
+    fn delete_keeps_the_selection_on_a_live_rep() {
+        let mut mol = mol_with_reps(3);
+        mol.delete_rep(1, false);
+        assert_eq!(order(&mol), ["0", "2"]);
+        assert_eq!(mol.selected_rep, Some(1));
+
+        // Deleting the last rep: the selection must clamp back, not dangle past the end.
+        let mut mol = mol_with_reps(3);
+        mol.delete_rep(2, false);
+        assert_eq!(order(&mol), ["0", "1"]);
+        assert_eq!(mol.selected_rep, Some(1));
+
+        // Emptying the list.
+        let mut mol = mol_with_reps(1);
+        mol.delete_rep(0, false);
+        assert!(mol.reps.is_empty());
+        assert_eq!(mol.selected_rep, None);
+
+        // From a shared prefix.
+        let mut mol = mol_with_reps(4);
+        mol.n_shared = 2;
+        mol.delete_rep(0, true);
+        assert_eq!(order(&mol), ["1", "2", "3"]);
+        assert_eq!(mol.n_shared, 1);
+
+        // Out of range must not panic.
+        let mut mol = mol_with_reps(2);
+        mol.delete_rep(7, false);
+        assert_eq!(order(&mol), ["0", "1"]);
+    }
+
+    /// Accepting a lasso commits it as an editable Ball-and-Stick rep and clears the glow;
+    /// discarding just clears. Both must mark the glow dirty so the highlight geometry goes.
+    #[test]
+    fn accepting_a_pending_selection_commits_it_as_a_rep() {
+        let mut mol = mol_with_reps(1);
+        mol.pending = Some(PendingSelection {
+            sel_text: "index 1:3".into(),
+            atoms: vec![1, 2, 3],
+        });
+        mol.glow_dirty = false;
+        mol.accept_pending_selection();
+        assert!(mol.pending.is_none());
+        assert_eq!(mol.reps.len(), 2);
+        assert_eq!(mol.reps[1].kind, RepKind::BallAndStick);
+        assert_eq!(mol.reps[1].sel_text, "index 1:3");
+        assert_eq!(mol.selected_rep, Some(1));
+        assert!(mol.reps_open, "the new rep must be visible in the panel");
+        assert!(mol.glow_dirty, "the glow geometry must be rebuilt (cleared)");
+
+        let mut mol = mol_with_reps(1);
+        mol.pending = Some(PendingSelection { sel_text: "index 5".into(), atoms: vec![5] });
+        mol.glow_dirty = false;
+        mol.discard_pending_selection();
+        assert!(mol.pending.is_none());
+        assert_eq!(mol.reps.len(), 1, "discarding must not add a rep");
+        assert!(mol.glow_dirty);
     }
 }
