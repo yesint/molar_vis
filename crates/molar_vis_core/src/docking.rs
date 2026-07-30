@@ -41,6 +41,28 @@ pub fn docking_mode(receptor_frames: usize, ligands: usize) -> Result<DockingMod
     }
 }
 
+/// Whether the topology file's **own** coordinates are one of the receptor's conformations.
+///
+/// A protein selection of several files can mean two different things, and they differ by
+/// exactly this one frame:
+///
+/// * **one file per pose** (31 structures for 31 poses) — the first file is the receptor pose 0
+///   was docked into, so it counts;
+/// * **a structure plus a trajectory holding the whole ensemble** (`jak2.pdb` + a 26-frame
+///   trajectory for 26 poses) — the structure is the reference conformation, not a pose, so it
+///   does not; counting it would offset every pose/receptor pairing by one.
+///
+/// Nothing in the file list itself separates the two (a "trajectory" may be a multi-model PDB,
+/// and 30 one-model files are a perfectly good ensemble), but **the pose count does**: exactly
+/// one of the two readings can match it. So take the one that does, and otherwise count the
+/// frame — the natural reading, the one a single file needs, and the one that makes the
+/// rejection message report the honest total.
+///
+/// `appended_frames` is what the files *after* the first contribute.
+pub fn structure_frame_counts(appended_frames: usize, ligands: usize) -> bool {
+    appended_frames != ligands
+}
+
 /// What a flexible-docking reconcile should do this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sync {
@@ -112,6 +134,41 @@ mod tests {
     #[test]
     fn no_ligands_is_an_error() {
         assert!(docking_mode(1, 0).is_err());
+    }
+
+    /// One protein file per pose: the first file is pose 0's receptor, so its own coordinates
+    /// are a conformation — dropping them made 31 files come out as 30 frames and the load was
+    /// rejected against 31 poses.
+    #[test]
+    fn one_protein_file_per_pose_counts_the_first_file() {
+        // 31 files, 30 of them after the first, 31 poses.
+        assert!(structure_frame_counts(30, 31));
+        assert_eq!(docking_mode(30 + 1, 31), Ok(DockingMode::Flexible));
+    }
+
+    /// A structure plus a trajectory that holds the whole ensemble: the structure is the
+    /// reference conformation, not a pose.
+    #[test]
+    fn a_full_ensemble_trajectory_does_not_count_the_structure() {
+        assert!(!structure_frame_counts(26, 26));
+        assert_eq!(docking_mode(26, 26), Ok(DockingMode::Flexible));
+    }
+
+    /// A single file is its own ensemble — nothing follows it, so its coordinates always count
+    /// (a 1-model PDB is rigid docking, a 26-model one flexible).
+    #[test]
+    fn a_lone_protein_file_always_counts() {
+        assert!(structure_frame_counts(0, 26));
+        assert!(structure_frame_counts(0, 1));
+    }
+
+    /// Neither reading matching is the real mismatch — reported as the natural (counting)
+    /// total rather than one less, so the number in the message is the one the files hold.
+    #[test]
+    fn a_genuine_mismatch_reports_the_counting_total() {
+        assert!(structure_frame_counts(4, 26));
+        let e = docking_mode(4 + 1, 26).unwrap_err();
+        assert!(e.contains("5 frames"), "{e}");
     }
 
     #[test]

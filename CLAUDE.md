@@ -801,12 +801,20 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   - **Ligands**: one multi-record SDF *or* one file per pose (multi-select) → the poses become
     the members of one [`MolGroup`].
   - **Protein**: the **first file supplies the topology**, and the receptor's conformations are
-    the frames of the files *after* it — so a structure + a 26-frame trajectory is 26
-    conformations, one per pose, **not** 27. The structure's own coordinates are its reference
-    conformation, not an extra pose; counting them would offset every pose/receptor pairing by
-    one. With nothing after it the single file *is* the ensemble (a 1-model PDB → rigid, a
-    26-model one → flexible). Everything is read + validated **before** the scene is touched, so
-    a rejected combination leaves the document untouched.
+    its own coordinates plus the frames of every file after it — *except* when those files
+    already hold one conformation per pose, where the structure is the reference conformation
+    rather than a pose. Both readings are real and they differ by exactly that one frame:
+    **31 files for 31 poses** means the first file is pose 0's receptor (dropping it reported
+    "30 frames but 31 ligands" and refused a perfectly good docking result — the bug this rule
+    replaced), while **a structure + a 26-frame ensemble trajectory for 26 poses** means 26, not
+    27, or every pose/receptor pairing is off by one. Nothing in the file list separates them (a
+    "trajectory" may be a multi-model PDB; 30 one-model files are a fine ensemble) — but the
+    **pose count** does, since only one reading can match it, so **`structure_frame_counts`**
+    takes the one that does and otherwise counts the frame (the natural reading, what a lone
+    file needs, and what makes the rejection message quote the honest total). With nothing after
+    it the single file *is* the ensemble (a 1-model PDB → rigid, a 26-model one → flexible).
+    Everything is read + validated **before** the scene is touched, so a rejected combination
+    leaves the document untouched.
   - The pose group gets an **`Interactions` shared rep pointed at the receptor's rep** — exactly
     the state the partner picker would leave behind, so it round-trips undo/sessions for free via
     `RepState.partner`. The group's existing Licorice shared rep is kept (an Interactions rep
@@ -1978,15 +1986,17 @@ History labels via `describe_change` ("edit selection", "change coloring",
   *Ligands* `[Choose…]` / `[Load]` `[Cancel]` that does in one step what was a fiddly manual
   sequence — open the receptor, append its ensemble, open the poses as a group, add an
   `Interactions` rep, aim it with the partner picker. Ligands are one multi-record SDF or one file
-  per pose (multi-select) → a [`MolGroup`]; the protein's first file supplies the topology and the
-  files after it its conformations, validated to be **1 frame (rigid docking) or one per pose
-  (flexible)** before the scene is touched. The pose group gets an `Interactions` shared rep
-  already pointed at the receptor, and a flexible pair **steps together in both directions**
-  (pose ⇄ receptor frame, playback included) — see the module bullet for the reconcile design and
-  why the receptor's own structure frame isn't counted as a pose. Fixtures: `tests/jak2.pdb` (4844
+  per pose (multi-select) → a [`MolGroup`]; the protein's first file supplies the topology and its
+  own coordinates + the frames of the files after it are the conformations, validated to be
+  **1 frame (rigid docking) or one per pose (flexible)** before the scene is touched. The pose
+  group gets an `Interactions` shared rep already pointed at the receptor, and a flexible pair
+  **steps together in both directions** (pose ⇄ receptor frame, playback included) — see the
+  module bullet for the reconcile design and for when the receptor's own structure frame counts
+  as a pose (`structure_frame_counts`). Fixtures: `tests/jak2.pdb` (4844
   atoms) + `tests/jak2_inhs.sd` (26 ChEMBL inhibitors) + a generated 26-frame `tests/jak2_traj.pdb`
-  (not in git; see `tests/README.md`). Verified: 9 unit tests over the two pure decisions
-  (mode from frame counts, which side to drive — first reconcile, either direction, playback,
+  (not in git; see `tests/README.md`). Verified: 13 unit tests over the three pure decisions
+  (mode from frame counts, whether the structure file's own frame is a pose, which side to drive
+  — first reconcile, either direction, playback,
   both-moved precedence, idle), 103 tests total (107 with `scripting`), all crates green for
   native + wasm32 in both feature configurations with no warnings, and headless offscreen checks
   of the dialog, the loaded result (pose in the site with green H-bond dashes, receptor at 26

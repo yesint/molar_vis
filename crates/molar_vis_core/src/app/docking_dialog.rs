@@ -10,7 +10,7 @@
 
 use super::*;
 use super::widgets::{modal_shell, ModalBody, ModalSpec};
-use crate::docking::{docking_mode, sync_action, DockingMode, Sync};
+use crate::docking::{docking_mode, structure_frame_counts, sync_action, DockingMode, Sync};
 
 /// State of the "Load docking data" modal.
 ///
@@ -206,14 +206,13 @@ impl App {
 
         // --- receptor: the first file is the topology, the rest are its ensemble -----
         //
-        // The **first file supplies the topology**, and the receptor's conformations are the
-        // frames of the files *after* it — so a structure plus a 26-frame trajectory is 26
-        // conformations, one per pose, not 27. The structure's own coordinates are its
-        // reference conformation, not an extra pose; counting them would offset every
-        // pose/receptor pairing by one.
-        //
-        // With nothing after it, the single file *is* the ensemble: its own frames are used,
-        // so a one-model PDB is rigid docking and a 26-model one is flexible.
+        // The **first file supplies the topology**; the receptor's conformations are its own
+        // coordinates plus the frames of every file after it — except when those files already
+        // hold one conformation per pose, in which case the structure is the reference
+        // conformation rather than a pose. Which of the two a file list means is decided by
+        // [`structure_frame_counts`] (from the pose count, the only thing that can tell them
+        // apart); with nothing after the first file it is always its own ensemble, so a
+        // one-model PDB is rigid docking and a 26-model one flexible.
         let (structure, extra) = protein.split_first().ok_or("no protein file selected")?;
         let receptor = data::load_with(structure, &bonds)?;
         let n_atoms = receptor.n_atoms;
@@ -227,19 +226,19 @@ impl App {
                 frames.push((path.clone(), 0, read));
             }
         }
+        let appended: usize = frames.iter().map(|(_, _, s)| s.len()).sum();
+        let count_structure = structure_frame_counts(appended, poses.len());
         // Nothing after the first file: fall back to that file's own extra models (read from
         // frame 1, since frame 0 is the structure we already loaded) — seeded as frame 0 below.
-        let seed_structure = frames.is_empty();
-        if seed_structure {
+        if frames.is_empty() {
             let opts = LoadOptions { from: 1, to: None, stride: 1 };
             let own = data::traj_loader::read_frames_sync(structure, &opts, n_atoms)?;
             if !own.is_empty() {
                 frames.push((structure.clone(), 1, own));
             }
         }
-        let appended: usize = frames.iter().map(|(_, _, s)| s.len()).sum();
-        // `seed_structure` means frame 0 is the structure's own coordinates, so it counts.
-        let receptor_frames = if seed_structure { appended + 1 } else { appended };
+        let receptor_frames =
+            frames.iter().map(|(_, _, s)| s.len()).sum::<usize>() + count_structure as usize;
         let mode = docking_mode(receptor_frames, poses.len())?;
 
         // --- commit: receptor, then the pose group, then the link ------------------
@@ -251,12 +250,14 @@ impl App {
         self.scene.style_receptor(protein_mi);
         {
             let mol = &mut self.scene.molecules[protein_mi];
+            // Frame 0 is the structure's own coordinates whenever they count as a conformation
+            // (one file per pose, or a lone multi-model file); when the later files already
+            // hold the whole ensemble, the frames are exactly theirs. Skipped with nothing to
+            // append, so rigid docking keeps a plain static receptor and no trajectory bar.
+            if count_structure && !frames.is_empty() {
+                mol.seed_frame0();
+            }
             for (path, from, states) in frames {
-                // Only seed frame 0 with the structure's own coordinates when *it* is the
-                // ensemble; when later files supply one, the frames are exactly theirs.
-                if seed_structure {
-                    mol.seed_frame0(); // idempotent
-                }
                 mol.append_frames(states);
                 mol.traj_loads.push(crate::scene::TrajLoad { path, from, to: None, stride: 1 });
             }
