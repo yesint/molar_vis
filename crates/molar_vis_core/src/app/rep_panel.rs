@@ -1636,3 +1636,165 @@ mod bar_fit_tests {
         }
     }
 }
+
+
+/// Widget-layer tests for the rep-settings panel and the three pickers. Same headless
+/// `ctx.run_ui` pattern as [`bar_fit_tests`] — these take only a `&mut Ui` plus a
+/// `Representation`, which constructs fine because `RepGpu` derives `Default`.
+///
+/// They pin invariants nothing else checks: which tabs exist for which rep, and that a
+/// picker button's width does not depend on the option currently selected.
+#[cfg(test)]
+mod rep_panel_tests {
+    use super::*;
+    use crate::material::Material;
+    use crate::settings::{AppearanceSettings, ThemeMode};
+
+    /// Run `build` in a fresh themed context, twice (egui reads a widget's state from the
+    /// previous frame's response).
+    fn run(theme: ThemeMode, mut build: impl FnMut(&mut egui::Ui)) {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &AppearanceSettings { theme, ..Default::default() });
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| build(ui));
+        }
+    }
+
+    /// Draw the params panel once for `rep` with `has_box`, and report the tab it ended on.
+    fn params_tab(rep: &mut Representation, has_box: bool) -> SettingsTab {
+        run(ThemeMode::Dark, |ui| {
+            draw_rep_params(ui, rep, has_box, None);
+        });
+        rep.settings_tab
+    }
+
+    /// The **Periodic** tab exists only with a box and the **Color** tab only for a colour
+    /// scheme that has options — and if the tab you were *on* loses its condition, the panel
+    /// must fall back to Style rather than leave a tab selected that is no longer in the bar.
+    /// Both ways of losing it are ways the app really does: the molecule's box goes away
+    /// (session load, a frame without one), and the colour scheme is switched off Charge.
+    #[test]
+    fn conditional_tabs_fall_back_to_style_when_their_condition_goes_away() {
+        // Periodic: reachable with a box, abandoned when the box goes.
+        let mut rep = Representation::new(RepKind::Lines);
+        rep.settings_tab = SettingsTab::Periodic;
+        assert_eq!(
+            params_tab(&mut rep, true),
+            SettingsTab::Periodic,
+            "with a box, the Periodic tab must stay selected"
+        );
+        assert_eq!(
+            params_tab(&mut rep, false),
+            SettingsTab::Style,
+            "without a box there is no Periodic tab, so it must fall back to Style"
+        );
+
+        // Color: reachable only for the Charge scheme, abandoned when it changes.
+        let mut rep = Representation::new(RepKind::Lines);
+        rep.color = ColorMethod::Charge;
+        rep.settings_tab = SettingsTab::Color;
+        assert_eq!(
+            params_tab(&mut rep, false),
+            SettingsTab::Color,
+            "the Charge scheme has options, so its Color tab must stay selected"
+        );
+        rep.color = ColorMethod::Element;
+        assert_eq!(
+            params_tab(&mut rep, false),
+            SettingsTab::Style,
+            "Element has no options, so the Color tab must fall back to Style"
+        );
+
+        // Style and Traj are unconditional — neither may ever be taken away.
+        for tab in [SettingsTab::Style, SettingsTab::Traj] {
+            let mut rep = Representation::new(RepKind::Lines);
+            rep.settings_tab = tab;
+            assert_eq!(params_tab(&mut rep, false), tab, "{tab:?} must always be available");
+        }
+    }
+
+    /// Every style must draw in the params panel on every tab it offers, in both themes. The
+    /// Style tab dispatches on [`RepParams`], so a style added without its arm would otherwise
+    /// surface only at runtime.
+    #[test]
+    fn every_style_draws_on_every_available_tab() {
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            for kind in RepKind::ALL {
+                for tab in [SettingsTab::Style, SettingsTab::Traj, SettingsTab::Periodic] {
+                    let mut rep = Representation::new(kind);
+                    rep.settings_tab = tab;
+                    run(theme, |ui| {
+                        draw_rep_params(ui, &mut rep, true, None);
+                    });
+                }
+                // The Color tab, for the one scheme that has options — with a charge-status
+                // message, since a leading `!` marks it an error and takes a different branch.
+                let mut rep = Representation::new(kind);
+                rep.color = ColorMethod::Charge;
+                rep.settings_tab = SettingsTab::Color;
+                run(theme, |ui| {
+                    draw_rep_params(ui, &mut rep, false, Some("!load an SDF/MOL"));
+                });
+            }
+        }
+    }
+
+    /// A picker button must be **the same width whatever is selected**.
+    ///
+    /// That is the entire point of [`max_label_width`]: the button reserves the *widest*
+    /// option's label, so choosing "Ball and stick" after "Lines" cannot grow the button, shove
+    /// its neighbours along and reflow the panel. It is also why an egui `sizing_pass` could
+    /// not replace it — a sizing pass measures the current content, not the max over options.
+    ///
+    /// This exercises the same two lines each of the three pickers opens with
+    /// (`max_label_width` over the enum's `ALL`, then `picker_button`), because the pickers
+    /// return their selection rather than their button's rect. Checked in both themes, since
+    /// the reservation is measured in the themed font.
+    #[test]
+    fn picker_button_width_does_not_depend_on_the_selection() {
+        use std::cell::RefCell;
+        // (group, label) pairs covering all three pickers' option lists.
+        let groups: [(&str, Vec<&str>); 3] = [
+            ("style", RepKind::ALL.iter().map(|k| k.label()).collect()),
+            ("color", ColorMethod::ALL.iter().map(|m| m.label()).collect()),
+            ("material", Material::ALL.iter().map(|m| m.label()).collect()),
+        ];
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            let seen: RefCell<Vec<(&str, &str, f32)>> = RefCell::new(Vec::new());
+            run(theme, |ui| {
+                seen.borrow_mut().clear();
+                for (group, labels) in &groups {
+                    let lw = max_label_width(ui, labels.iter().copied());
+                    for label in labels {
+                        let w = picker_button(ui, label, lw, |_, _| {}).rect.width();
+                        seen.borrow_mut().push((group, label, w));
+                    }
+                }
+            });
+            for (group, _) in &groups {
+                let ws: Vec<(&str, f32)> = seen
+                    .borrow()
+                    .iter()
+                    .filter(|(g, _, _)| g == group)
+                    .map(|(_, l, w)| (*l, *w))
+                    .collect();
+                let (_, first) = ws[0];
+                for (label, w) in &ws {
+                    assert!(
+                        (w - first).abs() < 0.01,
+                        "{theme:?}: the {group} picker is {w} wide for {label:?} but {first} \
+                         for {:?} — its width must not follow the selection",
+                        ws[0].0
+                    );
+                }
+            }
+        }
+    }
+}
