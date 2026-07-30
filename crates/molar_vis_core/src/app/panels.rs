@@ -420,7 +420,8 @@ impl App {
                     )
                     .clicked()
                 {
-                    self.docking_dialog = Some(super::docking_dialog::DockingDialog::new());
+                    self.docking_dialog =
+                        Some(ModalState::new(super::docking_dialog::DockingDialog::new()));
                     ui.close();
                 }
             }).response);
@@ -463,7 +464,7 @@ impl App {
             // format, then saves (ray-traced on a compute device — see `render/raytrace.rs`).
             menu_buttons.push(ui.menu_button("Render", |ui| {
                 if ui.button(format!("{}  Image…", icon::IMAGE)).clicked() {
-                    self.image_dialog = Some(ImageDialog { scale: 1 });
+                    self.image_dialog = Some(ModalState::new(ImageDialog { scale: 1 }));
                     ui.close();
                 }
             }).response);
@@ -810,16 +811,16 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let _ = save_mol;
         if let Some(id) = open_del_frames {
-            self.delete_frames_dialog = Some(DeleteFramesDialog::new(id));
+            self.delete_frames_dialog = Some(ModalState::new(DeleteFramesDialog::new(id)));
         }
         if rename.is_some() {
-            self.rename_dialog = rename;
+            self.rename_dialog = rename.map(ModalState::new);
         }
         if let Some(id) = open_load {
             // Native: the load dialog (file picker + range/stride/sync-async).
             #[cfg(not(target_arch = "wasm32"))]
             {
-                self.load_dialog = Some(LoadDialog::new(id));
+                self.load_dialog = Some(ModalState::new(LoadDialog::new(id)));
             }
             // Browser: pick a trajectory file and stream all its frames in (no
             // dialog; range/stride aren't offered on the web yet).

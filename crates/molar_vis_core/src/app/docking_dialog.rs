@@ -9,7 +9,7 @@
 //! Native only: it reads several files from disk and the browser build has no filesystem.
 
 use super::*;
-use super::loaders::DialogAction;
+use super::widgets::{modal_shell, ModalBody, ModalSpec};
 use crate::docking::{docking_mode, sync_action, DockingMode, Sync};
 
 /// State of the "Load docking data" modal.
@@ -26,12 +26,11 @@ use crate::docking::{docking_mode, sync_action, DockingMode, Sync};
 pub(super) struct DockingDialog {
     pub(super) protein: Vec<std::path::PathBuf>,
     pub(super) ligands: Vec<std::path::PathBuf>,
-    pub(super) error: Option<String>,
 }
 
 impl DockingDialog {
     pub(super) fn new() -> Self {
-        Self { protein: Vec::new(), ligands: Vec::new(), error: None }
+        Self { protein: Vec::new(), ligands: Vec::new() }
     }
 }
 
@@ -72,14 +71,17 @@ impl App {
     /// Load/Cancel. Mirrors `draw_load_dialog`'s shape (a centered `egui::Modal`, errors
     /// shown in place so a rejected combination can be corrected without reopening).
     pub(super) fn draw_docking_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.docking_dialog.take() else {
-            return;
-        };
-        let mut action = DialogAction::Keep;
-
-        let modal = egui::Modal::new(egui::Id::new("docking_modal")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.heading("Load docking data");
+        modal_shell(
+            self,
+            ctx,
+            |a| &mut a.docking_dialog,
+            ModalSpec {
+                id: "docking_modal",
+                width: 420.0,
+                heading: "Load docking data",
+                commit: "Load",
+            },
+            |ui, dialog, err, _app| {
             ui.label(
                 egui::RichText::new(
                     "A receptor plus the ligand poses docked into it. One receptor frame is \
@@ -114,7 +116,7 @@ impl App {
                             // predictable (jak2.pdb before jak2_traj.pdb).
                             ps.sort();
                             dialog.protein = ps;
-                            dialog.error = None;
+                            *err = None;
                         }
                     }
                     match dialog.protein.is_empty() {
@@ -142,7 +144,7 @@ impl App {
                         {
                             ps.sort();
                             dialog.ligands = ps;
-                            dialog.error = None;
+                            *err = None;
                         }
                     }
                     match dialog.ligands.is_empty() {
@@ -157,44 +159,21 @@ impl App {
                     ui.end_row();
                 });
 
-            if let Some(e) = &dialog.error {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(e).color(ui.visuals().error_fg_color),
-                    )
-                    .wrap(),
-                );
-            }
-
-            ui.separator();
-            ui.horizontal(|ui| {
-                let ready = !dialog.protein.is_empty() && !dialog.ligands.is_empty();
-                if ui.add_enabled(ready, egui::Button::new("Load")).clicked() {
-                    action = DialogAction::Load;
+            ModalBody::enabled(!dialog.protein.is_empty() && !dialog.ligands.is_empty())
+            },
+            // A rejected combination reopens the dialog with the reason (the shell's fourth
+            // state), so the selection can be fixed without starting over.
+            |app, dialog| match app.load_docking(&dialog.protein, &dialog.ligands) {
+                Ok(msg) => {
+                    app.status = msg;
+                    Ok(())
                 }
-                if ui.button("Cancel").clicked() {
-                    action = DialogAction::Cancel;
-                }
-            });
-        });
-
-        if modal.should_close() {
-            action = DialogAction::Cancel;
-        }
-        match action {
-            DialogAction::Keep => self.docking_dialog = Some(dialog),
-            DialogAction::Cancel => {}
-            DialogAction::Load => match self.load_docking(&dialog.protein, &dialog.ligands) {
-                Ok(msg) => self.status = msg,
                 Err(e) => {
-                    // Keep the dialog open with the reason, so the selection can be fixed.
                     log::error!("docking load: {e}");
-                    dialog.error = Some(e);
-                    self.docking_dialog = Some(dialog);
+                    Err(e)
                 }
             },
-        }
+        );
     }
 
     /// Load a docking result: the receptor (+ its ensemble as trajectory frames) and the

@@ -171,6 +171,157 @@ pub(super) fn toolbar_label(ui: &mut egui::Ui, text: &str) {
     paint_ink_centered(ui.painter(), rect, galley, col);
 }
 
+// ---------------------------------------------------------------------------------------
+// The modal shell.
+// ---------------------------------------------------------------------------------------
+
+/// A modal's state: whatever the dialog itself needs, plus the error slot the shell owns.
+///
+/// Held by [`App`] as `Option<ModalState<_>>`, so `Some` == open — the one invariant every
+/// modal obeys. The error is here rather than in the inner state because it is the shell that
+/// sets it (from a failed commit) and the shell that renders it, and because a modal that
+/// *can't* fail then gets the same treatment for free if it ever grows a fallible commit.
+pub(super) struct ModalState<S> {
+    pub(super) inner: S,
+    /// Why the last commit attempt failed, rendered in place above the button row. The body
+    /// may clear it when the input that failed changes (e.g. a different file is chosen).
+    pub(super) error: Option<String>,
+}
+
+impl<S> ModalState<S> {
+    pub(super) fn new(inner: S) -> Self {
+        Self { inner, error: None }
+    }
+}
+
+/// The fixed presentation of one modal: its egui id, width, heading, and the label of its
+/// affirmative button.
+pub(super) struct ModalSpec<'a> {
+    pub(super) id: &'a str,
+    pub(super) width: f32,
+    pub(super) heading: &'a str,
+    /// Label of the affirmative button — "Load", "Delete", "Rename", "Save…".
+    pub(super) commit: &'a str,
+}
+
+/// What a modal's body reports back for this frame.
+pub(super) struct ModalBody {
+    /// Whether the affirmative button is enabled (e.g. no file chosen yet → not yet).
+    pub(super) can_commit: bool,
+    /// Set by a body that decides the outcome itself — the rename field commits on Enter.
+    /// Leave `None` to let the footer buttons decide.
+    pub(super) action: Option<DialogAction>,
+}
+
+impl ModalBody {
+    /// The common case: only the footer decides, and the commit button is enabled iff `ok`.
+    pub(super) fn enabled(ok: bool) -> Self {
+        Self { can_commit: ok, action: None }
+    }
+}
+
+/// What a modal decided this frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DialogAction {
+    /// Nothing decided — stay open.
+    Keep,
+    /// Dismissed: Cancel, Escape, or a click on the backdrop.
+    Cancel,
+    /// The affirmative button (or Enter) fired.
+    Commit,
+}
+
+/// Draw one of the app's transient modals, and run its commit.
+///
+/// Owns everything the five modals had each hand-rolled: the take-from-`Option` (which is
+/// what frees `&mut App` for the commit), the fixed width, the heading, the error line, the
+/// separator and the commit/cancel row, `Modal::should_close()`, **Escape**, and the
+/// fourth state the load and docking dialogs both open-coded — a commit that *fails* reopens
+/// the dialog with the reason, so the input can be corrected without starting over.
+///
+/// Centralising `should_close()` and Escape is the behaviour fix here: the image dialog
+/// discarded its `ModalResponse` (so it alone had no backdrop-click dismissal) and both it
+/// and the settings window only *peeked* at Escape without consuming it, which made
+/// dismissal order-dependent when more than one was open. Now every modal consumes Escape.
+///
+/// `slot` is a field projection (`|a| &mut a.load_dialog`), so the shell can put the state
+/// back after the commit has had full `&mut App`. `body` gets `&App` for the read-only scene
+/// facts a dialog displays ("Into <name> (N atoms)", the frame count, the viewport size).
+pub(super) fn modal_shell<S>(
+    app: &mut App,
+    ctx: &egui::Context,
+    slot: fn(&mut App) -> &mut Option<ModalState<S>>,
+    spec: ModalSpec<'_>,
+    body: impl FnOnce(&mut egui::Ui, &mut S, &mut Option<String>, &App) -> ModalBody,
+    commit: impl FnOnce(&mut App, &mut S) -> Result<(), String>,
+) {
+    let Some(mut state) = slot(app).take() else {
+        return;
+    };
+    let mut action = DialogAction::Keep;
+
+    let modal = egui::Modal::new(egui::Id::new(spec.id)).show(ctx, |ui| {
+        ui.set_width(spec.width);
+        ui.heading(spec.heading);
+        let ModalState { inner, error } = &mut state;
+        let reported = body(ui, inner, error, app);
+        if let Some(a) = reported.action {
+            action = a;
+        }
+        if let Some(e) = error.as_deref() {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(egui::RichText::new(e).color(ui.visuals().error_fg_color)).wrap(),
+            );
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(reported.can_commit, egui::Button::new(spec.commit))
+                .clicked()
+            {
+                action = DialogAction::Commit;
+            }
+            if ui.button("Cancel").clicked() {
+                action = DialogAction::Cancel;
+            }
+        });
+    });
+
+    // A backdrop click or Escape dismisses. Escape is **consumed** (`key_pressed` on the
+    // mutable input) so it dismisses exactly one modal, not every one that happens to be open.
+    if modal.should_close() || ctx.input_mut(|i| i.key_pressed(egui::Key::Escape)) {
+        action = DialogAction::Cancel;
+    }
+
+    *slot(app) = resolve_modal(action, state, |inner| commit(app, inner));
+}
+
+/// Decide a modal's fate from its `action`: the state to store back, or `None` to close.
+///
+/// Split out of [`modal_shell`] because it is the whole of the shell's *logic* — the four
+/// states, including the commit that fails and reopens — and it is testable without an
+/// [`App`] (which needs a live wgpu device). `commit` takes only the inner state so the
+/// caller can close over `&mut App` here.
+fn resolve_modal<S>(
+    action: DialogAction,
+    mut state: ModalState<S>,
+    commit: impl FnOnce(&mut S) -> Result<(), String>,
+) -> Option<ModalState<S>> {
+    match action {
+        DialogAction::Keep => Some(state),
+        DialogAction::Cancel => None,
+        DialogAction::Commit => match commit(&mut state.inner) {
+            Ok(()) => None,
+            // Reopen showing why, so the input can be corrected without starting over.
+            Err(e) => {
+                state.error = Some(e);
+                Some(state)
+            }
+        },
+    }
+}
+
 /// The app's standard **tab bar**: underline-style tabs (the selected tab is bold
 /// with an accent underline; the others are weak, clickable text) instead of
 /// disconnected toggle buttons. Sets `*current` to the clicked tab and returns
@@ -251,4 +402,77 @@ pub(super) fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
                 *c = [lin.r(), lin.g(), lin.b(), 1.0];
             }
         });
+}
+
+
+/// The modal shell's four states, tested without an [`App`] (which needs a live wgpu device):
+/// [`resolve_modal`] is the whole of the shell's logic, and the state that matters most is the
+/// fourth — a commit that fails must leave the dialog **open, with the reason**, so the input
+/// can be corrected instead of the work being thrown away. Both the load-trajectory and
+/// load-docking dialogs hand-rolled that before; now there is one implementation to check.
+#[cfg(test)]
+mod modal_shell_tests {
+    use super::*;
+
+    /// A stand-in dialog state: a value the commit reads, and a record of it having run.
+    #[derive(Default)]
+    struct Probe {
+        value: u32,
+        committed: bool,
+    }
+
+    #[test]
+    fn keep_holds_the_state_and_does_not_commit() {
+        let out = resolve_modal(DialogAction::Keep, ModalState::new(Probe { value: 7, ..Default::default() }), |p| {
+            p.committed = true;
+            Ok(())
+        });
+        let out = out.expect("Keep must stay open");
+        assert_eq!(out.inner.value, 7, "the edit buffer must survive the frame");
+        assert!(!out.inner.committed, "Keep must not run the commit");
+        assert!(out.error.is_none());
+    }
+
+    #[test]
+    fn cancel_closes_and_does_not_commit() {
+        let mut ran = false;
+        let out = resolve_modal(DialogAction::Cancel, ModalState::new(Probe::default()), |_| {
+            ran = true;
+            Ok(())
+        });
+        assert!(out.is_none(), "Cancel must close");
+        assert!(!ran, "Cancel must not run the commit");
+    }
+
+    #[test]
+    fn a_successful_commit_runs_and_closes() {
+        let mut seen = 0;
+        let out = resolve_modal(DialogAction::Commit, ModalState::new(Probe { value: 42, ..Default::default() }), |p| {
+            seen = p.value;
+            Ok(())
+        });
+        assert!(out.is_none(), "a successful commit must close the dialog");
+        assert_eq!(seen, 42, "the commit must see the dialog's state");
+    }
+
+    /// The fourth state: reopen with the message, keeping everything the user had entered.
+    #[test]
+    fn a_failed_commit_reopens_with_the_error() {
+        let out = resolve_modal(DialogAction::Commit, ModalState::new(Probe { value: 3, ..Default::default() }), |_| {
+            Err("no such file".to_string())
+        });
+        let out = out.expect("a failed commit must leave the dialog open");
+        assert_eq!(out.error.as_deref(), Some("no such file"));
+        assert_eq!(out.inner.value, 3, "the entered state must be preserved for correcting");
+    }
+
+    /// A retry that succeeds must clear the previous failure's message along with the dialog —
+    /// i.e. the error rides the state, so closing disposes of it.
+    #[test]
+    fn a_retry_that_succeeds_closes_despite_a_stale_error() {
+        let mut state = ModalState::new(Probe { value: 1, ..Default::default() });
+        state.error = Some("first attempt failed".into());
+        let out = resolve_modal(DialogAction::Commit, state, |_| Ok(()));
+        assert!(out.is_none(), "a successful retry must close, discarding the stale error");
+    }
 }

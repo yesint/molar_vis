@@ -623,7 +623,29 @@ impl App {
         // modal (empty), so the dialog itself can be screenshot with MOLAR_VIS_DEBUG_SAVE_UI.
         #[cfg(not(target_arch = "wasm32"))]
         if std::env::var("MOLAR_VIS_DEBUG_DOCKING_DIALOG").is_ok() {
-            app.docking_dialog = Some(super::docking_dialog::DockingDialog::new());
+            app.docking_dialog = Some(ModalState::new(super::docking_dialog::DockingDialog::new()));
+        }
+
+        // Verification hooks for the three remaining modals, which had none — so all five now
+        // open headlessly and can be checked with MOLAR_VIS_DEBUG_SAVE_UI. Each opens on
+        // molecule 0 (the trajectory ones are only meaningful with frames, so pair them with
+        // MOLAR_VIS_DEBUG_TRAJ).
+        //   _LOADDIALOG=1  the "Load trajectory" modal
+        //   _RENAME=1      the "Rename molecule" modal
+        //   _IMAGEDIALOG=1 the "Render image" save modal
+        if std::env::var("MOLAR_VIS_DEBUG_LOADDIALOG").is_ok() {
+            if let Some(mol) = app.scene.molecules.first() {
+                app.load_dialog = Some(ModalState::new(LoadDialog::new(mol.id)));
+            }
+        }
+        if std::env::var("MOLAR_VIS_DEBUG_RENAME").is_ok() {
+            if let Some(mol) = app.scene.molecules.first() {
+                app.rename_dialog =
+                    Some(ModalState::new(RenameDialog { mol: mol.id, name: mol.name.clone() }));
+            }
+        }
+        if std::env::var("MOLAR_VIS_DEBUG_IMAGEDIALOG").is_ok() {
+            app.image_dialog = Some(ModalState::new(ImageDialog { scale: 2 }));
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DOCKING="<protein files>;<ligand files>" loads a
@@ -910,7 +932,7 @@ impl App {
         // dialog for mol 0 (pair with MOLAR_VIS_DEBUG_TRAJ to have frames).
         if std::env::var("MOLAR_VIS_DEBUG_DELFRAMES").is_ok() {
             if let Some(mol) = app.scene.molecules.first() {
-                app.delete_frames_dialog = Some(DeleteFramesDialog::new(mol.id));
+                app.delete_frames_dialog = Some(ModalState::new(DeleteFramesDialog::new(mol.id)));
             }
         }
 

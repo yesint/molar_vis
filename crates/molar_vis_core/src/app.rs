@@ -58,6 +58,9 @@ mod widgets;
 
 use draw::DrawSession;
 use loaders::{DeleteFramesDialog, LoadDialog};
+// Only `ModalState` is named here (the five modal field types); the shell itself is
+// imported by each module that draws a modal.
+use widgets::ModalState;
 
 
 /// Workaround for a winit/egui IME bug seen on recent Wayland compositors: while a
@@ -139,16 +142,16 @@ pub struct App {
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).
-    load_dialog: Option<LoadDialog>,
+    load_dialog: Option<ModalState<LoadDialog>>,
     /// Open "Load docking data…" dialog, if any (native: it reads several files from disk).
     #[cfg(not(target_arch = "wasm32"))]
-    docking_dialog: Option<docking_dialog::DockingDialog>,
+    docking_dialog: Option<ModalState<docking_dialog::DockingDialog>>,
     /// Open "delete trajectory frames" dialog, if any.
-    delete_frames_dialog: Option<DeleteFramesDialog>,
+    delete_frames_dialog: Option<ModalState<DeleteFramesDialog>>,
     /// Open "Render ▸ Image…" save dialog (the chosen output scale), if any.
-    image_dialog: Option<ImageDialog>,
+    image_dialog: Option<ModalState<ImageDialog>>,
     /// Open "rename molecule" dialog: the target molecule + the edit buffer.
-    rename_dialog: Option<RenameDialog>,
+    rename_dialog: Option<ModalState<RenameDialog>>,
     /// In-flight background trajectory loaders, keyed by molecule (so they
     /// survive reorder/delete/undo). Drained each frame via `try_recv`.
     loaders: HashMap<MolId, Receiver<LoadMsg>>,

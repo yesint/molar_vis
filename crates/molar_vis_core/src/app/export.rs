@@ -7,9 +7,12 @@
 //! file via an `rfd` dialog, while wasm polls the readback each frame and triggers a browser
 //! download (no filesystem).
 
+use eframe::egui;
+
 use super::App;
 #[cfg(not(target_arch = "wasm32"))]
 use super::RtJob;
+use super::widgets::{modal_shell, ModalBody, ModalSpec};
 
 /// Tile-submits per frame while pumping a Save trace (bounded per-frame GPU work → the UI
 /// stays responsive with a "Saving…" overlay instead of freezing). The sample *count* is the
@@ -22,50 +25,46 @@ impl App {
     /// (PNG only for now), then **Save** to render + write the file. Cross-platform (it just
     /// stages `export_request`, which `ui` services right after this).
     pub(super) fn draw_image_dialog(&mut self, ctx: &egui::Context) {
-        let Some(dlg) = self.image_dialog.as_mut() else { return };
-        let [vw, vh] = self.last_size;
-        let mut save_scale: Option<u32> = None;
-        let mut cancel = false;
-        egui::Modal::new(egui::Id::new("render_image_dialog")).show(ctx, |ui| {
-            ui.set_width(300.0);
-            ui.heading("Render image");
-            ui.add_space(8.0);
-            ui.label("Output size");
-            for (label, scale) in [("Viewport (1×)", 1u32), ("2× viewport", 2), ("4× viewport", 4)] {
-                let (w, h) = (vw.max(1) * scale, vh.max(1) * scale);
-                ui.radio_value(&mut dlg.scale, scale, format!("{label}   ({w} × {h} px)"));
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label("Format");
-                egui::ComboBox::from_id_salt("render_image_format")
-                    .selected_text("PNG")
-                    .show_ui(ui, |ui| {
-                        let mut png = true;
-                        ui.selectable_value(&mut png, true, "PNG");
-                    });
-            });
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Save…").clicked() {
-                    save_scale = Some(dlg.scale);
+        modal_shell(
+            self,
+            ctx,
+            |a| &mut a.image_dialog,
+            ModalSpec {
+                id: "render_image_dialog",
+                width: 300.0,
+                heading: "Render image",
+                commit: "Save…",
+            },
+            |ui, dlg, _err, app| {
+                let [vw, vh] = app.last_size;
+                ui.add_space(8.0);
+                ui.label("Output size");
+                for (label, scale) in
+                    [("Viewport (1×)", 1u32), ("2× viewport", 2), ("4× viewport", 4)]
+                {
+                    let (w, h) = (vw.max(1) * scale, vh.max(1) * scale);
+                    ui.radio_value(&mut dlg.scale, scale, format!("{label}   ({w} × {h} px)"));
                 }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            });
-        });
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            cancel = true;
-        }
-        if let Some(scale) = save_scale {
-            self.image_dialog = None;
-            self.export_request = Some(scale);
-        } else if cancel {
-            self.image_dialog = None;
-        }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Format");
+                    egui::ComboBox::from_id_salt("render_image_format")
+                        .selected_text("PNG")
+                        .show_ui(ui, |ui| {
+                            let mut png = true;
+                            ui.selectable_value(&mut png, true, "PNG");
+                        });
+                });
+                ui.add_space(12.0);
+                ModalBody::enabled(true)
+            },
+            |app, dlg| {
+                // The render itself happens in `ui` after `draw_viewport`, where the wgpu
+                // render state is available — see `export_request`.
+                app.export_request = Some(dlg.scale);
+                Ok(())
+            },
+        );
     }
 
     /// Render the current view at `scale ×` the viewport and save it as a PNG.

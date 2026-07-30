@@ -13,7 +13,6 @@ pub(super) struct LoadDialog {
     to_text: String,
     stride: usize,
     mode: LoadMode,
-    error: Option<String>,
 }
 
 impl LoadDialog {
@@ -25,16 +24,8 @@ impl LoadDialog {
             to_text: String::new(),
             stride: 1,
             mode: LoadMode::Sync,
-            error: None,
         }
     }
-}
-
-/// Outcome of drawing the load dialog this frame.
-pub(super) enum DialogAction {
-    Keep,
-    Cancel,
-    Load,
 }
 
 /// How the "Delete frames" dialog selects which frames to drop.
@@ -258,275 +249,236 @@ impl App {
     /// stride (keep every Nth frame), with Delete/Cancel. Trajectory frames are
     /// view state, so this is not undoable (like loading frames).
     pub(super) fn draw_delete_frames_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.delete_frames_dialog.take() else {
-            return;
-        };
-        let n_frames = self
-            .scene
-            .molecules
-            .iter()
-            .find(|m| m.id == dialog.mol_id)
-            .map(|m| m.trajectory.n_frames());
-        let last = n_frames.unwrap_or(0).saturating_sub(1);
-        let mut do_delete = false;
-        let mut close = false;
-
-        let modal = egui::Modal::new(egui::Id::new("del_frames_modal")).show(ctx, |ui| {
-            ui.set_width(340.0);
-            ui.heading("Delete trajectory frames");
-            match n_frames {
-                Some(nf) => {
-                    ui.label(format!("{nf} frames loaded (indices 0..{last})"));
+        modal_shell(
+            self,
+            ctx,
+            |a| &mut a.delete_frames_dialog,
+            ModalSpec {
+                id: "del_frames_modal",
+                width: 340.0,
+                heading: "Delete trajectory frames",
+                commit: "Delete",
+            },
+            |ui, dialog, _err, app| {
+                let n_frames = app
+                    .scene
+                    .molecules
+                    .iter()
+                    .find(|m| m.id == dialog.mol_id)
+                    .map(|m| m.trajectory.n_frames());
+                let last = n_frames.unwrap_or(0).saturating_sub(1);
+                match n_frames {
+                    Some(nf) => {
+                        ui.label(format!("{nf} frames loaded (indices 0..{last})"));
+                    }
+                    None => {
+                        ui.colored_label(ui.visuals().error_fg_color, "molecule no longer exists");
+                    }
                 }
-                None => {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        "molecule no longer exists",
-                    );
-                }
-            }
-            ui.separator();
-            tab_bar(
-                ui,
-                &mut dialog.mode,
-                &[
-                    (DeleteFramesMode::Range, "Range"),
-                    (DeleteFramesMode::Decimate, "Decimate"),
-                ],
-            );
-            ui.add_space(4.0);
-            match dialog.mode {
-                DeleteFramesMode::Range => {
-                    egui::Grid::new("del_range_opts")
-                        .num_columns(2)
-                        .spacing(egui::vec2(8.0, 4.0))
-                        .show(ui, |ui| {
-                            ui.label("First frame");
-                            ui.add(egui::DragValue::new(&mut dialog.from).range(0..=last));
-                            ui.end_row();
-                            ui.label("Last frame");
-                            ui.add(egui::DragValue::new(&mut dialog.to).range(0..=last));
-                            ui.end_row();
+                ui.separator();
+                tab_bar(
+                    ui,
+                    &mut dialog.mode,
+                    &[
+                        (DeleteFramesMode::Range, "Range"),
+                        (DeleteFramesMode::Decimate, "Decimate"),
+                    ],
+                );
+                ui.add_space(4.0);
+                match dialog.mode {
+                    DeleteFramesMode::Range => {
+                        egui::Grid::new("del_range_opts")
+                            .num_columns(2)
+                            .spacing(egui::vec2(8.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.label("First frame");
+                                ui.add(egui::DragValue::new(&mut dialog.from).range(0..=last));
+                                ui.end_row();
+                                ui.label("Last frame");
+                                ui.add(egui::DragValue::new(&mut dialog.to).range(0..=last));
+                                ui.end_row();
+                            });
+                        ui.weak("Deletes frames in [first, last] inclusive.");
+                    }
+                    DeleteFramesMode::Decimate => {
+                        ui.horizontal(|ui| {
+                            ui.label("Keep every");
+                            ui.add(egui::DragValue::new(&mut dialog.stride).range(2..=100_000));
+                            ui.label("-th frame");
                         });
-                    ui.weak("Deletes frames in [first, last] inclusive.");
-                }
-                DeleteFramesMode::Decimate => {
-                    ui.horizontal(|ui| {
-                        ui.label("Keep every");
-                        ui.add(egui::DragValue::new(&mut dialog.stride).range(2..=100_000));
-                        ui.label("-th frame");
-                    });
-                    ui.weak("Keeps frames 0, N, 2N, … and deletes the rest.");
-                }
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(n_frames.is_some(), egui::Button::new("Delete"))
-                    .clicked()
-                {
-                    do_delete = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    close = true;
-                }
-            });
-        });
-        if modal.should_close() {
-            close = true;
-        }
-
-        if do_delete {
-            if let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id) {
-                let removed = match dialog.mode {
-                    DeleteFramesMode::Range => mol.trajectory.delete_range(dialog.from, dialog.to),
-                    DeleteFramesMode::Decimate => mol.trajectory.decimate(dialog.stride),
-                };
-                // Re-render at the (clamped) current frame, or the static structure
-                // if every frame was removed.
-                mol.box_dirty = true;
-                if mol.trajectory.frames.is_empty() {
-                    for rep in &mut mol.reps {
-                        rep.coords_dirty = true;
+                        ui.weak("Keeps frames 0, N, 2N, … and deletes the rest.");
                     }
-                    if mol.pending.is_some() {
-                        mol.glow_dirty = true;
-                    }
-                } else {
-                    mol.apply_current_frame();
                 }
-                self.status = format!("Deleted {removed} frame(s)");
-                self.view_dirty = true;
-            }
-        } else if !close {
-            self.delete_frames_dialog = Some(dialog); // keep open
-        }
+                ModalBody::enabled(n_frames.is_some())
+            },
+            |app, dialog| {
+                if let Some(mol) = app.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id) {
+                    let removed = match dialog.mode {
+                        DeleteFramesMode::Range => {
+                            mol.trajectory.delete_range(dialog.from, dialog.to)
+                        }
+                        DeleteFramesMode::Decimate => mol.trajectory.decimate(dialog.stride),
+                    };
+                    // Re-render at the (clamped) current frame, or the static structure
+                    // if every frame was removed.
+                    mol.box_dirty = true;
+                    if mol.trajectory.frames.is_empty() {
+                        for rep in &mut mol.reps {
+                            rep.coords_dirty = true;
+                        }
+                        if mol.pending.is_some() {
+                            mol.glow_dirty = true;
+                        }
+                    } else {
+                        mol.apply_current_frame();
+                    }
+                    app.status = format!("Deleted {removed} frame(s)");
+                    app.view_dirty = true;
+                }
+                Ok(())
+            },
+        );
     }
 
     /// Render the "Load trajectory" modal (a-la VMD): file chooser + frame range
     /// / stride + sync/async, with Load/Cancel. Driven from `ctx` (egui modals
     /// take a `Context`, not a `Ui`), so it floats above the whole window.
     pub(super) fn draw_load_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut dialog) = self.load_dialog.take() else {
-            return;
-        };
-        let mut action = DialogAction::Keep;
-
-        let modal = egui::Modal::new(egui::Id::new("load_traj_modal")).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.heading("Load trajectory");
-            match self.scene.molecules.iter().find(|m| m.id == dialog.mol_id) {
-                Some(mol) => {
-                    ui.label(format!("Into “{}”  ({} atoms)", mol.name, mol.n_atoms));
-                }
-                None => {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        "molecule no longer exists",
-                    );
-                }
-            }
-            ui.separator();
-
-            // File chooser.
-            ui.horizontal(|ui| {
-                if ui
-                    .button(format!("{}  Choose file…", icon::FOLDER_OPEN))
-                    .clicked()
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter(
-                            "Trajectories",
-                            &["xtc", "trr", "dcd", "pdb", "gro", "xyz", "nc", "ncdf"],
-                        )
-                        .pick_file()
-                    {
-                        dialog.path = Some(p);
-                        dialog.error = None;
-                    }
-                }
-                match &dialog.path {
-                    Some(p) => {
-                        ui.monospace(
-                            p.file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                        );
+        modal_shell(
+            self,
+            ctx,
+            |a| &mut a.load_dialog,
+            ModalSpec {
+                id: "load_traj_modal",
+                width: 360.0,
+                heading: "Load trajectory",
+                commit: "Load",
+            },
+            |ui, dialog, err, app| {
+                match app.scene.molecules.iter().find(|m| m.id == dialog.mol_id) {
+                    Some(mol) => {
+                        ui.label(format!("Into “{}”  ({} atoms)", mol.name, mol.n_atoms));
                     }
                     None => {
-                        ui.weak("no file selected");
+                        ui.colored_label(ui.visuals().error_fg_color, "molecule no longer exists");
                     }
                 }
-            });
+                ui.separator();
 
-            // Frame range + stride.
-            egui::Grid::new("traj_load_opts")
-                .num_columns(2)
-                .spacing(egui::vec2(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.label("First frame");
-                    ui.add(egui::DragValue::new(&mut dialog.from));
-                    ui.end_row();
-
-                    ui.label("Last frame");
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut dialog.to_text)
-                                .desired_width(60.0)
-                                .hint_text("end"),
-                        );
-                        ui.weak("(empty = to end of file)");
-                    });
-                    ui.end_row();
-
-                    ui.label("Stride");
-                    ui.add(egui::DragValue::new(&mut dialog.stride).range(1..=usize::MAX))
-                        .on_hover_text("Keep every Nth frame");
-                    ui.end_row();
+                // File chooser.
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(format!("{}  Choose file…", icon::FOLDER_OPEN))
+                        .clicked()
+                    {
+                        // A different file may well work, so drop the last failure's message.
+                        *err = None;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(p) = rfd::FileDialog::new()
+                            .add_filter(
+                                "Trajectories",
+                                &["xtc", "trr", "dcd", "pdb", "gro", "xyz", "nc", "ncdf"],
+                            )
+                            .pick_file()
+                        {
+                            dialog.path = Some(p);
+                        }
+                    }
+                    match &dialog.path {
+                        Some(p) => {
+                            ui.monospace(
+                                p.file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        None => {
+                            ui.weak("no file selected");
+                        }
+                    }
                 });
 
-            ui.horizontal(|ui| {
-                ui.label("Reading:");
-                ui.radio_value(&mut dialog.mode, LoadMode::Sync, "Sync")
-                    .on_hover_text("Read all frames now (UI blocks until done)");
-                ui.radio_value(&mut dialog.mode, LoadMode::Async, "Async")
-                    .on_hover_text("Read in the background; frames appear as they load");
-            });
+                // Frame range + stride.
+                egui::Grid::new("traj_load_opts")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.label("First frame");
+                        ui.add(egui::DragValue::new(&mut dialog.from));
+                        ui.end_row();
 
-            if let Some(err) = &dialog.error {
-                ui.colored_label(ui.visuals().error_fg_color, err);
-            }
+                        ui.label("Last frame");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.to_text)
+                                    .desired_width(60.0)
+                                    .hint_text("end"),
+                            );
+                            ui.weak("(empty = to end of file)");
+                        });
+                        ui.end_row();
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(dialog.path.is_some(), egui::Button::new("Load"))
-                    .clicked()
-                {
-                    action = DialogAction::Load;
-                }
-                if ui.button("Cancel").clicked() {
-                    action = DialogAction::Cancel;
-                }
-            });
-        });
+                        ui.label("Stride");
+                        ui.add(egui::DragValue::new(&mut dialog.stride).range(1..=usize::MAX))
+                            .on_hover_text("Keep every Nth frame");
+                        ui.end_row();
+                    });
 
-        if modal.should_close() {
-            action = DialogAction::Cancel;
-        }
+                ui.horizontal(|ui| {
+                    ui.label("Reading:");
+                    ui.radio_value(&mut dialog.mode, LoadMode::Sync, "Sync")
+                        .on_hover_text("Read all frames now (UI blocks until done)");
+                    ui.radio_value(&mut dialog.mode, LoadMode::Async, "Async")
+                        .on_hover_text("Read in the background; frames appear as they load");
+                });
 
-        match action {
-            DialogAction::Keep => self.load_dialog = Some(dialog),
-            DialogAction::Cancel => {}
-            DialogAction::Load => {
-                if let Err(e) = self.start_load(&dialog) {
-                    dialog.error = Some(e);
-                    self.load_dialog = Some(dialog); // reopen, showing the error
-                }
-            }
-        }
+                ModalBody::enabled(dialog.path.is_some())
+            },
+            // A failed read reopens the dialog with the reason (the shell's fourth state), so
+            // the range/stride can be corrected without choosing the file again.
+            |app, dialog| app.start_load(dialog),
+        );
     }
 
     /// Modal to rename a molecule's displayed name (set from the molecule menu).
     pub(super) fn draw_rename_dialog(&mut self, ctx: &egui::Context) {
-        let Some(RenameDialog { mol: id, mut name }) = self.rename_dialog.take() else {
-            return;
-        };
-        let mut commit = false;
-        let mut cancel = false;
-        let modal = egui::Modal::new(egui::Id::new("rename_mol_modal")).show(ctx, |ui| {
-            ui.set_width(280.0);
-            ui.heading("Rename molecule");
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut name)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("name"),
-            );
-            // Detect Enter *before* re-requesting focus: `request_focus()` re-grabs
-            // focus the same frame, which would mask the Enter-induced `lost_focus()`
-            // (so Enter never committed). Only keep the field focused when not entered.
-            let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if !entered {
-                resp.request_focus();
-            }
-            ui.separator();
-            ui.horizontal(|ui| {
-                let ok = ui
-                    .add_enabled(!name.trim().is_empty(), egui::Button::new("Rename"))
-                    .clicked();
-                commit = ok || (entered && !name.trim().is_empty());
-                cancel = ui.button("Cancel").clicked();
-            });
-        });
-        if commit && !name.trim().is_empty() {
-            if let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == id) {
-                mol.name = name.trim().to_string();
-            }
-        } else if !cancel && !modal.should_close() {
-            // Still open — keep the edit buffer.
-            self.rename_dialog = Some(RenameDialog { mol: id, name });
-        }
+        modal_shell(
+            self,
+            ctx,
+            |a| &mut a.rename_dialog,
+            ModalSpec {
+                id: "rename_mol_modal",
+                width: 280.0,
+                heading: "Rename molecule",
+                commit: "Rename",
+            },
+            |ui, dialog, _err, _app| {
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut dialog.name)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("name"),
+                );
+                // Detect Enter *before* re-requesting focus: `request_focus()` re-grabs
+                // focus the same frame, which would mask the Enter-induced `lost_focus()`
+                // (so Enter never committed). Only keep the field focused when not entered.
+                let entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if !entered {
+                    resp.request_focus();
+                }
+                let ok = !dialog.name.trim().is_empty();
+                ModalBody {
+                    can_commit: ok,
+                    // Enter in the field commits, so the body decides in that case.
+                    action: (entered && ok).then_some(DialogAction::Commit),
+                }
+            },
+            |app, dialog| {
+                if let Some(mol) = app.scene.molecules.iter_mut().find(|m| m.id == dialog.mol) {
+                    mol.name = dialog.name.trim().to_string();
+                }
+                Ok(())
+            },
+        );
     }
 
     /// Begin loading the dialog's file into its molecule (sync or async).
