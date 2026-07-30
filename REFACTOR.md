@@ -413,26 +413,56 @@ Not part of this refactor; recorded so they aren't lost.
 
 ---
 
-## Suggested order and totals
+## Order and totals — all done
 
-| phase | what | effort | risk |
+Phases are numbered in execution order. Each landed as its own commit, verified against
+`scripts/check.sh` (the four renders and the session round-trip came back **byte-identical**
+after every phase).
+
+| phase | what | risk | commit |
 |---|---|---|---|
-Phases are numbered in execution order (matching the plan file and the task list).
+| 0 ✅ | `scripts/check.sh` + a recorded baseline | none | — |
+| 1 ✅ | 22 single-field methods → `Scene`/`Camera`; `rebuild_dirty` → free fn | none | `b245f6f` |
+| 2 ✅ | One state struct per dialog (8 fields → 4) | low | `f019454` |
+| 3 ✅ | The traj/group bar fit tests (precede Phase 4) | none | `6cfad99` |
+| 4 ✅ | Three `Sides` edits in `rep_panel.rs` | low | `d4c1c3f` |
+| 5 ✅ | `modal_shell` + the 4th dialog state (+ 3 debug hooks first) | medium | `bedc157` |
+| 6 ✅ | Remaining widget-layer `ctx.run_ui` tests | none | `884e57e` |
+| 7 ✅ | `RtState`, `Console`, axes → `Camera`, loaders → `Scene` | low | `329d001` |
+| 8 ✅ | `RepAction` / `GroupAction` enums + the outcome convention | med-high | `2b9d90e` |
 
-| phase | what | effort | risk |
-|---|---|---|---|
-| 0 ✅ | `scripts/check.sh` + a recorded baseline | 30 min | none |
-| 1 | 24 single-field methods → `Scene`/`Camera`; `rebuild_dirty` → free fn | ~750 LOC moved | none |
-| 2 | One state struct per dialog (11 fields → 4) | ~90 LOC | low |
-| 3 | The `draw_traj_bar` fit test (must precede Phase 4) | ~45 min | none |
-| 4 | Three `Sides` edits in `rep_panel.rs` | ~1.5 h | low |
-| 5 | `modal_shell` + `DialogAction`'s 4th state (+ 3 debug hooks first) | ~200 LOC, net −80 | medium |
-| 6 | Remaining widget-layer `ctx.run_ui` tests | ~3 h | none |
-| 7 | `RtState`, `Console`, axes → `Camera`, loaders → `Scene` | ~150 LOC | low |
-| 8 | `RepAction` / `GroupAction` enums + the outcome convention | ~260 LOC | med-high |
+Field count: **46 → 32** in the native default build (55 → 37 declared). Tests: 92/96 → 122/126.
 
-Phases 0–3, 6 and 7 are pure wins with no behavior change and should be done regardless. Phase 4
-fixes a latent bug. Phase 5 changes dialog dismissal behavior (intentionally). Phase 8 is the only
-one that can break something subtle, and it is last for that reason.
+### Where the plan was wrong, and what was done instead
 
-Field count after all of it: **46 → ~30** in the native default build.
+* **Phase 1's attribution was optimistic for three methods.** Per-function field attribution
+  (rather than eyeballing) shows `dihedral_preview_hover` reaches scene + camera + draw,
+  `sync_docking_frames` reaches camera transitively via `switch_group_member_synced`, and
+  `toggle_hydrogens` reaches draw via `after_draw_edit`. The first two stayed on `App`; the
+  third was split, with the mutation on `Scene`. Two that mixed in `view_dirty`/`status` return
+  the flag/message instead, per the plan's own note. `drawing_plane_point`/`drag_dir` reach
+  `draw` too, so they moved to `Camera` with the plane depth as an explicit parameter.
+* **Phase 2's count was 8 fields, not 11**, and the `ViewMenu` keeps `open` *inside* the struct
+  rather than becoming an `Option`: it is a toolbar popover flipped open and shut constantly and
+  its tab is sticky across that, so an `Option` would reset it to Camera on every reopen.
+* **Phase 3's probe widths had to start at 336.** The trajectory bar's *first* row has an
+  intrinsic floor (310.25 pt, 329.44 above 50 frames) that no reserve arithmetic can help — a
+  separate, pre-existing left-panel minimum-width limit. Above it the old reserve left **2 px**
+  of slack; after Phase 4 it is 0 by construction.
+* **Phase 5 came out net +180 LOC, not −80.** The functional code did shrink; the shell's doc
+  comments and its 5 unit tests more than made up the difference.
+* **Phase 7's `loaders` → `Scene` needed more than a field move.** The plan's stated benefit
+  ("one owner's invariant") does not follow from relocating the fields, because every removal
+  site is in `app/`. So `Scene::trash_molecule` / `trash_grouped_molecule` now own the whole
+  remove → drop-loaders → trash → clamp ritual and the four sites each collapse to one call.
+  Also, `axes_on` in `Camera` exposed that `Camera::frame_bbox` builds a *whole* camera and
+  would have switched the gizmo off on a new document — the four such sites now go through one
+  `App::reframe_camera`.
+* **Phase 8's precondition (manual GUI passes) could not be met.** Substituted by extracting the
+  index arithmetic onto `Molecule` and unit-testing it *before* changing any caller. No generic
+  `PanelOutcome<A>` type: the three outcomes' payloads differ, so the convention is written down
+  once instead.
+* **Not done:** moving `export.rs`'s functions to `impl RtState`. `draw_image_dialog` goes
+  through `modal_shell` (which needs `&mut App`), and `export_image` reaches 8 of `App`'s fields
+  — the plan's proposed 4-parameter signature does not survive contact, and a 6-parameter one
+  would be worse than `&mut self`, which is the plan's own reasoning about the 5 orchestrators.
