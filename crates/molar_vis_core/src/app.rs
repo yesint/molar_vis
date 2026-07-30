@@ -378,6 +378,18 @@ struct ViewMenu {
     /// freshly-narrowed rect no longer covers the leftmost tab the click landed on (see
     /// `view_settings_window`). Cleared when the menu closes, never mid-life.
     last_rect: Option<egui::Rect>,
+    /// Whether one of the window's child popups (a dropdown, a colour picker) was open
+    /// **last frame**.
+    ///
+    /// Needed because a popup can extend past the window's own bottom edge, and choosing an
+    /// item closes the popup *within the same frame* — so by the time the
+    /// close-on-click-outside test runs there is no open popup to detect, and a click on such
+    /// an item reads as a click outside the window. That is what dismissed the whole menu when
+    /// the depth-cue type was set to `Exp²`: it is the lowest of four items in a dropdown
+    /// anchored near the top of the content, and its centre lands ~9 px below the window.
+    /// While a popup is up, every click belongs to it — on an item, or outside to dismiss it —
+    /// so the window must sit the frame out either way.
+    popup_open: bool,
 }
 
 /// How a lasso gesture combines with the molecule's existing active selection.

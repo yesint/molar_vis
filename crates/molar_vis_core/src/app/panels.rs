@@ -192,8 +192,12 @@ impl App {
     pub(super) fn view_settings_window(&mut self, ctx: &egui::Context, anchor: egui::Rect) {
         if !self.view_menu.open {
             self.view_menu.last_rect = None;
+            self.view_menu.popup_open = false;
             return;
         }
+        // Read *before* drawing: the child popups are shown (and closed) inside the closure
+        // below, so afterwards this frame's state is already the post-click one.
+        let popup_was_open = self.view_menu.popup_open;
         let inner = egui::Window::new("view_settings")
             .title_bar(false)
             .resizable(false)
@@ -231,12 +235,21 @@ impl App {
         // freshly-updated rect (and `layer_id_at`, which reads the same just-updated
         // area state) no longer covers the leftmost tab the click actually landed on,
         // and the menu wrongly closed. The previous frame's rect is the geometry the
-        // user saw and clicked. A child popup (dropdown / color picker) keeps it open
-        // via `Popup::is_any_open`; clicks on the hamburger (`anchor`) are its toggle.
+        // user saw and clicked. Clicks on the hamburger (`anchor`) are its toggle.
+        //
+        // A child popup (dropdown / colour picker) suppresses the test — and it has to be
+        // suppressed for the frame the popup **closes** in as well, not only while it is up:
+        // a popup can extend past the window's bottom edge (the depth-cue type dropdown's last
+        // item, `Exp²`, sits ~9 px below it), and choosing an item closes the popup in that
+        // same frame, so `is_any_open` is already false here and the click would read as
+        // "outside the window". Hence `popup_was_open`, sampled before the closure ran. While a
+        // popup is up every click belongs to it — on an item, or outside it to dismiss it — so
+        // the window sits out that click either way and a second one closes it.
         if let Some(inner) = inner {
             let hit_rect = self.view_menu.last_rect.unwrap_or(inner.response.rect);
+            let popup_open = egui::Popup::is_any_open(ctx);
             let clicked = ctx.input(|i| i.pointer.any_click());
-            if clicked && !egui::Popup::is_any_open(ctx) {
+            if clicked && !popup_open && !popup_was_open {
                 if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
                     if !hit_rect.contains(p) && !anchor.contains(p) {
                         self.view_menu.open = false;
@@ -244,6 +257,7 @@ impl App {
                 }
             }
             self.view_menu.last_rect = Some(inner.response.rect);
+            self.view_menu.popup_open = popup_open;
         }
     }
 
@@ -1243,5 +1257,189 @@ impl App {
             Some(GroupAction::DeleteMember(id)) => escalate = Some(GroupEscalation::Member(id)),
         }
         GroupOutcome { view_dirty, escalate }
+    }
+}
+
+
+/// Regression test for the view-settings window dismissing itself when a dropdown item is
+/// chosen from *below* its bottom edge.
+///
+/// The window closes on a click outside its rect. Its child dropdowns are separate `Area`s that
+/// can extend past that rect, and `ui.close()` closes a popup in the same frame the item is
+/// clicked — so at close-test time there is no open popup to detect and the click reads as
+/// "outside". The depth-cue **Type** dropdown is the case that bit: four items anchored near the
+/// top of the Camera tab's content, of which the last (`Exp²`) lands below the window.
+///
+/// Rather than reach into `App` (which needs a live wgpu device), this rebuilds the same shape —
+/// a right-pivoted `Window`, a button with a downward `Popup::menu` of four items, two slider
+/// rows under it — and drives the real predicate. It first *asserts the geometry*, so if a
+/// future layout change means the item no longer overhangs, the test says so instead of passing
+/// vacuously.
+#[cfg(test)]
+mod view_menu_dismiss_tests {
+    use super::*;
+
+    const SCREEN: egui::Vec2 = egui::Vec2::new(1200.0, 750.0);
+
+    /// The hamburger's rect, as `draw_view_toolbar` hands it to `view_settings_window`.
+    fn anchor() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(1150.0, 8.0), egui::vec2(30.0, 26.0))
+    }
+
+    /// One frame of the mock window. `open_popup` forces the dropdown open (as clicking the
+    /// header would); `events` are fed as raw input. Returns
+    /// `(window rect, popup item rects, popup open at end of frame)`.
+    fn frame(
+        ctx: &egui::Context,
+        open_popup: bool,
+        events: Vec<egui::Event>,
+    ) -> (egui::Rect, Vec<egui::Rect>, bool) {
+        let mut items: Vec<egui::Rect> = Vec::new();
+        let mut win = egui::Rect::NOTHING;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            let inner = egui::Window::new("view_settings")
+                .title_bar(false)
+                .resizable(false)
+                .movable(false)
+                .pivot(egui::Align2::RIGHT_TOP)
+                .fixed_pos(anchor().right_bottom() + egui::vec2(0.0, 4.0))
+                .show(&ctx, |ui| {
+                    ui.set_min_width(248.0);
+                    ui.label("tabs");
+                    ui.add_space(6.0);
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.label("Depth cue");
+                        egui::Grid::new("cue_grid").num_columns(2).show(ui, |ui| {
+                            ui.label("Type");
+                            let header = ui.button("Linear  v");
+                            if open_popup {
+                                egui::Popup::open_id(&ctx, header.id.with("popup"));
+                            }
+                            egui::Popup::menu(&header).show(|ui| {
+                                for label in ["None", "Linear", "Exp", "Exp2"] {
+                                    let r = ui.selectable_label(false, label);
+                                    items.push(r.rect);
+                                    // What the real dropdown does on a pick.
+                                    if r.clicked() {
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("Strength");
+                            ui.add(egui::Slider::new(&mut 0.5f32, 0.0..=1.0));
+                            ui.end_row();
+                            ui.label("Start");
+                            ui.add(egui::Slider::new(&mut 0.3f32, 0.0..=1.0));
+                            ui.end_row();
+                        });
+                    });
+                });
+            if let Some(i) = inner {
+                win = i.response.rect;
+            }
+        });
+        (win, items, egui::Popup::is_any_open(ctx))
+    }
+
+    fn click_at(p: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(p),
+            egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ]
+    }
+
+    /// The predicate `view_settings_window` applies, in the same order.
+    fn dismisses(
+        ctx: &egui::Context,
+        hit_rect: egui::Rect,
+        popup_open: bool,
+        popup_was_open: bool,
+    ) -> bool {
+        let clicked = ctx.input(|i| i.pointer.any_click());
+        if !clicked || popup_open || popup_was_open {
+            return false;
+        }
+        ctx.input(|i| i.pointer.interact_pos())
+            .is_some_and(|p| !hit_rect.contains(p) && !anchor().contains(p))
+    }
+
+    #[test]
+    fn choosing_a_dropdown_item_below_the_window_does_not_dismiss_it() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+
+        // Settle, then open the dropdown and let it lay out.
+        frame(&ctx, false, vec![]);
+        frame(&ctx, true, vec![]);
+        let (win, items, popup_open) = frame(&ctx, false, vec![]);
+        assert!(popup_open, "the dropdown should be open after `open_id`");
+        assert_eq!(items.len(), 4, "four items: None / Linear / Exp / Exp²");
+
+        // The geometry this bug is made of — asserted so the test can't pass vacuously if a
+        // layout change ever brings the last item back inside the window.
+        let last = items[3].center();
+        assert!(
+            !win.contains(last),
+            "the last dropdown item's centre {last:?} is expected to fall OUTSIDE the window              {win:?} — that is the whole premise; if the layout changed so it no longer does,              re-derive this test rather than deleting it"
+        );
+        for (i, r) in items.iter().take(3).enumerate() {
+            assert!(win.contains(r.center()), "item {i} was expected inside the window");
+        }
+
+        // Click that last item. The popup closes in this very frame…
+        let hit_rect = win; // the previous frame's rect, as the real code uses
+        let (_, _, popup_open_after) = frame(&ctx, false, click_at(last));
+        assert!(!popup_open_after, "picking an item closes the popup in the same frame");
+
+        // …so without knowing a popup *was* open, the click reads as outside → the bug.
+        assert!(
+            dismisses(&ctx, hit_rect, popup_open_after, false),
+            "precondition: this is the click that used to dismiss the window"
+        );
+        // With the fix, the window sits the frame out.
+        assert!(
+            !dismisses(&ctx, hit_rect, popup_open_after, true),
+            "choosing a dropdown item must not dismiss the view-settings window"
+        );
+    }
+
+    /// The fix must not stop a genuine click-outside from dismissing the window.
+    #[test]
+    fn a_click_outside_still_dismisses_the_window() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        frame(&ctx, false, vec![]);
+        let (win, _, _) = frame(&ctx, false, vec![]);
+
+        // Bottom-left of the screen: outside both the window and the hamburger.
+        let far = egui::pos2(40.0, 700.0);
+        assert!(!win.contains(far) && !anchor().contains(far));
+        let (_, _, popup_open) = frame(&ctx, false, click_at(far));
+        assert!(
+            dismisses(&ctx, win, popup_open, false),
+            "a click outside, with no popup involved, must still dismiss the window"
+        );
+
+        // A click inside the window must never dismiss it.
+        let (_, _, popup_open) = frame(&ctx, false, click_at(win.center()));
+        assert!(!dismisses(&ctx, win, popup_open, false));
     }
 }
