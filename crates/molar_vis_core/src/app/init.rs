@@ -757,7 +757,7 @@ impl App {
             // multi-record file (exercises the group-save write loop; pair with
             // MOLAR_VIS_DEBUG_SDF to load a group).
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_GROUP") {
-                match app.save_group_to(0, std::path::Path::new(&path)) {
+                match app.scene.save_group_to(0, std::path::Path::new(&path)) {
                     Ok(n) => log::info!("debug: saved group ({n} molecules) to {path}"),
                     Err(e) => log::error!("debug save group failed: {e}"),
                 }
@@ -776,7 +776,13 @@ impl App {
                         dim("MOLAR_VIS_DEBUG_SAVE_IMAGE_W", 800),
                         dim("MOLAR_VIS_DEBUG_SAVE_IMAGE_H", 600),
                     );
-                    app.rebuild_dirty(rs);
+                    build::rebuild_dirty(
+                        &mut app.scene,
+                        &app.renderer,
+                        &app.settings,
+                        app.view_dirty,
+                        rs,
+                    );
                     let aspect = w as f32 / h as f32;
                     let view = app.camera.view();
                     let proj = app.camera.proj(aspect);
@@ -814,7 +820,13 @@ impl App {
                         dim("MOLAR_VIS_DEBUG_RAYTRACE_H", 600),
                     );
                     let samples = dim("MOLAR_VIS_DEBUG_RAYTRACE_SAMPLES", 128);
-                    app.rebuild_dirty(rs);
+                    build::rebuild_dirty(
+                        &mut app.scene,
+                        &app.renderer,
+                        &app.settings,
+                        app.view_dirty,
+                        rs,
+                    );
                     app.renderer.prepare_raytrace(
                         rs,
                         &app.scene,

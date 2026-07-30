@@ -12,26 +12,29 @@ pub(super) const DRAW_AUTO_MAX_ATOMS: usize = 300;
 
 /// Length (nm) of a freshly drawn bond before relaxation (a generic single bond).
 pub(super) const DRAW_BOND_LEN: f32 = 0.15;
-impl App {
 
+/// Viewport ⇄ world projection for the drawing tools. Pure camera maths, so it lives on
+/// [`Camera`]: the plane depth a freshly placed atom lands on is passed **in** rather
+/// than read off the draw session, which is what keeps these off `impl App`.
+impl Camera {
     /// Project a viewport pixel onto the active drawing plane → a world point (nm).
     /// The plane passes through `plane_depth` (the last-touched atom, else the camera
     /// target) with the camera view direction as its normal, so freshly placed atoms
     /// land on the focal plane the user is looking at. `None` if the ray is parallel
     /// to the plane (degenerate).
-    pub(super) fn drawing_plane_point(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> Option<glam::Vec3> {
+    pub(super) fn plane_point(
+        &self,
+        px: egui::Pos2,
+        rect: egui::Rect,
+        size_px: [u32; 2],
+        plane_depth: Option<glam::Vec3>,
+    ) -> Option<glam::Vec3> {
         let ndc = px_to_ndc(px, rect);
         let aspect = size_px[0] as f32 / size_px[1] as f32;
-        let view = self.camera.view();
-        let proj = self.camera.proj(aspect);
-        let (ro, rd) = pick::cursor_ray(view, proj, ndc.x, ndc.y);
+        let (ro, rd) = pick::cursor_ray(self.view(), self.proj(aspect), ndc.x, ndc.y);
         // Plane normal = the view direction toward the eye (camera-facing).
-        let n = (self.camera.eye() - self.camera.target).normalize_or_zero();
-        let p0 = self
-            .draw
-            .as_ref()
-            .and_then(|d| d.plane_depth)
-            .unwrap_or(self.camera.target);
+        let n = (self.eye() - self.target).normalize_or_zero();
+        let p0 = plane_depth.unwrap_or(self.target);
         let denom = rd.dot(n);
         if denom.abs() < 1.0e-5 {
             return None;
@@ -44,16 +47,16 @@ impl App {
     }
 
     /// Pixel → world ray on the current camera (for snap-to-atom hit tests).
-    pub(super) fn cursor_world_ray(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> (glam::Vec3, glam::Vec3) {
+    pub(super) fn pixel_ray(&self, px: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> (glam::Vec3, glam::Vec3) {
         let ndc = px_to_ndc(px, rect);
         let aspect = size_px[0] as f32 / size_px[1] as f32;
-        pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc.x, ndc.y)
+        pick::cursor_ray(self.view(), self.proj(aspect), ndc.x, ndc.y)
     }
 
     /// Project a world point (nm) to a viewport pixel (for the rubber-band's start).
     pub(super) fn world_to_pixel(&self, world: glam::Vec3, rect: egui::Rect, size_px: [u32; 2]) -> Option<egui::Pos2> {
         let aspect = size_px[0] as f32 / size_px[1] as f32;
-        let mvp = self.camera.proj(aspect) * self.camera.view();
+        let mvp = self.proj(aspect) * self.view();
         let clip = mvp * world.extend(1.0);
         if clip.w.abs() < 1.0e-6 {
             return None;
@@ -65,11 +68,106 @@ impl App {
         ))
     }
 
+    /// Unit world direction from `src` toward the cursor, in the screen-parallel
+    /// drawing plane (so a new bonded atom grows in the dragged direction). Falls back
+    /// to camera-right when degenerate.
+    pub(super) fn drag_dir(
+        &self,
+        src: glam::Vec3,
+        cursor: egui::Pos2,
+        rect: egui::Rect,
+        size_px: [u32; 2],
+        plane_depth: Option<glam::Vec3>,
+    ) -> glam::Vec3 {
+        let aim = self.plane_point(cursor, rect, size_px, plane_depth).unwrap_or(src);
+        let d = (aim - src).normalize_or_zero();
+        if d == glam::Vec3::ZERO {
+            self.right()
+        } else {
+            d
+        }
+    }
+}
+
+impl Scene {
     /// World position (nm) of atom `i` of molecule `mi` at the displayed frame.
     pub(super) fn atom_world(&self, mi: usize, i: usize) -> Option<glam::Vec3> {
-        let mol = self.scene.molecules.get(mi)?;
+        let mol = self.molecules.get(mi)?;
         let p = mol.render_state().coords.get(i)?;
         Some(glam::vec3(p.x, p.y, p.z))
+    }
+
+    /// Mark molecule `mi`'s reps dirty after a structural edit (rebuild geometry +
+    /// the GPU pick buffer). The caller flags the re-render (`view_dirty`).
+    pub(super) fn flag_edit(&mut self, mi: usize) {
+        if let Some(mol) = self.molecules.get_mut(mi) {
+            for rep in &mut mol.reps {
+                rep.sel_dirty = true; // the selection set ("all") grows/shrinks
+                rep.geom_dirty = true;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                mol.pick_dirty = true;
+            }
+        }
+    }
+
+    /// Add or remove explicit hydrogens on molecule `mi`: if it already has any H,
+    /// remove them all; otherwise add the implicit-hydrogen count to every heavy atom
+    /// (placed at rough offsets, to be relaxed by the caller).
+    pub(super) fn toggle_hydrogens(&mut self, mi: usize) {
+        let has_h = {
+            let mol = &self.molecules[mi];
+            let topo = mol.data.topology();
+            (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
+        };
+        if has_h {
+            let mol = &mut self.molecules[mi];
+            let topo = mol.data.topology();
+            let h_idx: Vec<usize> = (0..mol.n_atoms)
+                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
+                .collect();
+            // Don't strip an all-hydrogen molecule down to nothing.
+            if !h_idx.is_empty() && h_idx.len() < mol.n_atoms {
+                mol.remove_atoms(&h_idx);
+            }
+        } else {
+            // Offset directions for placed H (FIRE relaxes them into real geometry); the
+            // per-H nudge breaks symmetry so e.g. methane doesn't start in a planar saddle.
+            const DIRS: [glam::Vec3; 6] = [
+                glam::Vec3::X, glam::Vec3::NEG_X, glam::Vec3::Y,
+                glam::Vec3::NEG_Y, glam::Vec3::Z, glam::Vec3::NEG_Z,
+            ];
+            let mol = &mut self.molecules[mi];
+            let counts = mol.implicit_hydrogens();
+            let parents: Vec<(usize, glam::Vec3, u8)> = (0..mol.n_atoms)
+                .filter_map(|i| {
+                    let c = *counts.get(i)?;
+                    let p = mol.data.state().coords.get(i)?;
+                    (c > 0).then_some((i, glam::vec3(p.x, p.y, p.z), c))
+                })
+                .collect();
+            let h_atom = Element::H.make_atom();
+            for (i, p, c) in parents {
+                for k in 0..c as usize {
+                    let k = k as f32;
+                    let dir = (DIRS[(c as usize - 1 + k as usize) % 6]
+                        + glam::vec3(0.01 * k, 0.013 * (k + 1.0), 0.017 * k))
+                    .normalize_or_zero();
+                    if let Some(hi) = mol.add_atom(&h_atom, p + dir * 0.11) {
+                        mol.add_bond(i, hi, crate::minimize::BondOrder::Single);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl App {
+    /// The drawing-plane depth of the active session (the last-touched point), if any —
+    /// the one piece of draw state [`Camera::plane_point`] needs from the app.
+    fn plane_depth(&self) -> Option<glam::Vec3> {
+        self.draw.as_ref().and_then(|d| d.plane_depth)
     }
 
     /// Pointer handling for the active drawing tool (atom/bond/erase) + the bond
@@ -148,8 +246,8 @@ impl App {
             // the empty-space start pixel.
             let band: Option<(egui::Pos2, egui::Pos2)> = match self.draw.as_ref().map(|d| &d.drag) {
                 Some(DrawDrag::FromAtom { from, current }) => target_mi
-                    .and_then(|mi| self.atom_world(mi, *from))
-                    .and_then(|w| self.world_to_pixel(w, rect, size_px))
+                    .and_then(|mi| self.scene.atom_world(mi, *from))
+                    .and_then(|w| self.camera.world_to_pixel(w, rect, size_px))
                     .map(|s| (s, *current)),
                 Some(DrawDrag::FromEmpty { start, current }) => Some((*start, *current)),
                 _ => None,
@@ -201,23 +299,10 @@ impl App {
         self.draw_draw_overlays(ui, rect, size_px);
     }
 
-    /// Unit world direction from `src` toward the cursor, in the screen-parallel
-    /// drawing plane (so a new bonded atom grows in the dragged direction). Falls back
-    /// to camera-right when degenerate.
-    pub(super) fn drag_dir(&self, src: glam::Vec3, cursor: egui::Pos2, rect: egui::Rect, size_px: [u32; 2]) -> glam::Vec3 {
-        let aim = self.drawing_plane_point(cursor, rect, size_px).unwrap_or(src);
-        let d = (aim - src).normalize_or_zero();
-        if d == glam::Vec3::ZERO {
-            self.camera.right()
-        } else {
-            d
-        }
-    }
-
     /// The projected screen radius (px) of atom `i` as drawn (its rep's sphere).
     pub(super) fn atom_screen_radius(&self, mi: usize, i: usize, rect: egui::Rect, size_px: [u32; 2]) -> f32 {
         let mol = &self.scene.molecules[mi];
-        let (Some(w), Some(atom)) = (self.atom_world(mi, i), mol.data.topology().get_atom(i)) else {
+        let (Some(w), Some(atom)) = (self.scene.atom_world(mi, i), mol.data.topology().get_atom(i)) else {
             return 4.0;
         };
         let r_world = mol
@@ -226,7 +311,7 @@ impl App {
             .find(|r| r.visible)
             .map_or(0.05, |r| pick::effective_radius(&r.params, atom));
         let right = self.camera.orientation * glam::Vec3::X;
-        match (self.world_to_pixel(w, rect, size_px), self.world_to_pixel(w + right * r_world, rect, size_px)) {
+        match (self.camera.world_to_pixel(w, rect, size_px), self.camera.world_to_pixel(w + right * r_world, rect, size_px)) {
             (Some(c), Some(e)) => (e - c).length().max(3.0),
             _ => 4.0,
         }
@@ -238,9 +323,9 @@ impl App {
     pub(super) fn draw_hit_test(&self, mi: usize, rect: egui::Rect, size_px: [u32; 2], cursor: egui::Pos2) -> Option<HitTarget> {
         let mol = &self.scene.molecules[mi];
         // Front-most atom whose drawn sphere the cursor is inside.
-        let (ro, rd) = self.cursor_world_ray(cursor, rect, size_px);
+        let (ro, rd) = self.camera.pixel_ray(cursor, rect, size_px);
         if let Some((i, _)) = pick::nearest_atom(mol, ro, rd, 0.04) {
-            if let Some(c) = self.atom_world(mi, i).and_then(|w| self.world_to_pixel(w, rect, size_px)) {
+            if let Some(c) = self.scene.atom_world(mi, i).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)) {
                 if (cursor - c).length() <= self.atom_screen_radius(mi, i, rect, size_px) {
                     return Some(HitTarget::Atom(i));
                 }
@@ -266,14 +351,14 @@ impl App {
         };
         let mol = &self.scene.molecules[mi];
         let painter = ui.painter_at(rect);
-        let px_of = |w: glam::Vec3| self.world_to_pixel(w, rect, size_px);
+        let px_of = |w: glam::Vec3| self.camera.world_to_pixel(w, rect, size_px);
 
         // Hover highlight (also during a drag, so you see the atom you'd bond to —
         // `pointer_latest_pos` stays valid while the button is held, unlike hover_pos).
         if let Some(px) = ui.ctx().pointer_latest_pos().filter(|p| rect.contains(*p)) {
             match self.draw_hit_test(mi, rect, size_px, px) {
                 Some(HitTarget::Atom(i)) => {
-                    if let Some(c) = self.atom_world(mi, i).and_then(px_of) {
+                    if let Some(c) = self.scene.atom_world(mi, i).and_then(px_of) {
                         // Ring sized to the atom's drawn sphere (tracks zoom).
                         let rpx = self.atom_screen_radius(mi, i, rect, size_px);
                         let col = crate::theme::glow_color(ui.ctx(), &self.camera.background);
@@ -283,7 +368,7 @@ impl App {
                 Some(HitTarget::Bond(k)) => {
                     let b = mol.bonds[k];
                     if let (Some(p), Some(q)) =
-                        (self.atom_world(mi, b.i1).and_then(px_of), self.atom_world(mi, b.i2).and_then(px_of))
+                        (self.scene.atom_world(mi, b.i1).and_then(px_of), self.scene.atom_world(mi, b.i2).and_then(px_of))
                     {
                         painter.line_segment(
                             [p, q],
@@ -346,7 +431,7 @@ impl App {
         if response.drag_started_by(egui::PointerButton::Primary) {
             let Some(px) = response.interact_pointer_pos() else { return };
             let from_atom = target_mi.and_then(|mi| {
-                let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+                let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
                 pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i)
             });
             // Drag from an existing atom → set the drawing plane to that atom's depth, so
@@ -354,7 +439,7 @@ impl App {
             // plane, which produced a stray long bond on big molecules).
             let from_depth = from_atom
                 .zip(target_mi)
-                .and_then(|(from, mi)| self.atom_world(mi, from));
+                .and_then(|(from, mi)| self.scene.atom_world(mi, from));
             if let Some(d) = self.draw.as_mut() {
                 if let Some(w) = from_depth {
                     d.plane_depth = Some(w);
@@ -380,7 +465,7 @@ impl App {
                         Some(mi) => mi,
                         None => return,
                     };
-                    let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+                    let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
                     let dest =
                         pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i);
                     match dest {
@@ -388,7 +473,7 @@ impl App {
                         // bond's order if one already joins them.
                         Some(to) if to != from => {
                             if self.scene.molecules[mi].set_or_add_bond(from, to, bond_order) {
-                                self.after_draw_edit(mi, self.atom_world(mi, to));
+                                self.after_draw_edit(mi, self.scene.atom_world(mi, to));
                             }
                         }
                         Some(_) => {} // same atom → no-op
@@ -396,8 +481,10 @@ impl App {
                         // in the dragged direction (fixed length, not wherever the cursor
                         // landed — robust + Marvin-style; the relax refines small molecules).
                         None => {
-                            let src = self.atom_world(mi, from).unwrap_or(self.camera.target);
-                            let new_pos = src + self.drag_dir(src, px, rect, size_px) * DRAW_BOND_LEN;
+                            let src = self.scene.atom_world(mi, from).unwrap_or(self.camera.target);
+                            let new_pos = src
+                                + self.camera.drag_dir(src, px, rect, size_px, self.plane_depth())
+                                    * DRAW_BOND_LEN;
                             if let Some((mi, new_idx)) = self.place_atom(element, new_pos) {
                                 self.scene.molecules[mi].add_bond(from, new_idx, bond_order);
                                 self.after_draw_edit(mi, Some(new_pos));
@@ -409,13 +496,18 @@ impl App {
                     // Drag from empty space → two bonded atoms: the first at the start
                     // point, the second one bond-length away in the drag direction. A
                     // negligible drag falls back to a single atom.
-                    let Some(p_start) = self.drawing_plane_point(start, rect, size_px) else { return };
+                    let Some(p_start) = self.camera.plane_point(start, rect, size_px, self.plane_depth())
+                    else {
+                        return;
+                    };
                     let Some((mi, a)) = self.place_atom(element, p_start) else { return };
                     if (px - start).length() < 6.0 {
                         self.after_draw_edit(mi, Some(p_start)); // too short → one atom
                         return;
                     }
-                    let p_end = p_start + self.drag_dir(p_start, px, rect, size_px) * DRAW_BOND_LEN;
+                    let p_end = p_start
+                        + self.camera.drag_dir(p_start, px, rect, size_px, self.plane_depth())
+                            * DRAW_BOND_LEN;
                     if let Some((_, b)) = self.place_atom(element, p_end) {
                         self.scene.molecules[mi].add_bond(a, b, bond_order);
                         self.after_draw_edit(mi, Some(p_end));
@@ -440,7 +532,7 @@ impl App {
                         {
                             let src = element.make_atom();
                             self.scene.molecules[mi].set_atom_element(i, &src);
-                            self.after_draw_edit(mi, self.atom_world(mi, i));
+                            self.after_draw_edit(mi, self.scene.atom_world(mi, i));
                         }
                         return;
                     }
@@ -454,7 +546,8 @@ impl App {
             }
             // Empty space → place an atom (creating the molecule if needed).
             let pos = self
-                .drawing_plane_point(px, rect, size_px)
+                .camera
+                .plane_point(px, rect, size_px, self.plane_depth())
                 .unwrap_or(self.camera.target);
             if let Some((mi, _)) = self.place_atom(element, pos) {
                 self.after_draw_edit(mi, Some(pos));
@@ -484,7 +577,8 @@ impl App {
                 false // skip the whole-molecule relax on large structures
             }
         };
-        self.flag_edit(mi);
+        self.scene.flag_edit(mi);
+        self.view_dirty = true;
         if let Some(d) = self.draw.as_mut() {
             if let Some(p) = plane {
                 d.plane_depth = Some(p);
@@ -495,54 +589,11 @@ impl App {
         }
     }
 
-    /// Toggle explicit hydrogens on the drawn molecule: if it already has any H, remove
-    /// them all; otherwise add the implicit-hydrogen count to every heavy atom (placed at
-    /// rough offsets and then relaxed). Undoable + perceived like any draw edit.
+    /// Toggle explicit hydrogens on the drawn molecule (see
+    /// [`Scene::toggle_hydrogens`]), then run the usual post-edit bookkeeping so the
+    /// change is perceived, relaxed and undoable like any draw edit.
     pub(super) fn toggle_hydrogens(&mut self, mi: usize) {
-        let has_h = {
-            let mol = &self.scene.molecules[mi];
-            let topo = mol.data.topology();
-            (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
-        };
-        if has_h {
-            let mol = &mut self.scene.molecules[mi];
-            let topo = mol.data.topology();
-            let h_idx: Vec<usize> = (0..mol.n_atoms)
-                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
-                .collect();
-            // Don't strip an all-hydrogen molecule down to nothing.
-            if !h_idx.is_empty() && h_idx.len() < mol.n_atoms {
-                mol.remove_atoms(&h_idx);
-            }
-        } else {
-            // Offset directions for placed H (FIRE relaxes them into real geometry); the
-            // per-H nudge breaks symmetry so e.g. methane doesn't start in a planar saddle.
-            const DIRS: [glam::Vec3; 6] = [
-                glam::Vec3::X, glam::Vec3::NEG_X, glam::Vec3::Y,
-                glam::Vec3::NEG_Y, glam::Vec3::Z, glam::Vec3::NEG_Z,
-            ];
-            let mol = &mut self.scene.molecules[mi];
-            let counts = mol.implicit_hydrogens();
-            let parents: Vec<(usize, glam::Vec3, u8)> = (0..mol.n_atoms)
-                .filter_map(|i| {
-                    let c = *counts.get(i)?;
-                    let p = mol.data.state().coords.get(i)?;
-                    (c > 0).then_some((i, glam::vec3(p.x, p.y, p.z), c))
-                })
-                .collect();
-            let h_atom = Element::H.make_atom();
-            for (i, p, c) in parents {
-                for k in 0..c as usize {
-                    let k = k as f32;
-                    let dir = (DIRS[(c as usize - 1 + k as usize) % 6]
-                        + glam::vec3(0.01 * k, 0.013 * (k + 1.0), 0.017 * k))
-                    .normalize_or_zero();
-                    if let Some(hi) = mol.add_atom(&h_atom, p + dir * 0.11) {
-                        mol.add_bond(i, hi, crate::minimize::BondOrder::Single);
-                    }
-                }
-            }
-        }
+        self.scene.toggle_hydrogens(mi);
         self.after_draw_edit(mi, None);
     }
 
@@ -560,7 +611,7 @@ impl App {
         }
         let Some(mi) = target_mi else { return };
         let Some(px) = response.interact_pointer_pos() else { return };
-        let (ro, rd) = self.cursor_world_ray(px, rect, size_px);
+        let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
         if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08) {
             let empty = self.scene.molecules[mi].remove_atom(i);
             if empty {
@@ -578,7 +629,8 @@ impl App {
                 }
                 self.view_dirty = true;
             } else {
-                self.flag_edit(mi);
+                self.scene.flag_edit(mi);
+                self.view_dirty = true;
                 if let Some(d) = self.draw.as_mut() {
                     d.minimize_pending = true;
                 }
@@ -591,7 +643,8 @@ impl App {
         let ndc = px_to_ndc(px, rect);
         if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02) {
             self.scene.molecules[mi].remove_bond_at(k);
-            self.flag_edit(mi);
+            self.scene.flag_edit(mi);
+            self.view_dirty = true;
             if let Some(d) = self.draw.as_mut() {
                 d.minimize_pending = true;
             }
@@ -630,22 +683,6 @@ impl App {
                 label,
             );
         }
-    }
-
-    /// Mark molecule `mi`'s reps dirty after a structural edit (rebuild geometry +
-    /// the GPU pick buffer) and flag a re-render.
-    pub(super) fn flag_edit(&mut self, mi: usize) {
-        if let Some(mol) = self.scene.molecules.get_mut(mi) {
-            for rep in &mut mol.reps {
-                rep.sel_dirty = true; // the selection set ("all") grows/shrinks
-                rep.geom_dirty = true;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                mol.pick_dirty = true;
-            }
-        }
-        self.view_dirty = true;
     }
 
     /// Debounced minimizer: when an edit is pending and the pointer has settled, run a

@@ -970,12 +970,12 @@ impl App {
         // buttons — here rather than in the member's own-reps pass, which is buried behind
         // two expanders and isn't drawn at all until the member has own reps. Outside the
         // `expanded` block on purpose: a captured selection has to be actionable without
-        // first unfolding the group. See `App::draw_pending_block`.
+        // first unfolding the group. See `Scene::draw_pending_block`.
         // Entered only when there *is* one: an empty `ui.indent` still paints its indent guide, so
         // the block showed up as a stray short dash under the cycle bar with nothing beside it.
         if let Some(mi) = cur_mi.filter(|&mi| self.scene.molecules[mi].pending.is_some()) {
             ui.indent(egui::Id::new(("grouppending", gid)), |ui| {
-                view_dirty |= self.draw_pending_block(ui, mi);
+                view_dirty |= self.scene.draw_pending_block(ui, mi);
             });
         }
 

@@ -18,7 +18,13 @@ impl App {
                 .wgpu_render_state()
                 .expect("wgpu render state must exist");
 
-            let geom_changed = self.rebuild_dirty(render_state);
+            let geom_changed = build::rebuild_dirty(
+                &mut self.scene,
+                &self.renderer,
+                &self.settings,
+                self.view_dirty,
+                render_state,
+            );
 
             // Claim the whole central area as a draggable, scrollable surface.
             let available = ui.available_size();
@@ -321,7 +327,7 @@ impl App {
             // regardless of the current pick mode.
             if self.partner_pick.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.partner_pick = None;
-                self.clear_hover();
+                self.scene.clear_hover();
                 ui.ctx().request_repaint();
             }
             let picking_partner = self.partner_pick.is_some();
@@ -383,7 +389,7 @@ impl App {
                             Some(h) => {
                                 let atoms = rep_atom_ids(&self.scene.molecules[h.mol], h.rep);
                                 residue_hit = true; // don't let the glow be cleared below
-                                if self.set_hover(h.mol, atoms) {
+                                if self.scene.set_hover(h.mol, atoms) {
                                     ui.ctx().request_repaint();
                                 }
                                 if response.clicked() {
@@ -425,7 +431,7 @@ impl App {
                                 let mol = &self.scene.molecules[hit.mol];
                                 pick::expand_selection(&mol.data, &mol.bonds, &[hit.id], mode)
                             };
-                            self.merge_into_pending(hit.mol, hits, op);
+                            self.scene.merge_into_pending(hit.mol, hits, op);
                             self.view_dirty = true;
                             ui.ctx().request_repaint();
                         }
@@ -441,7 +447,7 @@ impl App {
                                 )
                             };
                             draw_residue_info_overlay(ui, rect, &hit, atoms.len());
-                            if self.set_hover(hit.mol, atoms) {
+                            if self.scene.set_hover(hit.mol, atoms) {
                                 ui.ctx().request_repaint();
                             }
                             residue_hit = true;
@@ -567,7 +573,7 @@ impl App {
                                 // Cartoon and Surface, so widen the perpendicular fade past
                                 // the R-tube selection radius or residue side chains would
                                 // fade out.
-                                self.set_hover_detail(mi, atoms, o, d, R * 1.8);
+                                self.scene.set_hover_detail(mi, atoms, o, d, R * 1.8);
                                 lens_shown = true;
                             }
                             self.last_lens_ndc = Some((ndc_x, ndc_y));
@@ -595,7 +601,7 @@ impl App {
                 }
             }
             // Drop any stale hover highlight (left a residue, no hit, or not hovering).
-            if !residue_hit && self.clear_hover() {
+            if !residue_hit && self.scene.clear_hover() {
                 ui.ctx().request_repaint();
             }
             // Drop the detail lens when the view-line isn't near a Cartoon/Surface
@@ -723,63 +729,9 @@ impl App {
             rep.geom_dirty = true;
         }
         self.partner_pick = None;
-        self.clear_hover();
+        self.scene.clear_hover();
         self.history.maybe_record(crate::history::EditState::capture(&self.scene));
         self.view_dirty = true;
-    }
-
-    /// Set molecule `mi`'s steady hover highlight to `atoms`, clearing every other
-    /// molecule's. Returns whether anything changed (so the caller can request a
-    /// repaint to rebuild the glow).
-    pub(super) fn set_hover(&mut self, mi: usize, atoms: Vec<usize>) -> bool {
-        let mut changed = false;
-        for (i, mol) in self.scene.molecules.iter_mut().enumerate() {
-            if i != mi && mol.hover.take().is_some() {
-                mol.hover_dirty = true;
-                changed = true;
-            }
-        }
-        if let Some(mol) = self.scene.molecules.get_mut(mi) {
-            if mol.hover.as_deref() != Some(atoms.as_slice()) {
-                mol.hover = Some(atoms);
-                mol.hover_dirty = true;
-                changed = true;
-            }
-        }
-        changed
-    }
-
-    /// Clear every molecule's hover highlight. Returns whether anything changed.
-    pub(super) fn clear_hover(&mut self) -> bool {
-        let mut changed = false;
-        for mol in &mut self.scene.molecules {
-            if mol.hover.take().is_some() {
-                mol.hover_dirty = true;
-                changed = true;
-            }
-        }
-        changed
-    }
-
-    /// Stage molecule `mi`'s hover detail lens (always rebuilt — the fade tracks the
-    /// ray, so any cursor move changes it). Clears the lens on other molecules.
-    pub(super) fn set_hover_detail(
-        &mut self,
-        mi: usize,
-        atoms: Vec<usize>,
-        ray_o: glam::Vec3,
-        ray_d: glam::Vec3,
-        radius: f32,
-    ) {
-        for (i, mol) in self.scene.molecules.iter_mut().enumerate() {
-            if i != mi && mol.hover_detail.take().is_some() {
-                mol.hover_detail_dirty = true;
-            }
-        }
-        if let Some(mol) = self.scene.molecules.get_mut(mi) {
-            mol.hover_detail = Some(crate::scene::HoverDetail { atoms, ray_o, ray_d, radius });
-            mol.hover_detail_dirty = true;
-        }
     }
 
     /// Clear every molecule's hover detail lens. Returns whether anything changed.
@@ -833,9 +785,69 @@ impl App {
                 let mol = &self.scene.molecules[res.mol];
                 pick::expand_selection(&mol.data, &mol.bonds, &res.atoms, mode)
             };
-            self.merge_into_pending(res.mol, hits, op);
+            self.scene.merge_into_pending(res.mol, hits, op);
         }
         self.view_dirty = true;
+    }
+
+}
+
+/// Hover + active-selection state. These read and write nothing but the scene, so they
+/// live on [`Scene`] rather than `App` — which is what lets `draw_viewport` call them
+/// without holding `&mut self` across a scene borrow.
+impl Scene {
+    /// Set molecule `mi`'s steady hover highlight to `atoms`, clearing every other
+    /// molecule's. Returns whether anything changed (so the caller can request a
+    /// repaint to rebuild the glow).
+    pub(super) fn set_hover(&mut self, mi: usize, atoms: Vec<usize>) -> bool {
+        let mut changed = false;
+        for (i, mol) in self.molecules.iter_mut().enumerate() {
+            if i != mi && mol.hover.take().is_some() {
+                mol.hover_dirty = true;
+                changed = true;
+            }
+        }
+        if let Some(mol) = self.molecules.get_mut(mi) {
+            if mol.hover.as_deref() != Some(atoms.as_slice()) {
+                mol.hover = Some(atoms);
+                mol.hover_dirty = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Clear every molecule's hover highlight. Returns whether anything changed.
+    pub(super) fn clear_hover(&mut self) -> bool {
+        let mut changed = false;
+        for mol in &mut self.molecules {
+            if mol.hover.take().is_some() {
+                mol.hover_dirty = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Stage molecule `mi`'s hover detail lens (always rebuilt — the fade tracks the
+    /// ray, so any cursor move changes it). Clears the lens on other molecules.
+    pub(super) fn set_hover_detail(
+        &mut self,
+        mi: usize,
+        atoms: Vec<usize>,
+        ray_o: glam::Vec3,
+        ray_d: glam::Vec3,
+        radius: f32,
+    ) {
+        for (i, mol) in self.molecules.iter_mut().enumerate() {
+            if i != mi && mol.hover_detail.take().is_some() {
+                mol.hover_detail_dirty = true;
+            }
+        }
+        if let Some(mol) = self.molecules.get_mut(mi) {
+            mol.hover_detail = Some(crate::scene::HoverDetail { atoms, ray_o, ray_d, radius });
+            mol.hover_detail_dirty = true;
+        }
     }
 
     /// Combine `hits` into molecule `mi`'s **active (pending) selection** per `op`
@@ -843,7 +855,7 @@ impl App {
     /// Shared by the lasso and click-to-select paths; clearing *other* molecules'
     /// pending sets for a `Replace` is the caller's job.
     pub(super) fn merge_into_pending(&mut self, mi: usize, hits: Vec<usize>, op: LassoOp) {
-        let mol = &mut self.scene.molecules[mi];
+        let mol = &mut self.molecules[mi];
         let mut set: std::collections::BTreeSet<usize> = mol
             .pending
             .as_ref()

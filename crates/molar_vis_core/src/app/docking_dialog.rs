@@ -269,7 +269,7 @@ impl App {
         self.add_loaded(receptor);
         let protein_mi = self.scene.molecules.len() - 1;
         let protein_src = self.scene.molecules[protein_mi].source.clone();
-        self.style_receptor(protein_mi);
+        self.scene.style_receptor(protein_mi);
         {
             let mol = &mut self.scene.molecules[protein_mi];
             for (path, from, states) in frames {
@@ -306,8 +306,8 @@ impl App {
         // The Interactions rep goes on the *group* (a shared rep, so it survives member
         // switching and applies to whichever pose is shown) and points at the receptor's
         // first rep — exactly the state the partner picker would leave behind.
-        self.add_docking_interactions(gi, protein_src, 0);
-        self.style_poses(gi);
+        self.scene.add_docking_interactions(gi, protein_src, 0);
+        self.scene.style_poses(gi);
         // Flexible docking: line the receptor's frame up with the shown pose from the
         // start, and let the two step together from then on (`sync_docking_frames`).
         if mode == DockingMode::Flexible {
@@ -325,41 +325,6 @@ impl App {
                 format!("Loaded {n_poses} ligand poses (flexible receptor, {receptor_frames} frames)")
             }
         })
-    }
-
-    /// The receptor's docking view: **lines** over the heavy atoms (wider than the default,
-    /// since it is a backdrop being read *through*) plus a **cartoon coloured by secondary
-    /// structure**, which is what makes a binding site legible as part of a fold.
-    fn style_receptor(&mut self, mi: usize) {
-        let mol = &mut self.scene.molecules[mi];
-        if let Some(rep) = mol.reps.first_mut() {
-            rep.kind = RepKind::Lines;
-            rep.params = RepParams::Lines { width: DOCKING_LINE_WIDTH };
-            rep.sel_text = HEAVY_ATOMS.to_string();
-            rep.sel_dirty = true;
-        }
-        let mut cartoon = Representation::new(RepKind::Cartoon);
-        cartoon.color = ColorMethod::SecStruct;
-        cartoon.sel_text = HEAVY_ATOMS.to_string();
-        mol.reps.push(cartoon);
-        mol.selected_rep = Some(0);
-    }
-
-    /// The poses' docking view: the group's shared reps over the heavy atoms only.
-    fn style_poses(&mut self, gi: usize) {
-        let Some(&member_id) = self.scene.groups.get(gi).and_then(|g| g.members.get(g.current))
-        else {
-            return;
-        };
-        let Some(mi) = self.scene.mol_index(member_id) else { return };
-        let mol = &mut self.scene.molecules[mi];
-        let n_shared = mol.n_shared.min(mol.reps.len());
-        for rep in &mut mol.reps[..n_shared] {
-            // The Interactions rep detects contacts *from* this selection, so it wants the
-            // same heavy-atom scope as the geometry reps.
-            rep.sel_text = HEAVY_ATOMS.to_string();
-            rep.sel_dirty = true;
-        }
     }
 
     /// Zoom to the currently shown pose **plus its contact shell**.
@@ -380,30 +345,107 @@ impl App {
         }
     }
 
+}
+
+/// The scene-only half of loading a docking result: styling the two sides and wiring the
+/// pose group's `Interactions` rep to the receptor. These read and write nothing but the
+/// scene, so they sit on [`Scene`].
+impl Scene {
+    /// The receptor's docking view: **lines** over the heavy atoms (wider than the default,
+    /// since it is a backdrop being read *through*) plus a **cartoon coloured by secondary
+    /// structure**, which is what makes a binding site legible as part of a fold.
+    pub(super) fn style_receptor(&mut self, mi: usize) {
+        let mol = &mut self.molecules[mi];
+        if let Some(rep) = mol.reps.first_mut() {
+            rep.kind = RepKind::Lines;
+            rep.params = RepParams::Lines { width: DOCKING_LINE_WIDTH };
+            rep.sel_text = HEAVY_ATOMS.to_string();
+            rep.sel_dirty = true;
+        }
+        let mut cartoon = Representation::new(RepKind::Cartoon);
+        cartoon.color = ColorMethod::SecStruct;
+        cartoon.sel_text = HEAVY_ATOMS.to_string();
+        mol.reps.push(cartoon);
+        mol.selected_rep = Some(0);
+    }
+
+    /// The poses' docking view: the group's shared reps over the heavy atoms only.
+    pub(super) fn style_poses(&mut self, gi: usize) {
+        let Some(&member_id) = self.groups.get(gi).and_then(|g| g.members.get(g.current))
+        else {
+            return;
+        };
+        let Some(mi) = self.mol_index(member_id) else { return };
+        let mol = &mut self.molecules[mi];
+        let n_shared = mol.n_shared.min(mol.reps.len());
+        for rep in &mut mol.reps[..n_shared] {
+            // The Interactions rep detects contacts *from* this selection, so it wants the
+            // same heavy-atom scope as the geometry reps.
+            rep.sel_text = HEAVY_ATOMS.to_string();
+            rep.sel_dirty = true;
+        }
+    }
+
     /// Give the ligand group an `Interactions` shared rep whose partner is the receptor's
     /// rep `protein_rep`, as if it had been assigned with the partner picker.
     ///
     /// The group's existing shared rep (Licorice, from `add_group`) is kept — an
     /// `Interactions` rep draws only contact lines, so on its own the poses would vanish.
     /// That is the same reasoning as the style picker's clone-on-switch.
-    fn add_docking_interactions(&mut self, gi: usize, protein_src: MoleculeSource, protein_rep: usize) {
-        let Some(&member_id) = self
-            .scene
-            .groups
-            .get(gi)
-            .and_then(|g| g.members.get(g.current))
+    pub(super) fn add_docking_interactions(
+        &mut self,
+        gi: usize,
+        protein_src: MoleculeSource,
+        protein_rep: usize,
+    ) {
+        let Some(&member_id) = self.groups.get(gi).and_then(|g| g.members.get(g.current))
         else {
             return;
         };
-        let Some(mi) = self.scene.mol_index(member_id) else { return };
+        let Some(mi) = self.mol_index(member_id) else { return };
         let mut rep = Representation::new(RepKind::Interactions);
         rep.partner = Some((protein_src, protein_rep));
-        let mol = &mut self.scene.molecules[mi];
+        let mol = &mut self.molecules[mi];
         // Appended to the shared prefix, so it is shared across members like the Licorice.
         let at = mol.n_shared.min(mol.reps.len());
         mol.reps.insert(at, rep);
         mol.n_shared = at + 1;
         mol.selected_rep = Some(at);
+    }
+
+    /// The receptor molecule of a flexible-docking pair: the molecule targeted by the
+    /// group's `Interactions` rep. `None` when the group has no such rep, its partner is
+    /// unresolvable, or the partner is a member of this very group.
+    pub(super) fn docking_receptor(&self, gi: usize) -> Option<usize> {
+        let g = self.groups.get(gi)?;
+        let mi = self.mol_index(*g.members.get(g.current)?)?;
+        let mol = &self.molecules[mi];
+        let n_shared = mol.n_shared.min(mol.reps.len());
+        for rep in &mol.reps[..n_shared] {
+            if !matches!(rep.kind, RepKind::Interactions) {
+                continue;
+            }
+            if let Some((pmi, _)) = super::build::partner_index(self, rep) {
+                // A partner inside this group would make the coupling self-referential.
+                if self.molecules[pmi].group != Some(g.id) {
+                    return Some(pmi);
+                }
+            }
+        }
+        None
+    }
+
+    /// Show receptor frame `frame`, going through the molecule's own frame-change path so
+    /// the geometry/coords dirty flags are set exactly as the trajectory bar would. Returns
+    /// whether the frame moved (the caller flags the re-render).
+    pub(super) fn set_receptor_frame(&mut self, pmi: usize, frame: usize) -> bool {
+        let mol = &mut self.molecules[pmi];
+        if mol.trajectory.current == frame || frame >= mol.trajectory.n_frames() {
+            return false;
+        }
+        mol.trajectory.set_current(frame);
+        mol.apply_current_frame();
+        true
     }
 }
 
@@ -424,7 +466,7 @@ impl App {
     /// control being missed. The member takes precedence if somehow both moved at once.
     pub(super) fn sync_docking_frames(&mut self) {
         for gi in 0..self.scene.groups.len() {
-            let Some(pmi) = self.docking_receptor(gi) else {
+            let Some(pmi) = self.scene.docking_receptor(gi) else {
                 self.scene.groups[gi].docking_sync = None; // not (or no longer) a pair
                 continue;
             };
@@ -436,7 +478,11 @@ impl App {
             let member = self.scene.groups[gi].current;
             let frame = self.scene.molecules[pmi].trajectory.current;
             match sync_action(self.scene.groups[gi].docking_sync, member, frame) {
-                Sync::ShowFrame(f) => self.set_receptor_frame(pmi, f),
+                Sync::ShowFrame(f) => {
+                    if self.scene.set_receptor_frame(pmi, f) {
+                        self.view_dirty = true;
+                    }
+                }
                 Sync::ShowPose(p) => self.switch_group_member_synced(gi, p),
                 Sync::Idle => {}
             }
@@ -445,40 +491,6 @@ impl App {
             let frame = self.scene.molecules[pmi].trajectory.current;
             self.scene.groups[gi].docking_sync = Some((member, frame));
         }
-    }
-
-    /// The receptor molecule of a flexible-docking pair: the molecule targeted by the
-    /// group's `Interactions` rep. `None` when the group has no such rep, its partner is
-    /// unresolvable, or the partner is a member of this very group.
-    fn docking_receptor(&self, gi: usize) -> Option<usize> {
-        let g = self.scene.groups.get(gi)?;
-        let mi = self.scene.mol_index(*g.members.get(g.current)?)?;
-        let mol = &self.scene.molecules[mi];
-        let n_shared = mol.n_shared.min(mol.reps.len());
-        for rep in &mol.reps[..n_shared] {
-            if !matches!(rep.kind, RepKind::Interactions) {
-                continue;
-            }
-            if let Some((pmi, _)) = super::build::partner_index(&self.scene, rep) {
-                // A partner inside this group would make the coupling self-referential.
-                if self.scene.molecules[pmi].group != Some(g.id) {
-                    return Some(pmi);
-                }
-            }
-        }
-        None
-    }
-
-    /// Show receptor frame `frame`, going through the molecule's own frame-change path so
-    /// the geometry/coords dirty flags are set exactly as the trajectory bar would.
-    fn set_receptor_frame(&mut self, pmi: usize, frame: usize) {
-        let mol = &mut self.scene.molecules[pmi];
-        if mol.trajectory.current == frame || frame >= mol.trajectory.n_frames() {
-            return;
-        }
-        mol.trajectory.set_current(frame);
-        mol.apply_current_frame();
-        self.view_dirty = true;
     }
 
     /// Show pose `member`, re-centering the camera on it exactly as the cycle bar does

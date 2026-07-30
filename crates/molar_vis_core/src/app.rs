@@ -56,7 +56,6 @@ mod settings_dialog;
 mod viewport;
 mod widgets;
 
-use build::*;
 use draw::DrawSession;
 use loaders::{DeleteFramesDialog, LoadDialog};
 
@@ -355,6 +354,31 @@ enum LassoOp {
     Subtract,
 }
 
+impl Scene {
+    /// For each shared (pymolar-backed) molecule whose external coordinates changed
+    /// since we last rendered, mark its geometry coords-dirty so the render loop
+    /// re-reads them. That's how a Python-side `sel.translate(...)` (which mutates the
+    /// shared `State` in place) shows up live. Change is detected by polling the
+    /// source's coordinate version counter (lock-free, no GIL) and comparing it to the
+    /// last-rendered value — so a *static* shared molecule costs nothing and the
+    /// viewer's "idle = 0 GPU" still holds. Cheap rebuild (reuses the cached secondary
+    /// structure, no DSSP). Only runs while the external (Python) channel is connected.
+    fn mark_shared_dirty(&mut self) {
+        for mol in &mut self.molecules {
+            if !mol.data.is_shared() {
+                continue;
+            }
+            let version = mol.data.coords_version();
+            if version == mol.shared_coords_version {
+                continue; // coordinates unchanged since the last render
+            }
+            mol.shared_coords_version = version;
+            // Shared-source polling doesn't drive the GPU pick buffer → pick = false.
+            mol.mark_coords_dirty(false);
+        }
+    }
+}
+
 impl App {
     /// Install the external job channel (native Python module). Jobs sent on the
     /// paired `Sender` are run on the UI thread each frame; while connected, the
@@ -372,29 +396,6 @@ impl App {
         };
         for job in jobs {
             job(self);
-        }
-    }
-
-    /// For each shared (pymolar-backed) molecule whose external coordinates changed
-    /// since we last rendered, mark its geometry coords-dirty so the render loop
-    /// re-reads them. That's how a Python-side `sel.translate(...)` (which mutates the
-    /// shared `State` in place) shows up live. Change is detected by polling the
-    /// source's coordinate version counter (lock-free, no GIL) and comparing it to the
-    /// last-rendered value — so a *static* shared molecule costs nothing and the
-    /// viewer's "idle = 0 GPU" still holds. Cheap rebuild (reuses the cached secondary
-    /// structure, no DSSP). Only runs while the external (Python) channel is connected.
-    fn mark_shared_dirty(&mut self) {
-        for mol in &mut self.scene.molecules {
-            if !mol.data.is_shared() {
-                continue;
-            }
-            let version = mol.data.coords_version();
-            if version == mol.shared_coords_version {
-                continue; // coordinates unchanged since the last render
-            }
-            mol.shared_coords_version = version;
-            // Shared-source polling doesn't drive the GPU pick buffer → pick = false.
-            mol.mark_coords_dirty(false);
         }
     }
 
@@ -575,315 +576,6 @@ impl App {
         self.view_dirty = true;
     }
 
-    /// Recompile dirty selections and rebuild/reupload dirty geometry. Returns
-    /// true if any geometry was uploaded (so the frame needs re-rendering).
-    fn rebuild_dirty(&mut self, rs: &eframe::egui_wgpu::RenderState) -> bool {
-        let mut changed = false;
-        // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
-        // once: the molecule loop below borrows `self.scene` mutably).
-        let dashed = self.settings.behavior.dashed_pbc_bonds;
-        // A structural change (molecule add/remove/reorder/visibility) shifts molecule
-        // indices, so the GPU pick geometry's baked `mol+1` ids must be rebuilt.
-        #[cfg(not(target_arch = "wasm32"))]
-        let structure_changed = self.view_dirty;
-        // Which molecules had geometry/coords (re)built this pass — used by the
-        // Interactions second pass to rebuild a contact rep when either endpoint
-        // molecule changed (its own or the partner's coords/selection).
-        let mut mol_changed = vec![false; self.scene.molecules.len()];
-        for (mi, mol) in self.scene.molecules.iter_mut().enumerate() {
-            // Only visible molecules are drawn into the pick id-buffer, so don't build
-            // pick geometry for hidden ones (e.g. the N−1 unshown members of a group).
-            // A hidden molecule made visible later sets `view_dirty`, re-marking it.
-            #[cfg(not(target_arch = "wasm32"))]
-            if structure_changed && mol.visible {
-                mol.pick_dirty = true;
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            let pick_pending = mol.pick_dirty;
-            #[cfg(target_arch = "wasm32")]
-            let pick_pending = false;
-            let any_rep_dirty = mol
-                .reps
-                .iter()
-                .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty);
-            if !(any_rep_dirty
-                || (mol.show_box && mol.box_dirty)
-                || mol.aromatic_dirty
-                || mol.glow_dirty
-                || mol.hover_dirty
-                || mol.hover_detail_dirty
-                || pick_pending)
-            {
-                continue;
-            }
-            // The coordinates to render: the current trajectory frame, read by
-            // reference (no copy into the System), or the static structure state.
-            let render_state: &State = match mol.trajectory.frames.get(mol.trajectory.current) {
-                Some(frame) => frame,
-                None => mol.data.state(),
-            };
-            let n_atoms = mol.n_atoms;
-            // Whether any rep's geometry was (re)built this pass — if so and there's
-            // an active selection, its glow must follow the new style/coords.
-            let mut rep_geom_changed = false;
-            for rep in &mut mol.reps {
-                if rep.sel_dirty {
-                    // Parse + evaluate the selection (against the System's own
-                    // state). On error keep the previous selection/geometry and
-                    // just surface the message.
-                    match mol.data.evaluate(rep.sel_text.as_str()) {
-                        Ok((expr, sel)) => {
-                            rep.expr = Some(expr);
-                            rep.sel = Some(sel);
-                            rep.sel_error = None;
-                            rep.sel_error_span = None;
-                            rep.sel_empty = false;
-                            rep.geom_dirty = true;
-                        }
-                        // Valid selection that matches no atoms: not an error — drop
-                        // the geometry (render nothing), keep the text, and flag the
-                        // field. The viewport must re-render to clear the old mesh.
-                        Err(scene::EvalError::Empty) => {
-                            rep.expr = None;
-                            rep.sel = None;
-                            rep.sel_error = None;
-                            rep.sel_error_span = None;
-                            rep.sel_empty = true;
-                            rep.gpu = Default::default();
-                            changed = true;
-                        }
-                        Err(scene::EvalError::Invalid { message, span }) => {
-                            // molar trims the input before parsing, so shift the span
-                            // past any leading whitespace to align it with the field's
-                            // text (leading whitespace is ASCII, so bytes == chars).
-                            let lead = rep
-                                .sel_text
-                                .bytes()
-                                .take_while(|b| *b == b' ' || *b == b'\t')
-                                .count();
-                            rep.sel_error = Some(message);
-                            rep.sel_error_span = span.map(|r| r.start + lead..r.end + lead);
-                            rep.sel_empty = false;
-                        }
-                    }
-                    rep.sel_dirty = false;
-                }
-                // Interactions reps read a *partner* molecule, so they can't be built
-                // inside this `&mut`-iterator loop — a second pass below handles them.
-                // Their selection was just evaluated (above); leave the geometry dirty
-                // flags for that pass to consume.
-                if matches!(rep.kind, RepKind::Interactions) {
-                    continue;
-                }
-                let Some(sel) = &rep.sel else {
-                    rep.geom_dirty = false;
-                    rep.coords_dirty = false;
-                    continue;
-                };
-
-                // Trajectory smoothing: a transient Savitzky–Golay blend of the
-                // frames around `current`, computed here and dropped after the
-                // build (nothing stored). Falls back to the raw current frame.
-                let smoothed = (rep.smooth_window > 1)
-                    .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
-                    .flatten();
-                let state: &State = smoothed.as_ref().unwrap_or(render_state);
-
-                if rep.geom_dirty {
-                    // Full structural rebuild: (re)compute secondary structure
-                    // into the cache, build geometry, recreate GPU buffers.
-                    let (geom, fresh_ss) = {
-                        let bound = mol.data.bind_with_state(sel, state);
-                        let ss = geometry::needs_ss(&rep.params, rep.color)
-                            .then(|| SsMap::compute(&bound, rep.ss_algo));
-                        let geom = geometry::build(
-                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
-                            ss.as_ref(), dashed,
-                        );
-                        (geom, ss)
-                    };
-                    rep.ss_cache = fresh_ss;
-                    rep.gpu = self.renderer.upload(rs, &geom);
-                    // Cache the cartoon ribbon CPU mesh (with residue tags) for the
-                    // selection glow to extract sub-ribbons from; clear for other styles.
-                    rep.cartoon_cache = if matches!(rep.kind, RepKind::Cartoon) {
-                        Some(geom.mesh)
-                    } else {
-                        None
-                    };
-                    rep.geom_dirty = false;
-                    rep.coords_dirty = false;
-                    changed = true;
-                    rep_geom_changed = true;
-                } else if rep.coords_dirty {
-                    // Coordinates-only frame change: rebuild geometry reusing the
-                    // cached secondary structure (no DSSP), then update the
-                    // existing GPU buffers in place (no reallocation).
-                    let geom = {
-                        let bound = mol.data.bind_with_state(sel, state);
-                        geometry::build(
-                            &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
-                            rep.ss_cache.as_ref(), dashed,
-                        )
-                    };
-                    self.renderer.update(rs, &mut rep.gpu, &geom);
-                    if matches!(rep.kind, RepKind::Cartoon) {
-                        rep.cartoon_cache = Some(geom.mesh); // keep the glow's cache fresh
-                    }
-                    rep.coords_dirty = false;
-                    changed = true;
-                    rep_geom_changed = true;
-                }
-            }
-            mol_changed[mi] = rep_geom_changed;
-            // Periodic-box wireframe: (re)build when dirty, regardless of whether
-            // it's currently shown — both the molecule-level box toggle *and* a
-            // rep's periodic `Box` toggle draw this geometry, and the latter isn't
-            // tracked by `box_dirty`, so keep `box_gpu` ready whenever a box exists.
-            // Use the current frame's box (tracks NPT box changes); fall back to the
-            // structure's own box when a trajectory frame carries none.
-            if mol.box_dirty {
-                let pb = render_state
-                    .pbox
-                    .as_ref()
-                    .or_else(|| mol.data.state().pbox.as_ref());
-                let lines = pb.map(geometry::box_wireframe).unwrap_or_default();
-                let geom = geometry::GeometryData { lines, ..Default::default() };
-                mol.box_gpu = self.renderer.upload(rs, &geom);
-                mol.box_dirty = false;
-                changed = true;
-            }
-
-            // Aromatic-ring circles: depth-tested 3-D line geometry (built from the
-            // perceived rings at the displayed coords), so they occlude correctly.
-            if mol.aromatic_dirty || (rep_geom_changed && !mol.aromatic_rings.is_empty()) {
-                let lines = geometry::aromatic_circles(&mol.aromatic_rings, &render_state.coords);
-                let geom = geometry::GeometryData { lines, ..Default::default() };
-                mol.aromatic_gpu = self.renderer.upload(rs, &geom);
-                mol.aromatic_dirty = false;
-                changed = true;
-            }
-
-            // If any rep's geometry was rebuilt (style/selection/coords changed) and
-            // there's a pending/hover highlight, rebuild its glow so it follows.
-            if rep_geom_changed && mol.pending.is_some() {
-                mol.glow_dirty = true;
-            }
-            if rep_geom_changed && mol.hover.is_some() {
-                mol.hover_dirty = true;
-            }
-            if rep_geom_changed && mol.hover_detail.is_some() {
-                mol.hover_detail_dirty = true;
-            }
-            if rep_geom_changed {
-                mol.hover_grid = None; // its filtered atom set depends on the reps/coords
-            }
-
-            // Active-selection glow: rebuild the pending atoms in each rep's own
-            // style (so the highlight glows in the current style), or clear it. Runs
-            // after the rep loop so Cartoon reps' `ss_cache` is already populated.
-            if mol.glow_dirty {
-                let geom = match &mol.pending {
-                    Some(pending) => build_glow(
-                        &mol.data, &mol.bonds, &mol.reps, &pending.atoms, render_state, n_atoms,
-                        dashed,
-                    ),
-                    None => geometry::GeometryData::default(),
-                };
-                mol.glow_gpu = self.renderer.upload(rs, &geom);
-                mol.glow_dirty = false;
-                changed = true;
-            }
-            // Hover highlight: same builder, the hovered residue's atoms (steady glow).
-            if mol.hover_dirty {
-                let geom = match &mol.hover {
-                    Some(atoms) => build_glow(
-                        &mol.data, &mol.bonds, &mol.reps, atoms, render_state, n_atoms, dashed,
-                    ),
-                    None => geometry::GeometryData::default(),
-                };
-                mol.hover_gpu = self.renderer.upload(rs, &geom);
-                mol.hover_dirty = false;
-                changed = true;
-            }
-            // Hover detail lens: faded CPK ball-and-stick of the atoms near the
-            // cursor view-line (built from `hover_detail`), over a Cartoon/Surface rep.
-            if mol.hover_detail_dirty {
-                let geom = match &mol.hover_detail {
-                    Some(d) => {
-                        build_hover_detail(&mol.data, &mol.bonds, d, render_state, n_atoms, dashed)
-                    }
-                    None => geometry::GeometryData::default(),
-                };
-                mol.hover_detail_gpu = self.renderer.upload(rs, &geom);
-                mol.hover_detail_dirty = false;
-                changed = true;
-            }
-            // GPU pick geometry (native): rebuild when the molecule's geometry/coords
-            // changed (rep_geom_changed covers both) or it was flagged dirty (init /
-            // structure change). Mirrors the atoms CPU `pick` would ray-cast.
-            #[cfg(not(target_arch = "wasm32"))]
-            if rep_geom_changed || mol.pick_dirty {
-                let geom = build_pick(mol, mi, render_state);
-                mol.pick_gpu = self.renderer.upload(rs, &geom);
-                mol.pick_dirty = false;
-                // No `changed = true`: pick geometry isn't drawn in render_scene, so
-                // it doesn't require a scene re-render on its own.
-            }
-        }
-
-        // --- Second pass: Interactions reps ---
-        // They render contacts between their own selection and a *partner* rep in
-        // (possibly) another molecule, so they must read two molecules at once —
-        // impossible inside the `&mut`-iterator loop above. Rebuild one when its own
-        // flags are dirty OR either endpoint molecule's geometry/coords changed.
-        let mut inter_jobs: Vec<(usize, usize)> = Vec::new();
-        let mut need_rings: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        // A structural change (visibility toggle, group member switch via the slider,
-        // molecule add/remove) doesn't rebuild any rep's geometry, but it can change
-        // which molecule a partner resolves to (group-following) or its visibility — so
-        // rebuild every interactions rep on it too.
-        let structural = self.view_dirty;
-        for (mi, mol) in self.scene.molecules.iter().enumerate() {
-            for (ri, rep) in mol.reps.iter().enumerate() {
-                if !matches!(rep.kind, RepKind::Interactions) {
-                    continue;
-                }
-                let partner = build::partner_index(&self.scene, rep).map(|(p, _)| p);
-                let self_changed =
-                    rep.geom_dirty || rep.coords_dirty || mol_changed[mi] || structural;
-                let partner_changed = partner.is_some_and(|pmi| mol_changed[pmi]);
-                if self_changed || partner_changed {
-                    inter_jobs.push((mi, ri));
-                    // Both endpoint molecules need their aromatic-ring cache for the π
-                    // interactions (populated mutably here, before the immutable build).
-                    need_rings.insert(mi);
-                    if let Some(pmi) = partner {
-                        need_rings.insert(pmi);
-                    }
-                }
-            }
-        }
-        for mi in need_rings {
-            self.scene.molecules[mi].ensure_interaction_rings();
-        }
-        for (mi, ri) in inter_jobs {
-            // Compute (immutable scene borrow), then upload + store (drops the borrow
-            // first, so mutating the rep afterwards is fine).
-            let geom = build_interactions(&self.scene, mi, ri);
-            log::debug!(
-                "interactions rep {mi}:{ri} → {} dashed line vertices",
-                geom.lines.len()
-            );
-            let gpu = self.renderer.upload(rs, &geom);
-            let rep = &mut self.scene.molecules[mi].reps[ri];
-            rep.gpu = gpu;
-            rep.geom_dirty = false;
-            rep.coords_dirty = false;
-            changed = true;
-        }
-        changed
-    }
 }
 
 
@@ -914,7 +606,7 @@ impl eframe::App for App {
         // re-renders only on an actual change (render-skip), so idle stays cheap.
         if self.jobs_rx.is_some() {
             self.run_external_jobs();
-            self.mark_shared_dirty();
+            self.scene.mark_shared_dirty();
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 

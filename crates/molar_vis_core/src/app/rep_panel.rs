@@ -231,11 +231,7 @@ pub(super) fn draw_rep_params(
     out
 }
 
-/// [Periodic] tab: render copies of the selection shifted by integer combinations
-/// of the box lattice vectors `a,b,c`. Returns true if anything changed (render-only
-/// — no geometry rebuild, the images are drawn under a translated camera). Only
-/// shown when the molecule has a box.
-impl App {
+impl Scene {
     /// The active (pending) selection block for molecule `mi` — the italic "selection"
     /// label plus accept / discard — drawn standalone, for a molecule whose reps are *not*
     /// laid out by a plain [`Self::draw_reps_for`] pass.
@@ -251,7 +247,7 @@ impl App {
     /// it becomes that member's own rep) — right, since the captured `index …` selection
     /// refers to that member's atoms and means nothing on its siblings.
     pub(super) fn draw_pending_block(&mut self, ui: &mut egui::Ui, mi: usize) -> bool {
-        let mol = &mut self.scene.molecules[mi];
+        let mol = &mut self.molecules[mi];
         if mol.pending.is_none() {
             return false;
         }
@@ -297,7 +293,9 @@ impl App {
         }
         accept || discard
     }
+}
 
+impl App {
     /// Run espaloma partial-charge prediction on rep `j`'s selection of molecule `mi` and
     /// record it as one undo step. The outcome — a charge-range summary or the failure's
     /// advice — is parked in `charge_status` for that rep's **Color** tab to display.
@@ -462,6 +460,10 @@ pub(super) fn draw_color_tab(
     compute
 }
 
+/// [Periodic] tab: render copies of the selection shifted by integer combinations
+/// of the box lattice vectors `a,b,c`. Returns true if anything changed (render-only
+/// — no geometry rebuild, the images are drawn under a translated camera). Only
+/// shown when the molecule has a box.
 pub(super) fn draw_periodic_tab(ui: &mut egui::Ui, rep: &mut Representation) -> bool {
     let p = &mut rep.periodic;
     let mut changed = false;

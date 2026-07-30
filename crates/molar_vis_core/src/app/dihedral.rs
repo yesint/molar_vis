@@ -205,6 +205,49 @@ fn side_color(side: DihedralSide) -> egui::Color32 {
     }
 }
 
+impl Scene {
+    /// The **displayed** coordinates of `atoms` in molecule `mi` (nm), for undo capture —
+    /// the current trajectory frame if one is loaded, else the owned System (matching where
+    /// `rotate_fragment` writes and the store `coord_edit_target` recorded).
+    pub(super) fn displayed_coords_of(&self, mi: usize, atoms: &[usize]) -> Vec<[f32; 3]> {
+        let st = self.molecules[mi].render_state();
+        atoms
+            .iter()
+            .map(|&a| st.coords.get(a).map(|p| [p.x, p.y, p.z]).unwrap_or([0.0; 3]))
+            .collect()
+    }
+}
+
+impl Camera {
+    /// Angle (rad) of the cursor's ray, projected into the rotation plane (through
+    /// `axis_point`, normal `u`), measured in the `(e1, e2)` basis. `None` when the ray
+    /// is nearly parallel to the plane (edge-on axis) — the caller then holds the last
+    /// angle so the fragment doesn't jump.
+    pub(super) fn plane_angle(
+        &self,
+        size_px: [u32; 2],
+        ndc: glam::Vec2,
+        axis_point: Vec3,
+        u: Vec3,
+        e1: Vec3,
+        e2: Vec3,
+    ) -> Option<f32> {
+        let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
+        let (o, dir) = pick::cursor_ray(self.view(), self.proj(aspect), ndc.x, ndc.y);
+        let denom = dir.dot(u);
+        if denom.abs() < 1e-4 {
+            return None;
+        }
+        let t = (axis_point - o).dot(u) / denom;
+        if !t.is_finite() {
+            return None;
+        }
+        let p = o + dir * t;
+        let rel = p - axis_point;
+        Some(rel.dot(e2).atan2(rel.dot(e1)))
+    }
+}
+
 impl App {
     /// Pointer handling for the DihedralRotate tool, dispatched from `draw_input` each
     /// frame. Selects a bond on click, grabs/rotates a handle on drag, and draws the
@@ -358,8 +401,9 @@ impl App {
         let mut best: Option<(usize, f32)> = None;
         for (idx, h) in axis.handles.iter().enumerate() {
             if let Some(p) = self
+                .scene
                 .atom_world(mi, h.atom)
-                .and_then(|w| self.world_to_pixel(w, rect, size_px))
+                .and_then(|w| self.camera.world_to_pixel(w, rect, size_px))
             {
                 let d = (cursor - p).length();
                 if d <= HANDLE_GRAB_PX && best.is_none_or(|(_, bd)| d < bd) {
@@ -397,12 +441,12 @@ impl App {
         // records as one undoable delta at release. This works for any molecule: the frame
         // target keeps the undo correct even if the displayed frame changes afterward.
         let frame = self.scene.molecules[mi].coord_edit_target();
-        let before = self.dihedral_coords_of(mi, &side_atoms);
+        let before = self.scene.displayed_coords_of(mi, &side_atoms);
         let edit_atoms = side_atoms;
         let (Some(pi), Some(pj), Some(ph)) = (
-            self.atom_world(mi, i),
-            self.atom_world(mi, j),
-            self.atom_world(mi, handle_atom),
+            self.scene.atom_world(mi, i),
+            self.scene.atom_world(mi, j),
+            self.scene.atom_world(mi, handle_atom),
         ) else {
             return;
         };
@@ -424,7 +468,7 @@ impl App {
         let e1 = e1.normalize();
         let e2 = u.cross(e1).normalize();
         let ndc = px_to_ndc(px, rect);
-        let angle = self.dihedral_plane_angle(rect, size_px, ndc, axis_point, u, e1, e2);
+        let angle = self.camera.plane_angle(size_px, ndc, axis_point, u, e1, e2);
         if let Some(d) = self.draw.as_mut() {
             d.dihedral.drag = Some(DihedralDrag {
                 side,
@@ -441,17 +485,6 @@ impl App {
         }
     }
 
-    /// The **displayed** coordinates of `atoms` in molecule `mi` (nm), for undo capture —
-    /// the current trajectory frame if one is loaded, else the owned System (matching where
-    /// `rotate_fragment` writes and the store `coord_edit_target` recorded).
-    fn dihedral_coords_of(&self, mi: usize, atoms: &[usize]) -> Vec<[f32; 3]> {
-        let st = self.scene.molecules[mi].render_state();
-        atoms
-            .iter()
-            .map(|&a| st.coords.get(a).map(|p| [p.x, p.y, p.z]).unwrap_or([0.0; 3]))
-            .collect()
-    }
-
     /// Record the completed twist of `atoms` (from their `before` coords to the current
     /// ones, in coordinate store `frame`) as one undoable
     /// [`crate::history::StructEdit::Coords`] step. No-op if nothing moved or the edit
@@ -466,7 +499,7 @@ impl App {
         if atoms.is_empty() {
             return;
         }
-        let after = self.dihedral_coords_of(mi, &atoms);
+        let after = self.scene.displayed_coords_of(mi, &atoms);
         if before == after {
             return;
         }
@@ -476,36 +509,6 @@ impl App {
             crate::history::StructEdit::Coords { atoms, before, after, frame },
             "rotate bond".into(),
         );
-    }
-
-    /// Angle (rad) of the cursor's ray, projected into the rotation plane (through
-    /// `axis_point`, normal `u`), measured in the `(e1, e2)` basis. `None` when the ray
-    /// is nearly parallel to the plane (edge-on axis) — the caller then holds the last
-    /// angle so the fragment doesn't jump.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn dihedral_plane_angle(
-        &self,
-        _rect: egui::Rect,
-        size_px: [u32; 2],
-        ndc: glam::Vec2,
-        axis_point: Vec3,
-        u: Vec3,
-        e1: Vec3,
-        e2: Vec3,
-    ) -> Option<f32> {
-        let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
-        let (o, dir) = pick::cursor_ray(self.camera.view(), self.camera.proj(aspect), ndc.x, ndc.y);
-        let denom = dir.dot(u);
-        if denom.abs() < 1e-4 {
-            return None;
-        }
-        let t = (axis_point - o).dot(u) / denom;
-        if !t.is_finite() {
-            return None;
-        }
-        let p = o + dir * t;
-        let rel = p - axis_point;
-        Some(rel.dot(e2).atan2(rel.dot(e1)))
     }
 
     /// Advance an active handle drag: rotate the grabbed side by the change in the
@@ -531,7 +534,7 @@ impl App {
             };
             (d.axis_point, d.axis_dir, d.e1, d.e2, d.side, d.last_angle)
         };
-        let Some(now) = self.dihedral_plane_angle(rect, size_px, ndc, axis_point, u, e1, e2) else {
+        let Some(now) = self.camera.plane_angle(size_px, ndc, axis_point, u, e1, e2) else {
             // Edge-on axis: can't measure the angle this frame. Freeze and drop the
             // reference so the next measurable frame re-baselines (delta 0) rather than
             // applying all the motion accumulated during the edge-on span as one jump.
@@ -601,8 +604,8 @@ impl App {
 
         // Axis bond highlight (a thick line between the two endpoints).
         if let (Some(a), Some(b)) = (
-            self.atom_world(mi, axis.i).and_then(|w| self.world_to_pixel(w, rect, size_px)),
-            self.atom_world(mi, axis.j).and_then(|w| self.world_to_pixel(w, rect, size_px)),
+            self.scene.atom_world(mi, axis.i).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
+            self.scene.atom_world(mi, axis.j).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
         ) {
             painter.line_segment([a, b], egui::Stroke::new(4.0_f32, AXIS_COLOR));
         }
@@ -616,8 +619,8 @@ impl App {
         let dragged = draw.dihedral.drag.as_ref().map(|dr| dr.handle);
         for (idx, h) in axis.handles.iter().enumerate() {
             let (Some(anchor), Some(hp)) = (
-                self.atom_world(mi, h.anchor).and_then(|w| self.world_to_pixel(w, rect, size_px)),
-                self.atom_world(mi, h.atom).and_then(|w| self.world_to_pixel(w, rect, size_px)),
+                self.scene.atom_world(mi, h.anchor).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
+                self.scene.atom_world(mi, h.atom).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
             ) else {
                 continue;
             };
@@ -665,8 +668,8 @@ impl App {
         }
         let bond = mol.bonds[k];
         if let (Some(a), Some(b)) = (
-            self.atom_world(mi, bond.i1).and_then(|w| self.world_to_pixel(w, rect, size_px)),
-            self.atom_world(mi, bond.i2).and_then(|w| self.world_to_pixel(w, rect, size_px)),
+            self.scene.atom_world(mi, bond.i1).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
+            self.scene.atom_world(mi, bond.i2).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
         ) {
             painter.line_segment([a, b], egui::Stroke::new(4.0_f32, AXIS_COLOR.gamma_multiply(0.5)));
         }
@@ -690,14 +693,14 @@ impl App {
         };
         let (i, j) = (axis.i, axis.j);
         if let Some(deg) = rotate_deg {
-            if let (Some(pi), Some(pj)) = (self.atom_world(mi, i), self.atom_world(mi, j)) {
+            if let (Some(pi), Some(pj)) = (self.scene.atom_world(mi, i), self.scene.atom_world(mi, j)) {
                 let u = (pj - pi).normalize_or_zero();
                 let j_side = axis.j_side.clone();
                 // Record it like a real handle twist (capture the store + before coords),
                 // so the twist is undoable and detected by session save's edited-structure
                 // export — the same path a user gesture takes.
                 let frame = self.scene.molecules[mi].coord_edit_target();
-                let before = self.dihedral_coords_of(mi, &j_side);
+                let before = self.scene.displayed_coords_of(mi, &j_side);
                 self.scene.molecules[mi].rotate_fragment(&j_side, pi, u, deg.to_radians());
                 {
                     let mol = &mut self.scene.molecules[mi];

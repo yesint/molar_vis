@@ -31,7 +31,7 @@ impl App {
     pub(super) fn run_script(&mut self, source: &str) {
         use crate::script::{ConsoleLine, LineKind};
         self.console.lines.push(ConsoleLine { kind: LineKind::Input, text: source.to_string() });
-        let summary = self.scene_summary();
+        let summary = self.scene.summary();
         // Evaluate in the persistent REPL session so `let` bindings survive across
         // console lines (`let m = mol(0)` then, next line, `m.rep(0)…`).
         let outcome = self.script.eval(source, summary);
@@ -74,14 +74,17 @@ impl App {
         }
     }
 
+}
+
+impl Scene {
     /// A one-line-per-rep listing of the scene, returned by the script `list()`.
     #[cfg(feature = "scripting")]
-    pub(super) fn scene_summary(&self) -> String {
-        if self.scene.molecules.is_empty() {
+    pub(super) fn summary(&self) -> String {
+        if self.molecules.is_empty() {
             return "(no molecules)".to_string();
         }
         let mut s = String::new();
-        for (mi, m) in self.scene.molecules.iter().enumerate() {
+        for (mi, m) in self.molecules.iter().enumerate() {
             let frames = m.trajectory.n_frames();
             s.push_str(&format!(
                 "[{mi}] {} — {} atoms{}{}\n",

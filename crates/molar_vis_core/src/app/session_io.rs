@@ -119,13 +119,7 @@ impl App {
         else {
             return;
         };
-        self.status = match save_displayed(&mut self.scene.molecules[i], &path, None) {
-            Ok(()) => format!("Saved molecule to {}", path.display()),
-            Err(e) => {
-                log::error!("save molecule: {e}");
-                format!("Save failed: {e}")
-            }
-        };
+        self.status = self.scene.save_molecule_to(i, &path);
     }
 
     /// Save representation `j` of molecule `mi`'s selection (just the selected
@@ -143,13 +137,7 @@ impl App {
         else {
             return;
         };
-        self.status = match save_displayed(&mut self.scene.molecules[mi], &path, Some(j)) {
-            Ok(()) => format!("Saved selection to {}", path.display()),
-            Err(e) => {
-                log::error!("save selection: {e}");
-                format!("Save failed: {e}")
-            }
-        };
+        self.status = self.scene.save_rep_selection_to(mi, j, &path);
     }
 
     /// Save every member of group `gi` to a single file (rfd save dialog), each at its
@@ -173,43 +161,13 @@ impl App {
         else {
             return;
         };
-        self.status = match self.save_group_to(gi, &path) {
+        self.status = match self.scene.save_group_to(gi, &path) {
             Ok(n) => format!("Saved {n} molecule(s) to {}", path.display()),
             Err(e) => {
                 log::error!("save group: {e}");
                 format!("Save failed: {e}")
             }
         };
-    }
-
-    /// Write every member of group `gi` to `path` as one multi-record file (the dialog-
-    /// free core of [`save_group`], also driven by the `MOLAR_VIS_DEBUG_SAVE_GROUP` hook).
-    /// Returns the number of members written.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn save_group_to(&mut self, gi: usize, path: &std::path::Path) -> Result<usize, String> {
-        let member_ids = match self.scene.groups.get(gi) {
-            Some(g) => g.members.clone(),
-            None => return Err("no such group".to_string()),
-        };
-        let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
-        let mut n = 0usize;
-        for id in member_ids {
-            let Some(mi) = self.scene.mol_index(id) else { continue };
-            let mol = &mut self.scene.molecules[mi];
-            // Swap the displayed frame into the System around the write, restore after
-            // (frames render by reference, not held in the System) — as save_displayed.
-            let displayed = mol.render_state().clone();
-            let prev = mol.data.set_state(displayed).map_err(|e| e.to_string())?;
-            let w = mol
-                .data
-                .system()
-                .ok_or_else(|| "cannot save a shared molecule".to_string())
-                .and_then(|sys| h.write(sys).map_err(|e| e.to_string()));
-            let _ = mol.data.set_state(prev);
-            w?;
-            n += 1;
-        }
-        Ok(n)
     }
 
     /// The persistable global view state (camera + view-toolbar toggles). This and
@@ -598,5 +556,68 @@ impl App {
             Ok(raw) => self.add_loaded(raw),
             Err(e) => log::error!("demo load failed: {e}"),
         }
+    }
+}
+
+/// The dialog-free half of "save to file": pick a path in the UI, then hand it here. Each
+/// of these needs only the scene, so it lives on [`Scene`] and **returns** the status line
+/// rather than writing `App::status` — the pattern for a message that has exactly one
+/// consumer.
+#[cfg(not(target_arch = "wasm32"))]
+impl Scene {
+    /// Write molecule `i` (whole topology + the displayed frame) to `path`.
+    pub(super) fn save_molecule_to(&mut self, i: usize, path: &std::path::Path) -> String {
+        match save_displayed(&mut self.molecules[i], path, None) {
+            Ok(()) => format!("Saved molecule to {}", path.display()),
+            Err(e) => {
+                log::error!("save molecule: {e}");
+                format!("Save failed: {e}")
+            }
+        }
+    }
+
+    /// Write just rep `j`'s selected atoms of molecule `mi` to `path`.
+    pub(super) fn save_rep_selection_to(
+        &mut self,
+        mi: usize,
+        j: usize,
+        path: &std::path::Path,
+    ) -> String {
+        match save_displayed(&mut self.molecules[mi], path, Some(j)) {
+            Ok(()) => format!("Saved selection to {}", path.display()),
+            Err(e) => {
+                log::error!("save selection: {e}");
+                format!("Save failed: {e}")
+            }
+        }
+    }
+
+    /// Write every member of group `gi` to `path` as one multi-record file (the dialog-
+    /// free core of `App::save_group`, also driven by the `MOLAR_VIS_DEBUG_SAVE_GROUP`
+    /// hook). Returns the number of members written.
+    pub(super) fn save_group_to(&mut self, gi: usize, path: &std::path::Path) -> Result<usize, String> {
+        let member_ids = match self.groups.get(gi) {
+            Some(g) => g.members.clone(),
+            None => return Err("no such group".to_string()),
+        };
+        let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
+        let mut n = 0usize;
+        for id in member_ids {
+            let Some(mi) = self.mol_index(id) else { continue };
+            let mol = &mut self.molecules[mi];
+            // Swap the displayed frame into the System around the write, restore after
+            // (frames render by reference, not held in the System) — as save_displayed.
+            let displayed = mol.render_state().clone();
+            let prev = mol.data.set_state(displayed).map_err(|e| e.to_string())?;
+            let w = mol
+                .data
+                .system()
+                .ok_or_else(|| "cannot save a shared molecule".to_string())
+                .and_then(|sys| h.write(sys).map_err(|e| e.to_string()));
+            let _ = mol.data.set_state(prev);
+            w?;
+            n += 1;
+        }
+        Ok(n)
     }
 }
