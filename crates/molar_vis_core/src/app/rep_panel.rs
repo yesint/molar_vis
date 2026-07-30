@@ -1458,3 +1458,105 @@ impl App {
         }
     }
 }
+
+
+/// Layout regression tests for the two cycle bars. Both take only a `&mut Ui` plus plain
+/// data, so they run headlessly with no wgpu device — see
+/// `theme::hover_does_not_resize_widgets` for the same `ctx.run_ui` pattern.
+///
+/// What they pin down is the thing the bars cannot check for themselves: that the row whose
+/// slider **stretches** keeps its trailing buttons inside the row. That row sizes the slider
+/// by subtracting a reserve from `available_width()`, and the reserve has to cover buttons
+/// that have not been added yet — whose rendered width is theme data (button padding, item
+/// spacing, Phosphor glyph metrics). As measured when these tests were written, the reserve
+/// leaves just **2 px** of slack, so any of those changing pushes the buttons out of the row.
+#[cfg(test)]
+mod bar_fit_tests {
+    use super::*;
+    use crate::settings::{AppearanceSettings, ThemeMode};
+
+    /// Widths to probe, in points. The floor is set by the trajectory bar's **first** row,
+    /// whose widget set is fixed and cannot shrink: measured at 310.25 (≤50 frames) and
+    /// 329.44 (>50 frames, where the slider-zoom toggle appears). Narrower than that and row
+    /// 1 overhangs no matter what the slider row does — a separate, pre-existing limit of
+    /// the left panel's minimum width, not the reserve arithmetic under test. Starting at
+    /// 336 also makes this a tripwire: add another widget to row 1 and the first probe fails,
+    /// so the floor has to be raised deliberately.
+    const WIDTHS: [f32; 5] = [336.0, 360.0, 420.0, 512.0, 700.0];
+
+    /// Draw `build` in a fresh context at `width` under `theme`, and return
+    /// `(available width, width actually used)`. Two frames, because egui reads a widget's
+    /// state from the previous frame's response.
+    fn measure(width: f32, theme: ThemeMode, mut build: impl FnMut(&mut egui::Ui)) -> (f32, f32) {
+        use std::cell::Cell;
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &AppearanceSettings { theme, ..Default::default() });
+        let out = Cell::new((0.0, 0.0));
+        let mut frame = || {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 300.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let avail = ui.available_width();
+                let used = ui.scope(|ui| build(ui)).response.rect.width();
+                out.set((avail, used));
+            });
+        };
+        frame();
+        frame();
+        out.get()
+    }
+
+    fn traj(n: usize) -> Trajectory {
+        let mut t = Trajectory::default();
+        t.frames = (0..n).map(|_| molar::prelude::State::default()).collect();
+        t
+    }
+
+    /// The trajectory bar must fit the panel in both themes at every width — and at both
+    /// trajectory lengths, since >50 frames enables the slider-zoom toggle (one more widget
+    /// competing for row 1's space, which raises the whole bar's floor).
+    #[test]
+    fn traj_bar_fits_its_row() {
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            for n in [10usize, 200] {
+                for w in WIDTHS {
+                    let mut t = traj(n);
+                    let (avail, used) = measure(w, theme, |ui| {
+                        draw_traj_bar(ui, &mut t);
+                    });
+                    assert!(
+                        used <= avail + 0.5,
+                        "{theme:?}: traj bar ({n} frames) overhangs a {w}-wide panel: \
+                         used {used} of {avail}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same for the group cycle bar, which has only the slider row. Its own floor is much
+    /// lower (~148), so the shared [`WIDTHS`] are all comfortably above it. Long member names
+    /// must not widen it either — the name only ever appears in a tooltip, its own `Area`.
+    #[test]
+    fn group_bar_fits_its_row() {
+        let names: Vec<String> = (0..12)
+            .map(|i| format!("a-rather-long-ligand-name-{i}"))
+            .collect();
+        for theme in [ThemeMode::Dark, ThemeMode::Light] {
+            for w in WIDTHS {
+                let (avail, used) = measure(w, theme, |ui| {
+                    draw_group_bar(ui, &names, 3);
+                });
+                assert!(
+                    used <= avail + 0.5,
+                    "{theme:?}: group bar overhangs a {w}-wide panel: used {used} of {avail}"
+                );
+            }
+        }
+    }
+}
