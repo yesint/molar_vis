@@ -3,16 +3,14 @@
 //! control panel (Scene → Molecules → Representations → Rep controls) plus the
 //! central 3D viewport, and only re-renders the scene when something changed.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 
 use eframe::egui;
 use molar::prelude::{AtomLike, AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, State};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
-use crate::camera::{Ao, Background, BgKind, Camera, CueMode, DepthCue, Projection};
+use crate::camera::{Ao, Background, BgKind, Camera, Corner, CueMode, DepthCue, Projection};
 use crate::color::{ChargeKind, ColorMethod};
 use crate::data;
 use crate::geometry::{self, RepKind, RepParams};
@@ -120,25 +118,9 @@ pub struct App {
     /// dropdowns), applied after the panel is drawn.
     pending_undo_n: Option<usize>,
     pending_redo_n: Option<usize>,
-    /// Pending "Save image" request: the supersampling scale (× the viewport). Set by the
-    /// menu, serviced after `draw_viewport` (where the wgpu render state is available).
-    export_request: Option<u32>,
-    /// Wasm only: an in-flight image readback + its download filename, polled each frame
-    /// until the GPU→CPU map resolves (native exports synchronously, so it needs no slot).
-    #[cfg(target_arch = "wasm32")]
-    pending_capture: Option<(crate::render::CaptureReadback, String)>,
-    /// Ray-tracing controller. `rt_scene_dirty` = scene geometry changed since the tracer last
-    /// uploaded it (re-gather before the next trace). `rt_warm` = a trace was just requested but
-    /// not yet started — its "Ray tracing…/Saving…" overlay is shown for `rt_warm_shown`'s frame
-    /// first, then the (possibly blocking) scene gather + trace begin run, so the overlay appears
-    /// immediately. `rt_job` = a trace in progress, pumped a few tile-submits per frame so the UI
-    /// stays responsive. `rt_still` = a finished R-key still is showing (held until any
-    /// camera/scene/size change drops back to the realtime view).
-    rt_scene_dirty: bool,
-    rt_warm: Option<RtKind>,
-    rt_warm_shown: bool,
-    rt_job: Option<RtJob>,
-    rt_still: bool,
+    /// Everything that produces an image outside the live rasterized viewport: the ray
+    /// tracer's jobs, the image export, and the debug UI screenshot. See [`RtState`].
+    rt: RtState,
     /// `(molecule index, rep index)` whose selection field is focused/expanded.
     editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).
@@ -148,13 +130,8 @@ pub struct App {
     docking_dialog: Option<ModalState<docking_dialog::DockingDialog>>,
     /// Open "delete trajectory frames" dialog, if any.
     delete_frames_dialog: Option<ModalState<DeleteFramesDialog>>,
-    /// Open "Render ▸ Image…" save dialog (the chosen output scale), if any.
-    image_dialog: Option<ModalState<ImageDialog>>,
     /// Open "rename molecule" dialog: the target molecule + the edit buffer.
     rename_dialog: Option<ModalState<RenameDialog>>,
-    /// In-flight background trajectory loaders, keyed by molecule (so they
-    /// survive reorder/delete/undo). Drained each frame via `try_recv`.
-    loaders: HashMap<MolId, Receiver<LoadMsg>>,
     /// Picking mode (top view-toolbar dropdown). `Click` shows the hovered atom's
     /// identity + glow and selects it on click; `Lasso` drags a freehand selection
     /// polygon.
@@ -178,10 +155,6 @@ pub struct App {
     /// detected (`System` mode also flips at runtime when the desktop does). See
     /// `follow_theme_background`.
     themed_bg: Option<egui::Theme>,
-    /// Frames elapsed for the `MOLAR_VIS_DEBUG_SAVE_UI` verification hook (it needs a few
-    /// to let the panels settle before requesting egui's screenshot). Native-only.
-    #[cfg(not(target_arch = "wasm32"))]
-    debug_ui_frames: u32,
     /// Result of the last [Compute charges] press, as `(rep index, message)` for the
     /// molecule it ran on — shown in that rep's **Color** tab. A leading `!` marks an
     /// error (rendered red); anything else is an informational summary. Transient.
@@ -199,10 +172,6 @@ pub struct App {
     /// stays idle (0 GPU) instead of re-picking every frame.
     #[cfg(not(target_arch = "wasm32"))]
     last_pick_px: Option<(u32, u32)>,
-    /// Whether the VMD-style orientation axes gizmo is shown in the viewport.
-    axes_on: bool,
-    /// Which viewport corner the axes gizmo is anchored to.
-    axes_corner: Corner,
     /// The top-bar "view settings" (hamburger) menu: open state, active tab, and the
     /// close-on-click-outside geometry. See [`ViewMenu`].
     view_menu: ViewMenu,
@@ -221,23 +190,14 @@ pub struct App {
     traj_tx: std::sync::mpsc::Sender<(MolId, String, Vec<u8>)>,
     #[cfg(target_arch = "wasm32")]
     traj_rx: std::sync::mpsc::Receiver<(MolId, String, Vec<u8>)>,
-    #[cfg(target_arch = "wasm32")]
-    wasm_loaders: HashMap<MolId, data::traj_wasm::TrajStream>,
     /// Active interactive-drawing session (Draw mode), or `None` when off. Mutually
     /// exclusive with the pick modes (`pick_mode`): turning Draw on forces `pick_mode
     /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
     /// the bottom of this file.
     draw: Option<DrawSession>,
-    /// Whether the scripting console panel is open (toggled from the View menu).
+    /// The in-app scripting console: open state, scrollback, and the REPL behind it.
     #[cfg(feature = "scripting")]
-    console_open: bool,
-    /// Scripting-console scrollback + input + history (see `script::console`).
-    #[cfg(feature = "scripting")]
-    console: crate::script::ScriptConsole,
-    /// Persistent Rhai REPL backing the console: keeps the engine + a `Scope` alive
-    /// across input lines so `let` bindings survive between lines (see `script::engine`).
-    #[cfg(feature = "scripting")]
-    script: crate::script::ScriptSession,
+    console: Console,
     /// External command channel for the native Python module (`molar_vis_py`) and the
     /// wasm JavaScript API (`molar_vis_js`): jobs queued from the host are drained + run
     /// with `&mut App` at the top of each `ui()`, so an external driver can control the
@@ -284,16 +244,44 @@ enum SettingsPage {
 }
 
 
-/// A viewport corner, for anchoring the axes gizmo.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub enum Corner {
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    #[default]
-    BottomRight,
+/// Offscreen rendering and capture: the ray tracer's jobs plus the two things they feed,
+/// the image export and the debug UI screenshot.
+///
+/// These nine fields are the one genuinely cohesive cluster in `App` — they are read and
+/// written together, several at a time, by `draw_viewport`'s trace controller and by
+/// `export.rs` (`viewport.rs:122-124` reads three, `:179-188` writes three, `export.rs`
+/// writes five in six lines). Nothing outside those two modules touches any of them.
+#[derive(Default)]
+struct RtState {
+    /// Scene geometry changed since the tracer last uploaded it (re-gather before the next
+    /// trace). Also set on a camera change, since a multi-order bond's strands and a line's
+    /// world radius are baked at gather time from the traced camera.
+    scene_dirty: bool,
+    /// A trace was just requested but has not started: its "Ray tracing…/Saving…" overlay is
+    /// shown for `warm_shown`'s frame first, then the (possibly blocking) scene gather + trace
+    /// begin run — so the overlay appears immediately rather than after the gather.
+    warm: Option<RtKind>,
+    warm_shown: bool,
+    /// A trace in progress, pumped a few tile-submits per frame so the UI stays responsive.
+    job: Option<RtJob>,
+    /// A finished R-key still is showing, held until any camera/scene/size change drops back
+    /// to the realtime view.
+    still: bool,
+    /// Pending "Save image" request: the supersampling scale (× the viewport). Set by the
+    /// dialog, serviced after `draw_viewport` (where the wgpu render state is available).
+    export_request: Option<u32>,
+    /// Wasm only: an in-flight image readback + its download filename, polled each frame until
+    /// the GPU→CPU map resolves (native exports synchronously, so it needs no slot).
+    #[cfg(target_arch = "wasm32")]
+    pending_capture: Option<(crate::render::CaptureReadback, String)>,
+    /// Open "Render ▸ Image…" save dialog (the chosen output scale), if any.
+    image_dialog: Option<ModalState<ImageDialog>>,
+    /// Frames elapsed for the `MOLAR_VIS_DEBUG_SAVE_UI` verification hook (it needs a few to
+    /// let the panels settle — and egui's `Area` fade-in run out — before requesting egui's
+    /// screenshot). Native-only.
+    #[cfg(not(target_arch = "wasm32"))]
+    debug_ui_frames: u32,
 }
-
 
 /// A just-requested ray trace, held one frame so its overlay paints before the (blocking)
 /// scene gather, then turned into the matching [`RtJob`].
@@ -330,6 +318,23 @@ enum RtJob {
 struct ImageDialog {
     /// Output size as a multiple of the viewport (1× / 2× / 4×).
     scale: u32,
+}
+
+/// The in-app scripting console (see `script::console` / `script::engine`).
+///
+/// Open state, scrollback and REPL are one cluster: every site that touches one touches
+/// another — opening the panel also asks the input field for focus, and running a line
+/// appends the echo, the REPL's output and any error to the same scrollback.
+#[cfg(feature = "scripting")]
+#[derive(Default)]
+struct Console {
+    /// Whether the console panel is showing (toggled from the View menu).
+    open: bool,
+    /// Scrollback + input buffer + input history.
+    ui: crate::script::ScriptConsole,
+    /// Persistent Rhai REPL: keeps the engine + a `Scope` alive across input lines, so
+    /// `let` bindings survive between them.
+    repl: crate::script::ScriptSession,
 }
 
 /// The program-settings dialog: a working copy of the settings (edit-then-apply — **Save**
@@ -452,8 +457,7 @@ impl App {
         }
         if was_empty {
             if let Some((min, max)) = self.scene.bbox() {
-                self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
-                self.settings.view.seed_camera(&mut self.camera);
+                self.reframe_camera(min, max);
             }
         }
         self.view_dirty = true;
@@ -539,6 +543,20 @@ impl App {
         self.view_dirty = true;
     }
 
+    /// Replace the camera with one framing `[min, max]` and seed the user's default view
+    /// (projection / background / depth cue / lighting), as a fresh document gets.
+    ///
+    /// `Camera::frame_bbox` builds a *whole* camera, so it also resets the view settings —
+    /// which is why `ViewDefaults::seed_camera` follows it. But the defaults have no entry
+    /// for the axes gizmo, so its state has to be carried across by hand or a user's toggle
+    /// would silently switch off the first time a molecule lands in an empty scene.
+    fn reframe_camera(&mut self, min: glam::Vec3, max: glam::Vec3) {
+        let axes = (self.camera.axes_on, self.camera.axes_corner);
+        self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
+        self.settings.view.seed_camera(&mut self.camera);
+        (self.camera.axes_on, self.camera.axes_corner) = axes;
+    }
+
     /// Re-frame all molecules (zoom-to-fit + default orientation), keeping the current
     /// projection / background / lighting settings.
     pub fn reset_view(&mut self) {
@@ -578,13 +596,13 @@ impl App {
 
     /// Show/hide the orientation-axes gizmo.
     pub fn show_axes(&mut self, on: bool) {
-        self.axes_on = on;
+        self.camera.axes_on = on;
         self.view_dirty = true;
     }
 
     /// Which viewport corner the axes gizmo sits in.
     pub fn set_axes_corner(&mut self, corner: Corner) {
-        self.axes_corner = corner;
+        self.camera.axes_corner = corner;
         self.view_dirty = true;
     }
 
@@ -702,7 +720,7 @@ impl eframe::App for App {
                 expected,
             ) {
                 Ok(stream) => {
-                    self.wasm_loaders.insert(mol_id, stream);
+                    self.scene.wasm_loaders.insert(mol_id, stream);
                     self.status = format!("Loading {name}…");
                 }
                 Err(e) => {
@@ -785,7 +803,7 @@ impl eframe::App for App {
             self.view_dirty = true;
         }
         // Keep repainting while animating or loading; otherwise idle = 0 GPU.
-        if animating || !self.loaders.is_empty() {
+        if animating || !self.scene.loaders.is_empty() {
             ctx.request_repaint();
         }
 
@@ -813,19 +831,19 @@ impl eframe::App for App {
         // MOLAR_VIS_DEBUG_SAVE_UI=<path>: capture the whole egui surface (panels included)
         // and quit — the offscreen alternative to screenshotting a real window.
         #[cfg(not(target_arch = "wasm32"))]
-        self.service_debug_ui_capture(&ctx);
+        self.rt.service_debug_ui_capture(&ctx);
 
         // Service a pending "Save image" request here: `frame` (the wgpu render state) is
         // available, and `draw_viewport` has just refreshed `last_size`. Native saves
         // synchronously; wasm stashes the readback for `poll_export` to finish + download.
-        if let Some(scale) = self.export_request.take() {
+        if let Some(scale) = self.rt.export_request.take() {
             self.export_image(frame, scale);
         }
         // Drive an in-progress frame-pumped "Save image" ray trace (native), and keep
         // repainting while any trace job runs so it advances each frame.
         #[cfg(not(target_arch = "wasm32"))]
         self.service_rt_save(frame);
-        if self.rt_job.is_some() {
+        if self.rt.job.is_some() {
             ctx.request_repaint();
         }
         #[cfg(target_arch = "wasm32")]

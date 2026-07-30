@@ -537,15 +537,7 @@ impl App {
             view_dirty: true,
             status,
             history,
-            export_request: None,
-            #[cfg(target_arch = "wasm32")]
-            pending_capture: None,
-            rt_scene_dirty: true,
-            rt_warm: None,
-            rt_warm_shown: false,
-            image_dialog: None,
-            rt_job: None,
-            rt_still: false,
+            rt: RtState { scene_dirty: true, ..Default::default() },
             pending_undo_n: None,
             pending_redo_n: None,
             editing_rep: None,
@@ -554,13 +546,10 @@ impl App {
             docking_dialog: None,
             delete_frames_dialog: None,
             rename_dialog: None,
-            loaders: HashMap::new(),
             pick_mode,
             selection_mode,
             lasso_path: Vec::new(),
             partner_pick: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            debug_ui_frames: 0,
             themed_bg: None,
             charge_status: None,
             interactions_dialog: None,
@@ -569,8 +558,6 @@ impl App {
             hover_pick: None,
             #[cfg(not(target_arch = "wasm32"))]
             last_pick_px: None,
-            axes_on: std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok(),
-            axes_corner: Corner::BottomRight,
             view_menu: ViewMenu {
                 open: std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok(),
                 ..Default::default()
@@ -583,17 +570,14 @@ impl App {
             traj_tx,
             #[cfg(target_arch = "wasm32")]
             traj_rx,
-            #[cfg(target_arch = "wasm32")]
-            wasm_loaders: HashMap::new(),
             draw: None,
             #[cfg(feature = "scripting")]
-            console_open: false,
-            #[cfg(feature = "scripting")]
-            console: crate::script::ScriptConsole::default(),
-            #[cfg(feature = "scripting")]
-            script: crate::script::ScriptSession::new(),
+            console: Console::default(),
             jobs_rx: None,
         };
+
+        // Verification hook: MOLAR_VIS_DEBUG_AXES=1 shows the orientation-axes gizmo.
+        app.camera.axes_on = std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok();
 
         // Match the viewport background to the theme *now*, not on the first `ui()` frame:
         // otherwise the opening frame flashes the other theme's background, and the
@@ -645,7 +629,7 @@ impl App {
             }
         }
         if std::env::var("MOLAR_VIS_DEBUG_IMAGEDIALOG").is_ok() {
-            app.image_dialog = Some(ModalState::new(ImageDialog { scale: 2 }));
+            app.rt.image_dialog = Some(ModalState::new(ImageDialog { scale: 2 }));
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DOCKING="<protein files>;<ligand files>" loads a
@@ -713,8 +697,8 @@ impl App {
                 None => src,
             };
             app.run_script(&src);
-            app.console_open = true; // show the console (echo + output) for the screenshot
-            app.console.focus_input = true;
+            app.console.open = true; // show the console (echo + output) for the screenshot
+            app.console.ui.focus_input = true;
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_CHARGES=1 presses [Compute charges] on every
@@ -1135,8 +1119,7 @@ impl App {
         }
         // Frame the camera on the drawn molecule and keep the session active.
         let (min, max) = self.scene.molecules[mi].current_bbox();
-        self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
-        self.settings.view.seed_camera(&mut self.camera);
+        self.reframe_camera(min, max);
         self.last_render_camera = None;
         self.view_dirty = true;
         self.pick_mode = PickMode::Off;

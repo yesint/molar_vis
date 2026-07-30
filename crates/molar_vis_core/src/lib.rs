@@ -34,7 +34,8 @@ mod suggest;
 mod theme;
 mod trajectory;
 
-pub use app::{App, AppJob, Corner};
+pub use app::{App, AppJob};
+pub use camera::Corner;
 // View-setting enums the external hosts parse (projection / depth-cue mode / axes
 // corner) when driving the camera + scene.
 pub use camera::{CueMode, Projection};

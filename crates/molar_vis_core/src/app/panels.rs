@@ -344,7 +344,7 @@ impl App {
         let scene_tex = self.renderer.texture_id();
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.label(egui::RichText::new("Axes").strong());
-            draw_axes_widget(ui, &mut self.axes_on, &mut self.axes_corner, Some(scene_tex));
+            draw_axes_widget(ui, &mut self.camera.axes_on, &mut self.camera.axes_corner, Some(scene_tex));
         });
         ui.add_space(6.0);
 
@@ -464,7 +464,7 @@ impl App {
             // format, then saves (ray-traced on a compute device — see `render/raytrace.rs`).
             menu_buttons.push(ui.menu_button("Render", |ui| {
                 if ui.button(format!("{}  Image…", icon::IMAGE)).clicked() {
-                    self.image_dialog = Some(ModalState::new(ImageDialog { scale: 1 }));
+                    self.rt.image_dialog = Some(ModalState::new(ImageDialog { scale: 1 }));
                     ui.close();
                 }
             }).response);
@@ -521,15 +521,15 @@ impl App {
             #[cfg(feature = "scripting")]
             menu_buttons.push(ui.menu_button("View", |ui| {
                 // Checkable Console toggle (a `[x]`-style item via the leading icon).
-                let mark = if self.console_open { icon::CHECK_SQUARE } else { icon::SQUARE };
+                let mark = if self.console.open { icon::CHECK_SQUARE } else { icon::SQUARE };
                 if ui
                     .button(format!("{}  Console", mark))
                     .on_hover_text("Scripting console (Rhai) — drive the viewer with commands")
                     .clicked()
                 {
-                    self.console_open = !self.console_open;
-                    if self.console_open {
-                        self.console.focus_input = true; // grab the input field on open
+                    self.console.open = !self.console.open;
+                    if self.console.open {
+                        self.console.ui.focus_input = true; // grab the input field on open
                     }
                     ui.close();
                 }
@@ -739,7 +739,7 @@ impl App {
                             view_dirty = true;
                         }
                     });
-                } else if self.loaders.contains_key(&mol.id) {
+                } else if self.scene.loaders.contains_key(&mol.id) {
                     ui.indent(egui::Id::new(("traj", i)), |ui| {
                         ui.weak(format!("loading… {} frames", mol.trajectory.n_frames()));
                     });
@@ -766,15 +766,10 @@ impl App {
                 let g = self.scene.groups.remove(gi);
                 for mid in &g.members {
                     if let Some(mmi) = self.scene.mol_index(*mid) {
-                        let m = self.scene.molecules.remove(mmi);
-                        self.loaders.remove(&m.id);
-                        #[cfg(target_arch = "wasm32")]
-                        self.wasm_loaders.remove(&m.id);
-                        self.scene.trash.insert(m.id, m);
+                        self.scene.trash_molecule(mmi);
                     }
                 }
                 self.scene.group_trash.insert(g.id, g);
-                self.scene.clamp_selection();
                 view_dirty = true;
             }
         }
@@ -782,26 +777,14 @@ impl App {
         // Delete a single group member: remove it (shared reps preserved on the new
         // shown member, see `Scene::remove_grouped_molecule`) and park it in the trash.
         if let Some(mid) = delete_member {
-            if let Some(m) = self.scene.remove_grouped_molecule(mid) {
-                self.loaders.remove(&m.id);
-                #[cfg(target_arch = "wasm32")]
-                self.wasm_loaders.remove(&m.id);
-                self.scene.trash.insert(m.id, m);
-            }
-            self.scene.clamp_selection();
+            self.scene.trash_grouped_molecule(mid);
             view_dirty = true;
         }
 
         if let Some(i) = delete {
-            // Park the molecule in the trash so the delete can be undone.
-            let m = self.scene.molecules.remove(i);
-            // Drop any in-flight loader (its background thread exits when the
-            // receiver is dropped); likewise any browser streaming loader.
-            self.loaders.remove(&m.id);
-            #[cfg(target_arch = "wasm32")]
-            self.wasm_loaders.remove(&m.id);
-            self.scene.trash.insert(m.id, m);
-            self.scene.clamp_selection();
+            // Park the molecule in the trash so the delete can be undone (and drop its
+            // in-flight loader with it) — see `Scene::trash_molecule`.
+            self.scene.trash_molecule(i);
             view_dirty = true;
         }
         #[cfg(not(target_arch = "wasm32"))]

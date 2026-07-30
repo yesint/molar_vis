@@ -28,7 +28,7 @@ impl App {
         modal_shell(
             self,
             ctx,
-            |a| &mut a.image_dialog,
+            |a| &mut a.rt.image_dialog,
             ModalSpec {
                 id: "render_image_dialog",
                 width: 300.0,
@@ -61,7 +61,7 @@ impl App {
             |app, dlg| {
                 // The render itself happens in `ui` after `draw_viewport`, where the wgpu
                 // render state is available — see `export_request`.
-                app.export_request = Some(dlg.scale);
+                app.rt.export_request = Some(dlg.scale);
                 Ok(())
             },
         );
@@ -100,13 +100,13 @@ impl App {
         // done. A Save shares the tracer with the R-key still, so cancel any running/pending one.
         #[cfg(not(target_arch = "wasm32"))]
         if self.renderer.raytrace_supported() {
-            if matches!(self.rt_job, Some(RtJob::Still)) {
+            if matches!(self.rt.job, Some(RtJob::Still)) {
                 self.renderer.rt_trace_cancel();
-                self.rt_job = None;
+                self.rt.job = None;
             }
-            self.rt_still = false;
-            self.rt_warm = Some(super::RtKind::Save { scale: scale.max(1), path: dest });
-            self.rt_warm_shown = false;
+            self.rt.still = false;
+            self.rt.warm = Some(super::RtKind::Save { scale: scale.max(1), path: dest });
+            self.rt.warm_shown = false;
             self.status = "rendering image…".into();
             return;
         }
@@ -140,7 +140,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         {
             // The browser drives the map; `poll_export` (each frame) finishes + downloads.
-            self.pending_capture = Some((cap, "molar_vis.png".to_string()));
+            self.rt.pending_capture = Some((cap, "molar_vis.png".to_string()));
         }
     }
 
@@ -149,7 +149,7 @@ impl App {
     /// UI responsive (a "Saving…" overlay shows meanwhile, drawn by the viewport).
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn service_rt_save(&mut self, frame: &mut eframe::Frame) {
-        let Some(RtJob::Save { out, reading, .. }) = self.rt_job.as_ref() else {
+        let Some(RtJob::Save { out, reading, .. }) = self.rt.job.as_ref() else {
             return;
         };
         let out = *out;
@@ -162,11 +162,11 @@ impl App {
             if self.renderer.save_step(&rs, SAVE_STEP_SUBMITS) {
                 match self.renderer.save_finish(&rs, out[0], out[1]) {
                     Some(rb) => {
-                        if let Some(RtJob::Save { reading, .. }) = self.rt_job.as_mut() {
+                        if let Some(RtJob::Save { reading, .. }) = self.rt.job.as_mut() {
                             *reading = Some(rb);
                         }
                     }
-                    None => self.rt_job = None,
+                    None => self.rt.job = None,
                 }
             }
             return;
@@ -175,11 +175,11 @@ impl App {
         // Phase 2: poll the readback (non-blocking); write to the pre-chosen path when it lands.
         let _ = rs.device.poll(wgpu::PollType::Poll);
         let ready = matches!(
-            self.rt_job.as_ref(),
+            self.rt.job.as_ref(),
             Some(RtJob::Save { reading: Some(rb), .. }) if rb.is_ready()
         );
         if ready {
-            if let Some(RtJob::Save { reading: Some(rb), path, .. }) = self.rt_job.take() {
+            if let Some(RtJob::Save { reading: Some(rb), path, .. }) = self.rt.job.take() {
                 self.write_png_native(rb.read(), &path);
             }
         }
@@ -202,17 +202,18 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     pub(super) fn poll_export(&mut self, ctx: &egui::Context) {
         let ready = self
+            .rt
             .pending_capture
             .as_ref()
             .is_some_and(|(c, _)| c.is_ready());
         if !ready {
             // Keep repainting so we re-check next frame (egui is otherwise idle).
-            if self.pending_capture.is_some() {
+            if self.rt.pending_capture.is_some() {
                 ctx.request_repaint();
             }
             return;
         }
-        let (cap, name) = self.pending_capture.take().unwrap();
+        let (cap, name) = self.rt.pending_capture.take().unwrap();
         let img = cap.read();
         let mut bytes = std::io::Cursor::new(Vec::new());
         match img.write_to(&mut bytes, image::ImageFormat::Png) {
@@ -267,7 +268,7 @@ fn trigger_download(name: &str, bytes: &[u8]) {
 const UI_CAPTURE_SETTLE_FRAMES: u32 = 48;
 
 #[cfg(not(target_arch = "wasm32"))]
-impl App {
+impl super::RtState {
     /// `MOLAR_VIS_DEBUG_SAVE_UI=<path>`: write the **whole egui surface** — panels, dialogs,
     /// overlays and the 3D image alike — to a PNG, then quit.
     ///

@@ -29,7 +29,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::app::Corner;
+use crate::camera::Corner;
 use crate::camera::Camera;
 use crate::history::RepState;
 use crate::pick::{PickMode, SelectionMode};

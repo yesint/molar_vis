@@ -212,9 +212,9 @@ impl App {
         self.scene.selected_mol = self.scene.mol_index(first_member);
         if was_empty {
             if let Some(mi) = self.scene.mol_index(first_member) {
-                let (min, max) = (self.scene.molecules[mi].bbox_min, self.scene.molecules[mi].bbox_max);
-                self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
-                self.settings.view.seed_camera(&mut self.camera);
+                let (min, max) =
+                    (self.scene.molecules[mi].bbox_min, self.scene.molecules[mi].bbox_max);
+                self.reframe_camera(min, max);
             }
         }
         self.status = format!("Loaded group ({n} molecules)");
@@ -237,8 +237,7 @@ impl App {
             // First molecule into an empty scene: frame it and seed the user's
             // default view (projection / background / depth-cue / …).
             if let Some((min, max)) = self.scene.bbox() {
-                self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
-                self.settings.view.seed_camera(&mut self.camera);
+                self.reframe_camera(min, max);
             }
         }
         self.status = format!("{} molecule(s) loaded", self.scene.molecules.len());
@@ -550,7 +549,7 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let rx = data::traj_loader::spawn_async(path, opts, expected);
-                    self.loaders.insert(dialog.mol_id, rx);
+                    self.scene.loaders.insert(dialog.mol_id, rx);
                     if let Some(mol) =
                         self.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id)
                     {
@@ -571,14 +570,14 @@ impl App {
     /// Drain background loaders, appending streamed frames to their molecules.
     /// Non-blocking (`try_recv`); finished/errored/disconnected loaders are removed.
     pub(super) fn poll_loaders(&mut self) {
-        if self.loaders.is_empty() {
+        if self.scene.loaders.is_empty() {
             return;
         }
         use std::sync::mpsc::TryRecvError;
-        let ids: Vec<MolId> = self.loaders.keys().copied().collect();
+        let ids: Vec<MolId> = self.scene.loaders.keys().copied().collect();
         let mut finished: Vec<MolId> = Vec::new();
         for id in ids {
-            while let Some(rx) = self.loaders.get(&id) {
+            while let Some(rx) = self.scene.loaders.get(&id) {
                 let msg = rx.try_recv();
                 match msg {
                     Ok(LoadMsg::Frame(state)) => {
@@ -607,7 +606,7 @@ impl App {
             }
         }
         for id in finished {
-            self.loaders.remove(&id);
+            self.scene.loaders.remove(&id);
         }
     }
 
@@ -618,15 +617,15 @@ impl App {
     /// while any stream is active.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn poll_wasm_loaders(&mut self, ctx: &egui::Context) {
-        if self.wasm_loaders.is_empty() {
+        if self.scene.wasm_loaders.is_empty() {
             return;
         }
         const BATCH: usize = 64;
-        let ids: Vec<MolId> = self.wasm_loaders.keys().copied().collect();
+        let ids: Vec<MolId> = self.scene.wasm_loaders.keys().copied().collect();
         let mut finished: Vec<MolId> = Vec::new();
         let mut view_dirty = false;
         for id in ids {
-            let Some(stream) = self.wasm_loaders.get_mut(&id) else {
+            let Some(stream) = self.scene.wasm_loaders.get_mut(&id) else {
                 continue;
             };
             let batch = stream.next_batch(BATCH);
@@ -660,13 +659,13 @@ impl App {
             }
         }
         for id in &finished {
-            self.wasm_loaders.remove(id);
+            self.scene.wasm_loaders.remove(id);
         }
         if view_dirty {
             self.view_dirty = true;
         }
         // Keep frames flowing while any stream is still active.
-        if !self.wasm_loaders.is_empty() {
+        if !self.scene.wasm_loaders.is_empty() {
             ctx.request_repaint();
         }
     }

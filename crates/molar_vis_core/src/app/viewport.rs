@@ -125,9 +125,9 @@ impl App {
             // trace is rendered with the glow hidden (`glow_pulse = 0`) so it doesn't flash.
             // Only a viewport **still** (R key) replaces the live view, so only it hides the
             // glow; a Save renders offscreen, leaving the live view (and its glow) interactive.
-            let tracing = matches!(self.rt_warm, Some(RtKind::Still))
-                || matches!(self.rt_job, Some(RtJob::Still))
-                || self.rt_still;
+            let tracing = matches!(self.rt.warm, Some(RtKind::Still))
+                || matches!(self.rt.job, Some(RtJob::Still))
+                || self.rt.still;
             let has_glow = self
                 .scene
                 .molecules
@@ -159,7 +159,7 @@ impl App {
             // rotation changes the primitives themselves (a trace is only started on demand, so
             // this costs one gather per trace at worst — negligible beside the trace).
             if geom_changed || cam_changed {
-                self.rt_scene_dirty = true;
+                self.rt.scene_dirty = true;
             }
 
             // Ray-traced still (PyMOL-`ray` style): pressing **R** ray-traces the current view
@@ -170,26 +170,26 @@ impl App {
                 && !self.scene.molecules.is_empty()
                 && self.draw.is_none();
             if rt_ok
-                && self.rt_warm.is_none()
-                && self.rt_job.is_none()
+                && self.rt.warm.is_none()
+                && self.rt.job.is_none()
                 && !ui.ctx().egui_wants_keyboard_input()
                 && ui.input(|i| i.key_pressed(egui::Key::R))
             {
-                self.rt_warm = Some(RtKind::Still); // start deferred (overlay shows first)
-                self.rt_warm_shown = false;
-                self.rt_still = false;
+                self.rt.warm = Some(RtKind::Still); // start deferred (overlay shows first)
+                self.rt.warm_shown = false;
+                self.rt.still = false;
             }
             // Any camera/scene/size change drops a showing still and aborts an in-progress /
             // pending **Still** back to the realtime view. (A Save renders offscreen at its own
             // captured view, so it keeps going.)
             if raster_dirty {
-                self.rt_still = false;
-                if matches!(self.rt_warm, Some(RtKind::Still)) {
-                    self.rt_warm = None;
+                self.rt.still = false;
+                if matches!(self.rt.warm, Some(RtKind::Still)) {
+                    self.rt.warm = None;
                 }
-                if matches!(self.rt_job, Some(RtJob::Still)) {
+                if matches!(self.rt.job, Some(RtJob::Still)) {
                     self.renderer.rt_trace_cancel();
-                    self.rt_job = None;
+                    self.rt.job = None;
                 }
             }
 
@@ -198,9 +198,9 @@ impl App {
             // immediately instead of only after the gather finishes. `force_raster` re-renders
             // the behind-view this frame so its glow is hidden (`glow_pulse = 0`, set above).
             let mut force_raster = false;
-            if self.rt_warm.is_some() {
-                if self.rt_warm_shown {
-                    if self.rt_scene_dirty {
+            if self.rt.warm.is_some() {
+                if self.rt.warm_shown {
+                    if self.rt.scene_dirty {
                         let dashed = self.settings.behavior.dashed_pbc_bonds;
                         self.renderer.prepare_raytrace(
                             render_state,
@@ -209,24 +209,24 @@ impl App {
                             size_px,
                             dashed,
                         );
-                        self.rt_scene_dirty = false;
+                        self.rt.scene_dirty = false;
                     }
                     let samples = self.camera.rt_sample_target();
-                    match self.rt_warm.take().unwrap() {
+                    match self.rt.warm.take().unwrap() {
                         RtKind::Still => {
                             self.renderer.rt_still_begin(render_state, &self.camera, size_px, samples);
-                            self.rt_job = Some(RtJob::Still);
+                            self.rt.job = Some(RtJob::Still);
                         }
                         RtKind::Save { scale, path } => {
                             let [vw, vh] = self.last_size;
                             let out = [vw.max(1) * scale.max(1), vh.max(1) * scale.max(1)];
                             if self.renderer.save_begin(render_state, &self.camera, out[0], out[1], samples) {
-                                self.rt_job = Some(RtJob::Save { out, path, reading: None });
+                                self.rt.job = Some(RtJob::Save { out, path, reading: None });
                             }
                         }
                     }
                 } else {
-                    self.rt_warm_shown = true;
+                    self.rt.warm_shown = true;
                     force_raster = true;
                     ui.ctx().request_repaint();
                 }
@@ -257,19 +257,19 @@ impl App {
                 self.last_render_camera = Some(self.camera);
                 self.last_size = size_px;
             }
-            if matches!(self.rt_job, Some(RtJob::Still)) {
+            if matches!(self.rt.job, Some(RtJob::Still)) {
                 // Pump the still trace a few tiles per frame (responsive + progressive). Paint
                 // it once the first sample-chunk has landed; keep repainting until converged,
                 // then hold the finished still.
                 let done = self.renderer.rt_still_step(render_state, RT_STEP_SUBMITS);
                 paint_rt = self.renderer.raytrace_samples() > 0;
                 if done {
-                    self.rt_job = None;
-                    self.rt_still = true;
+                    self.rt.job = None;
+                    self.rt.still = true;
                 } else {
                     ui.ctx().request_repaint();
                 }
-            } else if self.rt_still {
+            } else if self.rt.still {
                 // Holding the finished still (view unchanged): keep painting it, no re-trace.
                 paint_rt = true;
             }
@@ -654,8 +654,8 @@ impl App {
 
             // VMD-style orientation axes gizmo in the chosen corner (a gizmo painted
             // onto the 3D image; its on/off + corner live in the top view toolbar).
-            if self.axes_on {
-                draw_axes_overlay(ui, rect, &self.camera, self.axes_corner);
+            if self.camera.axes_on {
+                draw_axes_overlay(ui, rect, &self.camera, self.camera.axes_corner);
             }
 
             // Selection-modifier hint, floating over the 3D image (top-center) while a
@@ -680,7 +680,7 @@ impl App {
 
             // Progress hint while a trace is requested (warming) or running (the R-key still or
             // a Save image), so the user sees it's working — shown from the very first frame.
-            let rt_hint = match (&self.rt_warm, &self.rt_job) {
+            let rt_hint = match (&self.rt.warm, &self.rt.job) {
                 (Some(RtKind::Still), _) | (_, Some(RtJob::Still)) => Some("Ray tracing…"),
                 (Some(RtKind::Save { .. }), _) | (_, Some(RtJob::Save { .. })) => Some("Saving…"),
                 _ => None,

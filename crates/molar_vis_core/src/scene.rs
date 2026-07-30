@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use glam::Vec3;
@@ -18,7 +19,7 @@ use crate::minimize::{Bond, BondOrder};
 use crate::moldata::MolData;
 use crate::render::RepGpu;
 use crate::secstruct::SsMap;
-use crate::trajectory::Trajectory;
+use crate::trajectory::{LoadMsg, Trajectory};
 
 /// Stable per-molecule identity, so undo/redo can reference molecules across
 /// deletion (a deleted molecule is parked in [`Scene::trash`] by this id).
@@ -1229,6 +1230,18 @@ pub struct Scene {
     /// Groups removed from the document but retained so undo/redo can restore them
     /// (mirrors [`trash`]; the metadata is tiny — members live in `trash`).
     pub group_trash: HashMap<GroupId, MolGroup>,
+    /// In-flight background trajectory loaders, keyed by molecule (so they survive
+    /// reorder/delete/undo). Drained each frame via `try_recv`.
+    ///
+    /// A `MolId`-keyed side table that must be pruned in lockstep with molecule removal, or a
+    /// loader outlives its molecule and keeps streaming frames into nothing. Keeping it here
+    /// rather than on `App` makes that one owner's invariant: every removal path goes through
+    /// [`Scene::trash_molecule`], which drops the loader with the molecule.
+    pub loaders: HashMap<MolId, Receiver<LoadMsg>>,
+    /// The browser's equivalent: an incremental reader per molecule, stepped a batch of frames
+    /// per frame (no threads in wasm). Pruned by the same paths.
+    #[cfg(target_arch = "wasm32")]
+    pub wasm_loaders: HashMap<MolId, crate::data::traj_wasm::TrajStream>,
     next_id: u64,
     next_group_id: u64,
 }
@@ -1438,6 +1451,43 @@ impl Scene {
     /// Clamp `selected_mol`/`selected_rep` to valid ranges (after add/remove). Also
     /// prunes group membership of vanished molecules, clamps each group's `current`,
     /// drops empty groups, and re-applies the group visibility invariant.
+    /// Move molecule `i` to the trash so the delete can be **undone**, dropping any in-flight
+    /// trajectory loader with it and re-clamping the selection. Returns its id.
+    ///
+    /// The one place a molecule leaves the document. Dropping the loader is what stops its
+    /// background thread (it exits when the receiver goes) and what keeps `loaders` from
+    /// outliving its molecule; doing it here rather than at each call site is why those two
+    /// tables can't drift apart.
+    pub fn trash_molecule(&mut self, i: usize) -> MolId {
+        let mol = self.molecules.remove(i);
+        let id = mol.id;
+        self.drop_loaders(id);
+        self.trash.insert(id, mol);
+        self.clamp_selection();
+        id
+    }
+
+    /// [`Self::trash_molecule`] for a **group member**, by id: goes through
+    /// [`Self::remove_grouped_molecule`] so the group's shared reps are re-materialized onto
+    /// the newly shown member. Returns whether the molecule was found.
+    pub fn trash_grouped_molecule(&mut self, mol_id: MolId) -> bool {
+        let Some(mol) = self.remove_grouped_molecule(mol_id) else {
+            self.clamp_selection();
+            return false;
+        };
+        self.drop_loaders(mol.id);
+        self.trash.insert(mol.id, mol);
+        self.clamp_selection();
+        true
+    }
+
+    /// Drop any loader belonging to molecule `id` (native thread receiver / wasm stream).
+    fn drop_loaders(&mut self, id: MolId) {
+        self.loaders.remove(&id);
+        #[cfg(target_arch = "wasm32")]
+        self.wasm_loaders.remove(&id);
+    }
+
     pub fn clamp_selection(&mut self) {
         // Prune dead members and empty groups.
         let live: std::collections::HashSet<MolId> =

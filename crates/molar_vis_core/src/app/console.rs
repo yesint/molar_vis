@@ -14,10 +14,10 @@ impl App {
     /// space above it (not a floating window).
     #[cfg(feature = "scripting")]
     pub(super) fn draw_console(&mut self, ui: &mut egui::Ui) {
-        if !self.console_open {
+        if !self.console.open {
             return;
         }
-        if let Some(src) = crate::script::console::show(ui, &mut self.console_open, &mut self.console) {
+        if let Some(src) = crate::script::console::show(ui, &mut self.console.open, &mut self.console.ui) {
             self.run_script(&src);
             ui.ctx().request_repaint();
         }
@@ -30,15 +30,15 @@ impl App {
     #[cfg(feature = "scripting")]
     pub(super) fn run_script(&mut self, source: &str) {
         use crate::script::{ConsoleLine, LineKind};
-        self.console.lines.push(ConsoleLine { kind: LineKind::Input, text: source.to_string() });
+        self.console.ui.lines.push(ConsoleLine { kind: LineKind::Input, text: source.to_string() });
         let summary = self.scene.summary();
         // Evaluate in the persistent REPL session so `let` bindings survive across
         // console lines (`let m = mol(0)` then, next line, `m.rep(0)…`).
-        let outcome = self.script.eval(source, summary);
-        self.console.lines.extend(outcome.output);
+        let outcome = self.console.repl.eval(source, summary);
+        self.console.ui.lines.extend(outcome.output);
         for cmd in outcome.commands {
             if let Err(e) = self.execute_command(cmd) {
-                self.console.lines.push(ConsoleLine { kind: LineKind::Error, text: e });
+                self.console.ui.lines.push(ConsoleLine { kind: LineKind::Error, text: e });
             }
         }
         self.view_dirty = true;

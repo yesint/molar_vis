@@ -83,13 +83,13 @@ impl App {
         self.scene.groups.clear();
         self.scene.trash.clear();
         self.scene.group_trash.clear();
-        self.loaders.clear();
+        self.scene.loaders.clear();
         self.editing_rep = None;
         self.load_dialog = None;
         // A new document = a fresh REPL: drop console variables so a stored handle
         // (`let m = mol(0)`) doesn't outlive the molecule it referred to.
         #[cfg(feature = "scripting")]
-        self.script.reset();
+        self.console.repl.reset();
     }
 
     /// Start a new, empty visualization state: remove every molecule, reset the
@@ -182,8 +182,8 @@ impl App {
             camera: Some(self.camera),
             pick_mode: self.pick_mode,
             selection_mode: self.selection_mode,
-            axes_on: self.axes_on,
-            axes_corner: self.axes_corner,
+            axes_on: self.camera.axes_on,
+            axes_corner: self.camera.axes_corner,
         }
     }
 
@@ -195,8 +195,8 @@ impl App {
         }
         self.pick_mode = view.pick_mode;
         self.selection_mode = view.selection_mode;
-        self.axes_on = view.axes_on;
-        self.axes_corner = view.axes_corner;
+        self.camera.axes_on = view.axes_on;
+        self.camera.axes_corner = view.axes_corner;
     }
 
     /// Save the current visualization state to a JSON session file (rfd picker).

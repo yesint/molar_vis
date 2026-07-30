@@ -616,12 +616,7 @@ impl App {
             let empty = self.scene.molecules[mi].remove_atom(i);
             if empty {
                 // The molecule is now empty → delete it (park in trash, undoable).
-                let m = self.scene.molecules.remove(mi);
-                self.loaders.remove(&m.id);
-                #[cfg(target_arch = "wasm32")]
-                self.wasm_loaders.remove(&m.id);
-                self.scene.trash.insert(m.id, m);
-                self.scene.clamp_selection();
+                self.scene.trash_molecule(mi);
                 if let Some(d) = self.draw.as_mut() {
                     d.target = None;
                     d.drag = DrawDrag::Idle;

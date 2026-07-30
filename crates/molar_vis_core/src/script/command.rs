@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use crate::app::Corner;
+use crate::camera::Corner;
 use crate::camera::{CueMode, Projection};
 use crate::color::{ColorMethod, DEFAULT_SOLID};
 use crate::material::Material;

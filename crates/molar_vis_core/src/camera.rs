@@ -233,6 +233,29 @@ pub struct Camera {
     /// boolean value (true → full) so pre-slider sessions still load.
     #[serde(default, deserialize_with = "de_gi")]
     pub gi: f32,
+    /// Whether the VMD-style orientation-axes gizmo is shown, and which viewport corner it
+    /// is anchored to.
+    ///
+    /// View state like `background`, edited in the same view-settings tab, driven by the same
+    /// host API — so it belongs with the camera rather than with the menu widget that edits
+    /// it, and a toggle re-renders through `Camera`'s `PartialEq` with no extra dirty flag.
+    /// **Not serialized here**: [`ViewState`](crate::session::ViewState) is the single
+    /// persistence surface for these two (it carried them before they moved), so leaving them
+    /// out keeps session files unchanged and lets one written before the move still load.
+    #[serde(skip)]
+    pub axes_on: bool,
+    #[serde(skip)]
+    pub axes_corner: Corner,
+}
+
+/// A viewport corner, for anchoring the axes gizmo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomRight,
 }
 
 /// Deserialize `gi` as a float, but tolerate the legacy boolean form (true → 1.0, false → 0.0)
@@ -290,6 +313,8 @@ impl Camera {
             background: Background::default(),
             fill,
             gi: 0.0,
+            axes_on: false,
+            axes_corner: Corner::default(),
         }
     }
 
