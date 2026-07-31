@@ -936,7 +936,7 @@ impl App {
 
         // Whether we're currently choosing an interaction partner (then each rep row
         // becomes a click target for selecting it as the partner).
-        let picking_partner = self.partner_pick.is_some();
+        let picking_partner = self.rep_pick.is_some();
 
         // Read before the `&mut mol` borrow below, since the params panel needs it inside.
         let charge_status = self.charge_status.clone();
@@ -1354,7 +1354,9 @@ impl App {
                         view_dirty = true;
                     }
                 }
-                RepAction::StartPartnerPick(j) => self.partner_pick = Some((mol_id, j)),
+                RepAction::StartPartnerPick(j) => {
+                    self.rep_pick = Some(RepPick::Partner(mol_id, j))
+                }
                 RepAction::OpenInteractionSettings(j) => {
                     self.interactions_dialog = Some(InteractionsDialog {
                         mol: mol_id,
@@ -1363,7 +1365,7 @@ impl App {
                     });
                 }
                 // A rep row clicked while choosing a partner → assign it.
-                RepAction::ChoosePartner(j) => self.assign_partner(mi, j),
+                RepAction::ChoosePartner(j) => self.choose_rep(mi, j),
                 // Focus the camera on a clicked partner rep — it reads *another* molecule,
                 // which is why this could never run inside the row closures.
                 RepAction::FocusPartner(src, pr) => {

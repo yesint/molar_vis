@@ -565,7 +565,8 @@ impl App {
             pick_mode,
             selection_mode,
             lasso_path: Vec::new(),
-            partner_pick: None,
+            rep_pick: None,
+            align_dialog: None,
             themed_bg: None,
             charge_status: None,
             interactions_dialog: None,
@@ -695,6 +696,24 @@ impl App {
                 .find(|m| m.group.is_none())
                 .map(|m| m.trajectory.current);
             log::info!("debug docking: pose={pose:?} receptor_frame={frame:?}");
+        }
+
+        // Verification hooks: MOLAR_VIS_DEBUG_ALIGN_DIALOG=1 opens the Analysis ▸ Align
+        // window; MOLAR_VIS_DEBUG_ALIGN=<spec> also runs it (see `App::debug_align`).
+        // Ahead of the offscreen-render hooks, so a moved molecule lands in a
+        // MOLAR_VIS_DEBUG_SAVE_IMAGE render.
+        if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_ALIGN_DIALOG") {
+            app.align_dialog = Some(super::align_dialog::AlignDialog::new(&app.scene));
+            // `=pick` also enters "choose a representation" mode for the source, so the
+            // prompt and the lit-up picker button can be screenshot (a click on a rep can't
+            // be simulated headlessly; delivering it is the partner picker's own path).
+            if v == "pick" {
+                app.rep_pick =
+                    Some(super::RepPick::Align(super::align_dialog::AlignSide::Source));
+            }
+        }
+        if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_ALIGN") {
+            app.debug_align(&spec);
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai

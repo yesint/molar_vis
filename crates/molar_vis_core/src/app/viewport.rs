@@ -339,12 +339,12 @@ impl App {
             // the finger cursor + whole-rep highlight + click-assign are handled in the
             // hover branch below. Takes precedence over the normal pick modes and works
             // regardless of the current pick mode.
-            if self.partner_pick.is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.partner_pick = None;
+            if self.rep_pick.is_some() && ui.input_mut(|i| i.key_pressed(egui::Key::Escape)) {
+                self.rep_pick = None;
                 self.scene.clear_hover();
                 ui.ctx().request_repaint();
             }
-            let picking_partner = self.partner_pick.is_some();
+            let picking_partner = self.rep_pick.is_some();
             if picking_partner {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
@@ -407,14 +407,14 @@ impl App {
                                     ui.ctx().request_repaint();
                                 }
                                 if response.clicked() {
-                                    self.assign_partner(h.mol, h.rep);
+                                    self.choose_rep(h.mol, h.rep);
                                     ui.ctx().request_repaint();
                                 }
                             }
                             None => {
                                 // Click on empty space cancels the pick.
                                 if response.clicked() {
-                                    self.partner_pick = None;
+                                    self.rep_pick = None;
                                     ui.ctx().request_repaint();
                                 }
                             }
@@ -722,16 +722,29 @@ impl App {
         }
     }
 
+    /// Deliver the rep `(mi, rep)` the user just clicked to whatever asked for it — the
+    /// Interactions partner, or a side of the alignment dialog (see [`RepPick`]).
+    ///
+    /// The one entry point for both click paths (the 3-D view here, a rep row in
+    /// `draw_reps_for`), so neither has to know what the pick is for.
+    pub(super) fn choose_rep(&mut self, mi: usize, rep: usize) {
+        match self.rep_pick {
+            Some(RepPick::Partner(..)) => self.assign_partner(mi, rep),
+            Some(RepPick::Align(side)) => self.align_take_rep(side, mi, rep),
+            None => {}
+        }
+    }
+
     /// Assign the rep `(chosen_mi, chosen_rep)` as the partner of the Interactions rep
-    /// being configured (held in `self.partner_pick`), then leave partner-pick mode and
-    /// record one undo checkpoint. A pick resolving to the Interactions rep itself is
-    /// ignored (pick mode stays active so the user can choose a different rep).
-    pub(super) fn assign_partner(&mut self, chosen_mi: usize, chosen_rep: usize) {
-        let Some((target_id, target_rep)) = self.partner_pick else {
+    /// being configured (held in `self.rep_pick`), then leave pick mode and record one undo
+    /// checkpoint. A pick resolving to the Interactions rep itself is ignored (pick mode
+    /// stays active so the user can choose a different rep).
+    fn assign_partner(&mut self, chosen_mi: usize, chosen_rep: usize) {
+        let Some(RepPick::Partner(target_id, target_rep)) = self.rep_pick else {
             return;
         };
         let Some(target_mi) = self.scene.mol_index(target_id) else {
-            self.partner_pick = None; // the Interactions rep's molecule is gone
+            self.rep_pick = None; // the Interactions rep's molecule is gone
             return;
         };
         if target_mi == chosen_mi && target_rep == chosen_rep {
@@ -742,7 +755,7 @@ impl App {
             rep.partner = Some((chosen_src, chosen_rep));
             rep.geom_dirty = true;
         }
-        self.partner_pick = None;
+        self.rep_pick = None;
         self.scene.clear_hover();
         self.history.maybe_record(crate::history::EditState::capture(&self.scene));
         self.view_dirty = true;

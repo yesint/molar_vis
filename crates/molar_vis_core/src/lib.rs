@@ -4,6 +4,7 @@
 //! parameters). Native-only concerns (argv parsing, file dialogs, logging setup)
 //! live in the `molar_vis` binary so this crate can compile to `wasm32-unknown-unknown`.
 
+mod analysis;
 mod app;
 mod camera;
 /// Espaloma partial-charge assignment (native only — see the module docs).

@@ -37,6 +37,7 @@ use egui_phosphor::regular as icon;
 
 // `pub(crate)`: the ray tracer gathers interaction dashes through `build::build_interactions`
 // too, so the trace shows the same contact lines the raster does.
+mod align_dialog;
 pub(crate) mod build;
 mod console;
 mod dihedral;
@@ -130,6 +131,9 @@ pub struct App {
     /// Open "Load docking data…" dialog, if any (native: it reads several files from disk).
     #[cfg(not(target_arch = "wasm32"))]
     docking_dialog: Option<ModalState<docking_dialog::DockingDialog>>,
+    /// Open **Analysis ▸ Align…** dialog, if any. A non-modal window (it is driven partly by
+    /// clicks on the tree / the 3-D view), so it is not a [`ModalState`].
+    align_dialog: Option<align_dialog::AlignDialog>,
     /// Open "delete trajectory frames" dialog, if any.
     delete_frames_dialog: Option<ModalState<DeleteFramesDialog>>,
     /// Open "rename molecule" dialog: the target molecule + the edit buffer.
@@ -144,11 +148,10 @@ pub struct App {
     /// In-progress lasso polygon (viewport pixel coords), accumulated while
     /// dragging in `PickMode::Lasso`. Empty when not lassoing. Transient view state.
     lasso_path: Vec<egui::Pos2>,
-    /// Active "choose a partner rep" mode for an Interactions rep, or `None`. Holds the
-    /// Interactions rep being configured as `(its molecule id, its rep index)`. While
-    /// set, hovering a rep's geometry (viewport) or a rep row (panel) highlights it and
-    /// clicking assigns it as the partner. Esc / empty-click cancels. Transient.
-    partner_pick: Option<(MolId, usize)>,
+    /// Active **"choose a representation"** mode, or `None` — and what the choice is for.
+    /// While set, hovering a rep's geometry (viewport) or a rep row (panel) highlights the
+    /// whole rep and clicking delivers it; Esc / empty-click cancels. Transient.
+    rep_pick: Option<RepPick>,
     /// Open per-type **Settings** dialog of an Interactions rep, if any: which rep, plus
     /// the active type tab. A movable `egui::Window` (`draw_interactions_dialog`) edits
     /// the rep's `InteractionSettings`. Transient.
@@ -223,6 +226,19 @@ pub type AppJob = Box<dyn FnOnce(&mut App) + Send>;
 #[cfg(target_arch = "wasm32")]
 pub type AppJob = Box<dyn FnOnce(&mut App)>;
 
+
+/// What a picked representation is for — the destination of the one "choose a rep" gesture
+/// (finger cursor, whole-rep glow, click in the tree *or* in the 3-D view, Escape to cancel).
+///
+/// The gesture is the same wherever the answer goes, so it stays one mechanism with a
+/// destination attached rather than one flag per feature that wants it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RepPick {
+    /// Assign it as the partner of this Interactions rep, given as `(molecule, rep)`.
+    Partner(MolId, usize),
+    /// Fill this side of the alignment dialog from it.
+    Align(align_dialog::AlignSide),
+}
 
 /// Tabs in the top-bar "view settings" (hamburger) menu.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -775,6 +791,7 @@ impl eframe::App for App {
         self.draw_image_dialog(&ctx);
         self.draw_settings_dialog(&ctx, frame);
         self.draw_interactions_dialog(&ctx);
+        self.draw_align_dialog(&ctx);
 
         // Apply undo/redo after the panel so list indices stay stable during draw. Each
         // step is replayed individually (a structural delta must be inverted in order —

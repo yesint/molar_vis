@@ -591,6 +591,22 @@ impl App {
                 }
             }).response);
 
+            // — Analysis — measurements on the loaded structures. Pure computation on the
+            // scene (no filesystem), so it is available in the browser too.
+            menu_buttons.push(ui.menu_button("Analysis", |ui| {
+                if ui
+                    .button(format!("{}  Align…", icon::ARROWS_IN))
+                    .on_hover_text(
+                        "Superpose one selection onto another and report their RMSD",
+                    )
+                    .clicked()
+                {
+                    self.align_dialog =
+                        Some(super::align_dialog::AlignDialog::new(&self.scene));
+                    ui.close();
+                }
+            }).response);
+
             // — View — (its only entry is the console toggle, so the whole menu goes
             // with the `scripting` feature)
             #[cfg(feature = "scripting")]

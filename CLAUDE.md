@@ -154,6 +154,13 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
   `MOLAR_VIS_DEBUG_THEME=light|dark|system` (pin the theme without touching the saved config, so
   either palette — and the viewport background that follows it — can be screenshot) +
+  `MOLAR_VIS_DEBUG_ALIGN_DIALOG=[1|pick]` (open the **Analysis ▸ Align** window; `pick` also enters
+  "choose a representation" mode for the source, so the prompt + lit picker button show) +
+  `MOLAR_VIS_DEBUG_ALIGN="<src mol>,<sel>,<frame>;<tgt mol>,<sel>,<frame>;<flags>"` (fill that
+  dialog and press **Align**, logging the RMSD — flags from `common`/`all`/`whole`/`same`/`rmsd`,
+  the last measuring without moving; the target half may be empty with `same`. Runs through the same
+  request-building + undo-recording path the buttons do and leaves the dialog open, so a `_SAVE_UI`
+  shot shows the readout and a `_SAVE_IMAGE` one shows the moved molecule) +
   `MOLAR_VIS_DEBUG_DOCKING="<protein files>;<ligand files>"` (load a docking result the way the
   dialog's [Load] does — paths comma-separated within each half, e.g.
   `"tests/jak2.pdb,tests/jak2_traj.pdb;tests/jak2_inhs.sd"` — bypassing the file picker) +
@@ -834,6 +841,37 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     (`MolGroup::docking_sync`, transient) and propagates whichever moved, so playback works for
     free and no control can be missed. Applies to **any** group whose Interactions partner has one
     frame per member, however it was set up — not just what the dialog built.
+- `analysis.rs` + `app/align_dialog.rs` — **superposition + RMSD** (M33), the first entry under the
+  new **Analysis** menu. `analysis.rs` is the pure half (WASM-safe, touches only [`Scene`]): one
+  `Request` (two `Side`s = molecule + selection + frame, plus `all_frames` / `common_subset` /
+  `move_whole`) drives `rmsd` (measure) and `align` (fit, then measure). The maths is molar's
+  (`fit_transform` / `rmsd`, `get_matching_atoms_by_name`); what lives here is everything around it:
+  - **Pairing** (`pair_atoms`) — atom for atom by default, which needs equal counts and *says so*
+    with the advice that fixes it; with **Common subset** molar aligns the two **atom-name
+    sequences** and only matched atoms are compared. That recovers from a few missing atoms (an
+    unresolved side chain, a different protonation) — it is **not** a structural matcher: names
+    repeat down a chain, so a *systematic* difference (every `CA` gone from one side) lets it pair
+    one residue with the next and the RMSD is then meaningless. Verified: it silently returns
+    0.101 nm for two *identical* structures paired that way, hence the module-doc warning and the
+    option being off in a request built by hand.
+  - **A resolved `Plan`** (selections compiled, frames chosen, atoms paired) so both entry points
+    are cheap per frame and every failure mode sits in one place — including a pairing under 3
+    atoms, where a least-squares fit isn't determined.
+  - **Two-phase apply**: every frame's fitted coordinates are computed **read-only first**, then
+    written. The target may live in the *same* molecule (fitting a trajectory onto one of its own
+    frames), so nothing may be written while positions are still being read — and a failure leaves
+    the scene untouched. Phase 1 returns finished coordinates rather than a transform, which also
+    keeps molar's nalgebra isometry type out of every signature (nalgebra is not a direct
+    dependency; the whole molar boundary goes through molar's own aliases).
+  - **Undo**: `align` returns one `StructEdit::Coords` per moved frame for the caller to record as
+    **one** step (`History::record_structs`) — a 27-frame trajectory fit is one Ctrl+Z.
+  `app/align_dialog.rs` is the window (see the *Menu bar* section for the semantics of each
+  control). It is deliberately **not** a modal: each side can be filled by *clicking a
+  representation* in the tree or the 3-D view, which a modal's backdrop would swallow, and the
+  window grows when the readout appears, which a centred `Modal` answers by jumping its top edge
+  (the same reason the settings window is a `Window`). A stale readout is dropped the moment any
+  input changes, like a rep's selection feedback. Hooks: `MOLAR_VIS_DEBUG_ALIGN=<spec>` (runs it
+  through the real button path) + `_ALIGN_DIALOG=[1|pick]`.
 - `charges.rs` — **espaloma partial-charge assignment** on a selection (M31), via `molar_ff`'s
   `ApplyCharges`. **Native only** (`tract` + a ~600 kB bundled ONNX has no business in the wasm
   bundle, and the browser has no way to obtain charges anyway; charge *coloring* works everywhere).
@@ -1209,6 +1247,49 @@ next frame). The menus —
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
   remain as test-only/API machinery) · **Settings…** (`GEAR_SIX`) opening the program-settings window
   (`App::draw_settings_dialog`; see `settings.rs` / M21).
+- **Analysis** — measurements on the loaded structures; pure computation on the scene, so it is in
+  the browser build too. **Align…** (`ARROWS_IN`) opens the alignment window
+  (`app/align_dialog.rs`, [`analysis.rs`]): **Source** and **Target** rows, each `[molecule ▾]
+  [selection text] [⌖ pick a rep] [frame ⇕]`, then the checkboxes *All frames* · *Same as source* ·
+  *Common subset* · *Move whole molecule* (**all off by default**), an **RMSD:** readout that
+  appears once something has been computed, and `[Align] [RMSD] [Close]`. The decisions behind it:
+  - **There is no "Selection" vs "Existing rep" distinction** (the first sketch had one): a rep *is*
+    a molecule plus a selection, so the **⌖ picker** just writes those into the row — click a rep in
+    the tree or in the 3-D view — and the text stays editable. It reuses the Interactions partner
+    picker's whole gesture through **`RepPick`** (`Partner` | `Align(side)`) — one pick mechanism
+    with a destination attached, dispatched by `App::choose_rep`, rather than one flag per feature.
+  - **The molecule dropdown is group-aware and scrolls** (`mol_entries`/`chosen`/`group_entry`): a
+    [`MolGroup`] is **one** expandable row (`⧉ ligands20.sdf — diazepam ▸`) whose submenu lists the
+    members with the shown one marked as the panel marks it; clicking the row itself takes the
+    **shown** member, so the common case is one click. Listing members flat is what broke this
+    control — a 20-pose SDF buried every other molecule — and it also misrepresented a group, which
+    the rest of the UI treats as one thing showing one member at a time. Both levels are wrapped in
+    a `ScrollArea` (`LIST_MAX_H`), since a menu taller than the screen can't be used at all. A
+    chosen member reads qualified by its group (`ligands20.sdf: aspirin`), and a freshly opened
+    dialog defaults to the group's **shown** member (`default_mol`), never to a hidden sibling.
+  - **The selection field has a fixed width and the window grows around it** (`SEL_FIELD_W`,
+    `set_min_width(MIN_WIDTH)` rather than `set_width`): it used to take whatever the molecule
+    dropdown left over, so choosing a group member — whose label carries the group's name — squeezed
+    the longest thing typed in this dialog down to a few characters. Both dropdowns share one
+    reserved width (the wider of the two current labels, `max_label_width`), which also keeps the
+    two rows' columns lined up with each other.
+  - **`Common subset` is off by default**: atom for atom is the honest comparison and it *reports*
+    a count mismatch, whereas name-pairing guesses — something to switch on deliberately.
+  - **`All frames` sits on the Source row**, because it belongs to what *moves*: it fits every frame
+    of the source molecule onto whatever the target is (a whole trajectory onto a reference
+    structure, or onto one of its own frames). Enabled only when that molecule has >1 frame.
+  - **`Same as source`** makes the target the source's own molecule + selection at the frame in the
+    **source's** frame box (that box is then the *reference*), which with `All frames` is the usual
+    trajectory fit. With it off, the frame that moves is the molecule's **displayed** one — the
+    source's box is spoken for, and comparing a frame with itself would do nothing.
+  - **`Move whole molecule`** applies the fit to every atom of the source molecule; **off (the
+    default)** moves only the atoms its selection matched. The transform comes from the selection
+    either way. Off means a partial selection is moved *out of* its molecule — which is the user's
+    explicit choice of default.
+  - **RMSD** is reported after the fit for [Align] (so it is the residual, measured from the stored
+    coordinates) and without moving anything for [RMSD]; over several frames it reads
+    `mean of N frames (min …, max …)`, since one number for a fitted trajectory can't say whether
+    it is uniformly close or has outlier frames.
 - **View** — **`[x] Console`** (a `CHECK_SQUARE`/`SQUARE`-marked toggle of `console_open` — the Rhai
   scripting console bottom panel; opening it sets `console.focus_input` so the input grabs focus; see
   `script/engine.rs` / M24). This is the menu's only entry, so the **whole View menu is behind the
@@ -1901,7 +1982,8 @@ History labels via `describe_change` ("edit selection", "change coloring",
   single rep-level **Line width** slider (applies to all types) + a **Settings…** button opening the
   **tabbed dialog** (`draw_interactions_dialog`, one tab per type, each with that type's full parameter
   set — H-bonds has D–A distance, D–A-with-H, min angle — + a Reset-all footer; line width is *not* in
-  the dialog); **partner-pick mode** (`App::partner_pick`, `app/viewport.rs`) — [Choose…] enters a
+  the dialog); **partner-pick mode** (`App::rep_pick`, now shared with the alignment dialog's ⌖
+  picker via [`RepPick`] — M33; `app/viewport.rs`) — [Choose…] enters a
   mode where hovering a rep's geometry highlights the whole rep (finger cursor, via `pick::PickHit.rep`)
   and a click assigns it, **and** clicking a rep's **panel row** also assigns it, Esc / empty-click
   cancels, one undo checkpoint (`assign_partner`). Interaction lines **are** ray-traced (as thin
@@ -2006,6 +2088,34 @@ History labels via `describe_change` ("edit selection", "change coloring",
   the coupling re-establishes itself on load, but a multi-file ligand selection has no single
   source to reload the group from — the members keep their own per-file sources, as for a
   browser-loaded group); no per-pose score display or sorting.
+- ✅ M33 **Analysis menu — superposition + RMSD** — a new top-level **Analysis** menu whose first
+  entry, **Align…**, opens a non-modal window that fits one selection onto another and reports the
+  RMSD ([`analysis.rs`] + `app/align_dialog.rs`; see those bullets and the *Menu bar* section for
+  every control's semantics). The maths is molar's (`fit_transform`/`rmsd`, and
+  `get_matching_atoms_by_name` for the **Common subset** pairing); the work here is the pairing
+  policy, the frame/atom bookkeeping, a **read-everything-then-write** apply (the target may be a
+  frame of the very molecule being moved), and one **undoable** step per press however many frames
+  it moved. Along the way the Interactions partner picker was generalized into one
+  **`RepPick`** gesture (`Partner` | `Align(side)`, dispatched by `App::choose_rep`), which is what
+  let the dialog drop the "Selection vs Existing rep" distinction its first sketch had: a rep is a
+  molecule plus a selection, so the ⌖ picker just writes both into the row. Verified: 8 unit tests
+  (identical copies → 0; a rigidly rotated+translated copy recovered to <1e-3 nm; the count-mismatch
+  refusal and the name-paired path; a <3-atom fit refused; **undo restores the pre-align
+  coordinates**; `Move whole molecule` off moving only the selection; both label shapes; a 20-member
+  SDF group listed as **one** dropdown row with its members inside), 137
+  tests total (141 with `scripting`), native + wasm32 +
+  `molar_vis_py` green with no warnings, clippy clean, and headless checks: an identical-pair RMSD of
+  0.000, the count-mismatch message, a 27-frame `same as source` trajectory fit
+  (`0.036 nm — mean of 27 frames (min 0.000, max 0.061)`, min 0 being the reference frame fitting
+  itself), before/after renders of a 40°-rotated + 1.5 nm-translated copy of 2lao coming back onto
+  the original, two group members aligned by common subset (0.499 nm) and a member against
+  itself (0.000), and window shots of the dialog fresh, with a readout, in rep-pick mode, and
+  defaulting to a group's shown member. Hooks
+  `MOLAR_VIS_DEBUG_ALIGN` / `_ALIGN_DIALOG`. **Deferred**: RMSD-vs-frame curves (the readout is a
+  summary line, not a plot); mass-weighted RMSD (molar has `rmsd_mw`, unexposed); no scripting/JS/
+  Python binding for `align` yet; and the picker's *click delivery* is the partner picker's own path,
+  so it is covered by that feature's verification rather than re-checked headlessly (a click on a
+  rep row can't be simulated).
 - 🟡 M11 **Atom picking + lasso selection** — `pick.rs` (`PickMode {Off, Click, Lasso}`,
   `PickHit`, `cursor_ray`, `ray_sphere`, `effective_radius`, `pick(scene, view, proj, ndc) ->
   Option<PickHit>`): a **CPU ray-cast** of the cursor against every visible atom **at its displayed
