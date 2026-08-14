@@ -165,21 +165,45 @@ impl RtScene {
                 Some(frame) => frame,
                 None => mol.data.state(),
             };
+            // Periodic-image translations, read from the same box `render_scene` uses
+            // (`mol.data.state().pbox`) so the trace replicates exactly the images the
+            // rasterizer draws. `None` (no box) → the single central copy.
+            let box_vecs = mol.data.state().pbox.as_ref().map(|pb| {
+                let m = pb.get_matrix();
+                // Columns of the box matrix are the lattice vectors a, b, c (nm).
+                [
+                    Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
+                    Vec3::new(m[(0, 1)], m[(1, 1)], m[(2, 1)]),
+                    Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
+                ]
+            });
             for (ri, rep) in mol.reps.iter().enumerate() {
                 if !rep.visible {
                     continue;
                 }
+                // Every image this rep draws (central included iff `self_img`); a single
+                // `[0,0,0]` when the molecule has no box. The tracer has no per-image camera,
+                // so the replication the rasterizer gets from `images[mi][ri]` is baked in
+                // here — each primitive below is emitted once per offset, shifted by it.
+                let offsets = match box_vecs {
+                    Some([a, b, c]) => rep.periodic.offsets(a, b, c),
+                    None => vec![Vec3::ZERO],
+                };
                 // Interaction dashes are built from *two* molecules, so they don't come out of
                 // `geometry::build` (which returns nothing for this style) but from the same
                 // second-pass builder `rebuild_dirty` uses. Without this the ray trace lost every
                 // contact line — the one thing a docking picture is *about*.
                 if matches!(rep.params, crate::geometry::RepParams::Interactions { .. }) {
                     let geom = crate::app::build::build_interactions(scene, mi, ri);
-                    for seg in geom.lines.chunks_exact(2) {
-                        if let Some(gc) = line_capsule(&seg[0], &seg[1], view) {
-                            aabbs.push(cylinder_aabb(&gc));
-                            tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
-                            self.cylinders.push(gc);
+                    for &off in &offsets {
+                        for seg in geom.lines.chunks_exact(2) {
+                            let (v0, v1) =
+                                (shift_line_vertex(seg[0], off), shift_line_vertex(seg[1], off));
+                            if let Some(gc) = line_capsule(&v0, &v1, view) {
+                                aabbs.push(cylinder_aabb(&gc));
+                                tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
+                                self.cylinders.push(gc);
+                            }
                         }
                     }
                     continue;
@@ -204,57 +228,112 @@ impl RtScene {
                     dashed_pbc,
                 );
 
-                for sp in &geom.spheres {
-                    let gs = GpuSphere {
-                        c: [sp.center[0], sp.center[1], sp.center[2], sp.radius],
-                        m: [sp.color, sp.mat, 0, 0],
-                    };
-                    aabbs.push(sphere_aabb(&gs));
-                    tags.push(tag(TAG_SPHERE, self.spheres.len()));
-                    self.spheres.push(gs);
-                }
-                for cy in &geom.cylinders {
-                    // Multi-order bonds' parallel strands are shifted by the *rasterizer's vertex
-                    // shader*, from the camera, so they stay side-by-side at any angle (see
-                    // `cylinder.wgsl`). The tracer has no vertex stage, so the same shift is baked
-                    // in here — otherwise a double/triple/aromatic bond traced as a single strand,
-                    // its siblings hidden inside it.
-                    let [p0, p1] = strand_offset(cy, view.view);
-                    let gc = GpuCylinder {
-                        c0: [p0[0], p0[1], p0[2], cy.radius],
-                        c1: [p1[0], p1[1], p1[2], 0.0],
-                        m: [cy.color, cy.mat, cy.color1, 0],
-                    };
-                    aabbs.push(cylinder_aabb(&gc));
-                    tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
-                    self.cylinders.push(gc);
-                }
-                // Lines (the Lines rep, interaction dashes, the periodic box) are screen-space
-                // quads in the rasterizer — a constant *pixel* width, which a ray has no notion
-                // of. Traced as **thin capsules** whose world radius is that pixel width
-                // converted at the traced camera, so the trace shows what the raster shows: a
-                // lines-only receptor used to vanish completely from a ray-traced docking view,
-                // which is the whole backdrop of the picture.
-                for seg in geom.lines.chunks_exact(2) {
-                    if let Some(gc) = line_capsule(&seg[0], &seg[1], view) {
+                for &off in &offsets {
+                    for sp in &geom.spheres {
+                        let gs = GpuSphere {
+                            c: [
+                                sp.center[0] + off.x,
+                                sp.center[1] + off.y,
+                                sp.center[2] + off.z,
+                                sp.radius,
+                            ],
+                            m: [sp.color, sp.mat, 0, 0],
+                        };
+                        aabbs.push(sphere_aabb(&gs));
+                        tags.push(tag(TAG_SPHERE, self.spheres.len()));
+                        self.spheres.push(gs);
+                    }
+                    for cy in &geom.cylinders {
+                        // Multi-order bonds' parallel strands are shifted by the *rasterizer's
+                        // vertex shader*, from the camera, so they stay side-by-side at any angle
+                        // (see `cylinder.wgsl`). The tracer has no vertex stage, so the same shift
+                        // is baked in here — otherwise a double/triple/aromatic bond traced as a
+                        // single strand, its siblings hidden inside it. The strand shift is
+                        // translation-invariant, so the periodic `off` just adds on top of it.
+                        let [p0, p1] = strand_offset(cy, view.view);
+                        let (p0, p1) = (p0 + off, p1 + off);
+                        let gc = GpuCylinder {
+                            c0: [p0[0], p0[1], p0[2], cy.radius],
+                            c1: [p1[0], p1[1], p1[2], 0.0],
+                            m: [cy.color, cy.mat, cy.color1, 0],
+                        };
                         aabbs.push(cylinder_aabb(&gc));
                         tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
                         self.cylinders.push(gc);
                     }
+                    // Lines (the Lines rep, interaction dashes, the periodic box) are screen-space
+                    // quads in the rasterizer — a constant *pixel* width, which a ray has no notion
+                    // of. Traced as **thin capsules** whose world radius is that pixel width
+                    // converted at the traced camera, so the trace shows what the raster shows: a
+                    // lines-only receptor used to vanish completely from a ray-traced docking view,
+                    // which is the whole backdrop of the picture. (Each image's capsule is built
+                    // from the shifted endpoints, so a perspective view's per-image line width is
+                    // correct too.)
+                    for seg in geom.lines.chunks_exact(2) {
+                        let (v0, v1) =
+                            (shift_line_vertex(seg[0], off), shift_line_vertex(seg[1], off));
+                        if let Some(gc) = line_capsule(&v0, &v1, view) {
+                            aabbs.push(cylinder_aabb(&gc));
+                            tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
+                            self.cylinders.push(gc);
+                        }
+                    }
+                    // Mesh: append vertices (offset triangle indices into the shared array).
+                    let base = self.mesh_verts.len() as u32;
+                    for v in &geom.mesh.vertices {
+                        self.mesh_verts.push(GpuMeshVertex {
+                            p: [
+                                v.pos[0] + off.x,
+                                v.pos[1] + off.y,
+                                v.pos[2] + off.z,
+                                f32::from_bits(v.color),
+                            ],
+                            n: [v.normal[0], v.normal[1], v.normal[2], f32::from_bits(v.mat)],
+                        });
+                    }
+                    for t in geom.mesh.indices.chunks_exact(3) {
+                        let (i0, i1, i2) = (base + t[0], base + t[1], base + t[2]);
+                        aabbs.push(triangle_aabb(&self.mesh_verts, i0, i1, i2));
+                        tags.push(tag(TAG_TRIANGLE, self.triangles.len()));
+                        self.triangles.push(GpuTriangle { i: [i0, i1, i2, 0] });
+                    }
                 }
-                // Mesh: append vertices (offset triangle indices into the shared array).
-                let base = self.mesh_verts.len() as u32;
-                for v in &geom.mesh.vertices {
-                    self.mesh_verts.push(GpuMeshVertex {
-                        p: [v.pos[0], v.pos[1], v.pos[2], f32::from_bits(v.color)],
-                        n: [v.normal[0], v.normal[1], v.normal[2], f32::from_bits(v.mat)],
-                    });
+            }
+            // Periodic-box wireframe: the molecule-level box (central) iff `mol.show_box`,
+            // plus a replica at each image cell of any visible rep with `periodic.show_box`
+            // on — exactly the cells `render_scene`'s `draw_reps` draws it at. The tracer
+            // renders no box at all otherwise, so a periodic view lost every cell outline.
+            if let Some(pbox) = mol.data.state().pbox.as_ref() {
+                let mut box_offsets: Vec<Vec3> = Vec::new();
+                if mol.show_box {
+                    box_offsets.push(Vec3::ZERO);
                 }
-                for t in geom.mesh.indices.chunks_exact(3) {
-                    let (i0, i1, i2) = (base + t[0], base + t[1], base + t[2]);
-                    aabbs.push(triangle_aabb(&self.mesh_verts, i0, i1, i2));
-                    tags.push(tag(TAG_TRIANGLE, self.triangles.len()));
-                    self.triangles.push(GpuTriangle { i: [i0, i1, i2, 0] });
+                if let Some([a, b, c]) = box_vecs {
+                    for rep in &mol.reps {
+                        if rep.visible && rep.periodic.show_box {
+                            box_offsets.extend(rep.periodic.offsets(a, b, c));
+                        }
+                    }
+                }
+                // Dedup coincident cells (e.g. `mol.show_box` + a rep's central image), so
+                // the same box outline isn't traced twice.
+                box_offsets.sort_by(|u, v| {
+                    u.to_array().partial_cmp(&v.to_array()).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                box_offsets.dedup();
+                if !box_offsets.is_empty() {
+                    let edges = geometry::box_wireframe(pbox);
+                    for off in box_offsets {
+                        for seg in edges.chunks_exact(2) {
+                            let (v0, v1) =
+                                (shift_line_vertex(seg[0], off), shift_line_vertex(seg[1], off));
+                            if let Some(gc) = line_capsule(&v0, &v1, view) {
+                                aabbs.push(cylinder_aabb(&gc));
+                                tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
+                                self.cylinders.push(gc);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -364,6 +443,16 @@ fn line_capsule(
         c1: [b[0], b[1], b[2], 0.0],
         m: [v0.color, FLAT_MAT, v1.color, FLAG_FLAT_ENDS],
     })
+}
+
+/// A copy of `v` translated by `off` (nm) — used to replicate a line at each periodic image
+/// before it's converted to a capsule, so `line_capsule`'s view-dependent width/offset are
+/// computed at the image's real position.
+fn shift_line_vertex(v: crate::render::line::LineVertex, off: Vec3) -> crate::render::line::LineVertex {
+    crate::render::line::LineVertex {
+        pos: [v.pos[0] + off.x, v.pos[1] + off.y, v.pos[2] + off.z],
+        ..v
+    }
 }
 
 /// A multi-order bond strand's endpoints, with the same screen-plane shift the rasterizer's
