@@ -1,6 +1,6 @@
 # molar_vis — a modern molecular viewer in pure Rust
 
-[![Rust](https://img.shields.io/badge/rust-1.83+-blue.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.85+-blue.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Artistic--2.0-blue.svg)](#license)
 [![Built on molar](https://img.shields.io/badge/built%20on-molar-orange.svg)](https://github.com/yesint/molar)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20WASM-green.svg)](#building)
@@ -22,6 +22,14 @@ screen-space **ambient occlusion** and real-time **cast shadows**, VMD-style **d
 previews**, periodic-image replication with dashed wrap-around bonds, and a **hover lens** that
 quietly reveals the atoms tucked under a cartoon ribbon or a molecular surface. A settings dialog
 remembers how you like things between runs.
+
+It has grown well past a plain viewer, too. A built-in **GPU ray tracer** renders
+publication-quality images (path-traced global illumination, ambient occlusion, soft shadows); an
+interactive **structure editor** lets you sketch atoms and bonds and rotate dihedrals with on-the-fly
+cleanup; and a set of **drug-discovery tools** cover protein–ligand **interaction detection**, loading
+**docking** results, structure **superposition / RMSD**, and **partial-charge** coloring. You can drive
+all of it from the GUI, from **Python / Jupyter**, from **JavaScript** in the browser, or from a
+built-in **scripting console**.
 
 ![molar_vis](docs/screenshot.png)
 
@@ -89,8 +97,9 @@ Frame changes are zero-copy (rendered by reference) with incremental GPU updates
 trimmed or decimated.
 
 **Coloring schemes** — Element (CPK), Chain, ResID, ResName, Index, B-factor,
-Secondary structure, and **Solid** (a custom color you pick), each with a drawn descriptive
-icon in the picker.
+Secondary structure, **Charge** (a diverging red–white–blue ramp over the partial or formal charge —
+partial charges can be assigned on the fly with **espaloma**), and **Solid** (a custom color you
+pick), each with a drawn descriptive icon in the picker.
 
 **Selections** — molar's VMD/Pteros-style selection language: `protein`, `backbone`,
 `water`, `name CA`, `resid 1:50`, `chain A`, `within 5.0 of ...`, and much more.
@@ -115,6 +124,30 @@ camera-facing residues right where you're looking (not just the single nearest a
 ribbon gaps and surface dimples too) and dissolves softly back in as you move on — so you can read the
 underlying structure without ever switching representation.
 
+**Structure editing** — a built-in editor (**Molecule ▸ Draw**) for sketching and fixing structures:
+click to place atoms from a CPK element palette, drag to bond, click a bond to cycle its order, erase,
+and toggle hydrogens. A lightweight cleanup force field (harmonic bonds/angles + torsions + a repulsive
+term, FIRE-relaxed) tidies the geometry on the fly or on a button. A **dihedral-rotation** tool twists
+one side of a molecule about any rotatable bond by dragging a handle. Every edit rides the normal
+undo/redo timeline.
+
+**Protein–ligand interactions** — an **Interactions** representation that detects and draws the six
+PLIP-style non-covalent contact types between its selection and a chosen *partner* representation (in
+the same molecule or another): **hydrogen bonds, hydrophobic contacts, salt bridges, π-stacking,
+π-cation and halogen bonds**, as color-coded dashed lines, with per-type distance/angle cutoffs in a
+tabbed settings dialog. Contact detection is spatial-grid based, so it scales.
+
+**Molecular groups & docking** — a multi-record **SDF/MOL** file loads as a **group**: many molecules
+under one panel row, cycled one at a time with a slider and sharing a common set of representations.
+**Molecule ▸ Load docking data…** loads a receptor plus a set of docked ligand poses in one step,
+already wired with an interaction rep aimed at the receptor — rigid, or flexible (one receptor
+conformation per pose, stepping together as you scrub the poses).
+
+**Analysis — superposition & RMSD** — **Analysis ▸ Align** fits one selection onto another
+(least-squares superposition) and reports the RMSD, over a single frame or a whole trajectory, with
+atom-by-atom or name-based (common-subset) pairing. Fill either side by clicking a representation in
+the tree or in the 3-D view. One undo step per alignment.
+
 **Rendering options** — collected in the **view-settings menu** (the hamburger on the right of
 the top bar, with **Camera / Lighting / Scene** tabs):
 - **Projection** — perspective or orthographic (orthographic is the default).
@@ -127,6 +160,14 @@ the top bar, with **Camera / Lighting / Scene** tabs):
 - **Orientation axes** gizmo (VMD-style), in any viewport corner.
 - **Anti-aliasing** — supersampling (configurable 1–4×, default 2×; smooths the ray-cast impostor
   silhouettes that MSAA can't touch), with idle frames costing **zero GPU**.
+
+**GPU ray tracing** — press **R** in the viewport to ray-trace the current view in place (PyMOL-`ray`
+style), or **Render ▸ Image…** to save a high-resolution ray-traced PNG. The tracer — a hand-written
+compute-shader path tracer over a BVH — does ray-traced ambient occlusion, soft cast shadows and
+Blinn-Phong shading across every representation, with optional **path-traced global illumination**
+(sky-dome ambient + colour bleeding) and order-independent transparency. It's frame-pumped so the UI
+never freezes and refines progressively. Compute-capable devices only (native and WebGPU; WebGL2 falls
+back to a high-resolution capture of the realtime view).
 
 **Camera & display**
 - Quaternion arcball camera with VMD mouse mapping (rotate / roll / pan / dolly / zoom-to-cursor).
@@ -145,7 +186,7 @@ the top bar, with **Camera / Lighting / Scene** tabs):
 - Full **undo/redo** with named history (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y).
 
 **Settings, sessions & files**
-- **Program settings** — a cogwheel in the toolbar opens a tabbed window
+- **Program settings** — **Edit ▸ Settings** opens a tabbed window
   (*Appearance / Rendering / View / Representations / Behavior*) for everything that used to be baked
   in at launch: UI theme + font scale + accent color, anti-aliasing and shadow-map quality, the
   default projection / background / lighting / representation / coloring for *new* scenes, mouse
@@ -157,6 +198,14 @@ the top bar, with **Camera / Lighting / Scene** tabs):
   representation, the camera and all view settings) as a single JSON session.
 - **Export** (native) — write a molecule, or just one representation's selection, back out to
   PDB / GRO / XYZ at the displayed frame.
+
+**Scripting** — three ways to drive the same viewer:
+- an **in-app console** using the embedded [Rhai](https://rhai.rs) language (an optional
+  `--features scripting` build), with a fluent API —
+  `mol(0).rep(0).set_style("vdw").set_color("chain")`;
+- the **[Python module](#scripting-it-from-python)** — build molecules and selections with molar's
+  numpy-backed API and render them live, zero-copy;
+- a **JavaScript API** in the browser build that mirrors the Python one almost line-for-line.
 
 **Efficient by default** — the scene is only re-rendered when geometry, the camera, the
 viewport size or visibility actually change. **Idle costs zero GPU**; the UI repaints on
@@ -203,6 +252,11 @@ hosts on any static site. It's deployed to GitHub Pages from `.github/workflows/
 on every push to `main`. molar's parallelism (rayon) runs serially on wasm; trajectories load too —
 the picked file's frames stream into the viewer incrementally (no threads). File **export** and the
 on-disk **settings/session** files are native-only (the browser has no filesystem).
+
+The browser build is also **scriptable from JavaScript** — a small API (`crates/molar_vis_js`, built
+with `wasm-pack`) that mirrors the Python module almost line-for-line, so a surrounding web page can
+`import init, { start, System }` and drive the running viewer (`add_mol` / `add_rep` / setters /
+view controls).
 
 ### Python module
 
@@ -368,16 +422,17 @@ A few design points worth knowing if you want to hack on it:
   by per-rep dirty flags, and the whole frame is skipped when nothing changed.
 - **Units.** All geometry is in nanometers (molar's native unit) end to end.
 
-The workspace is two crates: `molar_vis_core` (the WASM-safe library — all logic and
-rendering) and `molar_vis` (the thin native binary: argv + logging).
+The workspace is several crates: `molar_vis_core` (the WASM-safe library — all logic and
+rendering), `molar_vis` (the thin native binary: argv + logging), `molar_vis_web` (the browser
+build), `molar_vis_py` (the native Python module) and `molar_vis_js` (the browser JavaScript API).
 
 ## Status
 
 **Works today (native on Linux/Windows/macOS, and in the browser):**
 - Load one or more molecules; multi-molecule / multi-representation scenes.
 - All six representations (Lines, Licorice, Ball-and-Stick, VDW, Cartoon, Surface).
-- Every coloring scheme (incl. custom solid colors); the full molar selection language with
-  in-field error highlighting and keyword suggestions.
+- Every coloring scheme (incl. **charge** coloring and custom solid colors); the full molar selection
+  language with in-field error highlighting and keyword suggestions.
 - Eleven materials incl. order-independent transparency; perspective/orthographic; depth-cue modes;
   screen-space **ambient occlusion** and real-time **cast shadows**; solid/gradient background.
 - **Trajectory** loading + VMD-style playback (smoothing, frame trim/decimate), on the desktop
@@ -388,8 +443,19 @@ rendering) and `molar_vis` (the thin native binary: argv + logging).
 - **Program settings** dialog with a persisted config file; save/load **sessions**; **export**
   molecules and selections to file.
 - Undo/redo; drag-reorder reps; zoom-to-selection/molecule.
+- **GPU ray tracing** — press **R** to ray-trace the viewport, or save a high-resolution ray-traced
+  image (ambient occlusion, soft shadows, optional path-traced global illumination).
+- **Structure editing** — sketch atoms/bonds, cycle bond orders, rotate dihedrals, with cleanup
+  minimization; all undoable.
+- **Protein–ligand interactions** — the Interactions rep (H-bonds, hydrophobic, salt bridges,
+  π-stacking, π-cation, halogen bonds) with a per-type settings dialog.
+- **Molecular groups** (multi-record SDF) and a **docking-results** loader (receptor + ligand poses).
+- **Analysis ▸ Align** — least-squares superposition + RMSD, single-frame or whole-trajectory.
+- **Charge coloring** — partial (espaloma) or formal charge on a diverging ramp.
+- **In-app scripting console** (embedded [Rhai](https://rhai.rs); an optional `--features scripting` build).
 - **Browser build** — runs in the browser ([live demo](https://yesint.github.io/molar_vis/));
-  WebGPU with a WebGL2 fallback; in-browser structure + trajectory loading.
+  WebGPU with a WebGL2 fallback; in-browser structure + trajectory loading; **scriptable from
+  JavaScript** (an API mirroring the Python module).
 - **Python module** (native, Linux/Windows) — `import molar_vis`, build molecules/selections with
   the re-exported pymolar API, `spawn()` a live viewer and drive it (`add_mol`/`add_rep`/property
   setters); coordinate edits (`sel.translate(…)`) render live, zero-copy. See
