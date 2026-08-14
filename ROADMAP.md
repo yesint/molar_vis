@@ -2,17 +2,17 @@
 
 Future work, **in no particular order**. The milestones already shipped (M0–M12,
 materials/OIT, surface, trajectories, browser app, picking/lasso, …) are tracked in
-[CLAUDE.md](CLAUDE.md) under *Milestone status*; this file is the forward-looking list.
+[docs/MILESTONES.md](docs/MILESTONES.md) (*Milestone status*); this file is the forward-looking list.
 
 ## File I/O & state
 - ~~Deleting trajectory frames~~ — **shipped** (M15; Range/Decimate dialog from the molecule menu)
 - ~~Saving molecules and selections to file~~ — **shipped** (M15; molecule menu + per-rep save button)
-- ~~Saving / loading visualization state~~ — **shipped** (M13; see CLAUDE.md *Milestone status*)
+- ~~Saving / loading visualization state~~ — **shipped** (M13; see docs/MILESTONES.md)
 
 ## App & UI
 - ~~App settings~~ — **shipped** (M21; settings dialog + persisted config in the platform config dir)
 - ~~Background color selection~~ — **shipped** (M20; solid color or gradient)
-- ~~Selection input improvements~~ — **shipped** (M14; see CLAUDE.md *Milestone status*):
+- ~~Selection input improvements~~ — **shipped** (M14; see docs/MILESTONES.md):
   - ~~Visual errors~~ — erroring span highlighted red in the field (molar caret) + message
   - ~~Suggestions of available chains, residue and index ranges~~ — hint under the field per keyword
 

@@ -102,7 +102,7 @@
 
 - `toy_tube.pdb` — two carbons + one bond: the minimal single-**tube** fixture for isolating
   cylinder-impostor artifacts (used to fix the end-on "crescent"/strip bugs — see the *Impostors*
-  note in CLAUDE.md). Open in Licorice (`MOLAR_VIS_DEBUG_REP=licorice`) and rotate to an end-on
+  note in docs/ARCHITECTURE.md). Open in Licorice (`MOLAR_VIS_DEBUG_REP=licorice`) and rotate to an end-on
   view.
 
 ## Camera telemetry (debugging a specific view)
