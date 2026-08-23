@@ -166,8 +166,8 @@ to them. Dropdowns hang off `egui::Popup::menu(&resp)`.
 Each rep is a **two-row block** (`ui.vertical`; the whole block is the reorder drop target
 via `dnd_hover_payload`/`dnd_release_payload`):
 - **Row 1**: **drag handle** (`DOTS_SIX_VERTICAL` in `dnd_drag_source(payload=index)`) ·
-  **selection field** (fills width; focusing sets `editing_rep` and expands it to a
-  full-width editor, collapsing on Enter/blur) · right-justified compact actions
+  **selection field** (fills the row's remaining width, bounded by `Sides::shrink_left`
+  against the compact action group) · right-justified compact actions
   (`Layout::right_to_left` + `compact_actions`): **zoom-to-selection** (`MAGNIFYING_GLASS_PLUS`
   → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · a **per-rep menu** (`LIST` hamburger)
   holding the less-frequent actions so the row stays uncluttered: **Edit (draw mode)** (`Edit`

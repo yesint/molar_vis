@@ -872,10 +872,9 @@ pub(super) fn draw_group_bar(ui: &mut egui::Ui, names: &[String], current: usize
 impl App {
 
     /// Representations of the selected molecule as rich rows: a drag handle
-    /// (reorder by dragging), the selection text (expands to full width while
-    /// focused, collapses on Enter/blur), a drawn style-icon dropdown, and a
-    /// right-justified action group (gear→params, eye, update-every-frame,
-    /// duplicate, trash). An "Add" button precedes the list.
+    /// (reorder by dragging), the selection text field, a drawn style-icon dropdown,
+    /// and a right-justified action group (eye, zoom, and a `⋮` menu with
+    /// edit/duplicate/save/delete). An "Add" button precedes the list.
     /// The representations of molecule `mi`, nested under it: rich two-row blocks
     /// (drag handle · selection · actions / style · color · gear) with
     /// drag-reorder. The "add representation" control lives in the molecule's
@@ -897,11 +896,6 @@ impl App {
         is_shared: bool,
     ) -> bool {
         let mut view_dirty = false;
-        // `editing_rep` is now only a **one-shot request** to open a field programmatically
-        // (the debug/edit hook): the per-row layout below reads the field's *actual* focus
-        // from egui, and clears the request once that field has taken focus.
-        let editing_rep = self.editing_rep;
-        let mut new_editing = self.editing_rep;
 
         // Read this molecule's basics + clamp the range with an *immutable* borrow, so
         // the partner-label precompute below (which reads *other* molecules) doesn't
@@ -967,19 +961,6 @@ impl App {
 
         for j in start..end {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
-            // The row expands into a full-width editor **exactly while its selection field has
-            // focus** — read straight from egui memory, so the layout can never drift out of
-            // sync with the real focus (the old gained/lost-event flag could end up
-            // cleared-but-focused, sticking the row *collapsed* on re-clicks, or
-            // set-but-unfocused, sticking it *open*). `editing_rep` is only a pending request to
-            // open a field programmatically; it's honoured by `request_focus` below and consumed
-            // once the field is focused, after which the focus state alone sustains the layout.
-            let open_request = editing_rep == Some((mi, j));
-            let focused = ui.memory(|m| m.has_focus(sel_id));
-            let editing_this = focused || open_request;
-            if open_request && focused {
-                new_editing = None;
-            }
             let rep = &mut mol.reps[j];
             // Whether the selection is valid but empty (0 atoms) — flags the field.
             let sel_empty = rep.sel_empty;
@@ -1005,153 +986,119 @@ impl App {
                             .on_hover_text("Drag to reorder");
                         row2_indent = handle.rect.width();
 
-                        if editing_this {
-                            // Focused (or a pending open request): the field fills the whole row.
-                            let resp = sel_text_edit(
-                                ui,
-                                &mut rep.sel_text,
-                                sel_id,
-                                f32::INFINITY,
-                                rep.sel_error_span.clone(),
-                            );
-                            // Honour a programmatic open request by taking focus, so the field
-                            // then sustains the full-width layout on its own.
-                            if open_request && !focused {
-                                resp.request_focus();
-                            }
-                            // Editing invalidates the last evaluation: drop the
-                            // stale error message / red highlight / empty flag
-                            // until the new text is committed (re-evaluated).
-                            if resp.changed() {
-                                clear_sel_feedback(rep);
-                            }
-                            if sel_empty && !resp.changed() {
-                                mark_empty_selection(ui, resp.rect);
-                            }
-                            if resp.lost_focus() {
-                                rep.sel_dirty = true;
-                            }
-                        } else {
-                            // Selection field on the left filling the rest, actions on the
-                            // right. `Sides::shrink_left` measures the action group and
-                            // bounds the field's Ui with what's left — replacing the
-                            // pre-`Sides` workaround (a `right_to_left` wrapping a
-                            // `left_to_right` that read `available_width()`), one nesting
-                            // level shallower. The right closure is right-to-left just as
-                            // that wrapper was, so the action order is unchanged.
-                            //
-                            // Both closures are built before either runs, so only one may
-                            // hold `&mut rep`: the actions report their clicks back, and the
-                            // eye toggle is applied after.
-                            let (_, toggle_eye) = egui::containers::Sides::new()
-                                    .shrink_left()
-                                    .spacing(COMPACT_SPACING)
-                                    .show(
-                                        ui,
-                                        |ui| {
-                                            // The field's max rect is now bounded, so it can
-                                            // simply ask for everything.
-                                            let resp = sel_text_edit(
-                                                ui,
-                                                &mut rep.sel_text,
-                                                sel_id,
-                                                f32::INFINITY,
-                                                rep.sel_error_span.clone(),
-                                            );
-                                            if resp.changed() {
-                                                clear_sel_feedback(rep);
-                                            }
-                                            if sel_empty && !resp.changed() {
-                                                mark_empty_selection(ui, resp.rect);
-                                            }
-                                            // No focus-event tracking here: the field's actual
-                                            // focus (read above) drives the expand next frame.
-                                            if resp.lost_focus() {
-                                                rep.sel_dirty = true;
-                                            }
-                                        },
-                                        |ui| {
-                                            compact_actions(ui);
-                                            // Per-rep hamburger: the less-frequent actions
-                                            // (edit · duplicate · save · delete) live here so
-                                            // the row stays uncluttered; eye + zoom stay inline.
-                                            ui.menu_button(icon::LIST, |ui| {
-                                                let editing = draw_target_rep == Some(j);
-                                                if ui
-                                                    .selectable_label(
-                                                        editing,
-                                                        format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
-                                                    )
-                                                    .on_hover_text(
-                                                        "Edit this selection in draw mode — sketch atoms/bonds within it",
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    action = Some(RepAction::Edit(j));
-                                                    ui.close();
-                                                }
-                                                if ui
-                                                    .button(format!("{}  Duplicate", icon::COPY))
-                                                    .clicked()
-                                                {
-                                                    action = Some(RepAction::Duplicate(j));
-                                                    ui.close();
-                                                }
-                                                // Save just the selected atoms to a structure
-                                                // file. Native only (molar writes to disk).
-                                                #[cfg(not(target_arch = "wasm32"))]
-                                                if ui
-                                                    .button(format!(
-                                                        "{}  Save selection…",
-                                                        icon::FLOPPY_DISK
-                                                    ))
-                                                    .clicked()
-                                                {
-                                                    action = Some(RepAction::SaveSelection(j));
-                                                    ui.close();
-                                                }
-                                                ui.separator();
-                                                if ui
-                                                    .button(format!("{}  Delete", icon::TRASH))
-                                                    .clicked()
-                                                {
-                                                    action = Some(RepAction::Delete(j));
-                                                    ui.close();
-                                                }
-                                            })
-                                            .response
-                                            .on_hover_text("Representation menu");
-                                            // (Update-every-frame moved to Settings ▸ Traj.)
-                                            // Eye: open when shown, crossed when hidden.
-                                            let eye = if rep_visible {
-                                                icon::EYE
-                                            } else {
-                                                icon::EYE_SLASH
-                                            };
-                                            let toggle = ui
-                                                .selectable_label(rep_visible, eye)
-                                                .on_hover_text(match rep_visible {
-                                                    true => "Hide",
-                                                    false => "Show",
-                                                })
-                                                .clicked();
-                                            // Zoom the camera to fit this selection.
-                                            if icon_button(
-                                                ui,
-                                                icon::MAGNIFYING_GLASS_PLUS,
-                                                "Zoom to selection",
-                                            )
-                                            .clicked()
+                        // Selection field on the left, actions on the right.
+                        // `Sides::shrink_left` measures the (compact) action group and bounds the
+                        // field's Ui with the width that's left, so the field fills the rest of the
+                        // row. Both closures are built before either runs, so only one may hold
+                        // `&mut rep`: the actions report their clicks back, and the eye toggle is
+                        // applied after.
+                        let (_, toggle_eye) = egui::containers::Sides::new()
+                                .shrink_left()
+                                .spacing(COMPACT_SPACING)
+                                .show(
+                                    ui,
+                                    |ui| {
+                                        // The field's max rect is bounded by `Sides`, so it just
+                                        // asks for everything (`INFINITY`).
+                                        let resp = sel_text_edit(
+                                            ui,
+                                            &mut rep.sel_text,
+                                            sel_id,
+                                            f32::INFINITY,
+                                            rep.sel_error_span.clone(),
+                                        );
+                                        if resp.changed() {
+                                            clear_sel_feedback(rep);
+                                        }
+                                        if sel_empty && !resp.changed() {
+                                            mark_empty_selection(ui, resp.rect);
+                                        }
+                                        // Committing the edit (blur) re-evaluates the selection.
+                                        if resp.lost_focus() {
+                                            rep.sel_dirty = true;
+                                        }
+                                    },
+                                    |ui| {
+                                        compact_actions(ui);
+                                        // Per-rep hamburger: the less-frequent actions
+                                        // (edit · duplicate · save · delete) live here so
+                                        // the row stays uncluttered; eye + zoom stay inline.
+                                        ui.menu_button(icon::LIST, |ui| {
+                                            let editing = draw_target_rep == Some(j);
+                                            if ui
+                                                .selectable_label(
+                                                    editing,
+                                                    format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
+                                                )
+                                                .on_hover_text(
+                                                    "Edit this selection in draw mode — sketch atoms/bonds within it",
+                                                )
+                                                .clicked()
                                             {
-                                                action = Some(RepAction::ZoomTo(j));
+                                                action = Some(RepAction::Edit(j));
+                                                ui.close();
                                             }
-                                            toggle
-                                        },
-                                    );
-                            if toggle_eye {
-                                rep.visible = !rep_visible;
-                                view_dirty = true;
-                            }
+                                            if ui
+                                                .button(format!("{}  Duplicate", icon::COPY))
+                                                .clicked()
+                                            {
+                                                action = Some(RepAction::Duplicate(j));
+                                                ui.close();
+                                            }
+                                            // Save just the selected atoms to a structure
+                                            // file. Native only (molar writes to disk).
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            if ui
+                                                .button(format!(
+                                                    "{}  Save selection…",
+                                                    icon::FLOPPY_DISK
+                                                ))
+                                                .clicked()
+                                            {
+                                                action = Some(RepAction::SaveSelection(j));
+                                                ui.close();
+                                            }
+                                            ui.separator();
+                                            if ui
+                                                .button(format!("{}  Delete", icon::TRASH))
+                                                .clicked()
+                                            {
+                                                action = Some(RepAction::Delete(j));
+                                                ui.close();
+                                            }
+                                        })
+                                        .response
+                                        .on_hover_text("Representation menu");
+                                        // (Update-every-frame moved to Settings ▸ Traj.)
+                                        // Eye: open when shown, crossed when hidden.
+                                        let eye = if rep_visible {
+                                            icon::EYE
+                                        } else {
+                                            icon::EYE_SLASH
+                                        };
+                                        let toggle = ui
+                                            .selectable_label(rep_visible, eye)
+                                            .on_hover_text(match rep_visible {
+                                                true => "Hide",
+                                                false => "Show",
+                                            })
+                                            .clicked();
+                                        // Zoom the camera to fit this selection.
+                                        if icon_button(
+                                            ui,
+                                            icon::MAGNIFYING_GLASS_PLUS,
+                                            "Zoom to selection",
+                                        )
+                                        .clicked()
+                                        {
+                                            action = Some(RepAction::ZoomTo(j));
+                                        }
+                                        toggle
+                                    },
+                                );
+                        if toggle_eye {
+                            rep.visible = !rep_visible;
+                            view_dirty = true;
                         }
                     });
 
@@ -1445,7 +1392,6 @@ impl App {
             }
         }
 
-        self.editing_rep = new_editing;
         view_dirty
     }
 

@@ -124,8 +124,6 @@ pub struct App {
     /// Everything that produces an image outside the live rasterized viewport: the ray
     /// tracer's jobs, the image export, and the debug UI screenshot. See [`RtState`].
     rt: RtState,
-    /// `(molecule index, rep index)` whose selection field is focused/expanded.
-    editing_rep: Option<(usize, usize)>,
     /// Open trajectory-load dialog, if any (one at a time).
     load_dialog: Option<ModalState<LoadDialog>>,
     /// Open "Load docking data…" dialog, if any (native: it reads several files from disk).

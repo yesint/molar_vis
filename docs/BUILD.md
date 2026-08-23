@@ -102,9 +102,6 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   startup scene to / replace it from a JSON session file during `App::new` — drives the
   save/load-state round-trip headlessly, since the rfd dialogs can't be; a save→load→save
   round-trip is byte-identical) +
-  `MOLAR_VIS_DEBUG_EDIT_REP=1` (open mol 0's first rep selection field in edit mode, so the
-  contextual selection-suggestion hint and an invalid selection's in-field red error highlight
-  can be screenshot headlessly — pair with `MOLAR_VIS_DEBUG_SEL`) +
   `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` (open that rep in **Draw mode**, scoped to its
   selection — so the rep-scoped editing and the **grey-out of the non-active reps** can be checked
   with `MOLAR_VIS_DEBUG_SAVE_IMAGE`; defaults to rep 0) +

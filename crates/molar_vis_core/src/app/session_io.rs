@@ -84,7 +84,6 @@ impl App {
         self.scene.trash.clear();
         self.scene.group_trash.clear();
         self.scene.loaders.clear();
-        self.editing_rep = None;
         self.load_dialog = None;
         // A new document = a fresh REPL: drop console variables so a stored handle
         // (`let m = mol(0)`) doesn't outlive the molecule it referred to.

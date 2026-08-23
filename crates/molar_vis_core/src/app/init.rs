@@ -556,7 +556,6 @@ impl App {
             rt: RtState { scene_dirty: true, ..Default::default() },
             pending_undo_n: None,
             pending_redo_n: None,
-            editing_rep: None,
             load_dialog: None,
             #[cfg(not(target_arch = "wasm32"))]
             docking_dialog: None,
@@ -969,15 +968,6 @@ impl App {
             if let Some(mol) = app.scene.molecules.first() {
                 app.delete_frames_dialog = Some(ModalState::new(DeleteFramesDialog::new(mol.id)));
             }
-        }
-
-        // Verification hook: MOLAR_VIS_DEBUG_EDIT_REP=1 opens mol 0's first rep
-        // selection field in edit mode, so a selection error's in-field
-        // whole-word highlight can be screenshot headlessly.
-        if std::env::var("MOLAR_VIS_DEBUG_EDIT_REP").is_ok()
-            && app.scene.molecules.first().is_some_and(|m| !m.reps.is_empty())
-        {
-            app.editing_rep = Some((0, 0));
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DRAW=<preset> builds a small molecule
