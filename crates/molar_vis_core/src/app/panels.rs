@@ -23,8 +23,6 @@ pub(super) enum GroupAction {
     AddSharedRep,
     /// Zoom-to-fit the shown member (the header magnifier).
     Focus,
-    /// Open the shown member in the drawing editor.
-    Edit,
     /// Write every member to one multi-record file. Native only (see
     /// [`RepAction::SaveSelection`](super::rep_panel::RepAction::SaveSelection)).
     #[cfg(not(target_arch = "wasm32"))]
@@ -135,10 +133,21 @@ impl App {
                             }
                         }
                     });
-                    // Mutually exclusive with Draw (which hosts the dihedral tool):
-                    // choosing any pick mode leaves edit mode.
+                    // Choosing a pick mode **suspends** an active Draw session rather than
+                    // dropping it: picking then re-selects the draw scope, and the drawing
+                    // tool resumes once the pick mode is Off again. Just cancel any in-progress
+                    // draw gesture so the suspended session holds no stale rubber-band/twist.
                     if pick_changed && self.pick_mode != PickMode::Off {
-                        self.draw = None;
+                        if let Some(d) = self.draw.as_mut() {
+                            d.drag = draw::DrawDrag::Idle;
+                            d.dihedral.drag = None;
+                        }
+                    }
+                    // Turning the pick method back off while drawing = "done selecting":
+                    // confirm the freshly picked selection as Draw's new scope (no trip to the
+                    // panel's Accept button needed). Harmless when nothing was picked.
+                    if pick_changed && self.pick_mode == PickMode::Off {
+                        self.confirm_draw_reselect();
                     }
                     // Scope dropdown (how a hit expands: Atoms / Residues / Bound H).
                     // Only relevant when picking is on, so hidden while pick mode is Off.
@@ -673,11 +682,6 @@ impl App {
         // A camera "zoom to fit" request (whole-molecule bbox), applied after the
         // loop so it doesn't conflict with the `&mut` molecule borrow.
         let mut focus: Option<(glam::Vec3, glam::Vec3)> = None;
-        // "Open this molecule in the editor" request (the row's edit button).
-        let mut edit_mol: Option<usize> = None;
-        // The molecule currently being edited (for the edit-button highlight),
-        // captured before the `&mut` molecule loop.
-        let editing_target = self.draw.as_ref().and_then(|d| d.target);
         // A group delete / single-member delete chosen from the panel — deferred to
         // after the loop because removing molecules shifts the entry indices it iterates.
         let mut delete_group: Option<GroupId> = None;
@@ -802,15 +806,7 @@ impl App {
                             mol.visible = !mol.visible;
                             view_dirty = true;
                         }
-                        // Edit: open this molecule in the drawing editor.
-                        let editing = editing_target == Some(mol.id);
-                        if ui
-                            .selectable_label(editing, icon::PENCIL_SIMPLE)
-                            .on_hover_text("Edit molecule (draw mode)")
-                            .clicked()
-                        {
-                            edit_mol = Some(i);
-                        }
+                        // (Edit/draw is now per-representation — see each rep row's menu.)
                         if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to molecule")
                             .clicked()
                         {
@@ -920,10 +916,6 @@ impl App {
             self.camera.focus_bbox(min, max);
             view_dirty = true;
         }
-        if let Some(i) = edit_mol {
-            self.open_in_editor(i);
-            view_dirty = true;
-        }
         view_dirty
     }
 
@@ -955,14 +947,6 @@ impl App {
             .collect();
         let cur_mi = members.get(current).and_then(|&id| self.scene.mol_index(id));
         let cur_bbox = cur_mi.map(|mi| self.scene.molecules[mi].current_bbox());
-
-        // The shown member currently open in the editor (for the Edit-button highlight).
-        let editing_shown = self
-            .draw
-            .as_ref()
-            .and_then(|d| d.target)
-            .zip(members.get(current).copied())
-            .is_some_and(|(t, cur)| t == cur);
 
         // The single thing this entry asked for — see [`GroupAction`]. Set inside the UI
         // closures (which must stay borrow-free), applied once they have all ended.
@@ -1009,14 +993,7 @@ impl App {
                 {
                     action = Some(GroupAction::ToggleEye);
                 }
-                // Edit: open the currently-shown member in the drawing editor.
-                if ui
-                    .selectable_label(editing_shown, icon::PENCIL_SIMPLE)
-                    .on_hover_text("Edit shown molecule (draw mode)")
-                    .clicked()
-                {
-                    action = Some(GroupAction::Edit);
-                }
+                // (Edit/draw is now per-representation — see each member rep row's menu.)
                 if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to shown molecule").clicked() {
                     action = Some(GroupAction::Focus);
                 }
@@ -1226,13 +1203,6 @@ impl App {
                 // Full zoom-to-fit the shown member (the magnifier means "zoom").
                 if let Some((min, max)) = cur_bbox {
                     self.camera.focus_bbox(min, max);
-                    view_dirty = true;
-                }
-            }
-            Some(GroupAction::Edit) => {
-                // Open the currently-shown member in the drawing editor.
-                if let Some(mi) = cur_mi {
-                    self.open_in_editor(mi);
                     view_dirty = true;
                 }
             }

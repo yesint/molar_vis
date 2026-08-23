@@ -181,6 +181,8 @@ pub(super) fn sel_text_edit(
 pub(super) enum RepAction {
     /// Drag-reorder: move rep `from` into the gap before position `to`.
     Reorder { from: usize, to: usize },
+    /// Open rep `j` in the drawing editor (Draw mode scoped to its selection).
+    Edit(usize),
     /// Duplicate rep `j`, inserting the copy just after it.
     Duplicate(usize),
     /// Rep `j` was switched to Interactions: re-insert `clone` (its old style, still visible)
@@ -895,10 +897,10 @@ impl App {
         is_shared: bool,
     ) -> bool {
         let mut view_dirty = false;
-        let editing = self
-            .editing_rep
-            .filter(|&(m, _)| m == mi)
-            .map(|(_, r)| r);
+        // `editing_rep` is now only a **one-shot request** to open a field programmatically
+        // (the debug/edit hook): the per-row layout below reads the field's *actual* focus
+        // from egui, and clears the request once that field has taken focus.
+        let editing_rep = self.editing_rep;
         let mut new_editing = self.editing_rep;
 
         // Read this molecule's basics + clamp the range with an *immutable* borrow, so
@@ -950,6 +952,13 @@ impl App {
             Reveal::Pending(id) => id == mol_id,
             Reveal::Rep(id, j) => id == mol_id && (start..end).contains(&j),
         });
+        // The rep of *this* molecule currently open in the drawing editor — highlights the
+        // rep hamburger's Edit item so it's clear which selection Draw is scoped to.
+        let draw_target_rep = self
+            .draw
+            .as_ref()
+            .filter(|d| d.target == Some(mol_id))
+            .and_then(|d| d.target_rep);
         let mol = &mut self.scene.molecules[mi];
 
         // The single thing this pass asked for — see [`RepAction`]. Set from inside the row
@@ -958,6 +967,19 @@ impl App {
 
         for j in start..end {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
+            // The row expands into a full-width editor **exactly while its selection field has
+            // focus** — read straight from egui memory, so the layout can never drift out of
+            // sync with the real focus (the old gained/lost-event flag could end up
+            // cleared-but-focused, sticking the row *collapsed* on re-clicks, or
+            // set-but-unfocused, sticking it *open*). `editing_rep` is only a pending request to
+            // open a field programmatically; it's honoured by `request_focus` below and consumed
+            // once the field is focused, after which the focus state alone sustains the layout.
+            let open_request = editing_rep == Some((mi, j));
+            let focused = ui.memory(|m| m.has_focus(sel_id));
+            let editing_this = focused || open_request;
+            if open_request && focused {
+                new_editing = None;
+            }
             let rep = &mut mol.reps[j];
             // Whether the selection is valid but empty (0 atoms) — flags the field.
             let sel_empty = rep.sel_empty;
@@ -983,8 +1005,8 @@ impl App {
                             .on_hover_text("Drag to reorder");
                         row2_indent = handle.rect.width();
 
-                        if editing == Some(j) {
-                            // Focused: the selection field fills the whole row.
+                        if editing_this {
+                            // Focused (or a pending open request): the field fills the whole row.
                             let resp = sel_text_edit(
                                 ui,
                                 &mut rep.sel_text,
@@ -992,6 +1014,11 @@ impl App {
                                 f32::INFINITY,
                                 rep.sel_error_span.clone(),
                             );
+                            // Honour a programmatic open request by taking focus, so the field
+                            // then sustains the full-width layout on its own.
+                            if open_request && !focused {
+                                resp.request_focus();
+                            }
                             // Editing invalidates the last evaluation: drop the
                             // stale error message / red highlight / empty flag
                             // until the new text is committed (re-evaluated).
@@ -1003,7 +1030,6 @@ impl App {
                             }
                             if resp.lost_focus() {
                                 rep.sel_dirty = true;
-                                new_editing = None;
                             }
                         } else {
                             // Selection field on the left filling the rest, actions on the
@@ -1038,33 +1064,63 @@ impl App {
                                             if sel_empty && !resp.changed() {
                                                 mark_empty_selection(ui, resp.rect);
                                             }
-                                            if resp.gained_focus() {
-                                                new_editing = Some((mi, j));
-                                            }
+                                            // No focus-event tracking here: the field's actual
+                                            // focus (read above) drives the expand next frame.
                                             if resp.lost_focus() {
                                                 rep.sel_dirty = true;
                                             }
                                         },
                                         |ui| {
                                             compact_actions(ui);
-                                            if icon_button(ui, icon::TRASH, "Delete").clicked() {
-                                                action = Some(RepAction::Delete(j));
-                                            }
-                                            // Save just the selected atoms to a structure
-                                            // file (sits left of delete). Native only.
-                                            #[cfg(not(target_arch = "wasm32"))]
-                                            if icon_button(
-                                                ui,
-                                                icon::FLOPPY_DISK,
-                                                "Save selection to file",
-                                            )
-                                            .clicked()
-                                            {
-                                                action = Some(RepAction::SaveSelection(j));
-                                            }
-                                            if icon_button(ui, icon::COPY, "Duplicate").clicked() {
-                                                action = Some(RepAction::Duplicate(j));
-                                            }
+                                            // Per-rep hamburger: the less-frequent actions
+                                            // (edit · duplicate · save · delete) live here so
+                                            // the row stays uncluttered; eye + zoom stay inline.
+                                            ui.menu_button(icon::LIST, |ui| {
+                                                let editing = draw_target_rep == Some(j);
+                                                if ui
+                                                    .selectable_label(
+                                                        editing,
+                                                        format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Edit this selection in draw mode — sketch atoms/bonds within it",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    action = Some(RepAction::Edit(j));
+                                                    ui.close();
+                                                }
+                                                if ui
+                                                    .button(format!("{}  Duplicate", icon::COPY))
+                                                    .clicked()
+                                                {
+                                                    action = Some(RepAction::Duplicate(j));
+                                                    ui.close();
+                                                }
+                                                // Save just the selected atoms to a structure
+                                                // file. Native only (molar writes to disk).
+                                                #[cfg(not(target_arch = "wasm32"))]
+                                                if ui
+                                                    .button(format!(
+                                                        "{}  Save selection…",
+                                                        icon::FLOPPY_DISK
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    action = Some(RepAction::SaveSelection(j));
+                                                    ui.close();
+                                                }
+                                                ui.separator();
+                                                if ui
+                                                    .button(format!("{}  Delete", icon::TRASH))
+                                                    .clicked()
+                                                {
+                                                    action = Some(RepAction::Delete(j));
+                                                    ui.close();
+                                                }
+                                            })
+                                            .response
+                                            .on_hover_text("Representation menu");
                                             // (Update-every-frame moved to Settings ▸ Traj.)
                                             // Eye: open when shown, crossed when hidden.
                                             let eye = if rep_visible {
@@ -1330,16 +1386,14 @@ impl App {
                     self.scene.molecules[mi].delete_rep(j, is_shared);
                     view_dirty = true;
                 }
+                RepAction::Edit(j) => {
+                    self.open_rep_in_editor(mi, j);
+                    view_dirty = true;
+                }
                 RepAction::AcceptPending => {
-                    let mol = &mut self.scene.molecules[mi];
-                    let n_before = mol.reps.len();
-                    mol.accept_pending_selection();
-                    // The committed rep is appended last — at the end of a fold that may be
-                    // off-screen, and for a group member behind three of them. Unfold and
-                    // scroll to it, so the accept visibly *lands* somewhere.
-                    if mol.reps.len() > n_before {
-                        self.scene.reveal_rep(mi, self.scene.molecules[mi].reps.len() - 1);
-                    }
+                    // Commit the pending selection into a new rep; while Draw is live this
+                    // also re-scopes Draw to it and resumes drawing (see the helper).
+                    self.accept_pending_into_draw(mi);
                     view_dirty = true;
                 }
                 RepAction::DiscardPending => {

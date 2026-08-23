@@ -169,8 +169,12 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   **selection field** (fills width; focusing sets `editing_rep` and expands it to a
   full-width editor, collapsing on Enter/blur) · right-justified compact actions
   (`Layout::right_to_left` + `compact_actions`): **zoom-to-selection** (`MAGNIFYING_GLASS_PLUS`
-  → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · duplicate · **save selection to file**
-  (`FLOPPY_DISK` → `save_rep_selection`, native; just left of trash) · trash. The rep's
+  → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · a **per-rep menu** (`LIST` hamburger)
+  holding the less-frequent actions so the row stays uncluttered: **Edit (draw mode)** (`Edit`
+  action → `open_rep_in_editor` — Draw scoped to *this* rep's selection; the item is highlighted
+  when this rep is the active draw target), **Duplicate** (`COPY`), **Save selection…**
+  (`FLOPPY_DISK` → `save_rep_selection`, native), **Delete** (`TRASH`). (Editing/draw is now
+  per-representation — the molecule and group rows no longer carry a pencil.) The rep's
   **selection error** (if any) is shown in red on the next line, aligned under the field — and
   the **erroring span of the text is painted red in-place** (a `sel_text_edit` layouter colors
   from the molar caret offset to the end; see `suggest.rs`). Editing the field (`resp.changed()`)

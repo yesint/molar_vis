@@ -379,7 +379,7 @@ impl App {
             if !mol.visible || mol.data.is_shared() || mol.bonds.is_empty() {
                 continue;
             }
-            if let Some((k, dist)) = pick::nearest_bond_dist(mol, view, proj, ndc, 0.02) {
+            if let Some((k, dist)) = pick::nearest_bond_dist(mol, view, proj, ndc, 0.02, None) {
                 if best.is_none_or(|(_, _, bd)| dist < bd) {
                     best = Some((mi, k, dist));
                 }

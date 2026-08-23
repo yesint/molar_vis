@@ -200,6 +200,10 @@ pub struct App {
     /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
     /// the bottom of this file.
     draw: Option<DrawSession>,
+    /// The `(molecule, rep)` open in the drawing editor as of the last geometry rebuild.
+    /// When it changes (Draw toggled, scope re-pointed), every rep is re-marked dirty so the
+    /// grey-out of the non-active reps is applied or removed. See [`App::draw_gray_active`].
+    last_gray_active: Option<(MolId, usize)>,
     /// The in-app scripting console: open state, scrollback, and the REPL behind it.
     #[cfg(feature = "scripting")]
     console: Console,

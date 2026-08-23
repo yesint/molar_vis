@@ -38,11 +38,38 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   - `app/pickers.rs` — style/color/material pickers + their icon/preview painters.
   - `app/widgets.rs` — shared egui helpers (`tab_bar`, `slider_with_edit`, `picker_button`, …).
   - `app/overlay.rs` — viewport overlays (pick/residue info, modifier hint, axes gizmo, glow ring).
-  - `app/build.rs` — free-fn geometry builders (`build_glow`/`build_hover_detail`/`build_pick`/…).
+  - `app/build.rs` — the per-frame `rebuild_dirty` (evaluate selections → build + upload each dirty
+    rep's geometry) + free-fn geometry builders (`build_glow`/`build_hover_detail`/`build_pick`/…) +
+    `gray_out` (desaturate + dim a built rep's colours for Draw-mode's non-active greying).
   - `app/loaders.rs` — load/delete-frames/rename dialogs, loaders, `pick_file` (cfg-heavy IO).
   - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
   - `app/console.rs` — scripting-console UI + command-execution glue.
   - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.
+    A Draw session is **scoped to one representation** (`DrawSession::target_rep`, an index into
+    the target molecule's `reps`): hover / Draw / Erase only touch that rep's evaluated selection
+    (`App::draw_scope` → `pick::nearest_atom`/`nearest_bond` take an `allowed` atom set), so every
+    atom outside it — visible or not — is inert, and a freshly drawn atom is folded into that rep's
+    selection text (`Representation::include_atom`, coalescing a trailing `or index …` clause) so it
+    stays visible + editable. A blanket `all` scope means "the whole molecule"; a strict-subset scope
+    also **skips the whole-molecule auto-relax** (it would move atoms the selection excludes). The
+    scope is set by `open_rep_in_editor` (a rep's **Edit** menu item — editing is **per-rep** now, so
+    the molecule + group rows carry no pencil), by `start_drawn_molecule` (a fresh molecule's one `all`
+    rep), and by the **re-select-in-place** flow: choosing a pick mode no longer
+    drops the Draw session — it **suspends** it (the tool goes inert, picking runs; `viewport.rs`
+    gates on `pick_mode == Off`), and *confirming* the new selection re-scopes Draw to it. Confirm =
+    the pending stub's **Accept** *or* turning the pick method back off while drawing, both routed
+    through `App::accept_pending_into_draw` (accept → new rep → re-scope + pick mode Off). **In Draw
+    mode every non-active rep is greyed out** (`build::gray_out` desaturates + dims its colours at
+    build time; `rebuild_dirty` takes the active `(mol, rep)` and greys all others, and marks all reps
+    dirty when it changes — `App::draw_gray_active` / `last_gray_active`) so it reads as inactive and
+    non-interactive. The **edited rep is drawn first** within its molecule (`SceneRenderer::set_edit_active`
+    → `draw_reps`) so, with the `Less` depth test, it wins the coincident-depth tie against the grayed
+    context reps of the same atoms — otherwise the freshly created edit rep, appended last, z-loses and
+    hides behind them. The tools palette's **Clean up** (geometry optimization / relax to convergence)
+    is now **disabled with a reason** — not silently a no-op — when it cannot run: no molecule, a
+    shared molecule, no bonds, or a structure past `DRAW_AUTO_MAX_ATOMS` (the O(N²) relax is not run on
+    a large loaded structure). It is *not* gated on bond **orders** (`Unspecified`/`Single` optimize
+    fine). `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` opens a rep in Draw mode for headless checks.
   - `app/dihedral.rs` — the **DihedralRotate tool** of edit (Draw) mode (alongside Draw/Erase; state
     in `DihedralState` on the active `DrawSession`, tool button in `draw_tools_panel`): click a
     **rotatable** bond (non-ring, non-terminal — found by cutting the bond and BFS-splitting the graph

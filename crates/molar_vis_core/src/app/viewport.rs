@@ -48,12 +48,25 @@ impl App {
                 .wgpu_render_state()
                 .expect("wgpu render state must exist");
 
+            // Grey-out bookkeeping: the rep open in the editor stays in colour, every other
+            // rep is greyed out. When that rep changes (Draw toggled, scope re-pointed), re-mark
+            // every rep dirty so the next rebuild applies or removes the grey-out.
+            let gray_active = self.draw_gray_active();
+            if gray_active != self.last_gray_active {
+                for mol in &mut self.scene.molecules {
+                    for rep in &mut mol.reps {
+                        rep.geom_dirty = true;
+                    }
+                }
+                self.last_gray_active = gray_active;
+            }
             let geom_changed = build::rebuild_dirty(
                 &mut self.scene,
                 &self.renderer,
                 &self.settings,
                 self.view_dirty,
                 render_state,
+                gray_active,
             );
 
             // Claim the whole central area as a draggable, scrollable surface.
@@ -75,8 +88,10 @@ impl App {
             }
             // Draw mode: plain LMB is the active drawing tool (handled in `draw_input`);
             // Alt+LMB orbits, so the view can be rotated without leaving Draw. RMB/MMB/
-            // wheel navigate as usual.
-            let draw_mode = self.draw.is_some();
+            // wheel navigate as usual. A Draw session with a pick mode active is **suspended**
+            // (not dropped): picking takes over the pointer so the user can re-select the draw
+            // scope, so the drawing tool is inert until the pick mode returns to Off.
+            let draw_mode = self.draw.is_some() && self.pick_mode == PickMode::Off;
             // The DihedralRotate tool differs from Draw/Erase: a plain LMB drag orbits
             // the camera *unless* it grabbed a handle (then it rotates the fragment). So
             // the "suppress orbit" gate applies to the whole plain-LMB gesture for
@@ -163,6 +178,8 @@ impl App {
             // one decision, shared by the shaders and the cues egui draws over the scene below.
             self.renderer
                 .set_glow_color(crate::theme::glow_color(ui.ctx(), &self.camera.background));
+            // The edited rep draws first so it stays visible over the grayed context reps.
+            self.renderer.set_edit_active(gray_active);
 
             let cam_changed = self.last_render_camera != Some(self.camera);
             let size_changed = size_px != self.last_size;
@@ -305,7 +322,9 @@ impl App {
             // twists a fragment (dispatched inside `draw_input`). The camera orbit is
             // suppressed above per tool (Draw/Erase always; DihedralRotate only while a
             // handle drag is active).
-            if self.draw.is_some() {
+            // Suspended while a pick mode is active (picking re-selects the draw scope in
+            // place; see the `draw_mode` note above), so the tool doesn't fight the picker.
+            if self.draw.is_some() && self.pick_mode == PickMode::Off {
                 self.draw_input(ui, &response, rect, size_px);
             }
 

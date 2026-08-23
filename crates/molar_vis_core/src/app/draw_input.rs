@@ -170,6 +170,31 @@ impl App {
         self.draw.as_ref().and_then(|d| d.plane_depth)
     }
 
+    /// The `(molecule, rep)` currently open in the drawing editor — the rep that stays in
+    /// full colour while every other rep is greyed out (see [`build::gray_out`]). `None` when
+    /// not drawing, or before the first click has scoped the session to a rep.
+    pub(super) fn draw_gray_active(&self) -> Option<(MolId, usize)> {
+        let d = self.draw.as_ref()?;
+        Some((d.target?, d.target_rep?))
+    }
+
+    /// The atom set the active draw session is **scoped** to — its target rep's evaluated
+    /// selection. Draw/Erase/hover only touch these atoms; everything else in the molecule
+    /// is inert. Returns `None` (unrestricted — the whole molecule) when there is no target
+    /// rep, the rep/selection is missing, or the rep is a blanket `all` (for which building a
+    /// full index set every hover frame would be wasteful and pointless). An empty set means
+    /// the rep matches nothing, so nothing is hoverable/editable.
+    fn draw_scope(&self, mi: usize) -> Option<std::collections::HashSet<usize>> {
+        let rep_idx = self.draw.as_ref()?.target_rep?;
+        let mol = self.scene.molecules.get(mi)?;
+        let rep = mol.reps.get(rep_idx)?;
+        if rep.sel_text.trim() == "all" {
+            return None; // whole molecule
+        }
+        rep.sel.as_ref()?; // needs an evaluated selection to scope against
+        Some(super::viewport::rep_atom_ids(mol, rep_idx).into_iter().collect())
+    }
+
     /// Pointer handling for the active drawing tool (atom/bond/erase) + the bond
     /// rubber-band + the debounced minimizer. Called from `draw_viewport` each frame
     /// while Draw mode is on. Alt+LMB orbits (handled by the navigation block), so the
@@ -322,9 +347,10 @@ impl App {
     /// Shared by hover-highlight and click so they agree.
     pub(super) fn draw_hit_test(&self, mi: usize, rect: egui::Rect, size_px: [u32; 2], cursor: egui::Pos2) -> Option<HitTarget> {
         let mol = &self.scene.molecules[mi];
-        // Front-most atom whose drawn sphere the cursor is inside.
+        let scope = self.draw_scope(mi);
+        // Front-most atom whose drawn sphere the cursor is inside (within the draw scope).
         let (ro, rd) = self.camera.pixel_ray(cursor, rect, size_px);
-        if let Some((i, _)) = pick::nearest_atom(mol, ro, rd, 0.04) {
+        if let Some((i, _)) = pick::nearest_atom(mol, ro, rd, 0.04, scope.as_ref()) {
             if let Some(c) = self.scene.atom_world(mi, i).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)) {
                 if (cursor - c).length() <= self.atom_screen_radius(mi, i, rect, size_px) {
                     return Some(HitTarget::Atom(i));
@@ -335,7 +361,7 @@ impl App {
         let aspect = size_px[0] as f32 / size_px[1].max(1) as f32;
         let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
         let ndc = px_to_ndc(cursor, rect);
-        pick::nearest_bond(mol, view, proj, ndc, 0.02).map(HitTarget::Bond)
+        pick::nearest_bond(mol, view, proj, ndc, 0.02, scope.as_ref()).map(HitTarget::Bond)
     }
 
     /// Painter overlays for the drawing editor: a hover highlight on the atom/bond
@@ -390,6 +416,13 @@ impl App {
         match mi {
             Some(mi) => {
                 let idx = self.scene.molecules[mi].add_atom(&element.make_atom(), pos)?;
+                // A freshly drawn atom must stay in the active selection so it displays and
+                // remains editable — fold it into the scoped rep's selection text.
+                if let Some(rep_idx) = self.draw.as_ref().and_then(|d| d.target_rep) {
+                    if let Some(rep) = self.scene.molecules[mi].reps.get_mut(rep_idx) {
+                        rep.include_atom(idx);
+                    }
+                }
                 Some((mi, idx))
             }
             None => {
@@ -432,7 +465,9 @@ impl App {
             let Some(px) = response.interact_pointer_pos() else { return };
             let from_atom = target_mi.and_then(|mi| {
                 let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
-                pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i)
+                let scope = self.draw_scope(mi);
+                pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08, scope.as_ref())
+                    .map(|(i, _)| i)
             });
             // Drag from an existing atom → set the drawing plane to that atom's depth, so
             // a new bonded atom on release lands next to it (not on the far camera-target
@@ -466,8 +501,9 @@ impl App {
                         None => return,
                     };
                     let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
-                    let dest =
-                        pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08).map(|(i, _)| i);
+                    let scope = self.draw_scope(mi);
+                    let dest = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08, scope.as_ref())
+                        .map(|(i, _)| i);
                     match dest {
                         // Onto another atom → add a bond, or override an existing
                         // bond's order if one already joins them.
@@ -560,6 +596,16 @@ impl App {
     /// point, and arm the debounced relax (only worth it once there's something to
     /// relax — more than a lone atom).
     pub(super) fn after_draw_edit(&mut self, mi: usize, plane: Option<glam::Vec3>) {
+        // A draw scope that is a strict subset of the molecule (a restricted rep
+        // selection) must not auto-relax: the whole-molecule minimizer would move atoms
+        // *outside* the active selection, which Draw mode has to leave untouched. A
+        // blanket `all` scope (or none) relaxes as before.
+        let scoped_subset = self.draw.as_ref().and_then(|d| d.target_rep).is_some_and(|r| {
+            self.scene.molecules[mi]
+                .reps
+                .get(r)
+                .is_some_and(|rep| rep.sel_text.trim() != "all")
+        });
         let worth_relaxing = {
             let mol = &mut self.scene.molecules[mi];
             mol.refresh_bbox();
@@ -583,9 +629,55 @@ impl App {
             if let Some(p) = plane {
                 d.plane_depth = Some(p);
             }
-            if worth_relaxing {
+            if worth_relaxing && !scoped_subset {
                 d.minimize_pending = true;
             }
+        }
+    }
+
+    /// Accept molecule `mi`'s pending selection into a new rep, reveal it, and — while a
+    /// Draw session is live — **re-scope Draw to that new rep** and resume drawing (pick
+    /// mode back to Off). This is the "confirm the selection → re-open Draw in the new
+    /// selection" flow, shared by the pending stub's Accept button and by turning the pick
+    /// method off while drawing. A no-op if there was nothing pending to accept.
+    pub(super) fn accept_pending_into_draw(&mut self, mi: usize) {
+        let id = self.scene.molecules[mi].id;
+        let n_before = self.scene.molecules[mi].reps.len();
+        self.scene.molecules[mi].accept_pending_selection();
+        if self.scene.molecules[mi].reps.len() <= n_before {
+            return; // nothing was pending
+        }
+        // The committed rep is appended last — at the end of a fold that may be off-screen,
+        // and for a group member behind three of them. Unfold + scroll so it visibly lands.
+        let new_rep = self.scene.molecules[mi].reps.len() - 1;
+        self.scene.reveal_rep(mi, new_rep);
+        if let Some(d) = self.draw.as_mut() {
+            d.target = Some(id);
+            d.target_rep = Some(new_rep);
+            d.drag = DrawDrag::Idle;
+            d.dihedral = super::dihedral::DihedralState::default();
+            self.pick_mode = PickMode::Off;
+        }
+        self.view_dirty = true;
+    }
+
+    /// Confirm a re-select made while drawing: find the molecule carrying the freshly picked
+    /// selection (preferring the current Draw target) and accept it into Draw's new scope.
+    /// Called when the pick method is turned back off during a Draw session, so no trip to
+    /// the panel's Accept button is needed.
+    pub(super) fn confirm_draw_reselect(&mut self) {
+        if self.draw.is_none() {
+            return;
+        }
+        let target = self.draw.as_ref().and_then(|d| d.target);
+        let mi = self
+            .scene
+            .molecules
+            .iter()
+            .position(|m| m.pending.is_some() && Some(m.id) == target)
+            .or_else(|| self.scene.molecules.iter().position(|m| m.pending.is_some()));
+        if let Some(mi) = mi {
+            self.accept_pending_into_draw(mi);
         }
     }
 
@@ -593,7 +685,18 @@ impl App {
     /// [`Scene::toggle_hydrogens`]), then run the usual post-edit bookkeeping so the
     /// change is perceived, relaxed and undoable like any draw edit.
     pub(super) fn toggle_hydrogens(&mut self, mi: usize) {
+        let n_before = self.scene.molecules[mi].n_atoms;
         self.scene.toggle_hydrogens(mi);
+        // Newly added H must join the active selection so they display and stay editable
+        // (removal shrinks the molecule, so only the growth case needs folding in).
+        if let Some(rep_idx) = self.draw.as_ref().and_then(|d| d.target_rep) {
+            let n_after = self.scene.molecules[mi].n_atoms;
+            if let Some(rep) = self.scene.molecules[mi].reps.get_mut(rep_idx) {
+                for idx in n_before..n_after {
+                    rep.include_atom(idx);
+                }
+            }
+        }
         self.after_draw_edit(mi, None);
     }
 
@@ -611,14 +714,16 @@ impl App {
         }
         let Some(mi) = target_mi else { return };
         let Some(px) = response.interact_pointer_pos() else { return };
+        let scope = self.draw_scope(mi);
         let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
-        if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08) {
+        if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08, scope.as_ref()) {
             let empty = self.scene.molecules[mi].remove_atom(i);
             if empty {
                 // The molecule is now empty → delete it (park in trash, undoable).
                 self.scene.trash_molecule(mi);
                 if let Some(d) = self.draw.as_mut() {
                     d.target = None;
+                    d.target_rep = None;
                     d.drag = DrawDrag::Idle;
                     d.minimize_pending = false;
                 }
@@ -636,7 +741,7 @@ impl App {
         let aspect = size_px[0] as f32 / size_px[1] as f32;
         let (view, proj) = (self.camera.view(), self.camera.proj(aspect));
         let ndc = px_to_ndc(px, rect);
-        if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02) {
+        if let Some(k) = pick::nearest_bond(&self.scene.molecules[mi], view, proj, ndc, 0.02, scope.as_ref()) {
             self.scene.molecules[mi].remove_bond_at(k);
             self.scene.flag_edit(mi);
             self.view_dirty = true;

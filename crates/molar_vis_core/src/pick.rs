@@ -239,11 +239,17 @@ pub(crate) fn nearest_atom(
     ro: Vec3,
     rd: Vec3,
     min_radius: f32,
+    allowed: Option<&std::collections::HashSet<usize>>,
 ) -> Option<(usize, f32)> {
     let state = mol.render_state();
     let topo = mol.data.topology();
     let mut best: Option<(usize, f32)> = None;
     for (i, p) in state.coords.iter().enumerate() {
+        // In Draw mode the hit-test is scoped to the active rep's selection, so atoms
+        // outside it are inert (not hoverable / not editable).
+        if allowed.is_some_and(|set| !set.contains(&i)) {
+            continue;
+        }
         let r = topo
             .get_atom(i)
             .map(|a| a.vdw() * 0.5)
@@ -280,8 +286,9 @@ pub(crate) fn nearest_bond(
     proj: Mat4,
     ndc: Vec2,
     max_dist: f32,
+    allowed: Option<&std::collections::HashSet<usize>>,
 ) -> Option<usize> {
-    nearest_bond_dist(mol, view, proj, ndc, max_dist).map(|(k, _)| k)
+    nearest_bond_dist(mol, view, proj, ndc, max_dist, allowed).map(|(k, _)| k)
 }
 
 /// Like [`nearest_bond`], but also returns the screen-space (NDC) distance to the
@@ -292,6 +299,7 @@ pub(crate) fn nearest_bond_dist(
     proj: Mat4,
     ndc: Vec2,
     max_dist: f32,
+    allowed: Option<&std::collections::HashSet<usize>>,
 ) -> Option<(usize, f32)> {
     let mvp = proj * view;
     let state = mol.render_state();
@@ -305,6 +313,11 @@ pub(crate) fn nearest_bond_dist(
     };
     let mut best: Option<(usize, f32)> = None;
     for (k, bond) in mol.bonds.iter().enumerate() {
+        // Scoped Draw-mode hit-test: a bond counts only when *both* its atoms are in the
+        // active rep's selection (a bond half-outside the scope is not editable).
+        if allowed.is_some_and(|set| !(set.contains(&bond.i1) && set.contains(&bond.i2))) {
+            continue;
+        }
         let (Some(pa), Some(pb)) = (project(bond.i1), project(bond.i2)) else {
             continue;
         };

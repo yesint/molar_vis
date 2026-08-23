@@ -64,6 +64,39 @@ pub(super) fn fade_by_ray(geom: &mut geometry::GeometryData, o: glam::Vec3, d: g
     }
 }
 
+/// Desaturate + dim every element's colour so a representation reads as **inactive**.
+/// Used in Draw mode for every rep except the one being edited, to show at a glance that
+/// the others are not active and can't be interacted with. Opacity (the alpha byte) is
+/// left as-is so the draw order does not change.
+pub(super) fn gray_out(geom: &mut geometry::GeometryData) {
+    // Blend each channel most of the way to the colour's own luminance (desaturate),
+    // then darken — a dim, near-grey version of the original colour.
+    fn gray(c: u32) -> u32 {
+        let a = c & 0xff00_0000;
+        let r = (c & 0xff) as f32;
+        let g = ((c >> 8) & 0xff) as f32;
+        let b = ((c >> 16) & 0xff) as f32;
+        let l = 0.299 * r + 0.587 * g + 0.114 * b;
+        const DESAT: f32 = 0.85; // fraction blended toward grey
+        const DIM: f32 = 0.55; // brightness kept
+        let ch = |v: f32| (((v * (1.0 - DESAT) + l * DESAT) * DIM) as u32).min(255);
+        a | (ch(b) << 16) | (ch(g) << 8) | ch(r)
+    }
+    for s in &mut geom.spheres {
+        s.color = gray(s.color);
+    }
+    for c in &mut geom.cylinders {
+        c.color = gray(c.color);
+        c.color1 = gray(c.color1);
+    }
+    for l in &mut geom.lines {
+        l.color = gray(l.color);
+    }
+    for v in &mut geom.mesh.vertices {
+        v.color = gray(v.color);
+    }
+}
+
 /// Build the selection glow geometry for one molecule: for each visible rep, the
 /// rep's selection intersected with the highlighted `atoms`, built in that rep's
 /// own style/params, merged into one geometry. Used for both the pending (lasso)
@@ -581,6 +614,11 @@ renderer: &SceneRenderer,
 settings: &Settings,
 view_dirty: bool,
 rs: &eframe::egui_wgpu::RenderState,
+// The rep currently open in the drawing editor, as `(molecule, rep index)`. When set,
+// every *other* visible rep is greyed out (built desaturated + dim) to show it's inactive
+// in Draw mode. `None` when not drawing → nothing greyed. The caller marks all reps
+// `geom_dirty` when this changes, so a rebuild reaches every rep.
+gray_active: Option<(crate::scene::MolId, usize)>,
 ) -> bool {
     let mut changed = false;
     // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
@@ -627,10 +665,13 @@ rs: &eframe::egui_wgpu::RenderState,
             None => mol.data.state(),
         };
         let n_atoms = mol.n_atoms;
+        let mol_id = mol.id;
         // Whether any rep's geometry was (re)built this pass — if so and there's
         // an active selection, its glow must follow the new style/coords.
         let mut rep_geom_changed = false;
-        for rep in &mut mol.reps {
+        for (j, rep) in mol.reps.iter_mut().enumerate() {
+            // Grey out every rep except the one open in the editor (Draw mode only).
+            let grayed = matches!(gray_active, Some((tid, tr)) if !(mol_id == tid && j == tr));
             if rep.sel_dirty {
                 // Parse + evaluate the selection (against the System's own
                 // state). On error keep the previous selection/geometry and
@@ -700,10 +741,13 @@ rs: &eframe::egui_wgpu::RenderState,
                     let bound = mol.data.bind_with_state(sel, state);
                     let ss = geometry::needs_ss(&rep.params, rep.color)
                         .then(|| SsMap::compute(&bound, rep.ss_algo));
-                    let geom = geometry::build(
+                    let mut geom = geometry::build(
                         &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                         ss.as_ref(), dashed,
                     );
+                    if grayed {
+                        gray_out(&mut geom);
+                    }
                     (geom, ss)
                 };
                 rep.ss_cache = fresh_ss;
@@ -725,10 +769,14 @@ rs: &eframe::egui_wgpu::RenderState,
                 // existing GPU buffers in place (no reallocation).
                 let geom = {
                     let bound = mol.data.bind_with_state(sel, state);
-                    geometry::build(
+                    let mut geom = geometry::build(
                         &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                         rep.ss_cache.as_ref(), dashed,
-                    )
+                    );
+                    if grayed {
+                        gray_out(&mut geom);
+                    }
+                    geom
                 };
                 renderer.update(rs, &mut rep.gpu, &geom);
                 if matches!(rep.kind, RepKind::Cartoon) {
@@ -887,4 +935,41 @@ rs: &eframe::egui_wgpu::RenderState,
         changed = true;
     }
     changed
+}
+
+#[cfg(test)]
+mod gray_out_tests {
+    use super::*;
+    use crate::render::SphereInstance;
+
+    /// A saturated colour comes back desaturated (its channels pulled toward each other),
+    /// dimmed (its dominant channel darker), with its opacity (alpha) untouched.
+    #[test]
+    fn gray_out_desaturates_dims_and_keeps_alpha() {
+        // Saturated red, fully opaque (RGBA little-endian: R=0xFF, A=0xFF).
+        let red = 0xFF00_00FFu32;
+        let mut geom = geometry::GeometryData {
+            spheres: vec![SphereInstance {
+                center: [0.0; 3],
+                radius: 1.0,
+                color: red,
+                mat: 0,
+                pick: [0, 0],
+            }],
+            ..Default::default()
+        };
+        gray_out(&mut geom);
+        let c = geom.spheres[0].color;
+        let (r, g, b, a) = (
+            c & 0xff,
+            (c >> 8) & 0xff,
+            (c >> 16) & 0xff,
+            (c >> 24) & 0xff,
+        );
+        assert_eq!(a, 0xff, "opacity must be preserved");
+        assert!(r < 0xff, "dominant channel must be dimmed: {r}");
+        assert!(g > 0 && b > 0, "grey channels must lift toward luminance");
+        // Much closer to neutral grey than the original (|R−G| was 255).
+        assert!((r as i32 - g as i32).abs() < 64, "must read as desaturated");
+    }
 }

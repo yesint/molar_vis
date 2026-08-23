@@ -105,6 +105,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_EDIT_REP=1` (open mol 0's first rep selection field in edit mode, so the
   contextual selection-suggestion hint and an invalid selection's in-field red error highlight
   can be screenshot headlessly — pair with `MOLAR_VIS_DEBUG_SEL`) +
+  `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` (open that rep in **Draw mode**, scoped to its
+  selection — so the rep-scoped editing and the **grey-out of the non-active reps** can be checked
+  with `MOLAR_VIS_DEBUG_SAVE_IMAGE`; defaults to rep 0) +
   `MOLAR_VIS_DEBUG_SAVE_MOL=<path>` (write mol 0 to a structure file at startup — exercises the
   molar `FileHandler` write + displayed-frame swap path headlessly) +
   `MOLAR_VIS_DEBUG_SAVE_GROUP=<path>` (write group 0's members to one multi-record file — exercises

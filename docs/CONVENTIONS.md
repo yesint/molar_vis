@@ -37,6 +37,15 @@
   wrong the moment the widget paints a selection plate behind it (`widgets::overlay_button`,
   `draw::bond_order_icon`). Lay the galley out with `Color32::PLACEHOLDER` and pass the real colour
   to `Painter::galley`, since the state isn't known until the `Response` exists.
+- **Drive focus-dependent layout from `ui.memory(|m| m.has_focus(id))`, never from a flag you keep
+  in sync with `Response::gained_focus()`/`lost_focus()`.** The rep row swaps between a bounded field
+  (with action buttons) and a full-width editor depending on whether the selection field is focused
+  (`rep_panel::draw_reps_for`). Tracking that with a separate `editing_rep` flag toggled on the focus
+  *events* drifts: a missed/duplicated event (or a re-render that overwrites the flag) leaves it
+  cleared-but-focused (row stuck collapsed — re-clicks did nothing) or set-but-unfocused (stuck open).
+  Reading the field's **actual** focus each frame can't drift. Keep a flag only as a **one-shot open
+  request** (e.g. the debug hook): render the field, `Response::request_focus()` once, then let
+  `has_focus` sustain the layout.
 - Icons: `egui_phosphor::regular::{EYE, EYE_SLASH, TRASH, COPY, PLUS, PERSPECTIVE, CUBE}`;
   the font is installed in `theme::apply` via `egui_phosphor::add_to_fonts`.
 - **Wayland IME workaround** (`defuse_broken_ime` at the top of `App::ui`, Linux-gated):

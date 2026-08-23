@@ -248,6 +248,33 @@ impl Representation {
         crate::color::ColorSpec { method: self.color, charge_kind: self.charge_kind }
     }
 
+    /// Ensure global atom `idx` is part of this rep's selection, so an atom just drawn
+    /// while Draw mode is scoped to this rep stays visible and editable. A blanket
+    /// selection (`all` / empty) already covers every atom, so it is left untouched.
+    /// Otherwise the index is folded into a trailing `or index …` clause — coalesced into
+    /// one such clause so repeated draws don't bloat the text into `… or index 5 or index 6`.
+    /// Marks the selection dirty so it recompiles on the next frame.
+    pub fn include_atom(&mut self, idx: usize) {
+        let trimmed = self.sel_text.trim();
+        if trimmed.is_empty() || trimmed == "all" {
+            return;
+        }
+        const CLAUSE: &str = " or index ";
+        // Extend an existing trailing `or index <nums>` clause when the text ends in one.
+        if let Some(pos) = self.sel_text.rfind(CLAUSE) {
+            let tail = &self.sel_text[pos + CLAUSE.len()..];
+            if !tail.is_empty() && tail.split_whitespace().all(|t| t.parse::<usize>().is_ok()) {
+                self.sel_text = format!("{} {}", self.sel_text, idx);
+                self.sel_dirty = true;
+                return;
+            }
+        }
+        // Otherwise wrap the current selection (parenthesized, so operator precedence is
+        // preserved) and start a fresh index clause.
+        self.sel_text = format!("({}){}{}", self.sel_text, CLAUSE, idx);
+        self.sel_dirty = true;
+    }
+
     pub fn new(kind: RepKind) -> Self {
         Self::restore(
             kind,
@@ -1978,5 +2005,64 @@ mod rep_surgery_tests {
         scene.reveal_pending(0);
         assert!(scene.molecules[0].reps_open);
         assert_eq!(scene.reveal, Some(Reveal::Pending(MolId(0))));
+    }
+}
+
+#[cfg(test)]
+mod include_atom_tests {
+    use super::*;
+
+    fn rep_with(sel: &str) -> Representation {
+        let mut r = Representation::new(RepKind::BallAndStick);
+        r.sel_text = sel.to_string();
+        r.sel_dirty = false; // so the test can see include_atom re-arm it
+        r
+    }
+
+    /// A blanket selection already covers every atom, so a drawn atom needs no change.
+    #[test]
+    fn all_and_empty_selections_are_left_untouched() {
+        let mut r = rep_with("all");
+        r.include_atom(42);
+        assert_eq!(r.sel_text, "all");
+        assert!(!r.sel_dirty);
+
+        let mut r = rep_with("");
+        r.include_atom(42);
+        assert_eq!(r.sel_text, "");
+        assert!(!r.sel_dirty);
+    }
+
+    /// A restrictive selection gains a parenthesized `or index` clause, and further draws
+    /// coalesce into that one clause rather than stacking `or index … or index …`.
+    #[test]
+    fn restrictive_selection_gains_a_coalesced_index_clause() {
+        let mut r = rep_with("protein");
+        r.include_atom(5);
+        assert_eq!(r.sel_text, "(protein) or index 5");
+        assert!(r.sel_dirty);
+        r.include_atom(6);
+        r.include_atom(7);
+        assert_eq!(r.sel_text, "(protein) or index 5 6 7");
+    }
+
+    /// An existing `index` selection (as an accepted lasso produces) still coalesces —
+    /// the first draw wraps it, later draws extend the trailing clause.
+    #[test]
+    fn an_index_selection_wraps_then_extends() {
+        let mut r = rep_with("index 1:3 7");
+        r.include_atom(9);
+        assert_eq!(r.sel_text, "(index 1:3 7) or index 9");
+        r.include_atom(11);
+        assert_eq!(r.sel_text, "(index 1:3 7) or index 9 11");
+    }
+
+    /// A trailing `or index` clause buried inside a larger expression must not be mistaken
+    /// for the coalescible tail — it gets a fresh wrapped clause instead.
+    #[test]
+    fn a_nested_index_clause_is_not_coalesced() {
+        let mut r = rep_with("(x or index 5) and y");
+        r.include_atom(9);
+        assert_eq!(r.sel_text, "((x or index 5) and y) or index 9");
     }
 }

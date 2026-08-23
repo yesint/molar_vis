@@ -588,6 +588,7 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             traj_rx,
             draw: None,
+            last_gray_active: None,
             #[cfg(feature = "scripting")]
             console: Console::default(),
             jobs_rx: None,
@@ -736,6 +737,16 @@ impl App {
             app.console.ui.focus_input = true;
         }
 
+        // Verification hook: MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>] opens that rep in Draw
+        // mode (scoped to its selection), so the rep-scoped editing + the grey-out of the
+        // non-active reps can be checked with MOLAR_VIS_DEBUG_SAVE_IMAGE. Defaults to rep 0.
+        if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_DRAW_REP") {
+            let mut it = spec.split(':').map(|s| s.trim().parse::<usize>().unwrap_or(0));
+            let mol = it.next().unwrap_or(0);
+            let rep = it.next().unwrap_or(0);
+            app.open_rep_in_editor(mol, rep);
+        }
+
         // Verification hook: MOLAR_VIS_DEBUG_CHARGES=1 presses [Compute charges] on every
         // molecule's first rep (as the Color tab's button does) and logs the outcome, so
         // the espaloma path is exercisable headlessly. Pair with MOLAR_VIS_DEBUG_COLOR=charge
@@ -816,13 +827,16 @@ impl App {
                         dim("MOLAR_VIS_DEBUG_SAVE_IMAGE_W", 800),
                         dim("MOLAR_VIS_DEBUG_SAVE_IMAGE_H", 600),
                     );
+                    let gray_active = app.draw_gray_active();
                     build::rebuild_dirty(
                         &mut app.scene,
                         &app.renderer,
                         &app.settings,
                         app.view_dirty,
                         rs,
+                        gray_active,
                     );
+                    app.renderer.set_edit_active(gray_active);
                     let aspect = w as f32 / h as f32;
                     let view = app.camera.view();
                     let proj = app.camera.proj(aspect);
@@ -860,12 +874,14 @@ impl App {
                         dim("MOLAR_VIS_DEBUG_RAYTRACE_H", 600),
                     );
                     let samples = dim("MOLAR_VIS_DEBUG_RAYTRACE_SAMPLES", 128);
+                    let gray_active = app.draw_gray_active();
                     build::rebuild_dirty(
                         &mut app.scene,
                         &app.renderer,
                         &app.settings,
                         app.view_dirty,
                         rs,
+                        gray_active,
                     );
                     app.renderer.prepare_raytrace(
                         rs,
