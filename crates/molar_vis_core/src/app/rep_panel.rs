@@ -1287,16 +1287,9 @@ impl App {
 
             // A horizontal delimiter line between consecutive reps, so where one rep ends and
             // the next begins reads at a glance. The last rep just gets trailing space (before
-            // the pending stub / next molecule), not a dangling line. Drawn by hand (allocate a
-            // thin strip + paint an hline) rather than `ui.separator()`.
+            // the pending stub / next molecule), not a dangling line.
             if j + 1 < end {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
-                ui.painter().hline(
-                    rect.x_range(),
-                    rect.center().y,
-                    ui.visuals().widgets.noninteractive.bg_stroke,
-                );
+                ui.separator();
             } else {
                 ui.add_space(6.0);
             }
