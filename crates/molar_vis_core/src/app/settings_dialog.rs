@@ -280,6 +280,12 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
              over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
         );
+    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep magnifier does an unobstructed view")
+        .on_hover_text(
+            "The magnifier button on each representation rotates and scales the camera to show \
+             that rep with the least obstruction by the other reps (default). Off → it just \
+             zooms to fit the selection at the current orientation.",
+        );
 
     ui.separator();
     egui::Grid::new("set_behavior_traj")

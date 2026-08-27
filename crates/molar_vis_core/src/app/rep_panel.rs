@@ -896,6 +896,9 @@ impl App {
         is_shared: bool,
     ) -> bool {
         let mut view_dirty = false;
+        // Whether the per-rep magnifier does an unobstructed view (default) or a plain
+        // zoom-to-fit — read once so the row closures can caption the button.
+        let zoom_unobstructed = self.settings.behavior.rep_zoom_unobstructed;
 
         // Read this molecule's basics + clamp the range with an *immutable* borrow, so
         // the partner-label precompute below (which reads *other* molecules) doesn't
@@ -1083,11 +1086,16 @@ impl App {
                                                 false => "Show",
                                             })
                                             .clicked();
-                                        // Zoom the camera to fit this selection.
+                                        // Frame this selection: unobstructed view (default)
+                                        // or a plain zoom-to-fit (see the behavior setting).
                                         if icon_button(
                                             ui,
                                             icon::MAGNIFYING_GLASS_PLUS,
-                                            "Zoom to selection",
+                                            if zoom_unobstructed {
+                                                "Unobstructed view of selection"
+                                            } else {
+                                                "Zoom to selection"
+                                            },
                                         )
                                         .clicked()
                                         {
@@ -1355,11 +1363,19 @@ impl App {
                     view_dirty = true;
                 }
                 RepAction::ZoomTo(j) => {
-                    let mol = &self.scene.molecules[mi];
-                    if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
-                        let (min, max) = mol.sel_bbox(sel);
-                        self.camera.focus_bbox(min, max);
+                    if zoom_unobstructed {
+                        // Rotate + scale so this rep shows with the least obstruction.
+                        if let Err(e) = self.unobstructed_view(mi, j, 1.0, 256) {
+                            log::warn!("unobstructed view: {e}");
+                        }
                         view_dirty = true;
+                    } else {
+                        let mol = &self.scene.molecules[mi];
+                        if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
+                            let (min, max) = mol.sel_bbox(sel);
+                            self.camera.focus_bbox(min, max);
+                            view_dirty = true;
+                        }
                     }
                 }
                 RepAction::StartPartnerPick(j) => {

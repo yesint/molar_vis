@@ -213,6 +213,11 @@ pub struct BehaviorSettings {
     /// by default** — it's a niche aid and adds a per-hover grid query + rebuild. A
     /// behavior setting (applies live).
     pub hover_detail_lens: bool,
+    /// The per-rep magnifier button rotates **and** scales the camera to show that rep
+    /// with the least obstruction by other reps (the unobstructed view) instead of only
+    /// zooming to fit its selection at the current orientation. **On by default.** A
+    /// behavior setting (applies live — read when the button is clicked).
+    pub rep_zoom_unobstructed: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -231,6 +236,7 @@ impl Default for BehaviorSettings {
             bond_search_periodic: b.periodic,
             dashed_pbc_bonds: true,
             hover_detail_lens: false,
+            rep_zoom_unobstructed: true,
         }
     }
 }
