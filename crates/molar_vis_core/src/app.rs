@@ -760,6 +760,94 @@ impl App {
         self.view_dirty = true;
     }
 
+    /// Rotate and scale the camera to show representation `rep` of molecule `mol` with
+    /// the least obstruction — the view direction that keeps the **most of the rep's
+    /// atoms directly on screen** (front-most, hidden by neither another rep nor another
+    /// atom of the same rep), then frame that rep.
+    ///
+    /// `zoom_out` widens the framing about the rep's centre while keeping the chosen
+    /// orientation: `1.0` frames the rep tightly (the default), `2.0` shows twice its
+    /// extent so more of the surroundings are in view. Both the lateral fit and the depth
+    /// clip slab grow with it, so context in front of / behind the rep is not clipped.
+    ///
+    /// Atoms are modeled as vdW spheres (see [`crate::unobstructed`]); occluders are the
+    /// atoms of every *other* visible rep across all molecules (Interactions reps draw no
+    /// per-atom geometry and are skipped). Selection/geometry is refreshed first so a
+    /// freshly built scene (e.g. from the Python API) has evaluated selections.
+    pub fn unobstructed_view(&mut self, mol: usize, rep: usize, zoom_out: f32) -> Result<(), String> {
+        // Make sure selections are evaluated (a just-added rep may still be dirty),
+        // exactly as `render_to_file` does before an offscreen capture. Native only —
+        // on wasm the render state is per-frame, and the update loop keeps the scene
+        // built, so selections are already current when this is called.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rs) = self.render_state.clone() {
+            let gray_active = self.draw_gray_active();
+            build::rebuild_dirty(
+                &mut self.scene,
+                &self.renderer,
+                &self.settings,
+                self.view_dirty,
+                &rs,
+                gray_active,
+            );
+        }
+
+        // Target atoms: the chosen rep's evaluated selection, as (position, vdW radius).
+        let target = {
+            let m = self
+                .scene
+                .molecules
+                .get(mol)
+                .ok_or_else(|| format!("no molecule {mol}"))?;
+            let sel = m
+                .reps
+                .get(rep)
+                .ok_or_else(|| format!("no rep {rep} on molecule {mol}"))?
+                .sel
+                .as_ref()
+                .ok_or("target rep has no evaluated selection")?;
+            let bound = m.data.bind_with_state(sel, m.render_state());
+            bound
+                .iter_particle()
+                .map(|p| (glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), p.atom.vdw()))
+                .collect::<Vec<_>>()
+        };
+        if target.is_empty() {
+            return Err("target rep selects no atoms".to_string());
+        }
+
+        // Occluders: atoms of every other visible, per-atom rep (all molecules).
+        let mut occluders: Vec<(glam::Vec3, f32)> = Vec::new();
+        for (mi, m) in self.scene.molecules.iter().enumerate() {
+            for (ri, r) in m.reps.iter().enumerate() {
+                if (mi == mol && ri == rep) || !r.visible || r.kind == RepKind::Interactions {
+                    continue;
+                }
+                let Some(sel) = r.sel.as_ref() else { continue };
+                let bound = m.data.bind_with_state(sel, m.render_state());
+                for p in bound.iter_particle() {
+                    occluders.push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), p.atom.vdw()));
+                }
+            }
+        }
+
+        // Best direction, then orient and frame the target.
+        let dir = crate::unobstructed::best_unobstructed_direction(&target, &occluders);
+        self.camera.orientation = crate::unobstructed::look_along_quat(dir);
+        let (min, max) = {
+            let m = &self.scene.molecules[mol];
+            m.sel_bbox(m.reps[rep].sel.as_ref().unwrap())
+        };
+        // `zoom_out` enlarges the framed box about its centre: 1 = tight, >1 shows more
+        // of the surroundings (lateral fit and depth slab both grow, so context in front
+        // of / behind the rep stays unclipped).
+        let center = (min + max) * 0.5;
+        let half = (max - min) * 0.5 * zoom_out.max(1e-3);
+        self.camera.focus_bbox(center - half, center + half);
+        self.view_dirty = true;
+        Ok(())
+    }
+
     /// Perspective or orthographic projection.
     pub fn set_projection(&mut self, projection: Projection) {
         self.camera.projection = projection;

@@ -257,6 +257,28 @@ impl Visualizer {
         )
     }
 
+    /// Rotate and scale the view to show `rep` (a [`RepHandle`]) with the least
+    /// obstruction: it turns the camera to the direction that keeps the most of that
+    /// rep's atoms directly on screen (front-most, hidden by neither another rep nor
+    /// another atom of the same rep), then frames the rep. Every *other* visible rep is
+    /// treated as an occluder. Applies live, like the other view controls.
+    ///
+    /// `zoom_out` keeps that orientation but widens the framing about the rep's centre —
+    /// `1.0` frames the rep tightly (default), `2.0` shows twice its extent for a broader
+    /// view of the surroundings (front/back context is not clipped).
+    #[pyo3(signature = (rep, zoom_out=1.0))]
+    fn unobstructed_view(&self, rep: &RepHandle, zoom_out: f32) -> PyResult<()> {
+        let (mol, r) = (rep.mol, rep.rep);
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.unobstructed_view(mol, r, zoom_out) {
+                    log::error!("unobstructed_view: {e}");
+                }
+            }),
+        )
+    }
+
     /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
     /// `width × height`. Works whether the viewer is visible or hidden (`spawn(visible=False)`).
     /// With `raytrace=True` it goes through the GPU ray tracer (AO / shadows / GI), tracing

@@ -25,7 +25,8 @@ Notes for anyone extending this:
     PBC bond-wrapping does not shatter the cartoon/lines/licorice (see geometry.rs).
   * PAD (focus padding, nm) controls the zoom AND the depth clip slab. Too small and
     geometry in front of the pocket (e.g. a β-hairpin over the ligand) is clipped by the
-    near plane; widen PAD to include it. (An unobstructed-view mode is future work.)
+    near plane; widen PAD to include it. To instead turn the camera so the ligand is not
+    obstructed, see render_unobstructed.py (Visualizer.unobstructed_view).
 """
 import os, sys, time
 import molar_vis as mv

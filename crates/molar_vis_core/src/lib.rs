@@ -34,6 +34,7 @@ mod spatial;
 mod suggest;
 mod theme;
 mod trajectory;
+mod unobstructed;
 
 pub use app::{App, AppJob};
 pub use camera::Corner;
