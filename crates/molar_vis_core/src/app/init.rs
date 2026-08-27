@@ -591,6 +591,8 @@ impl App {
             #[cfg(feature = "scripting")]
             console: Console::default(),
             jobs_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            render_state: cc.wgpu_render_state.clone(),
         };
 
         // Verification hook: MOLAR_VIS_DEBUG_AXES=1 shows the orientation-axes gizmo.

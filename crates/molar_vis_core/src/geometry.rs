@@ -14,6 +14,17 @@ use crate::secstruct::SsMap;
 mod cartoon;
 mod surface;
 
+/// Shortest periodic-cell vector (nm) below which a box is treated as **absent** for
+/// PBC-aware rendering. Cryo-EM / NMR PDB entries carry a placeholder
+/// `CRYST1 1.000 1.000 1.000 90 90 90 P 1` (→ a 0.1 nm cell after molar's Å→nm scaling)
+/// that means "no crystal cell", not a real periodic box. Such a cell is far smaller
+/// than the bonds and the ~0.38 nm Cα spacing we render, so the minimum-image test wraps
+/// *every* consecutive Cα and *every* covalent bond — shattering the cartoon into
+/// per-residue confetti and collapsing lines/licorice into relocated stubs. No real
+/// atomic periodic cell is anywhere near this small (the smallest are several nm), so the
+/// floor rejects only placeholders and never a genuine crystal/MD box.
+const MIN_USABLE_BOX_NM: f32 = 0.5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RepKind {
     Vdw,
@@ -211,8 +222,18 @@ pub fn build(
     // a box face is drawn as two dashed half-bond stubs (one from each atom toward its
     // partner's nearest image) instead of a long line across the box, and a cartoon
     // ribbon is split at the boundary. Only consult it when the dashed-PBC setting is
-    // on — otherwise bonds draw as plain solid half-bonds (the cheap path).
-    let pbox = if dashed_pbc { bound.get_box() } else { None };
+    // on — otherwise bonds draw as plain solid half-bonds (the cheap path). A degenerate
+    // placeholder box (a cryo-EM `CRYST1 1 1 1` dummy) is ignored (see MIN_USABLE_BOX_NM):
+    // wrapping against it corrupts every rep — most visibly the cartoon (per-residue
+    // confetti) — so it must be treated as "no box".
+    let pbox = if dashed_pbc {
+        bound.get_box().filter(|b| {
+            let e = b.get_box_extents();
+            e.x.min(e.y).min(e.z) >= MIN_USABLE_BOX_NM
+        })
+    } else {
+        None
+    };
     let mut data = match *params {
         RepParams::Vdw { scale } => GeometryData {
             spheres: spheres(bound, &colorizer, |a| a.vdw() * scale),

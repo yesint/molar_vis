@@ -242,6 +242,61 @@ impl Visualizer {
         send_job(&self.jobs, Box::new(move |app| app.set_shadows(enabled, strength)))
     }
 
+    /// Zoom the camera to fit `sel` (a pymolar `Sel`) of the molecule `mol`
+    /// (a [`MolHandle`]) — VMD-style zoom-to-selection.
+    fn focus(&self, py: Python<'_>, mol: &MolHandle, sel: Py<PySel>) -> PyResult<()> {
+        let indices = sel.bind(py).get().index().to_vec();
+        let m = mol.mol;
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.focus_selection(m, &indices) {
+                    log::error!("focus: {e}");
+                }
+            }),
+        )
+    }
+
+    /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
+    /// `width × height`. Works whether the viewer is visible or hidden (`spawn(visible=False)`).
+    /// With `raytrace=True` it goes through the GPU ray tracer (AO / shadows / GI), tracing
+    /// `samples` paths per pixel; otherwise it captures the rasterized view.
+    ///
+    /// The render runs on the UI thread and this call **blocks** until the file is written
+    /// (releasing the GIL meanwhile, so the UI thread can read the shared pymolar data).
+    #[pyo3(signature = (path, width=1200, height=1000, raytrace=false, samples=128))]
+    fn render(
+        &self,
+        py: Python<'_>,
+        path: String,
+        width: u32,
+        height: u32,
+        raytrace: bool,
+        samples: u32,
+    ) -> PyResult<()> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let dest = std::path::PathBuf::from(&path);
+        send_job(
+            &self.jobs,
+            Box::new(move |app: &mut App| {
+                let res = app.render_to_file(&dest, width, height, raytrace, samples);
+                // The receiver may be gone if Python was interrupted; ignore a send error.
+                let _ = done_tx.send(res);
+            }),
+        )?;
+        // Block on the UI thread finishing the render + file write, but release the GIL so
+        // the UI thread can attach to it (a shared pymolar molecule's selection is evaluated
+        // under the GIL during the pre-render `rebuild_dirty`) — otherwise this deadlocks.
+        let outcome = py.detach(move || done_rx.recv());
+        match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+            Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "viewer window closed before the render completed",
+            )),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("<molar_vis.Visualizer: {} molecule(s)>", self.state.lock().unwrap().len())
     }
@@ -259,7 +314,7 @@ struct MolHandle {
 impl MolHandle {
     /// Add a representation. `sel` is a pymolar `Sel` (its atoms become the rep's
     /// selection); `style`/`color` are names like "cartoon"/"ss". Returns a handle.
-    #[pyo3(signature = (sel=None, style=None, color=None, material=None))]
+    #[pyo3(signature = (sel=None, style=None, color=None, material=None, width=None))]
     fn add_rep(
         &self,
         py: Python<'_>,
@@ -267,6 +322,7 @@ impl MolHandle {
         style: Option<String>,
         color: Option<String>,
         material: Option<String>,
+        width: Option<f32>,
     ) -> PyResult<RepHandle> {
         let rep = {
             let mut s = self.state.lock().unwrap();
@@ -306,6 +362,47 @@ impl MolHandle {
                     if let Err(e) = app.set_rep_material(mol, rep, m) {
                         log::error!("add_rep material failed: {e}");
                     }
+                }
+                if let Some(w) = width {
+                    if let Err(e) = app.set_rep_width(mol, rep, w) {
+                        log::error!("add_rep width failed: {e}");
+                    }
+                }
+            }),
+        )?;
+        Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
+    }
+
+    /// Add an **Interactions** representation to this molecule, detecting non-covalent
+    /// contacts (H-bonds, hydrophobic, salt bridges, π-stacking, π-cation, halogen) against
+    /// `partner` — a [`RepHandle`] (its rep) or a [`MolHandle`] (that molecule's first rep).
+    /// Returns a handle to the new rep.
+    fn add_interactions(&self, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
+        let (partner_mol, partner_rep) = if let Ok(r) = partner.cast::<RepHandle>() {
+            let r = r.borrow();
+            (r.mol, r.rep)
+        } else if let Ok(m) = partner.cast::<MolHandle>() {
+            (m.borrow().mol, 0usize)
+        } else {
+            return Err(PyValueError::new_err(
+                "partner must be a RepHandle or a MolHandle",
+            ));
+        };
+        let rep = {
+            let mut s = self.state.lock().unwrap();
+            let cnt = s
+                .get_mut(self.mol)
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("stale molecule handle"))?;
+            let idx = *cnt;
+            *cnt += 1;
+            idx
+        };
+        let mol = self.mol;
+        send_job(
+            &self.jobs,
+            Box::new(move |app: &mut App| {
+                if let Err(e) = app.add_interactions_rep(mol, partner_mol, partner_rep) {
+                    log::error!("add_interactions failed: {e}");
                 }
             }),
         )?;
@@ -360,6 +457,16 @@ impl RepHandle {
         }))
     }
 
+    /// Set the line width in pixels (Lines / Interactions styles only; other styles ignore
+    /// it with a logged warning).
+    #[setter]
+    fn set_width(&self, value: f32) -> PyResult<()> {
+        let (mol, rep) = (self.mol, self.rep);
+        send_job(&self.jobs, Box::new(move |app| {
+            if let Err(e) = app.set_rep_width(mol, rep, value) { log::error!("set width: {e}"); }
+        }))
+    }
+
     /// Set the selection from a pymolar `Sel`'s atoms.
     fn select(&self, py: Python<'_>, sel: Py<PySel>) -> PyResult<()> {
         let indices = sel.bind(py).get().index().to_vec();
@@ -378,20 +485,35 @@ impl RepHandle {
 /// the Python REPL stays responsive. Jobs (add molecules, change reps, …) are sent to
 /// it through the returned [`Visualizer`].
 ///
+/// `visible=False` creates the window **invisible** (`ViewportBuilder::with_visible(false)`,
+/// the same path as the `MOLAR_VIS_DEBUG_HIDDEN` hook), so a scene can be built and rendered
+/// to a file headlessly without popping a window onto the desktop. It still obtains a real
+/// wgpu device, so `Visualizer.render(...)` works; it does need a display server to create
+/// the (hidden) window.
+///
 /// The window's event loop runs off the main thread (`with_any_thread`), which winit
 /// supports on Linux/Windows; macOS requires the main thread and isn't handled yet.
 #[pyfunction]
-fn spawn() -> PyResult<Visualizer> {
+#[pyo3(signature = (visible=true))]
+fn spawn(visible: bool) -> PyResult<Visualizer> {
     let (tx, rx) = std::sync::mpsc::channel::<AppJob>();
 
     std::thread::Builder::new()
         .name("molar_vis-ui".into())
         .spawn(move || {
+            let mut viewport = eframe::egui::ViewportBuilder::default()
+                .with_title("molar_vis")
+                .with_inner_size([1200.0, 800.0]);
+            if !visible {
+                // Invisible window: headless render-to-file with no desktop window.
+                viewport = viewport.with_visible(false);
+            }
             let native_options = eframe::NativeOptions {
                 renderer: eframe::Renderer::Wgpu,
                 // Same early-Z device opt-in as the standalone binary (kills close-up
                 // impostor overdraw when the adapter supports it).
                 wgpu_options: molar_vis_core::early_z_wgpu_options(),
+                viewport,
                 event_loop_builder: Some(Box::new(|builder| {
                     // Permit the event loop on this non-main thread.
                     #[cfg(target_os = "linux")]

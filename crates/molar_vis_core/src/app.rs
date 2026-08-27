@@ -211,6 +211,14 @@ pub struct App {
     /// running viewer. `None` for the standalone app (native + the trunk web demo);
     /// connected by `molar_vis_py::spawn` / `molar_vis_js::start`. See [`AppJob`].
     jobs_rx: Option<std::sync::mpsc::Receiver<AppJob>>,
+    /// A clone of eframe's wgpu render state (device/queue/adapter), captured at
+    /// construction from `cc.wgpu_render_state`. It lets an external host (the native
+    /// Python module) drive an **offscreen** render-to-file from an [`AppJob`], which
+    /// only gets `&mut App` and so has no `eframe::Frame` to pull the render state from.
+    /// `None` if eframe wasn't created with the wgpu backend. Native-only (the offscreen
+    /// file-render path — [`App::render_to_file`] — is native).
+    #[cfg(not(target_arch = "wasm32"))]
+    render_state: Option<eframe::egui_wgpu::RenderState>,
 }
 
 
@@ -545,6 +553,156 @@ impl App {
             rep: crate::script::RepRef::Index(rep),
             text,
         })
+    }
+
+    /// Append an **Interactions** representation to molecule `mol`, detecting non-covalent
+    /// contacts against the partner representation `(partner_mol, partner_rep)`. Wires the
+    /// same [`Representation::partner`] the interactive partner-picker sets (keyed by the
+    /// partner molecule's [`MoleculeSource`]), so the build path is exactly the one
+    /// `MOLAR_VIS_DEBUG_INTERACTIONS` and the docking loader use. Returns the new rep index.
+    pub fn add_interactions_rep(
+        &mut self,
+        mol: usize,
+        partner_mol: usize,
+        partner_rep: usize,
+    ) -> Result<usize, String> {
+        let n = self.scene.molecules.len();
+        if mol >= n {
+            return Err(format!("no molecule {mol} (have {n})"));
+        }
+        if partner_mol >= n {
+            return Err(format!("no partner molecule {partner_mol} (have {n})"));
+        }
+        let partner_src = {
+            let pm = &self.scene.molecules[partner_mol];
+            if partner_rep >= pm.reps.len() {
+                return Err(format!(
+                    "partner molecule {partner_mol} has no rep {partner_rep} (has {})",
+                    pm.reps.len()
+                ));
+            }
+            pm.source.clone()
+        };
+        let mut rep = Representation::new(RepKind::Interactions);
+        rep.partner = Some((partner_src, partner_rep));
+        rep.sel_dirty = true;
+        rep.geom_dirty = true;
+        let m = &mut self.scene.molecules[mol];
+        m.reps.push(rep);
+        self.view_dirty = true;
+        Ok(m.reps.len() - 1)
+    }
+
+    /// Set representation `(mol, rep)`'s line width in pixels. Supported by the **Lines**
+    /// style (`RepParams::Lines { width }`) and the **Interactions** style (dashed-line
+    /// width, `InteractionSettings::line_width`); every other style has no line width and
+    /// returns an error. Line width is screen-space (constant at any zoom, VMD-style).
+    pub fn set_rep_width(&mut self, mol: usize, rep: usize, width: f32) -> Result<(), String> {
+        let m = self
+            .scene
+            .molecules
+            .get_mut(mol)
+            .ok_or_else(|| format!("no molecule {mol}"))?;
+        let r = m
+            .reps
+            .get_mut(rep)
+            .ok_or_else(|| format!("no rep {rep} on molecule {mol}"))?;
+        match &mut r.params {
+            RepParams::Lines { width: w } => *w = width.max(1.0),
+            RepParams::Interactions { settings } => settings.line_width = width.max(1.0),
+            _ => return Err("this representation style has no line width".to_string()),
+        }
+        r.geom_dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    /// Zoom the camera to fit exactly `indices` (a pymolar `Sel`'s atoms) of molecule
+    /// `mol` — the same zoom-to-selection the console's `focus` command and the
+    /// `MOLAR_VIS_DEBUG_FOCUS` hook drive (`Camera::focus_bbox`).
+    pub fn focus_selection(&mut self, mol: usize, indices: &[usize]) -> Result<(), String> {
+        let text = crate::pick::index_selection_string(indices).ok_or("selection is empty")?;
+        self.execute_command(crate::script::Command::Focus { mol, text })
+    }
+
+    /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
+    /// `width × height`. Reuses the exact offscreen-render → GPU readback → PNG-encode path
+    /// the `MOLAR_VIS_DEBUG_SAVE_IMAGE` (rasterizer) and `MOLAR_VIS_DEBUG_RAYTRACE`
+    /// (`raytrace = true`) hooks use, blocking on the readback so the file is on disk when
+    /// this returns. Runs on the UI thread (drive it via an [`AppJob`]); geometry is built
+    /// first (`build::rebuild_dirty`) so cartoons/surfaces/interactions are present.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_to_file(
+        &mut self,
+        path: &std::path::Path,
+        width: u32,
+        height: u32,
+        raytrace: bool,
+        samples: u32,
+    ) -> Result<(), String> {
+        let rs = self
+            .render_state
+            .clone()
+            .ok_or("wgpu render state unavailable (eframe must use the wgpu backend)")?;
+        let (w, h) = (width.max(1), height.max(1));
+
+        // Build + upload any dirty geometry (cartoons, surfaces, interaction dashes),
+        // exactly as the first `ui()` frame would — offscreen capture reads the built
+        // buffers, so nothing is drawn until this runs.
+        let gray_active = self.draw_gray_active();
+        build::rebuild_dirty(
+            &mut self.scene,
+            &self.renderer,
+            &self.settings,
+            self.view_dirty,
+            &rs,
+            gray_active,
+        );
+        self.renderer.set_edit_active(gray_active);
+
+        if raytrace {
+            if !self.renderer.raytrace_supported() {
+                return Err("ray tracing needs a compute-capable device".to_string());
+            }
+            self.renderer.prepare_raytrace(
+                &rs,
+                &self.scene,
+                &self.camera,
+                [w, h],
+                self.settings.behavior.dashed_pbc_bonds,
+            );
+            match self.renderer.capture_begin_raytrace(&rs, w, h, &self.camera, samples) {
+                Some(cap) => {
+                    let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                    cap.read()
+                        .save(path)
+                        .map_err(|e| format!("save image failed: {e}"))
+                }
+                None => Err("ray tracing unavailable, or the scene is empty".to_string()),
+            }
+        } else {
+            let aspect = w as f32 / h as f32;
+            let view = self.camera.view();
+            let proj = self.camera.proj(aspect);
+            let cap = self.renderer.capture_begin(
+                &rs,
+                w,
+                h,
+                view,
+                proj,
+                self.camera.is_perspective(),
+                self.camera.cue_uniform(),
+                self.camera.ao_uniform(),
+                self.camera.shadow_uniform(),
+                self.camera.background,
+                self.camera.eye_depth_range(),
+                &self.scene,
+            );
+            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+            cap.read()
+                .save(path)
+                .map_err(|e| format!("save image failed: {e}"))
+        }
     }
 
     // --- View controls (mirror the view-settings UI), for the Python API. Camera
