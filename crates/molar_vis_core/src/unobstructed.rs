@@ -199,6 +199,24 @@ mod tests {
     }
 
     #[test]
+    fn passed_reps_occlude_within_the_combined_target() {
+        // Two one-atom "reps" stacked along Z (this is what `unobstructed_view_multi`
+        // hands the scorer: the union of the passed reps as one target, no occluders).
+        let group = vec![(Vec3::ZERO, 0.5), (Vec3::new(0.0, 0.0, 2.0), 0.5)];
+        let none: Vec<(Vec3, f32)> = Vec::new();
+
+        // Looking along the stack, the front atom hides the back one -> only 1 visible.
+        assert_eq!(visible_count(&group, &none, Vec3::Z), 1);
+        // Perpendicular, they sit side by side -> both visible.
+        assert_eq!(visible_count(&group, &none, Vec3::X), 2);
+
+        // So the search must avoid the stacking axis and reveal both.
+        let d = best_unobstructed_direction(&group, &none);
+        assert_eq!(visible_count(&group, &none, d), 2, "best view should reveal both");
+        assert!(d.z.abs() < 0.6, "best view should not look down the stack, got {d:?}");
+    }
+
+    #[test]
     fn finds_the_opening_in_a_shell() {
         // Target: a small 3×3×3 cluster near the origin.
         let mut target = Vec::new();

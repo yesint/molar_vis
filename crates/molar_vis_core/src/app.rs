@@ -842,7 +842,11 @@ impl App {
         }
 
         // Occluders: atoms of every other visible, per-atom rep (all molecules) that is
-        // not itself a target.
+        // not itself a target. Excluding the target reps here does NOT stop them from
+        // occluding one another: all target atoms go into the combined `target` set
+        // above, and the scorer counts a target atom hidden when any *other* target atom
+        // (from any passed rep) is nearer and covers it — so the group is judged exactly
+        // as one rep whose own front atoms hide its back atoms.
         let mut occluders: Vec<(glam::Vec3, f32)> = Vec::new();
         for (mi, m) in self.scene.molecules.iter().enumerate() {
             for (ri, r) in m.reps.iter().enumerate() {
