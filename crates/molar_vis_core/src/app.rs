@@ -770,11 +770,30 @@ impl App {
     /// extent so more of the surroundings are in view. Both the lateral fit and the depth
     /// clip slab grow with it, so context in front of / behind the rep is not clipped.
     ///
-    /// Atoms are modeled as vdW spheres (see [`crate::unobstructed`]); occluders are the
-    /// atoms of every *other* visible rep across all molecules (Interactions reps draw no
-    /// per-atom geometry and are skipped). Selection/geometry is refreshed first so a
-    /// freshly built scene (e.g. from the Python API) has evaluated selections.
+    /// Convenience wrapper over [`Self::unobstructed_view_multi`] for a single rep.
     pub fn unobstructed_view(&mut self, mol: usize, rep: usize, zoom_out: f32) -> Result<(), String> {
+        self.unobstructed_view_multi(&[(mol, rep)], zoom_out)
+    }
+
+    /// Like [`Self::unobstructed_view`], but for several reps treated as **one** target:
+    /// the camera is oriented and scaled so the most of the *combined* atom set is
+    /// directly on screen. `targets` are `(mol, rep)` pairs and may span different
+    /// molecules. A target atom counts as hidden when any nearer atom covers it —
+    /// including a nearer atom of another target rep — so the group is handled as if it
+    /// were a single rep. `zoom_out` behaves as in [`Self::unobstructed_view`].
+    ///
+    /// Atoms are modeled as vdW spheres (see [`crate::unobstructed`]); occluders are the
+    /// atoms of every visible per-atom rep that is *not* in `targets` (Interactions reps
+    /// draw no per-atom geometry and are skipped). Selection/geometry is refreshed first
+    /// so a freshly built scene (e.g. from the Python API) has evaluated selections.
+    pub fn unobstructed_view_multi(
+        &mut self,
+        targets: &[(usize, usize)],
+        zoom_out: f32,
+    ) -> Result<(), String> {
+        if targets.is_empty() {
+            return Err("no target reps given".to_string());
+        }
         // Make sure selections are evaluated (a just-added rep may still be dirty),
         // exactly as `render_to_file` does before an offscreen capture. Native only —
         // on wasm the render state is per-frame, and the update loop keeps the scene
@@ -792,8 +811,12 @@ impl App {
             );
         }
 
-        // Target atoms: the chosen rep's evaluated selection, as (position, vdW radius).
-        let target = {
+        // Target atoms: the union of the chosen reps' selections, as (position, vdW
+        // radius), while accumulating the combined bounding box.
+        let mut target: Vec<(glam::Vec3, f32)> = Vec::new();
+        let mut min = glam::Vec3::splat(f32::INFINITY);
+        let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+        for &(mol, rep) in targets {
             let m = self
                 .scene
                 .molecules
@@ -807,20 +830,23 @@ impl App {
                 .as_ref()
                 .ok_or("target rep has no evaluated selection")?;
             let bound = m.data.bind_with_state(sel, m.render_state());
-            bound
-                .iter_particle()
-                .map(|p| (glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), p.atom.vdw()))
-                .collect::<Vec<_>>()
-        };
+            for p in bound.iter_particle() {
+                let pos = glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z);
+                target.push((pos, p.atom.vdw()));
+                min = min.min(pos);
+                max = max.max(pos);
+            }
+        }
         if target.is_empty() {
-            return Err("target rep selects no atoms".to_string());
+            return Err("target reps select no atoms".to_string());
         }
 
-        // Occluders: atoms of every other visible, per-atom rep (all molecules).
+        // Occluders: atoms of every other visible, per-atom rep (all molecules) that is
+        // not itself a target.
         let mut occluders: Vec<(glam::Vec3, f32)> = Vec::new();
         for (mi, m) in self.scene.molecules.iter().enumerate() {
             for (ri, r) in m.reps.iter().enumerate() {
-                if (mi == mol && ri == rep) || !r.visible || r.kind == RepKind::Interactions {
+                if targets.contains(&(mi, ri)) || !r.visible || r.kind == RepKind::Interactions {
                     continue;
                 }
                 let Some(sel) = r.sel.as_ref() else { continue };
@@ -831,16 +857,12 @@ impl App {
             }
         }
 
-        // Best direction, then orient and frame the target.
+        // Best direction, then orient and frame the combined target box.
         let dir = crate::unobstructed::best_unobstructed_direction(&target, &occluders);
         self.camera.orientation = crate::unobstructed::look_along_quat(dir);
-        let (min, max) = {
-            let m = &self.scene.molecules[mol];
-            m.sel_bbox(m.reps[rep].sel.as_ref().unwrap())
-        };
         // `zoom_out` enlarges the framed box about its centre: 1 = tight, >1 shows more
         // of the surroundings (lateral fit and depth slab both grow, so context in front
-        // of / behind the rep stays unclipped).
+        // of / behind the target stays unclipped).
         let center = (min + max) * 0.5;
         let half = (max - min) * 0.5 * zoom_out.max(1e-3);
         self.camera.focus_bbox(center - half, center + half);

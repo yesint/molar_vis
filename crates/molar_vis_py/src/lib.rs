@@ -279,6 +279,27 @@ impl Visualizer {
         )
     }
 
+    /// Like [`Visualizer::unobstructed_view`], but for a list of reps treated as **one**
+    /// target: the camera is oriented and scaled so the most of the *combined* atom set
+    /// is directly on screen. The reps may come from different molecules. Every visible
+    /// rep that is not in the list is treated as an occluder. `zoom_out` behaves as in
+    /// `unobstructed_view`.
+    #[pyo3(signature = (reps, zoom_out=1.0))]
+    fn unobstructed_view_multi(&self, reps: Vec<PyRef<'_, RepHandle>>, zoom_out: f32) -> PyResult<()> {
+        if reps.is_empty() {
+            return Err(PyValueError::new_err("reps must not be empty"));
+        }
+        let targets: Vec<(usize, usize)> = reps.iter().map(|r| (r.mol, r.rep)).collect();
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.unobstructed_view_multi(&targets, zoom_out) {
+                    log::error!("unobstructed_view_multi: {e}");
+                }
+            }),
+        )
+    }
+
     /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
     /// `width × height`. Works whether the viewer is visible or hidden (`spawn(visible=False)`).
     /// With `raytrace=True` it goes through the GPU ray tracer (AO / shadows / GI), tracing

@@ -38,7 +38,9 @@ is a vdW sphere, and the score of a candidate direction is the count of ligand a
 projected centre is the front-most surface. It maximizes that over a Fibonacci sphere of
 directions plus a local refine, then frames the ligand. Adds
 `Visualizer.unobstructed_view(rep, zoom_out=1.0)` to the API surface above (`zoom_out` > 1 keeps
-the orientation but widens the frame for a broader view of the surroundings).
+the orientation but widens the frame for a broader view of the surroundings). A companion
+`Visualizer.unobstructed_view_multi([rep, ...], zoom_out=1.0)` unobstructs several reps at once —
+possibly from different molecules — as one combined target.
 
 > Set `background(...)` **after** `add_mol`: adding the first molecule reseeds the camera
 > (background included) from the theme default, so an earlier `background(...)` is overwritten.
