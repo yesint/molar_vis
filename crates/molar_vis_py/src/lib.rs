@@ -126,7 +126,14 @@ struct Visualizer {
 impl Visualizer {
     /// Add a molecule, rendering **directly** from the pymolar `System` (zero-copy);
     /// returns a handle. The window updates as soon as the UI thread picks it up.
-    fn add_mol(&self, sys: Py<PySystem>) -> PyResult<MolHandle> {
+    ///
+    /// `source_path` (optional): the structure file this System was loaded from. It is
+    /// recorded as the molecule's session source (`MoleculeSource::File`) so a
+    /// `save_session` can be reloaded standalone (with the atoms) in a fresh process;
+    /// without it the shared molecule serializes as in-memory bytes and a session
+    /// cannot restore coordinates.
+    #[pyo3(signature = (sys, source_path=None))]
+    fn add_mol(&self, sys: Py<PySystem>, source_path: Option<String>) -> PyResult<MolHandle> {
         let mol = {
             let mut s = self.state.lock().unwrap();
             let idx = s.len();
@@ -138,8 +145,15 @@ impl Visualizer {
             &self.jobs,
             Box::new(move |app: &mut App| {
                 let src = Python::attach(|py| PySystemSource::new(py, sys));
-                if let Err(e) = app.add_shared_molecule(Box::new(src), name) {
-                    log::error!("add_mol failed: {e}");
+                match app.add_shared_molecule(Box::new(src), name) {
+                    Ok(idx) => {
+                        if let Some(p) = &source_path {
+                            if let Err(e) = app.set_molecule_source_file(idx, p) {
+                                log::error!("add_mol set source: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => log::error!("add_mol failed: {e}"),
                 }
             }),
         )?;
@@ -240,6 +254,22 @@ impl Visualizer {
     #[pyo3(signature = (enabled=true, strength=0.6))]
     fn shadows(&self, enabled: bool, strength: f32) -> PyResult<()> {
         send_job(&self.jobs, Box::new(move |app| app.set_shadows(enabled, strength)))
+    }
+
+    /// Save the current scene + view as a JSON session file (molecules by path, every
+    /// representation, camera + view settings). Blocks until the file is written.
+    fn save_session(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let dest = std::path::PathBuf::from(&path);
+        send_job(
+            &self.jobs,
+            Box::new(move |app: &mut App| {
+                app.save_session_file(&dest);
+                let _ = done_tx.send(());
+            }),
+        )?;
+        py.detach(move || done_rx.recv())
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer window closed before the session was saved"))
     }
 
     /// Zoom the camera to fit `sel` (a pymolar `Sel`) of the molecule `mol`

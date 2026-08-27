@@ -625,6 +625,23 @@ impl App {
         self.execute_command(crate::script::Command::Focus { mol, text })
     }
 
+    /// Save the current scene + view as a JSON session file (public wrapper over the
+    /// module-private `save_session_to`, for the Python API). Same path the
+    /// `MOLAR_VIS_DEBUG_SAVE_SESSION` hook and the GUI "Save session" use.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_session_file(&mut self, path: &std::path::Path) {
+        self.save_session_to(path);
+    }
+
+    /// Record `mol`'s session source as a structure file on disk, so a saved session
+    /// reloads its atoms standalone. Used by the Python `add_mol(source_path=…)`: a
+    /// shared (zero-copy) molecule otherwise serializes as in-memory bytes.
+    pub fn set_molecule_source_file(&mut self, mol: usize, path: &str) -> Result<(), String> {
+        let m = self.scene.molecules.get_mut(mol).ok_or_else(|| format!("no molecule {mol}"))?;
+        m.source = crate::scene::MoleculeSource::File(std::path::PathBuf::from(path));
+        Ok(())
+    }
+
     /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
     /// `width × height`. Reuses the exact offscreen-render → GPU readback → PNG-encode path
     /// the `MOLAR_VIS_DEBUG_SAVE_IMAGE` (rasterizer) and `MOLAR_VIS_DEBUG_RAYTRACE`
