@@ -771,8 +771,14 @@ impl App {
     /// clip slab grow with it, so context in front of / behind the rep is not clipped.
     ///
     /// Convenience wrapper over [`Self::unobstructed_view_multi`] for a single rep.
-    pub fn unobstructed_view(&mut self, mol: usize, rep: usize, zoom_out: f32) -> Result<(), String> {
-        self.unobstructed_view_multi(&[(mol, rep)], zoom_out)
+    pub fn unobstructed_view(
+        &mut self,
+        mol: usize,
+        rep: usize,
+        zoom_out: f32,
+        resolution: usize,
+    ) -> Result<(), String> {
+        self.unobstructed_view_multi(&[(mol, rep)], zoom_out, resolution)
     }
 
     /// Like [`Self::unobstructed_view`], but for several reps treated as **one** target:
@@ -786,10 +792,14 @@ impl App {
     /// atoms of every visible per-atom rep that is *not* in `targets` (Interactions reps
     /// draw no per-atom geometry and are skipped). Selection/geometry is refreshed first
     /// so a freshly built scene (e.g. from the Python API) has evaluated selections.
+    ///
+    /// `resolution` is the coarse direction-search sample count (see
+    /// [`crate::unobstructed::best_unobstructed_direction`]).
     pub fn unobstructed_view_multi(
         &mut self,
         targets: &[(usize, usize)],
         zoom_out: f32,
+        resolution: usize,
     ) -> Result<(), String> {
         if targets.is_empty() {
             return Err("no target reps given".to_string());
@@ -862,7 +872,7 @@ impl App {
         }
 
         // Best direction, then orient and frame the combined target box.
-        let dir = crate::unobstructed::best_unobstructed_direction(&target, &occluders);
+        let dir = crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution);
         self.camera.orientation = crate::unobstructed::look_along_quat(dir);
         // `zoom_out` enlarges the framed box about its centre: 1 = tight, >1 shows more
         // of the surroundings (lateral fit and depth slab both grow, so context in front

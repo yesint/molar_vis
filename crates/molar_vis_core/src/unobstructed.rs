@@ -130,7 +130,14 @@ fn visible_count(target: &[(Vec3, f32)], occluders: &[(Vec3, f32)], d: Vec3) -> 
 /// Pick the view direction that shows the most target atoms un-occluded. Returns a unit
 /// vector `d` pointing from the target toward the camera (see the module docs). Atoms
 /// are `(position_nm, vdw_radius_nm)`.
-pub fn best_unobstructed_direction(target: &[(Vec3, f32)], occluders: &[(Vec3, f32)]) -> Vec3 {
+///
+/// `resolution` is the number of directions in the coarse Fibonacci-sphere pass (clamped
+/// to at least 8); higher is more thorough but slower. A local refine follows regardless.
+pub fn best_unobstructed_direction(
+    target: &[(Vec3, f32)],
+    occluders: &[(Vec3, f32)],
+    resolution: usize,
+) -> Vec3 {
     if target.is_empty() {
         return Vec3::Z;
     }
@@ -138,7 +145,7 @@ pub fn best_unobstructed_direction(target: &[(Vec3, f32)], occluders: &[(Vec3, f
     let mut best = Vec3::Z;
     let mut best_score = 0u32;
     let mut seen = false;
-    for d in fibonacci_sphere(256) {
+    for d in fibonacci_sphere(resolution.max(8)) {
         let s = visible_count(target, occluders, d);
         if !seen || s > best_score {
             best_score = s;
@@ -211,7 +218,7 @@ mod tests {
         assert_eq!(visible_count(&group, &none, Vec3::X), 2);
 
         // So the search must avoid the stacking axis and reveal both.
-        let d = best_unobstructed_direction(&group, &none);
+        let d = best_unobstructed_direction(&group, &none, 256);
         assert_eq!(visible_count(&group, &none, d), 2, "best view should reveal both");
         assert!(d.z.abs() < 0.6, "best view should not look down the stack, got {d:?}");
     }
@@ -239,7 +246,7 @@ mod tests {
             .map(|u| (u * 1.2, 0.25))
             .collect();
 
-        let d = best_unobstructed_direction(&target, &occ);
+        let d = best_unobstructed_direction(&target, &occ, 256);
         // The best view must look through the hole, i.e. from the -X side.
         assert!(d.x < -0.6, "expected a view from the -X opening, got {d:?}");
         // Sanity: that direction really is much clearer than the blocked +X side.

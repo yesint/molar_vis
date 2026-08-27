@@ -265,14 +265,16 @@ impl Visualizer {
     ///
     /// `zoom_out` keeps that orientation but widens the framing about the rep's centre —
     /// `1.0` frames the rep tightly (default), `2.0` shows twice its extent for a broader
-    /// view of the surroundings (front/back context is not clipped).
-    #[pyo3(signature = (rep, zoom_out=1.0))]
-    fn unobstructed_view(&self, rep: &RepHandle, zoom_out: f32) -> PyResult<()> {
+    /// view of the surroundings (front/back context is not clipped). `resolution` is the
+    /// number of directions in the coarse search (default 256; higher = more thorough but
+    /// slower).
+    #[pyo3(signature = (rep, zoom_out=1.0, resolution=256))]
+    fn unobstructed_view(&self, rep: &RepHandle, zoom_out: f32, resolution: usize) -> PyResult<()> {
         let (mol, r) = (rep.mol, rep.rep);
         send_job(
             &self.jobs,
             Box::new(move |app| {
-                if let Err(e) = app.unobstructed_view(mol, r, zoom_out) {
+                if let Err(e) = app.unobstructed_view(mol, r, zoom_out, resolution) {
                     log::error!("unobstructed_view: {e}");
                 }
             }),
@@ -282,10 +284,15 @@ impl Visualizer {
     /// Like [`Visualizer::unobstructed_view`], but for a list of reps treated as **one**
     /// target: the camera is oriented and scaled so the most of the *combined* atom set
     /// is directly on screen. The reps may come from different molecules. Every visible
-    /// rep that is not in the list is treated as an occluder. `zoom_out` behaves as in
-    /// `unobstructed_view`.
-    #[pyo3(signature = (reps, zoom_out=1.0))]
-    fn unobstructed_view_multi(&self, reps: Vec<PyRef<'_, RepHandle>>, zoom_out: f32) -> PyResult<()> {
+    /// rep that is not in the list is treated as an occluder. `zoom_out` and `resolution`
+    /// behave as in `unobstructed_view`.
+    #[pyo3(signature = (reps, zoom_out=1.0, resolution=256))]
+    fn unobstructed_view_multi(
+        &self,
+        reps: Vec<PyRef<'_, RepHandle>>,
+        zoom_out: f32,
+        resolution: usize,
+    ) -> PyResult<()> {
         if reps.is_empty() {
             return Err(PyValueError::new_err("reps must not be empty"));
         }
@@ -293,7 +300,7 @@ impl Visualizer {
         send_job(
             &self.jobs,
             Box::new(move |app| {
-                if let Err(e) = app.unobstructed_view_multi(&targets, zoom_out) {
+                if let Err(e) = app.unobstructed_view_multi(&targets, zoom_out, resolution) {
                     log::error!("unobstructed_view_multi: {e}");
                 }
             }),
