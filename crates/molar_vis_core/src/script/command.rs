@@ -71,8 +71,32 @@ pub fn parse_color(s: &str) -> Option<ColorMethod> {
         "secstruct" | "structure" | "ss" => Some(ColorMethod::SecStruct),
         "charge" => Some(ColorMethod::Charge),
         "solid" => Some(ColorMethod::Solid(DEFAULT_SOLID)),
-        _ => None,
+        // Custom solid color: "solid:R,G,B" (0-255) or a hex "#rrggbb" / "0xrrggbb".
+        other => parse_solid_rgb(other).map(ColorMethod::Solid),
     }
+}
+
+/// Parse a custom solid color: `solid:R,G,B` (components 0-255) or `#rrggbb` / `0xrrggbb`.
+fn parse_solid_rgb(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("solid:") {
+        let parts: Vec<&str> = rest.split(',').collect();
+        if parts.len() == 3 {
+            let r = parts[0].trim().parse::<u8>().ok()?;
+            let g = parts[1].trim().parse::<u8>().ok()?;
+            let b = parts[2].trim().parse::<u8>().ok()?;
+            return Some([r, g, b, 255]);
+        }
+        return None;
+    }
+    let hex = s.strip_prefix('#').or_else(|| s.strip_prefix("0x"))?;
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        return Some([r, g, b, 255]);
+    }
+    None
 }
 
 /// Parse a material name by its display label (case-insensitive; e.g. "Transparent").
