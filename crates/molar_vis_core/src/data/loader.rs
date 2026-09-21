@@ -50,7 +50,7 @@ pub fn load_with(path: &Path, bonds: &BondParams) -> Result<RawMolecule, String>
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "molecule".to_string());
-    Ok(assemble(system, name, MoleculeSource::File(path.to_path_buf()), bonds))
+    assemble(system, name, MoleculeSource::File(path.to_path_buf()), bonds)
 }
 
 /// Load **every** record of a multi-molecule file as a **distinct** molecule:
@@ -81,7 +81,7 @@ pub fn load_records(path: &Path, bonds: &BondParams) -> Result<Vec<RawMolecule>,
                     name,
                     MoleculeSource::SdfRecord { path: path.to_path_buf(), index: i },
                     bonds,
-                ));
+                )?);
             }
             Err(e) if matches!(e.kind(), FileFormatError::Eof) => break,
             Err(e) => {
@@ -126,7 +126,7 @@ pub fn load_records_from_bytes(
                     rname.clone(),
                     MoleculeSource::Bytes { name: rname },
                     bonds,
-                ));
+                )?);
             }
             Err(e) if matches!(e.kind(), FileFormatError::Eof) => break,
             Err(e) => return Err(format!("failed to read record {} in {name}: {e}", out.len() + 1)),
@@ -180,12 +180,12 @@ pub fn load_from_bytes(name: &str, bytes: Vec<u8>, bonds: &BondParams) -> Result
         .read()
         .map_err(|e| format!("failed to parse {name}: {e}"))?;
     let system = System::new(top, st).map_err(|e| format!("invalid structure in {name}: {e}"))?;
-    Ok(assemble(
+    assemble(
         system,
         name.to_string(),
         MoleculeSource::Bytes { name: name.to_string() },
         bonds,
-    ))
+    )
 }
 
 /// Shared tail of [`load`]/[`load_from_bytes`]: guess bonds and the bounding box
@@ -196,7 +196,7 @@ fn assemble(
     name: String,
     source: MoleculeSource,
     bond_params: &BondParams,
-) -> RawMolecule {
+) -> Result<RawMolecule, String> {
     let (bonds, bbox_min, bbox_max, n) = {
         let all = system.select_all_bound();
         let (min, max) = all.min_max();
@@ -219,7 +219,8 @@ fn assemble(
             &vdw,
             pbox.as_ref(),
             bond_params,
-        );
+        )
+        .map_err(|e| format!("failed to guess bonds for {name}: {e}"))?;
         (
             bonds,
             Vec3::new(min.x, min.y, min.z),
@@ -230,7 +231,7 @@ fn assemble(
 
     log::info!("loaded {} atoms, {} bonds from {}", n, bonds.len(), name);
 
-    RawMolecule {
+    Ok(RawMolecule {
         name,
         source,
         system,
@@ -238,7 +239,7 @@ fn assemble(
         bonds,
         bbox_min,
         bbox_max,
-    }
+    })
 }
 
 impl RawMolecule {

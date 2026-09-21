@@ -613,7 +613,8 @@ impl Molecule {
                 &vdw,
                 state.pbox.as_ref(),
                 bond_params,
-            );
+            )
+            .map_err(|e| format!("failed to guess bonds for {name}: {e}"))?;
             (
                 bonds,
                 Vec3::new(min.x, min.y, min.z),

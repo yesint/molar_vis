@@ -52,6 +52,12 @@ impl Default for BondParams {
 ///   gives coarse-grained structures their real bonds — CG bead spacing (~0.32 nm) exceeds
 ///   `search_cutoff`, so distance guessing finds almost none of them.
 /// * **no bonds** — GRO/XYZ; the distance guess is all there is.
+///
+/// # Errors
+///
+/// Returns [`DistanceSearchError`] when bond guessing receives an invalid cutoff,
+/// coordinate, periodic box, or input length. A complete ordered file bond table
+/// does not need a distance search and is returned directly.
 pub fn resolve(
     file_bonds: &BondStorage,
     sel: &impl PosProvider,
@@ -59,7 +65,7 @@ pub fn resolve(
     vdw: &[f32],
     pbox: Option<&PeriodicBox>,
     params: &BondParams,
-) -> Vec<Bond> {
+) -> Result<Vec<Bond>, DistanceSearchError> {
     let n = positions.len();
     let from_file = || {
         // Defensive: never let a malformed record index past the atoms we loaded.
@@ -68,14 +74,14 @@ pub fn resolve(
     if file_bonds.has_orders() {
         let mut bonds: Vec<Bond> = from_file().map(normalized).collect();
         dedup_keeping_order(&mut bonds);
-        return bonds;
+        return Ok(bonds);
     }
-    let mut bonds = guess(sel, positions, vdw, pbox, params);
+    let mut bonds = guess(sel, positions, vdw, pbox, params)?;
     if !file_bonds.is_empty() {
         bonds.extend(from_file().map(normalized));
         dedup_keeping_order(&mut bonds);
     }
-    bonds
+    Ok(bonds)
 }
 
 /// A bond with its endpoints in ascending order, so the two sources' pairs compare equal.
@@ -98,16 +104,21 @@ fn dedup_keeping_order(bonds: &mut Vec<Bond>) {
 /// structure has a box**. The periodic search is much slower (it scans the
 /// neighbouring cells), so it's opt-in; the default non-periodic path is the fast
 /// one for large structures.
+///
+/// # Errors
+///
+/// Returns [`DistanceSearchError`] when the cutoff, coordinates, periodic box, or
+/// input lengths are invalid.
 pub fn guess(
     sel: &impl PosProvider,
     positions: &[[f32; 3]],
     vdw: &[f32],
     pbox: Option<&PeriodicBox>,
     params: &BondParams,
-) -> Vec<Bond> {
+) -> Result<Vec<Bond>, DistanceSearchError> {
     let n = positions.len();
     if n < 2 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Only honor the box when periodic search is requested.
@@ -121,7 +132,7 @@ pub fn guess(
             PBC_FULL,
         ),
         None => distance_search_single::<(usize, usize), Vec<_>>(params.search_cutoff, sel, 0..n),
-    };
+    }?;
 
     let min2 = params.min_dist * params.min_dist;
     let mut bonds: Vec<[usize; 2]> = Vec::new();
@@ -156,7 +167,7 @@ pub fn guess(
     bonds.sort_unstable();
     bonds.dedup();
     // Guessed bonds carry no chemical order (distances don't tell us one).
-    bonds.into_iter().map(|[a, b]| Bond::new(a, b)).collect()
+    Ok(bonds.into_iter().map(|[a, b]| Bond::new(a, b)).collect())
 }
 
 /// Collect a columnar [`BondStorage`] back into the flat list the viewer keeps.
@@ -199,7 +210,22 @@ mod tests {
             .map(|(p, a)| ([p.x, p.y, p.z], a.vdw()))
             .unzip();
         let pbox = system.state().pbox.clone();
-        guess(&all, &positions, &vdw, pbox.as_ref(), &BondParams::default())
+        guess(&all, &positions, &vdw, pbox.as_ref(), &BondParams::default()).unwrap()
+    }
+
+    #[test]
+    fn invalid_search_cutoff_is_reported() {
+        let system = System::from_file(fixture("2lao.pdb")).expect("load");
+        let all = system.select_all_bound();
+        let (positions, vdw): (Vec<[f32; 3]>, Vec<f32>) = all
+            .iter_pos()
+            .zip(all.iter_atoms())
+            .map(|(p, a)| ([p.x, p.y, p.z], a.vdw()))
+            .unzip();
+        let params = BondParams { search_cutoff: 0.0, ..BondParams::default() };
+
+        let error = guess(&all, &positions, &vdw, None, &params).unwrap_err();
+        assert_eq!(error, DistanceSearchError::InvalidCutoff(0.0));
     }
 
     /// An SDF carries a complete bond block *with orders*, so it is taken verbatim —
