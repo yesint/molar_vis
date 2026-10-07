@@ -942,7 +942,11 @@ impl eframe::App for App {
 
         #[cfg(not(target_arch = "wasm32"))]
         if self.service_unobstructed_job(&ctx) {
+            // Block input without fading the scene. The delayed progress modal
+            // supplies the backdrop only after the 0.5-second threshold.
+            let opacity = ui.painter().opacity();
             ui.disable();
+            ui.set_opacity(opacity);
             self.draw_left_panel(ui);
             self.draw_view_toolbar(ui);
             self.draw_viewport(ui, frame);
