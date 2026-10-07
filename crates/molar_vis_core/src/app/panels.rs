@@ -647,6 +647,15 @@ impl App {
                 }
             }).response);
 
+            menu_buttons.push(ui.menu_button("Help", |ui| {
+                if ui.button("Selection language").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(
+                        "https://yesint.github.io/molar_vis/selection-language.html",
+                    ));
+                    ui.close();
+                }
+            }).response);
+
             // Hover-switch: once any bar menu is open, moving the pointer onto a
             // different top-level button opens that menu (and closes the rest, since
             // only one popup is open at a time). Takes effect next frame, so request a

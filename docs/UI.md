@@ -36,6 +36,7 @@ next frame). The menus —
   tonemap — see the GI bullet under `render/raytrace.rs`). Separately, pressing **R** in the viewport
   ray-traces the current view in place (PyMOL-`ray` style; honors AO/shadows + GI) and holds it until
   the camera moves; see `render/raytrace.rs`.
+- **Help → Selection language** — opens the [colored selection reference](https://yesint.github.io/molar_vis/selection-language.html) in the browser. The static page has copyable examples, syntax colors, light/dark themes, and a responsive layout. It is also accessible from the web build.
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
   Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`

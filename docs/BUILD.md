@@ -231,3 +231,8 @@ then bump molar_vis's `rev` in the root `Cargo.toml` + `Cargo.lock`. The `molar`
 `../molar/molar`, the PyO3 bindings `../molar/molar_python`; the local dev `[patch]` points
 at those two paths.
 
+
+- Selection reference: `crates/molar_vis_js/web/selection-language.html` is included in the
+  existing GitHub Pages artifact. Help → Selection language opens its public URL. The normal
+  selection-assistance tests parse all copyable examples. Publishing uses the existing
+  `pages.yml` tag trigger or a manual workflow dispatch on the desired branch.

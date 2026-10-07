@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Selection language · molar_vis</title>
+<style>
+:root { color-scheme: light; --bg:#f5f7fb; --card:#fff; --ink:#202a3c; --muted:#5b667b; --line:#dce2ed; --kw:#195dc3; --field:#a44a17; --op:#824bb7; --num:#007b73; --pattern:#a32168; --code:#f2f5fa; }
+@media (prefers-color-scheme: dark) { :root { color-scheme:dark; --bg:#101622; --card:#192231; --ink:#e8edf6; --muted:#a8b4c7; --line:#354157; --kw:#88b7ff; --field:#ffc186; --op:#c6a5ff; --num:#76d9c9; --pattern:#f4a6d2; --code:#121b28; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.4 system-ui,-apple-system,sans-serif; }
+main { max-width:1420px; margin:auto; padding:18px 24px; }
+header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:12px; }
+h1 { font-size:27px; line-height:1.2; margin:0; letter-spacing:-.6px; }
+.brand { color:var(--muted); font-size:12px; margin:0 0 3px; }
+a { color:var(--kw); text-decoration:none; } a:hover { text-decoration:underline; }
+.nav { display:flex; gap:18px; white-space:nowrap; font-size:13px; }
+.intro { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; color:var(--muted); margin-bottom:12px; }
+.legend { display:flex; gap:12px; font:12px ui-monospace,SFMono-Regular,Consolas,monospace; }
+.grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; align-items:start; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+h2 { margin:0 0 10px; font-size:15px; font-weight:650; }
+ul { list-style:none; padding:0; margin:0; }
+li { display:flex; align-items:center; gap:8px; margin-bottom:3px; } li:last-child { margin-bottom:0; }
+.example { display:flex; flex:1; min-width:0; align-items:center; gap:8px; border:0; border-radius:5px; background:var(--code); color:var(--ink); text-align:left; padding:3px 7px; cursor:pointer; position:relative; }
+.example:hover { outline:1px solid var(--kw); } .example:focus-visible { outline:2px solid var(--kw); outline-offset:2px; }
+code { font:12px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-wrap:anywhere; flex:1; }
+.copy { color:var(--muted); font:10px system-ui,sans-serif; opacity:0; position:absolute; right:5px; background:var(--code); padding:2px; } .example:hover .copy,.example:focus-visible .copy { opacity:1; }
+.meaning { color:var(--muted); font-size:11px; flex:0 0 29%; }
+.note { color:var(--muted); border-top:1px solid var(--line); padding-top:9px; margin:11px 0 0; font-size:11px; line-height:1.5; }
+.kw { color:var(--kw); } .field { color:var(--field); } .op { color:var(--op); } .num { color:var(--num); } .pattern { color:var(--pattern); }
+footer { color:var(--muted); font-size:12px; display:flex; justify-content:space-between; gap:16px; margin-top:14px; }
+#status { min-height:1.4em; color:var(--num); }
+.card-3,.card-5 { grid-column:span 2; }
+@media (max-width:1100px) { .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .card-3,.card-5 { grid-column:span 1; } }
+@media (max-width:620px) { main { padding:18px 14px; } .grid { grid-template-columns:1fr; } header { align-items:start; } h1 { font-size:23px; } .nav { flex-direction:column; gap:4px; } footer { flex-direction:column; gap:4px; } }
+@media print { :root { color-scheme:light; --bg:#fff; --card:#fff; --ink:#111; --muted:#555; --line:#ccc; --code:#f5f5f5; } main { padding:0; } .grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; } .card { break-inside:avoid; padding:10px; } .card-3,.card-5 { grid-column:span 1; } .nav,.copy,#status { display:none; } }
+</style>
+</head>
+<body>
+<main>
+<header><div><p class="brand">molar_vis · quick reference</p><h1>Selection language</h1></div><nav class="nav" aria-label="Related pages"><a href="./">Open viewer</a><a href="https://github.com/yesint/molar_vis">GitHub</a></nav></header>
+<div class="intro"><span>Select atoms within one molecule. Distances are in <strong>nm</strong>. Click an example to copy.</span><div class="legend" aria-label="Syntax colors"><span class="kw">keyword</span><span class="field">field</span><span class="op">operator</span><span class="num">number</span></div></div>
+<div class="grid">
+<section class="card card-0"><h2>Common selections</h2><ul><li><button class="example" data-selection="all" title="Copy selection"><code><span class="kw">all</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Every atom</span></li>
+<li><button class="example" data-selection="protein" title="Copy selection"><code><span class="kw">protein</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Protein atoms</span></li>
+<li><button class="example" data-selection="backbone" title="Copy selection"><code><span class="kw">backbone</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Backbone atoms</span></li>
+<li><button class="example" data-selection="water" title="Copy selection"><code><span class="kw">water</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Water molecules</span></li>
+<li><button class="example" data-selection="hydrogen" title="Copy selection"><code><span class="kw">hydrogen</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Hydrogen atoms</span></li></ul><p class="note">Also: sidechain, now (not water), noh (no H), polh and apolh (polar / apolar H).</p></section>
+<section class="card card-1"><h2>Combine selections</h2><ul><li><button class="example" data-selection="protein and noh" title="Copy selection"><code><span class="kw">protein</span> <span class="op">and</span> <span class="kw">noh</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Protein without H</span></li>
+<li><button class="example" data-selection="(chain A) or (chain B)" title="Copy selection"><code>(<span class="kw">chain</span> A) <span class="op">or</span> (<span class="kw">chain</span> B)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Either chain</span></li>
+<li><button class="example" data-selection="not water" title="Copy selection"><code><span class="op">not</span> <span class="kw">water</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Exclude water</span></li>
+<li><button class="example" data-selection="protein and (name CA or name CB)" title="Copy selection"><code><span class="kw">protein</span> <span class="op">and</span> (<span class="kw">name</span> CA <span class="op">or</span> <span class="kw">name</span> CB)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Group conditions</span></li></ul><p class="note">Use and, or, not. Group mixed and/or with parentheses. Keywords and names are case-sensitive.</p></section>
+<section class="card card-2"><h2>Names, residues and indices</h2><ul><li><button class="example" data-selection="name CA CB" title="Copy selection"><code><span class="kw">name</span> CA CB</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Atom names</span></li>
+<li><button class="example" data-selection="name /C.*/" title="Copy selection"><code><span class="kw">name</span> <span class="pattern">/C.*/</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Starts with C</span></li>
+<li><button class="example" data-selection="resname ALA GLY" title="Copy selection"><code><span class="kw">resname</span> ALA GLY</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Residue names</span></li>
+<li><button class="example" data-selection="chain A B" title="Copy selection"><code><span class="kw">chain</span> A B</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Chain IDs</span></li>
+<li><button class="example" data-selection="resid 10:25 40" title="Copy selection"><code><span class="kw">resid</span> <span class="num">10</span><span class="op">:</span><span class="num">25</span> <span class="num">40</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">File residue IDs</span></li>
+<li><button class="example" data-selection="resindex 0:9" title="Copy selection"><code><span class="kw">resindex</span> <span class="num">0</span><span class="op">:</span><span class="num">9</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">First ten residues</span></li>
+<li><button class="example" data-selection="index 0 5:12" title="Copy selection"><code><span class="kw">index</span> <span class="num">0</span> <span class="num">5</span><span class="op">:</span><span class="num">12</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Atom indices</span></li></ul><p class="note">Space-separated values match any value. Ranges are inclusive. /…/ matches full names.</p></section>
+
+<section class="card card-4"><h2>Numbers and coordinates</h2><ul><li><button class="example" data-selection="z &gt; -1 and z &lt; 1" title="Copy selection"><code><span class="field">z</span> <span class="op">&gt;</span> <span class="num">-1</span> <span class="op">and</span> <span class="field">z</span> <span class="op">&lt;</span> <span class="num">1</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Coordinate slab (nm)</span></li>
+<li><button class="example" data-selection="mass &gt; 12" title="Copy selection"><code><span class="field">mass</span> <span class="op">&gt;</span> <span class="num">12</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Mass filter</span></li>
+<li><button class="example" data-selection="charge != 0" title="Copy selection"><code><span class="field">charge</span> <span class="op">!=</span> <span class="num">0</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Charged atoms</span></li>
+<li><button class="example" data-selection="beta &gt;= 20" title="Copy selection"><code><span class="field">beta</span> <span class="op">&gt;=</span> <span class="num">20</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">B-factor filter</span></li>
+<li><button class="example" data-selection="abs(x) &lt; 1" title="Copy selection"><code><span class="field">abs</span>(<span class="field">x</span>) <span class="op">&lt;</span> <span class="num">1</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Math in comparisons</span></li></ul><p class="note">Fields: x, y, z, mass, charge, vdw, occupancy (occ), bfactor (beta), vx/vy/vz, fx/fy/fz. Math: + − * / ^; abs, sqrt, sin, cos.</p></section>
+<section class="card card-3"><h2>Neighbors and whole groups</h2><ul><li><button class="example" data-selection="within 0.5 of (resname LIG)" title="Copy selection"><code><span class="kw">within</span> <span class="num">0.5</span> <span class="kw">of</span> (<span class="kw">resname</span> LIG)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Atoms near a ligand</span></li>
+<li><button class="example" data-selection="within 0.5 self of (resname LIG)" title="Copy selection"><code><span class="kw">within</span> <span class="num">0.5</span> <span class="kw">self</span> <span class="kw">of</span> (<span class="kw">resname</span> LIG)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Include the ligand</span></li>
+<li><button class="example" data-selection="within 0.5 pbc of (resname LIG)" title="Copy selection"><code><span class="kw">within</span> <span class="num">0.5</span> <span class="kw">pbc</span> <span class="kw">of</span> (<span class="kw">resname</span> LIG)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Periodic neighbors</span></li>
+<li><button class="example" data-selection="same residue as (name CA)" title="Copy selection"><code><span class="kw">same</span> <span class="kw">residue</span> as (<span class="kw">name</span> CA)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Whole matching residues</span></li>
+<li><button class="example" data-selection="same chain as (resid 10)" title="Copy selection"><code><span class="kw">same</span> <span class="kw">chain</span> as (<span class="kw">resid</span> <span class="num">10</span>)</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Whole matching chains</span></li></ul><p class="note">within excludes its target; self includes it. Distances are in nm. pbc uses the periodic box; pbc 110 enables x and y only.</p></section>
+<section class="card card-5"><h2>Points, lines and planes</h2><ul><li><button class="example" data-selection="within 1 of [0,0,0]" title="Copy selection"><code><span class="kw">within</span> <span class="num">1</span> <span class="kw">of</span> [<span class="num">0</span>,<span class="num">0</span>,<span class="num">0</span>]</code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Near a fixed point</span></li>
+<li><button class="example" data-selection="dist point [0,0,0] &lt; 1" title="Copy selection"><code><span class="kw">dist</span> <span class="kw">point</span> [<span class="num">0</span>,<span class="num">0</span>,<span class="num">0</span>] <span class="op">&lt;</span> <span class="num">1</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Distance from a point</span></li>
+<li><button class="example" data-selection="dist line [0,0,0] dir [0,0,1] &lt; 0.5" title="Copy selection"><code><span class="kw">dist</span> <span class="kw">line</span> [<span class="num">0</span>,<span class="num">0</span>,<span class="num">0</span>] <span class="kw">dir</span> [<span class="num">0</span>,<span class="num">0</span>,<span class="num">1</span>] <span class="op">&lt;</span> <span class="num">0.5</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Distance from the z axis</span></li>
+<li><button class="example" data-selection="dist plane [0,0,0] normal [0,0,1] &lt; 0.5" title="Copy selection"><code><span class="kw">dist</span> <span class="kw">plane</span> [<span class="num">0</span>,<span class="num">0</span>,<span class="num">0</span>] <span class="kw">normal</span> [<span class="num">0</span>,<span class="num">0</span>,<span class="num">1</span>] <span class="op">&lt;</span> <span class="num">0.5</span></code><span class="copy" aria-hidden="true">Copy</span></button><span class="meaning">Distance from a plane</span></li></ul><p class="note">Points can also be com of (protein) or pos 0 of (protein): the center of mass or first selected atom. Comparisons: &lt; &lt;= &gt; &gt;= == !=.</p></section>
+</div>
+<footer><span><strong>index</strong> and <strong>resindex</strong> start at 0. <strong>resid</strong> uses IDs from the structure file.</span><span id="status" role="status" aria-live="polite"></span></footer>
+</main>
+<script>
+document.querySelectorAll('[data-selection]').forEach(button => {
+  button.addEventListener('click', async () => {
+    const status = document.querySelector('#status');
+    try {
+      await navigator.clipboard.writeText(button.dataset.selection);
+      status.textContent = 'Selection copied';
+      clearTimeout(window.copyStatusTimer);
+      window.copyStatusTimer = setTimeout(() => { status.textContent = ''; }, 2200);
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(button.querySelector('code'));
+      const selection = window.getSelection();
+      selection.removeAllRanges(); selection.addRange(range);
+      status.textContent = 'Press Ctrl+C or Cmd+C to copy';
+    }
+  });
+});
+</script>
+</body>
+</html>

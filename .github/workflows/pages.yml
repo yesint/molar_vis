@@ -63,6 +63,7 @@ jobs:
         run: |
           mkdir -p dist
           cp crates/molar_vis_js/web/index.html dist/
+          cp crates/molar_vis_js/web/selection-language.html dist/
           cp -r crates/molar_vis_js/web/pkg dist/pkg
           cp tests/2lao.pdb dist/2lao.pdb
 

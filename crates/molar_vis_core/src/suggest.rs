@@ -68,4 +68,19 @@ mod tests {
         let e = err("resid 5 and", 11..11, &[]);
         assert_eq!(concise_message(&e), "unexpected end of input");
     }
+
+    #[test]
+    fn web_selection_reference_examples_parse() {
+        let page = include_str!("../../molar_vis_js/web/selection-language.html");
+        let mut count = 0;
+        for item in page.split("data-selection=\"").skip(1) {
+            let syntax = item.split('"').next().unwrap()
+                .replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", "\"").replace("&#x27;", "'").replace("&amp;", "&");
+            molar::prelude::SelectionExpr::new(&syntax).unwrap_or_else(|e| panic!("{syntax}: {e}"));
+            count += 1;
+        }
+        assert_eq!(count, 30, "verify every copyable example in the web reference");
+    }
+
 }
