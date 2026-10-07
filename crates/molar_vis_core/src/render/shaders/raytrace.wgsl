@@ -152,10 +152,12 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 
     let cc = dot(oc_p, oc_p) - r * r;
     let disc = b * b - 4.0 * a * cc;
     if (disc >= 0.0 && a >= 1e-12) {
-        var t = (-b - sqrt(disc)) / (2.0 * a);
-        if (exit_inside && t <= 1e-4) { t = (-b + sqrt(disc)) / (2.0 * a); }
-        let h = dot(ro + t * rd - p0, ua);
-        if (t > 1e-4 && h >= 0.0 && h <= seg) { best = t; }
+        let roots = vec2<f32>((-b - sqrt(disc)) / (2.0 * a), (-b + sqrt(disc)) / (2.0 * a));
+        for (var i = 0u; i < select(1u, 2u, exit_inside); i = i + 1u) {
+            let t = roots[i];
+            let h = dot(ro + t * rd - p0, ua);
+            if (t > 1e-4 && h >= 0.0 && h <= seg && (best < 0.0 || t < best)) { best = t; }
+        }
     }
     if (flat) { return best; }
     // Cap at p0 — only its outward (h ≤ 0) hemisphere; the rest is inside the wall.
@@ -163,9 +165,11 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 
     let c0 = dot(oc, oc) - r * r;
     let d0 = b0 * b0 - c0;
     if (d0 >= 0.0) {
-        var t = -b0 - sqrt(d0);
-        if (exit_inside && t <= 1e-4) { t = -b0 + sqrt(d0); }
-        if (t > 1e-4 && (best < 0.0 || t < best) && dot(ro + t * rd - p0, ua) <= 0.0) { best = t; }
+        let roots = vec2<f32>(-b0 - sqrt(d0), -b0 + sqrt(d0));
+        for (var i = 0u; i < select(1u, 2u, exit_inside); i = i + 1u) {
+            let t = roots[i];
+            if (t > 1e-4 && (best < 0.0 || t < best) && dot(ro + t * rd - p0, ua) <= 0.0) { best = t; }
+        }
     }
     // Cap at p1 — only its outward (h ≥ seg) hemisphere.
     let far = p0 + ua * seg;
@@ -174,9 +178,11 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 
     let c1 = dot(ocf, ocf) - r * r;
     let d1 = b1 * b1 - c1;
     if (d1 >= 0.0) {
-        var t = -b1 - sqrt(d1);
-        if (exit_inside && t <= 1e-4) { t = -b1 + sqrt(d1); }
-        if (t > 1e-4 && (best < 0.0 || t < best) && dot(ro + t * rd - p0, ua) >= seg) { best = t; }
+        let roots = vec2<f32>(-b1 - sqrt(d1), -b1 + sqrt(d1));
+        for (var i = 0u; i < select(1u, 2u, exit_inside); i = i + 1u) {
+            let t = roots[i];
+            if (t > 1e-4 && (best < 0.0 || t < best) && dot(ro + t * rd - p0, ua) >= seg) { best = t; }
+        }
     }
     return best;
 }
@@ -407,22 +413,26 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     return Surf(p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u);
 }
 
-// Match the raster shadow-map lookup with analytic intersections. Bias is along
-// the light axis (nm), rather than an unrelated constant along the shading normal.
+// Sample a finite directional light. Moving the origin across shadow-map texels
+// puts rays inside curved surfaces; varying direction keeps the origin on the surface
+// and gives penumbrae that widen with blocker distance.
 fn shadow_at(s: Surf, light: vec3<f32>, seed: ptr<function, u32>) -> f32 {
     if (U.shadow.z <= 0.5) { return 1.0; }
     let lc = U.shadow_matrix * vec4<f32>(s.p, 1.0);
     let ndc = lc.xyz / lc.w;
     if (any(ndc < vec3<f32>(-1.0, -1.0, 0.0)) || any(ndc > vec3<f32>(1.0))) { return 1.0; }
-    // The 3x3 map filter plus its bilinear texel footprint, sampled over paths.
-    let footprint = shadow_filter_width(U.shadow.w);
-    let off = (floor(vec2<f32>(rand(seed), rand(seed)) * 3.0) - vec2<f32>(1.0)) * footprint
-        + vec2<f32>(rand(seed), rand(seed)) - vec2<f32>(0.5);
-    let ro = s.p + light * U.shadow.y + U.shadow_u.xyz * off.x + U.shadow_v.xyz * off.y;
-    // Stop at the light's near clip plane; geometry outside the map cannot cast shadows.
-    let z_bias = (U.shadow_matrix * vec4<f32>(light, 0.0)).z;
-    let tmax = max(0.0, -ndc.z / z_bias - U.shadow.y);
-    if (any_hit(ro, light, tmax)) { return 1.0 - U.shadow.x; }
+    let angle = 6.2831853 * rand(seed);
+    let radius = sqrt(rand(seed)) * U.shadow.w * 0.15;
+    let dir = normalize(light + radius * (cos(angle) * normalize(U.shadow_u.xyz)
+        + sin(angle) * normalize(U.shadow_v.xyz)));
+    // A small normal offset in world units avoids acne without erasing contact shadows
+    // as the scene grows. Back-facing rays still hit the surface's exit intersection.
+    let bias = max(U.shadow.y, 2e-6 * max(max(abs(s.p.x), abs(s.p.y)), abs(s.p.z)));
+    let ro = s.p + s.nrm * bias;
+    let origin_depth = (U.shadow_matrix * vec4<f32>(ro, 1.0)).z;
+    let depth_step = (U.shadow_matrix * vec4<f32>(dir, 0.0)).z;
+    let tmax = max(0.0, -origin_depth / depth_step);
+    if (any_hit(ro, dir, tmax)) { return 1.0 - U.shadow.x; }
     return 1.0;
 }
 

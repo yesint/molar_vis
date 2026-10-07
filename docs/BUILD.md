@@ -71,7 +71,10 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   Appearance verification (native GPU, no window):
   `cargo test -p molar_vis_core render::appearance_tests -- --include-ignored --nocapture`.
   It compares actual pixels for six styles, both projections, AO, shadows, gradients,
-  outlines, transparent materials, linear/sRGB targets and camera clipping.
+  outlines, transparent materials, linear/sRGB targets and camera clipping. Shadow-specific
+  tests check clean light-facing surfaces, bias stability across scene bounds, soft
+  penumbrae and capsule exit intersections. Set `MOLAR_VIS_TEST_IMAGES=/tmp/appearance`
+  on the appearance test command to save comparison images without a window.
   Shader validation and sphere-tree tests also run in the normal suite without a GPU.
   `MOLAR_VIS_DEBUG_UNOBSTRUCTED_CPU=1` forces the CPU path for timing comparisons;
   `RUST_LOG=molar_vis_core=info` reports the selected backend, atom counts and search time.

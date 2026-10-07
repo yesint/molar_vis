@@ -37,8 +37,11 @@ fn trace_effects_keep_world_units_and_the_raster_light_frame() {
         );
         let shadow_matrix = Mat4::from_cols_array_2d(&u.shadow_matrix);
         let direction = Vec3::from_slice(&u.light_dir[..3]);
-        let offset = shadow_matrix.transform_vector3(direction * u.shadow[1]);
-        assert!((offset.z + camera.shadow_uniform()[1]).abs() < 1e-6);
+        assert!((direction.length() - 1.0).abs() < 1e-6);
+        assert_eq!(
+            u.shadow[1], 0.0002,
+            "ray bias must not grow with scene size"
+        );
         let step = shadow_matrix.transform_vector3(Vec3::from_slice(&u.shadow_u[..3]));
         assert!((step.x - 2.0 / 2048.0).abs() < 1e-6);
         assert!(step.y.abs() < 1e-6 && step.z.abs() < 1e-6);
@@ -167,6 +170,16 @@ fn molecular_appearance_matches_for_materials_effects_and_projections() {
                     BgKind::Solid
                 };
                 let (raster, trace) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+                if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                    let dir = std::path::Path::new(&dir);
+                    std::fs::create_dir_all(dir).unwrap();
+                    raster
+                        .save(dir.join(format!("{style:?}_{projection:?}_{effect}_raster.png")))
+                        .unwrap();
+                    trace
+                        .save(dir.join(format!("{style:?}_{projection:?}_{effect}_trace.png")))
+                        .unwrap();
+                }
                 let mut error = 0.0;
                 let mut foreground_error = 0.0;
                 let mut foreground_count = 0;
@@ -182,7 +195,14 @@ fn molecular_appearance_matches_for_materials_effects_and_projections() {
                 let fg = foreground_error / foreground_count.max(1) as f64;
                 eprintln!("{style:?}/{projection:?}/{effect}: MAE {mae:.2}, foreground {fg:.2}");
                 assert!(
-                    mae < 3.0 && fg < 10.0,
+                    // Analytic soft shadows legitimately differ from the map filter at contacts.
+                    mae < 3.0
+                        && fg
+                            < if matches!(effect, "shadow" | "combined") {
+                                12.0
+                            } else {
+                                10.0
+                            },
                     "appearance changed: {style:?}/{projection:?}/{effect}"
                 );
                 if effect == "gradient" {
@@ -319,4 +339,136 @@ fn traced_ao_detects_blockers_absent_from_the_depth_buffer() {
         (mean(&short_range) - mean(&trace_open)).abs() < 1.0,
         "AO radius must limit the rays in nm"
     );
+}
+
+#[test]
+#[ignore = "requires native GPU; checks shadow acne, scene-size bias and penumbrae"]
+fn traced_shadows_keep_lit_surfaces_clean_and_soften_the_terminator() {
+    use crate::{geometry::RepKind, material::Material};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let atom = molar::prelude::Atom::new().with_name("C").guess();
+    let raw = crate::data::RawMolecule::single_atom("shadow target", atom, Vec3::ZERO).unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    populate_rep(&renderer, &rs, &mut scene, RepKind::Vdw, Material::AoChalky);
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.2), Vec3::splat(0.2), 0.8);
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = false;
+    let (_, open) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    camera.shadow.enabled = true;
+    camera.shadow.strength = 1.0;
+    camera.shadow.softness = 0.0;
+    let (_, hard) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    // Central, light-facing sphere surface must not acquire shadow acne.
+    for y in 105..125 {
+        for x in 150..170 {
+            assert!((0..3).all(|c| open.get_pixel(x, y)[c].abs_diff(hard.get_pixel(x, y)[c]) <= 1));
+        }
+    }
+    camera.scene_radius = 20.0;
+    let (_, large_bounds) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    assert!(
+        hard.pixels()
+            .zip(large_bounds.pixels())
+            .all(|(a, b)| (0..3).all(|c| a[c].abs_diff(b[c]) <= 1)),
+        "shadow bias must not erase contacts or shift the terminator with scene bounds"
+    );
+    camera.shadow.softness = 1.0;
+    let (_, soft) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    let partial = |im: &image::RgbaImage| {
+        open.pixels()
+            .zip(im.pixels())
+            .filter(|(a, b)| {
+                let baseline = a[0] as f32;
+                baseline > 50.0 && b[0] as f32 > baseline * 0.1 && (b[0] as f32) < baseline * 0.9
+            })
+            .count()
+    };
+    eprintln!(
+        "Partially shadowed pixels: hard {}, soft {}",
+        partial(&hard),
+        partial(&soft)
+    );
+    assert!(
+        partial(&soft) > partial(&hard) + 100,
+        "finite light must soften the shadow terminator"
+    );
+}
+
+#[test]
+#[ignore = "requires native GPU; checks capsule exits after rejecting the near hemisphere"]
+fn capsule_shadow_rays_find_the_valid_exit() {
+    let rs = gpu();
+    let source = include_str!("shaders/raytrace.wgsl");
+    let start = source.find("fn ray_cylinder(").unwrap();
+    let end = source[start..].find("// Möller").unwrap() + start;
+    let source = format!(
+        "struct Cyl {{ c0: vec4<f32>, c1: vec4<f32>, m: vec4<u32> }};\n{}\n\
+        @group(0) @binding(0) var<storage, read_write> result: array<f32>;\n\
+        @compute @workgroup_size(1) fn main() {{\n\
+            let c = Cyl(vec4<f32>(0.0,0.0,0.0,0.2),vec4<f32>(0.0,0.0,1.0,0.0),vec4<u32>(0u));\n\
+            result[0] = ray_cylinder(c, vec3<f32>(0.1,0.0,0.5), vec3<f32>(0.0,0.0,1.0), true);\n\
+            result[1] = ray_cylinder(c, vec3<f32>(0.1,0.0,-0.1), vec3<f32>(0.0,0.0,1.0), true);\n\
+        }}",
+        &source[start..end]
+    );
+    let shader = rs
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("capsule-shadow-regression"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+    let pipeline = rs
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let output = rs.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let readback = rs.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 8,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let group = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: output.as_entire_binding(),
+        }],
+    });
+    let mut encoder = rs
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 8);
+    rs.queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        tx.send(r).unwrap();
+    });
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    rx.recv().unwrap().unwrap();
+    let bytes = readback.slice(..).get_mapped_range();
+    let values: &[f32] = bytemuck::cast_slice(&bytes);
+    let cap_height = (0.2_f32.powi(2) - 0.1_f32.powi(2)).sqrt();
+    assert!((values[0] - (0.5 + cap_height)).abs() < 1e-5);
+    assert!((values[1] - (1.1 + cap_height)).abs() < 1e-5);
 }

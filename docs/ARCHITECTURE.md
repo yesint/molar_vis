@@ -135,8 +135,9 @@
   a screen-space disk kernel; traced AO casts cosine-weighted rays into the surface
   hemisphere, so it detects 3D cavities and blockers outside the camera depth buffer. Both
   keep the same nm radius, bias and linear strength; traced AO has no scene-size scaling
-  or artificial contrast boost. Shadow rays use the same light camera, converted depth bias and
-  filter footprint as the raster shadow map; softness applies to both. Fog and normalized
+  or artificial contrast boost. Shadow rays use the same central light direction. RT samples a finite directional light
+  for distance-dependent penumbrae, with a small normal offset in nm independent of scene
+  size. Raster uses a shadow-map filter; softness applies to both. Fog and normalized
   color clamping precede deferred AO/shadow multiplication. Transparent layers use weighted
   OIT and do not act as opaque AO/shadow blockers. Gradient backgrounds and camera clip
   planes are preserved. GI is an explicit alternative lighting model, off by default;

@@ -87,8 +87,7 @@ impl Default for Ao {
 pub struct Shadow {
     pub enabled: bool,
     pub strength: f32,
-    /// Edge softness in [0,1] (0 = hard). Both renderers use the same light-space
-    /// filter footprint. `#[serde(default)]` so older sessions still load.
+    /// Edge softness in [0,1] (0 = hard). Raster uses a map filter; RT samples a finite light. `#[serde(default)]` so older sessions still load.
     #[serde(default = "default_shadow_softness")]
     pub softness: f32,
 }
@@ -408,8 +407,8 @@ impl Camera {
     }
 
     /// Shadow parameters for the renderer: `[strength, bias, enabled, softness]`
-    /// Bias is normalized light depth. The ray tracer converts it to nm.
-    /// `softness` controls the shared shadow filter footprint.
+    /// Bias is normalized light depth for the map; RT uses its own numerical offset.
+    /// `softness` controls the map filter or traced light angular radius.
     pub fn shadow_uniform(&self) -> [f32; 4] {
         let enabled = if self.shadow.enabled { 1.0 } else { 0.0 };
         [self.shadow.strength, 0.0025, enabled, self.shadow.softness.clamp(0.0, 1.0)]

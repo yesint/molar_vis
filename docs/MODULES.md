@@ -515,10 +515,12 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   from the raster depth buffer. Radius and bias retain their nm units and do not scale
   with scene size; strength remains linear, without a contrast boost. Fog and normalized color clamping
   happen before deferred AO/shadow multiplication, as in the raster pass sequence.
-  Both shadows use the same light camera and filter footprint. The ray tracer converts
-  normalized shadow depth bias to nm along the light axis and checks actual intersections,
-  including exit intersections when a shadow ray starts inside a sphere/capsule. Softness
-  affects both paths. Background gradients, near/far clipping and material opacity are kept.
+  Both shadows use the same central light direction. RT samples a finite directional
+  light, so penumbrae widen with blocker distance. It offsets origins along the surface
+  normal by a small numerical bias in nm independent of scene size, rather than moving
+  origins across shadow-map texels. Exit intersections preserve self-shadow on the back
+  of spheres/capsules. Raster softness controls its map filter; RT softness controls the
+  angular light radius (up to 0.15 radians). Background gradients, near/far clipping and material opacity are kept.
   GPU pixel regressions in `render/appearance_tests.rs` cover styles, projections, effects,
   outlines, transparency and linear/sRGB targets; shader validation also runs without a GPU.
   Drives the raytraced "Save image" **and the R-key viewport still**, both **frame-pumped** so the UI

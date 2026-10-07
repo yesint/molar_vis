@@ -1966,8 +1966,8 @@ impl SceneRenderer {
         let shadow_u = light_to_world.transform_vector3(Vec3::X) * texel;
         let shadow_v = light_to_world.transform_vector3(Vec3::Y) * texel;
         let mut shadow = camera.shadow_uniform();
-        // Raster bias is in normalized light depth; ray bias must be in nm.
-        shadow[1] *= 3.0 * radius;
+        // Analytic rays need only a numerical surface offset, independent of map size.
+        shadow[1] = 0.0002;
         raytrace::RtUniform {
             inv_view_proj: inv_vp.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
