@@ -747,20 +747,9 @@ impl App {
                     {
                         mol.reps_open = !mol.reps_open;
                     }
-                    // Name only; the atom/frame counts move to a hover tooltip.
-                    let frames = mol.trajectory.n_frames().max(1);
-                    // Bold: the molecule is a node of the tree, and its reps below are not.
-                    ui.label(bold_name(ui, mol.name.as_str())).on_hover_text(format!(
-                        "{} atoms / {} frame{}",
-                        mol.n_atoms,
-                        frames,
-                        if frames == 1 { "" } else { "s" }
-                    ));
-                    // Load a trajectory into this molecule (left-aligned, by the name).
-                    if icon_button(ui, icon::FOLDER_OPEN, "Load trajectory").clicked() {
-                        open_load = Some(mol.id);
-                    }
-                    // Right-justified action group: add-rep · zoom · eye · menu.
+                    // Right-justified action group: load · add-rep · zoom · eye · menu —
+                    // placed first, so the name (after it, in the space left) can never push it.
+                    let spacing = ui.spacing().clone();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         compact_actions(ui);
                         // Per-molecule menu (replaces the lone delete button): save,
@@ -834,6 +823,24 @@ impl App {
                             mol.reps_open = true;
                             view_dirty = true;
                         }
+                        // Load a trajectory into this molecule.
+                        if icon_button(ui, icon::FOLDER_OPEN, "Load trajectory").clicked() {
+                            open_load = Some(mol.id);
+                        }
+                        row_rest(ui, &spacing, |ui| {
+                            // Name only; the atom/frame counts move to a hover tooltip.
+                            // Bold: the molecule is a node of the tree, its reps are not.
+                            // Truncated with "…" in the space the actions leave.
+                            let frames = mol.trajectory.n_frames().max(1);
+                            let name = egui::Label::new(bold_name(ui, mol.name.as_str()));
+                            truncated(ui, name, 0.0).on_hover_text(format!(
+                                "{}\n{} atoms / {} frame{}",
+                                mol.name,
+                                mol.n_atoms,
+                                frames,
+                                if frames == 1 { "" } else { "s" }
+                            ));
+                        });
                     });
                 });
                 // Trajectory playback controls, shown once >1 frame is loaded.
@@ -974,10 +981,7 @@ impl App {
             {
                 action = Some(GroupAction::ToggleExpand);
             }
-            ui.add(egui::Label::new(icon::STACK).selectable(false))
-                .on_hover_text("Molecular group");
-            ui.label(bold_name(ui, &gname))
-                .on_hover_text(format!("group · {n_members} molecules"));
+            let spacing = ui.spacing().clone();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 compact_actions(ui);
                 ui.menu_button(icon::LIST, |ui| {
@@ -1016,6 +1020,13 @@ impl App {
                 {
                     action = Some(GroupAction::AddSharedRep);
                 }
+                // Icon + name in the space left by the actions; a long name ends in "…".
+                row_rest(ui, &spacing, |ui| {
+                    ui.add(egui::Label::new(icon::STACK).selectable(false))
+                        .on_hover_text("Molecular group");
+                    truncated(ui, egui::Label::new(bold_name(ui, &gname)), 0.0)
+                        .on_hover_text(format!("{gname}\ngroup · {n_members} molecules"));
+                });
             });
         });
 
@@ -1088,32 +1099,7 @@ impl App {
                                     {
                                         m.reps_open = !m.reps_open;
                                     }
-                                    // Clickable name: underlines on hover, click shows it.
-                                    // Bold like every molecule name; the *shown* member is
-                                    // marked by its accent bar + underline instead.
-                                    let text = bold_name(ui, m.name.as_str());
-                                    let text = if shown { text.underline() } else { text };
-                                    let resp = ui
-                                        .add(egui::Label::new(text).sense(egui::Sense::click()))
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                        .on_hover_text(format!(
-                                            "{} atoms — click to show{}",
-                                            m.n_atoms,
-                                            if shown { " (shown)" } else { "" }
-                                        ));
-                                    if resp.hovered() {
-                                        let r = resp.rect;
-                                        ui.painter().hline(
-                                            r.x_range(),
-                                            r.bottom(),
-                                            egui::Stroke::new(1.0_f32, ui.visuals().text_color()),
-                                        );
-                                    }
-                                    if resp.clicked() {
-                                        // Clicking a name shows it AND centers the
-                                        // camera on it (partial focus — pan, no zoom).
-                                        action = Some(GroupAction::ShowMember(pos));
-                                    }
+                                    let spacing = ui.spacing().clone();
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
@@ -1141,6 +1127,37 @@ impl App {
                                             {
                                                 action = Some(GroupAction::AddMemberRep(mid));
                                             }
+                                            row_rest(ui, &spacing, |ui| {
+                                                // Clickable name: underlines on hover, click shows it.
+                                                // Bold like every molecule name; the *shown* member is
+                                                // marked by its accent bar + underline instead.
+                                                let text = bold_name(ui, m.name.as_str());
+                                                let text = if shown { text.underline() } else { text };
+                                                // Truncated with "…" (full name in the tooltip).
+                                                let label =
+                                                    egui::Label::new(text).sense(egui::Sense::click());
+                                                let resp = truncated(ui, label, 0.0)
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                    .on_hover_text(format!(
+                                                        "{}\n{} atoms — click to show{}",
+                                                        m.name,
+                                                        m.n_atoms,
+                                                        if shown { " (shown)" } else { "" }
+                                                    ));
+                                                if resp.hovered() {
+                                                    let r = resp.rect;
+                                                    ui.painter().hline(
+                                                        r.x_range(),
+                                                        r.bottom(),
+                                                        egui::Stroke::new(1.0_f32, ui.visuals().text_color()),
+                                                    );
+                                                }
+                                                if resp.clicked() {
+                                                    // Clicking a name shows it AND centers the
+                                                    // camera on it (partial focus — pan, no zoom).
+                                                    action = Some(GroupAction::ShowMember(pos));
+                                                }
+                                            });
                                         },
                                     );
                                 });

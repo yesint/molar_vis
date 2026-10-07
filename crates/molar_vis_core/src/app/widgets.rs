@@ -159,6 +159,34 @@ pub(super) fn bold_name(ui: &egui::Ui, text: &str) -> egui::RichText {
     egui::RichText::new(text).font(crate::theme::bold(size))
 }
 
+/// Run `add_contents` in a left-to-right area that fills what is left of a row whose
+/// right-aligned actions are already placed (call it last inside the row's
+/// `right_to_left` layout), with the row's normal spacing back (the actions use
+/// [`compact_actions`]). Put a [`truncated`] name in it, so a long name ends in "…"
+/// instead of pushing the actions out of view.
+pub(super) fn row_rest<R>(
+    ui: &mut egui::Ui,
+    spacing: &egui::style::Spacing,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        *ui.spacing_mut() = spacing.clone();
+        add_contents(ui)
+    })
+    .inner
+}
+
+/// A label truncated with "…" to the available width minus `reserve` (the width any
+/// widgets after it on the row need), so they stay visible.
+pub(super) fn truncated(ui: &mut egui::Ui, label: egui::Label, reserve: f32) -> egui::Response {
+    let w = (ui.available_width() - reserve).max(0.0);
+    ui.scope(|ui| {
+        ui.set_max_width(w);
+        ui.add(label.truncate())
+    })
+    .inner
+}
+
 /// A plain text label vertically centered the same way [`overlay_button`] centers its glyph
 /// (by ink bounds, at the toolbar button height) — so a label sitting next to `overlay_button`
 /// dropdowns lines up with them instead of riding high/low.
