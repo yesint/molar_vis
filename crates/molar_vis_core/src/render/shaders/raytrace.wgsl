@@ -48,7 +48,7 @@ struct RtUniform {
 @group(0) @binding(1) var<storage, read> spheres: array<Sphere>;
 @group(0) @binding(2) var<storage, read> cylinders: array<Cyl>;
 @group(0) @binding(3) var<storage, read> mesh_verts: array<MeshVert>;
-@group(0) @binding(4) var<storage, read> triangles: array<vec4<u32>>; // (i0,i1,i2,_)
+@group(0) @binding(4) var<storage, read> triangles: array<vec4<u32>>; // (i0,i1,i2,closed_surface)
 @group(0) @binding(5) var<storage, read> nodes: array<BvhNode>;
 @group(0) @binding(6) var<storage, read> prim_indices: array<u32>;    // (type<<30)|index
 @group(0) @binding(7) var accum: texture_storage_2d<rgba32float, write>;
@@ -268,7 +268,7 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
     return hit;
 }
 
-fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> bool {
+fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32, skip_surface_exits: bool) -> bool {
     if (arrayLength(&nodes) == 0u) { return false; }
     let inv = 1.0 / rd;
     var stack: array<u32, 32>;
@@ -297,7 +297,14 @@ fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32) -> bool {
                     t = ray_cylinder(cylinders[idx], ro, rd, true);
                 } else {
                     let tri = triangles[idx];
-                    let result = ray_triangle(mesh_verts[tri.x].p.xyz, mesh_verts[tri.y].p.xyz, mesh_verts[tri.z].p.xyz, ro, rd);
+                    let a = mesh_verts[tri.x].p.xyz;
+                    let b = mesh_verts[tri.y].p.xyz;
+                    let c = mesh_verts[tri.z].p.xyz;
+                    // A ray in the smooth outward hemisphere must not be blocked by
+                    // exiting the faceted approximation of its own closed SES surface.
+                    // Entry faces of real blockers still occlude. Open ribbons stay two-sided.
+                    if (skip_surface_exits && tri.w != 0u && dot(cross(b-a,c-a), rd) > 0.0) { continue; }
+                    let result = ray_triangle(a, b, c, ro, rd);
                     t = result.x; uv = result.yz;
                 }
                 if (t > 1e-4 && t < tmax && primitive_opacity(tagged, ro + rd * t, uv) >= 0.999) { return true; }
@@ -350,12 +357,14 @@ const GI_BOUNCES: u32 = 3u;
 // (ambient, diffuse, specular, shininess) + the raw material word (for the outline bit).
 struct Surf {
     p: vec3<f32>,
+    ray_p: vec3<f32>, // smooth-surface origin for secondary rays; primary depth stays planar
     nrm: vec3<f32>,
     base: vec3<f32>,
     mat: vec4<f32>,
     mat_raw: u32,
     opacity: f32,
     mesh: bool,
+    closed: bool,
 };
 
 fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
@@ -363,6 +372,8 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     let typ = hit.prim >> 30u;
     let idx = hit.prim & IDX_MASK;
     var nrm: vec3<f32>;
+    var ray_p = p;
+    var closed = false;
     var base: vec3<f32>;
     var mat_raw: u32;
     var opacity: f32;
@@ -396,11 +407,31 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         }
     } else {
         let tri = triangles[idx];
+        closed = tri.w != 0u;
         let a = mesh_verts[tri.x];
         let b = mesh_verts[tri.y];
         let c = mesh_verts[tri.z];
         let wt = 1.0 - hit.uv.x - hit.uv.y;
-        nrm = normalize(wt * a.n.xyz + hit.uv.x * b.n.xyz + hit.uv.y * c.n.xyz);
+        let face = normalize(cross(b.p.xyz - a.p.xyz, c.p.xyz - a.p.xyz));
+        let interpolated = wt * a.n.xyz + hit.uv.x * b.n.xyz + hit.uv.y * c.n.xyz;
+        nrm = face;
+        if (dot(interpolated, interpolated) > 1e-12) { nrm = normalize(interpolated); }
+        // The planar hit lies below the smooth surface's vertex tangent planes.
+        // Project toward those planes before tracing, to avoid triangle-shaped
+        // shadow terminators. Use the eye-facing side for open/two-sided ribbons.
+        let side = select(-1.0, 1.0, dot(nrm, -rd) >= 0.0);
+        let na = a.n.xyz * side;
+        let nb = b.n.xyz * side;
+        let nc = c.n.xyz * side;
+        let smooth_n = nrm * side;
+        let ha = max(0.0, -dot(p - a.p.xyz, na)) / max(dot(smooth_n, na), 0.25);
+        let hb = max(0.0, -dot(p - b.p.xyz, nb)) / max(dot(smooth_n, nb), 0.25);
+        let hc = max(0.0, -dot(p - c.p.xyz, nc)) / max(dot(smooth_n, nc), 0.25);
+        // Clear all three tangent planes, not their weighted average: the average
+        // can leave grazing rays below a neighboring face. Bound the correction
+        // by triangle size so sharp ribbon corners cannot cause a large jump.
+        let limit = 0.25 * min(length(b.p.xyz-a.p.xyz), min(length(c.p.xyz-b.p.xyz), length(a.p.xyz-c.p.xyz)));
+        ray_p = p + smooth_n * min(max(ha, max(hb, hc)), limit);
         let ca = bitcast<u32>(a.p.w);
         let cb = bitcast<u32>(b.p.w);
         let cc = bitcast<u32>(c.p.w);
@@ -410,7 +441,7 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     }
     let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
     if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
-    return Surf(p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u);
+    return Surf(p, ray_p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u, closed);
 }
 
 // Sample a finite directional light. Moving the origin across shadow-map texels
@@ -425,14 +456,18 @@ fn shadow_at(s: Surf, light: vec3<f32>, seed: ptr<function, u32>) -> f32 {
     let radius = sqrt(rand(seed)) * U.shadow.w * 0.15;
     let dir = normalize(light + radius * (cos(angle) * normalize(U.shadow_u.xyz)
         + sin(angle) * normalize(U.shadow_v.xyz)));
+    // On a closed smooth surface an inward ray is immediately blocked by the
+    // surface itself. Decide this before offsetting: a numerical offset can make
+    // grazing inward rays miss, producing a bias-dependent, jagged terminator.
+    if (s.closed && dot(s.nrm, dir) <= 0.0) { return 1.0 - U.shadow.x; }
     // A small normal offset in world units avoids acne without erasing contact shadows
     // as the scene grows. Back-facing rays still hit the surface's exit intersection.
     let bias = max(U.shadow.y, 2e-6 * max(max(abs(s.p.x), abs(s.p.y)), abs(s.p.z)));
-    let ro = s.p + s.nrm * bias;
+    let ro = s.ray_p + s.nrm * bias;
     let origin_depth = (U.shadow_matrix * vec4<f32>(ro, 1.0)).z;
     let depth_step = (U.shadow_matrix * vec4<f32>(dir, 0.0)).z;
     let tmax = max(0.0, -origin_depth / depth_step);
-    if (any_hit(ro, dir, tmax)) { return 1.0 - U.shadow.x; }
+    if (any_hit(ro, dir, tmax, dot(s.nrm, dir) > 0.0)) { return 1.0 - U.shadow.x; }
     return 1.0;
 }
 
@@ -450,11 +485,11 @@ fn camera_hit(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit {
 // the user's radius in nm and strength linear; no scene scaling or contrast boost.
 fn ambient_visibility(s: Surf, seed: ptr<function, u32>) -> f32 {
     if (U.ao.w <= 0.5 || U.ao.z <= 0.0) { return 1.0; }
-    let ro = s.p + s.nrm * U.ao.y;
+    let ro = s.ray_p + s.nrm * U.ao.y;
     var occ = 0.0;
     for (var i = 0u; i < AO_RAYS; i = i + 1u) {
         let dir = cosine_hemisphere(s.nrm, rand(seed), rand(seed));
-        if (any_hit(ro, dir, U.ao.x)) { occ = occ + 1.0; }
+        if (any_hit(ro, dir, U.ao.x, true)) { occ = occ + 1.0; }
     }
     return clamp(1.0 - U.ao.z * occ / f32(AO_RAYS), 0.0, 1.0);
 }
@@ -500,7 +535,7 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
         }
         // Cosine-weighted diffuse bounce (cos/pdf cancel → multiply by albedo).
         throughput = throughput * s.base;
-        let ro = s.p + s.nrm * max(U.ao.y, 1e-4);
+        let ro = s.ray_p + s.nrm * max(U.ao.y, 1e-4);
         let rd = cosine_hemisphere(s.nrm, rand(seed), rand(seed));
         let hit = closest_hit(ro, rd);
         if (hit.prim == 0xffffffffu) {

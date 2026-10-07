@@ -64,7 +64,7 @@ pub struct GpuMeshVertex {
     pub n: [f32; 4],
 }
 
-/// A mesh triangle = three indices into the shared vertex array (`.w` unused).
+/// A mesh triangle: three vertex indices; `.w` is 1 for a closed SES surface.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuTriangle {
@@ -295,7 +295,8 @@ impl RtScene {
                         let (i0, i1, i2) = (base + t[0], base + t[1], base + t[2]);
                         aabbs.push(triangle_aabb(&self.mesh_verts, i0, i1, i2));
                         tags.push(tag(TAG_TRIANGLE, self.triangles.len()));
-                        self.triangles.push(GpuTriangle { i: [i0, i1, i2, 0] });
+                        let closed = u32::from(matches!(rep.kind, crate::geometry::RepKind::Surface));
+                        self.triangles.push(GpuTriangle { i: [i0, i1, i2, closed] });
                     }
                 }
             }

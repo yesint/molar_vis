@@ -471,6 +471,14 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   search. `unobstructed.rs` shares the direction search and provides the CPU scorer.
   Targets below 1024 atoms, browser builds, software adapters, unsupported devices, and searches
   exceeding device limits use the CPU. The compute pipeline is created on first use.
+- `geometry/surface.rs` — grid SES reconstruction with half-cell distance correction,
+  baseline field filtering, bounded relaxation projected back to the isosurface, and one
+  adaptive refinement pass. Quality-dependent normal-angle and midpoint-error tolerances
+  select edges; conforming transitions preserve connectivity and leave flat regions unchanged. Normals use analytic gradients of the continuous cubic field at the final positions;
+  colors smooth along mesh edges. Surface triangles have consistent outward winding.
+  Tests check level-set preservation, continuous outward normals, closed connectivity,
+  and a zero-radius probe. GPU appearance tests check convex self-AO and can save close-ups.
+
 - `render/raytrace.rs` + `render/shaders/raytrace.wgsl` — **GPU ray tracer** (Tachyon / PyMOL-`ray`
   quality: ray-traced ambient occlusion + shadows + Blinn-Phong, all rep types). **WebGPU/native
   only** (needs compute + storage buffers; gated on `DownlevelFlags::COMPUTE_SHADERS` → `Option<Raytracer>`

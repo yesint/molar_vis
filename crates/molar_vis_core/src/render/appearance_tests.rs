@@ -115,8 +115,19 @@ fn populate_rep(
     style: crate::geometry::RepKind,
     material: crate::material::Material,
 ) {
+    populate_rep_at(renderer, rs, scene, 0, style, material);
+}
+
+fn populate_rep_at(
+    renderer: &SceneRenderer,
+    rs: &RenderState,
+    scene: &mut Scene,
+    molecule: usize,
+    style: crate::geometry::RepKind,
+    material: crate::material::Material,
+) {
     use crate::{geometry, scene::Representation, secstruct::SsMap};
-    let mol = &mut scene.molecules[0];
+    let mol = &mut scene.molecules[molecule];
     let mut rep = Representation::new(style);
     rep.material = material;
     let sel = mol.data.select_all();
@@ -471,4 +482,196 @@ fn capsule_shadow_rays_find_the_valid_exit() {
     let cap_height = (0.2_f32.powi(2) - 0.1_f32.powi(2)).sqrt();
     assert!((values[0] - (0.5 + cap_height)).abs() < 1e-5);
     assert!((values[1] - (1.1 + cap_height)).abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "requires native GPU; checks smooth surface self-occlusion and saves close-ups"]
+fn smooth_surface_secondary_rays_do_not_create_triangle_patches() {
+    use crate::{geometry::RepKind, material::Material};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let atom = molar::prelude::Atom::new().with_name("C").guess();
+    let raw = crate::data::RawMolecule::single_atom("surface target", atom, Vec3::ZERO).unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    populate_rep(
+        &renderer,
+        &rs,
+        &mut scene,
+        RepKind::Surface,
+        Material::AoChalky,
+    );
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.2), Vec3::splat(0.2), 0.8);
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = false;
+    let (_, open) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    camera.ao.enabled = true;
+    camera.ao.strength = 1.0;
+    let (_, ao) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    let mut darkening = 0.0;
+    let mut count = 0;
+    for (a, b) in open.pixels().zip(ao.pixels()) {
+        if a[0] > 50 {
+            darkening += a[0].saturating_sub(b[0]) as f64;
+            count += 1;
+        }
+    }
+    let mean = darkening / count as f64;
+    eprintln!("Convex surface self-AO darkening: {mean:.2}");
+    assert!(
+        mean < 3.0,
+        "smooth convex surface must not acquire false self-occlusion patches"
+    );
+    camera.ao.enabled = false;
+    camera.shadow.enabled = true;
+    camera.shadow.strength = 1.0;
+    camera.shadow.softness = 0.0;
+    let (_, hard) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    let mol = &scene.molecules[0];
+    let rep = &mol.reps[0];
+    let bound = mol
+        .data
+        .bind_with_state(rep.sel.as_ref().unwrap(), mol.render_state());
+    let geom = crate::geometry::build(
+        &bound,
+        mol.n_atoms,
+        &mol.bonds,
+        &rep.params,
+        rep.color_spec(),
+        rep.material,
+        None,
+        true,
+    );
+    let inverse = (camera.proj(320.0 / 240.0) * camera.view()).inverse();
+    let light = camera
+        .view()
+        .inverse()
+        .transform_vector3(SHADOW_LIGHT_DIR_VIEW)
+        .normalize();
+    let mut checked = 0;
+    for y in (40..200).step_by(3) {
+        for x in (60..260).step_by(3) {
+            let ndc = Vec3::new(
+                (x as f32 + 0.5) / 320.0 * 2.0 - 1.0,
+                1.0 - (y as f32 + 0.5) / 240.0 * 2.0,
+                0.0,
+            );
+            let origin = inverse.project_point3(ndc);
+            let direction = (inverse.project_point3(ndc + Vec3::Z) - origin).normalize();
+            let mut nearest = f32::INFINITY;
+            let mut normal = Vec3::ZERO;
+            for tri in geom.mesh.indices.chunks_exact(3) {
+                let [a, b, c] = [
+                    geom.mesh.vertices[tri[0] as usize],
+                    geom.mesh.vertices[tri[1] as usize],
+                    geom.mesh.vertices[tri[2] as usize],
+                ];
+                let pa = Vec3::from_array(a.pos);
+                let e1 = Vec3::from_array(b.pos) - pa;
+                let e2 = Vec3::from_array(c.pos) - pa;
+                let cross = direction.cross(e2);
+                let det = e1.dot(cross);
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let offset = origin - pa;
+                let u = offset.dot(cross) / det;
+                let q = offset.cross(e1);
+                let v = direction.dot(q) / det;
+                let t = e2.dot(q) / det;
+                if u < 0.0 || v < 0.0 || u + v > 1.0 || t <= 0.0 || t >= nearest {
+                    continue;
+                }
+                nearest = t;
+                normal = ((1.0 - u - v) * Vec3::from_array(a.normal)
+                    + u * Vec3::from_array(b.normal)
+                    + v * Vec3::from_array(c.normal))
+                .normalize();
+            }
+            let facing = normal.dot(light);
+            // Exclude silhouette pixels where stochastic subpixel coverage differs.
+            if nearest.is_finite()
+                && normal.dot(-direction) > 0.4
+                && facing.abs() > 0.04
+                && open.get_pixel(x, y)[0] > 50
+            {
+                let visibility = hard.get_pixel(x, y)[0] as f32 / open.get_pixel(x, y)[0] as f32;
+                assert!(if facing > 0.0 { visibility > 0.98 } else { visibility < 0.02 },
+                "smooth shadow terminator disagrees with the normal at ({x},{y}): {facing}, {visibility}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 100);
+    camera.ao.enabled = true;
+    camera.shadow.strength = 0.8;
+    camera.shadow.softness = 0.4;
+    let (_, shadow) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    // Rejecting artificial exit hits must still preserve entry hits on a real blocker.
+    let blocker_atom = molar::prelude::Atom::new().with_name("C").guess();
+    let blocker = crate::data::RawMolecule::single_atom(
+        "surface blocker",
+        blocker_atom,
+        Vec3::new(0.35, 0.0, 0.3),
+    )
+    .unwrap();
+    scene.add(blocker, &crate::settings::RepDefaults::default());
+    populate_rep_at(
+        &renderer,
+        &rs,
+        &mut scene,
+        1,
+        RepKind::Surface,
+        Material::AoChalky,
+    );
+    camera.scene_radius = 1.0;
+    camera.shadow.enabled = false;
+    camera.ao.radius = 0.8;
+    let (_, blocked) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    let mut blocker_darkening = 0.0;
+    for y in 110..130 {
+        for x in 150..170 {
+            blocker_darkening += ao.get_pixel(x, y)[0] as f64 - blocked.get_pixel(x, y)[0] as f64;
+        }
+    }
+    blocker_darkening /= 400.0;
+    eprintln!("Closed surface blocker darkening: {blocker_darkening:.2}");
+    assert!(
+        blocker_darkening > 3.0,
+        "real closed-surface blockers must still occlude"
+    );
+    if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        open.save(dir.join("surface_convex_open.png")).unwrap();
+        ao.save(dir.join("surface_convex_ao.png")).unwrap();
+        shadow.save(dir.join("surface_convex_shadow.png")).unwrap();
+        let path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"));
+        let raw = crate::data::load(path).unwrap();
+        camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+        camera.target.z = raw.bbox_max.z - 0.5;
+        camera.distance *= 0.35;
+        camera.depth_cue.enabled = false;
+        camera.ao.enabled = true;
+        camera.shadow.enabled = true;
+        camera.shadow.strength = 0.5;
+        camera.background.color = [1.0, 1.0, 1.0, 1.0];
+        scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        populate_rep(
+            &renderer,
+            &rs,
+            &mut scene,
+            RepKind::Surface,
+            Material::AoChalky,
+        );
+        camera.shadow.enabled = false;
+        let (_, unshadowed) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+        unshadowed.save(dir.join("surface_closeup_ao.png")).unwrap();
+        camera.shadow.enabled = true;
+        let (raster, trace) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+        raster.save(dir.join("surface_closeup_raster.png")).unwrap();
+        trace.save(dir.join("surface_closeup_trace.png")).unwrap();
+    }
 }

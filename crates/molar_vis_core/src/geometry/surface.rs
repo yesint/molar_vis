@@ -1,7 +1,7 @@
 //! Molecular-surface builder: the solvent-excluded surface (SES, rolling-probe) via
 //! a **grid distance field + Surface Nets** — the robust, watertight-by-construction
 //! method used by PyMOL/Chimera/EDTSurf (distance maps + carving), rather than
-//! analytic patch stitching (which can't be made reliably watertight).
+//! analytic patch stitching. This is a grid approximation of the SES.
 //!
 //! Algorithm (morphological closing of the vdW balls by the probe):
 //! 1. Rasterize the **SAS solid** onto a grid: a voxel is "inside" if it lies within
@@ -17,8 +17,9 @@
 //! atom's color, then are **Laplacian-smoothed along the mesh** (1-ring averaging)
 //! so the hard nearest-atom Voronoi patches become smooth gradients — smoothing
 //! along the surface rather than through 3-D space, so colors don't bleed across a
-//! crevice. The normals get a light Laplacian pass too, to remove the per-cell
-//! faceting left by sampling the field gradient at the nearest grid node.
+//! crevice. A baseline field filter removes voxel noise; mesh relaxation is projected
+//! back to the field to preserve size. Normals use analytic gradients of the cubic field at the
+//! relaxed vertex positions, rather than smoothing shading over rough geometry.
 
 use glam::Vec3;
 use molar::prelude::*;
@@ -145,28 +146,34 @@ where
     }
 
     // --- Pass 2: exact EDT from each inside voxel to the nearest outside voxel. ---
-    // Seed: 0 at outside (feature) voxels, +inf at inside; F-H separable transform
-    // then sqrt gives voxel distance, ×h gives nm. `field = edt - probe` is the SES
-    // level set (0 outside SAS too, so field = -probe there → continuous).
+    // Seed: 0 at outside (feature) voxels, +inf at inside; the separable transform
+    // gives distance to solvent voxel centers. Subtract the half-cell boundary offset
+    // and probe radius to form the SES level set.
     let big = (nx * nx + ny * ny + nz * nz) as f32 + 1.0;
     let mut g: Vec<f32> = (0..n).map(|i| if inside[i] { big } else { 0.0 }).collect();
     edt_3d(&mut g, nx, ny, nz);
-    let mut field: Vec<f32> = g.iter().map(|&d2| d2.sqrt() * h - probe).collect();
+    // The EDT measures to solvent voxel centers, half a cell beyond the boundary.
+    // Correct that offset; retain negative values outside even for a zero-radius probe.
+    let mut field: Vec<f32> = g
+        .iter()
+        .map(|&d2| d2.sqrt() * h - 0.5 * h - probe)
+        .collect();
 
     // Light separable [1,2,1] blur of the distance field: the binary occupancy makes
     // the EDT (and its gradient = our normals) stair-step at voxel resolution, which
     // reads as a rugged/faceted surface. Blurring the field removes that
     // high-frequency noise so both the extracted isosurface and the shading come out
-    // smooth, at O(voxels) cost. Driven by the rep's `smoothing` slider.
-    smooth_field(&mut field, dims, smoothing as usize);
+    // smooth, at O(voxels) cost. The slider adds passes to the baseline reconstruction.
+    // One reconstruction pass removes binary-occupancy stair steps even at smoothing 0.
+    // The control adds further filtering, rather than relying on shading to hide them.
+    smooth_field(&mut field, dims, 1 + smoothing as usize);
 
     // --- Pass 3: Surface Nets isosurface at field = 0 (vertices seeded with the
     // nearest-atom color). ---
     let mut mesh = surface_nets(&field, &nearest, &colors, &ids, dims, lo, h);
 
     // Laplacian-smooth the mesh: the nearest-atom coloring is patchy (Voronoi
-    // cells), so spread it along the surface into smooth gradients; also lightly
-    // de-facet the gradient-sampled normals. Iteration counts scale with grid
+    // cells), so spread it along the surface into smooth gradients. Iteration counts scale with grid
     // resolution so the *physical* smoothing distance stays roughly constant.
     let uniform_color = colors.iter().all(|&c| c == colors[0]);
     let color_iters = if uniform_color {
@@ -174,19 +181,15 @@ where
     } else {
         ((0.2 / h * (0.2 / h)).round() as usize).clamp(4, 64)
     };
-    let normal_iters = ((0.1 / h * (0.1 / h)).round() as usize).clamp(1, 16);
-    laplacian_smooth(&mut mesh, color_iters, normal_iters);
+    relax_on_field(&mut mesh, &field, dims, lo, h);
+    laplacian_smooth(&mut mesh, color_iters);
+    refine_on_field(&mut mesh, &field, dims, lo, h, quality);
     mesh
 }
 
-/// Laplacian (umbrella) smoothing of per-vertex attributes *along the mesh surface*:
-/// each vertex is repeatedly replaced by the average of its 1-ring neighbors (found
-/// from the triangle list). Topology-aware — blends along the surface, so colors
-/// don't bleed across a crevice the way a 3-D distance blend would. Color is smoothed
-/// `color_iters` times (hard nearest-atom Voronoi patches → smooth gradients); the
-/// gradient-sampled normals get `normal_iters` lighter passes to remove per-cell
-/// faceting, then are renormalized.
-fn laplacian_smooth(mesh: &mut MeshData, color_iters: usize, normal_iters: usize) {
+/// Blend colors along mesh edges so nearest-atom patches become continuous gradients
+/// without bleeding across spatially close but disconnected surface regions.
+fn laplacian_smooth(mesh: &mut MeshData, color_iters: usize) {
     if mesh.vertices.is_empty() || mesh.indices.len() < 3 {
         return;
     }
@@ -206,16 +209,6 @@ fn laplacian_smooth(mesh: &mut MeshData, color_iters: usize, normal_iters: usize
         for (v, c) in mesh.vertices.iter_mut().zip(&rgb) {
             let q = |x: f32| x.round().clamp(0.0, 255.0) as u32;
             v.color = q(c[0]) | (q(c[1]) << 8) | (q(c[2]) << 16) | (0xff << 24);
-        }
-    }
-    if normal_iters > 0 {
-        let mut nrm: Vec<[f32; 3]> = mesh.vertices.iter().map(|v| v.normal).collect();
-        smooth_attr(&mut nrm, &mesh.indices, normal_iters);
-        for (v, nn) in mesh.vertices.iter_mut().zip(&nrm) {
-            let g = Vec3::from_array(*nn).normalize_or_zero();
-            if g != Vec3::ZERO {
-                v.normal = [g.x, g.y, g.z];
-            }
         }
     }
 }
@@ -414,13 +407,28 @@ fn surface_nets(
 
     // The 8 corner offsets and the 12 cube edges (corner index pairs).
     const CORNER: [[usize; 3]; 8] = [
-        [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1],
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
     ];
     const EDGE: [[usize; 2]; 12] = [
-        [0, 1], [1, 2], [2, 3], [3, 0],
-        [4, 5], [5, 6], [6, 7], [7, 4],
-        [0, 4], [1, 5], [2, 6], [3, 7],
+        [0, 1],
+        [1, 2],
+        [2, 3],
+        [3, 0],
+        [4, 5],
+        [5, 6],
+        [6, 7],
+        [7, 4],
+        [0, 4],
+        [1, 5],
+        [2, 6],
+        [3, 7],
     ];
 
     // Place one vertex per straddling cell.
@@ -465,12 +473,12 @@ fn surface_nets(
                 }
                 let vgrid = acc / cnt; // vertex in grid coordinates
                 let pos_world = origin + vgrid * h;
-                // Normal from the field gradient (central differences, trilinear-ish
-                // at the nearest grid sample), pointing outward (toward solvent).
+                // Evaluate the continuous field gradient at the actual vertex, then normalize.
+                // Rounding to a grid node made normals jump between adjacent cells.
                 let gx = vgrid.x.round() as usize;
                 let gy = vgrid.y.round() as usize;
                 let gz = vgrid.z.round() as usize;
-                let normal = -field_gradient(field, dims, gx, gy, gz);
+                let normal = -sample_gradient(field, dims, vgrid).normalize_or_zero();
                 let ni = idx(gx.min(nx - 1), gy.min(ny - 1), gz.min(nz - 1));
                 let aid = nearest[ni];
                 let color = if aid != u32::MAX {
@@ -479,7 +487,11 @@ fn surface_nets(
                     0xffff_ffff
                 };
                 cell_vert[cidx(x, y, z)] = vertices.len() as u32;
-                vert_atom.push(ids.get(aid as usize).copied().unwrap_or(crate::geometry::NO_ATOM));
+                vert_atom.push(
+                    ids.get(aid as usize)
+                        .copied()
+                        .unwrap_or(crate::geometry::NO_ATOM),
+                );
                 vertices.push(MeshVertex {
                     pos: [pos_world.x, pos_world.y, pos_world.z],
                     normal: [normal.x, normal.y, normal.z],
@@ -491,12 +503,28 @@ fn surface_nets(
     }
 
     // Quads: for each grid edge along +x/+y/+z whose endpoints straddle, connect the
-    // four cells sharing that edge. Winding is irrelevant (two-sided rendering), so
-    // we emit a fixed split; the cells must all exist (interior edges only).
+    // four cells sharing that edge. Use the shorter diagonal, with winding consistent
+    // with the outward field normals (also used for secondary-ray geometry).
     let mut indices: Vec<u32> = Vec::new();
     let quad = |a: u32, b: u32, c: u32, d: u32, indices: &mut Vec<u32>| {
         if a != u32::MAX && b != u32::MAX && c != u32::MAX && d != u32::MAX {
-            indices.extend_from_slice(&[a, b, c, a, c, d]);
+            let pos = |i: u32| Vec3::from_array(vertices[i as usize].pos);
+            let tris = if pos(a).distance_squared(pos(c)) <= pos(b).distance_squared(pos(d)) {
+                [[a, b, c], [a, c, d]]
+            } else {
+                [[a, b, d], [b, c, d]]
+            };
+            for [i, j, k] in tris {
+                let face = (pos(j) - pos(i)).cross(pos(k) - pos(i));
+                let outward = Vec3::from_array(vertices[i as usize].normal)
+                    + Vec3::from_array(vertices[j as usize].normal)
+                    + Vec3::from_array(vertices[k as usize].normal);
+                if face.dot(outward) >= 0.0 {
+                    indices.extend_from_slice(&[i, j, k]);
+                } else {
+                    indices.extend_from_slice(&[i, k, j]);
+                }
+            }
         }
     };
     for z in 0..nz {
@@ -548,24 +576,409 @@ fn surface_nets(
         );
     }
 
-    MeshData { vertices, indices, vert_res: Vec::new(), vert_atom }
+    MeshData {
+        vertices,
+        indices,
+        vert_res: Vec::new(),
+        vert_atom,
+    }
 }
 
-/// Central-difference gradient of the scalar field at a grid sample (clamped).
-fn field_gradient(field: &[f32], dims: [usize; 3], x: usize, y: usize, z: usize) -> Vec3 {
-    let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
-    let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
-    let s = |a: usize, lim: usize| a.min(lim - 1);
-    let xm = idx(x.saturating_sub(1), s(y, ny), s(z, nz));
-    let xp = idx(s(x + 1, nx), s(y, ny), s(z, nz));
-    let ym = idx(s(x, nx), y.saturating_sub(1), s(z, nz));
-    let yp = idx(s(x, nx), s(y + 1, ny), s(z, nz));
-    let zm = idx(s(x, nx), s(y, ny), z.saturating_sub(1));
-    let zp = idx(s(x, nx), s(y, ny), s(z + 1, nz));
-    let g = Vec3::new(
-        field[xp] - field[xm],
-        field[yp] - field[ym],
-        field[zp] - field[zm],
+/// Catmull-Rom reconstruction gives a C1 field across voxel boundaries. Its analytic
+/// derivative supplies normals of the same surface used for vertex projection.
+fn sample_field_gradient(field: &[f32], dims: [usize; 3], p: Vec3) -> (f32, Vec3) {
+    let q = p.clamp(
+        Vec3::ZERO,
+        Vec3::new(
+            (dims[0] - 1) as f32,
+            (dims[1] - 1) as f32,
+            (dims[2] - 1) as f32,
+        ),
     );
-    g.normalize_or_zero()
+    let base = q.floor();
+    let f = q - base;
+    let weights = |t: f32| {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        (
+            [
+                -0.5 * t + t2 - 0.5 * t3,
+                1.0 - 2.5 * t2 + 1.5 * t3,
+                0.5 * t + 2.0 * t2 - 1.5 * t3,
+                -0.5 * t2 + 0.5 * t3,
+            ],
+            [
+                -0.5 + 2.0 * t - 1.5 * t2,
+                -5.0 * t + 4.5 * t2,
+                0.5 + 4.0 * t - 4.5 * t2,
+                -t + 1.5 * t2,
+            ],
+        )
+    };
+    let (wx, dx) = weights(f.x);
+    let (wy, dy) = weights(f.y);
+    let (wz, dz) = weights(f.z);
+    let mut value = 0.0;
+    let mut gradient = Vec3::ZERO;
+    for z in 0..4 {
+        for y in 0..4 {
+            for x in 0..4 {
+                let ix = (base.x as isize + x as isize - 1).clamp(0, dims[0] as isize - 1) as usize;
+                let iy = (base.y as isize + y as isize - 1).clamp(0, dims[1] as isize - 1) as usize;
+                let iz = (base.z as isize + z as isize - 1).clamp(0, dims[2] as isize - 1) as usize;
+                let v = field[ix + dims[0] * (iy + dims[1] * iz)];
+                value += v * wx[x] * wy[y] * wz[z];
+                gradient += v * Vec3::new(
+                    dx[x] * wy[y] * wz[z],
+                    wx[x] * dy[y] * wz[z],
+                    wx[x] * wy[y] * dz[z],
+                );
+            }
+        }
+    }
+    (value, gradient)
+}
+
+fn sample_gradient(field: &[f32], dims: [usize; 3], p: Vec3) -> Vec3 {
+    sample_field_gradient(field, dims, p).1
+}
+
+/// Relax irregular Surface Nets cells tangentially, then project back to the SES
+/// level set. Projection prevents the shrinkage of unconstrained Laplacian smoothing.
+fn relax_on_field(mesh: &mut MeshData, field: &[f32], dims: [usize; 3], origin: Vec3, h: f32) {
+    let mut sums = vec![Vec3::ZERO; mesh.vertices.len()];
+    let mut counts = vec![0u32; mesh.vertices.len()];
+    for _ in 0..2 {
+        sums.fill(Vec3::ZERO);
+        counts.fill(0);
+        for tri in mesh.indices.chunks_exact(3) {
+            for &(i, j) in &[
+                (tri[0], tri[1]),
+                (tri[0], tri[2]),
+                (tri[1], tri[0]),
+                (tri[1], tri[2]),
+                (tri[2], tri[0]),
+                (tri[2], tri[1]),
+            ] {
+                sums[i as usize] += Vec3::from_array(mesh.vertices[j as usize].pos);
+                counts[i as usize] += 1;
+            }
+        }
+        for (i, v) in mesh.vertices.iter_mut().enumerate() {
+            if counts[i] == 0 {
+                continue;
+            }
+            let old = (Vec3::from_array(v.pos) - origin) / h;
+            let average = (sums[i] / counts[i] as f32 - origin) / h;
+            let mut p = old.lerp(average, 0.5);
+            for _ in 0..3 {
+                let (value, g) = sample_field_gradient(field, dims, p);
+                if g.length_squared() < 1e-12 {
+                    break;
+                }
+                p -= g * (value / g.length_squared());
+                // Bound displacement to protect thin necks and prevent topology changes.
+                p = old + (p - old).clamp_length_max(0.5);
+            }
+            v.pos = (origin + p * h).to_array();
+            v.normal = (-sample_gradient(field, dims, p))
+                .normalize_or_zero()
+                .to_array();
+        }
+    }
+}
+
+/// Refine edges whose normal angle or distance from the continuous field exceeds
+/// the quality tolerance. A shared edge decision and conforming 0/1/2/3-edge splits
+/// keep neighboring triangles connected without forcing subdivision of flat regions.
+fn refine_on_field(
+    mesh: &mut MeshData,
+    field: &[f32],
+    dims: [usize; 3],
+    origin: Vec3,
+    h: f32,
+    quality: u32,
+) {
+    let quality = quality.min(4) as usize;
+    let cosine = [40.0_f32, 30.0, 22.0, 16.0, 12.0][quality]
+        .to_radians()
+        .cos();
+    let tolerance = h * [0.12, 0.10, 0.08, 0.06, 0.04][quality];
+    let before = mesh.indices.len() / 3;
+    let mut midpoints = std::collections::HashMap::new();
+    let mut indices = Vec::with_capacity(mesh.indices.len());
+    for tri in mesh.indices.chunks_exact(3) {
+        let mut edge = |a: u32, b: u32| -> Option<u32> {
+            *midpoints.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                let va = mesh.vertices[a as usize];
+                let vb = mesh.vertices[b as usize];
+                let pa = Vec3::from_array(va.pos);
+                let pb = Vec3::from_array(vb.pos);
+                if pa.distance_squared(pb) < (0.25 * h).powi(2) {
+                    return None;
+                }
+                let initial = ((pa + pb) * 0.5 - origin) / h;
+                let (value, gradient) = sample_field_gradient(field, dims, initial);
+                let error = value.abs() * h / gradient.length().max(1e-12);
+                let curved = Vec3::from_array(va.normal).dot(Vec3::from_array(vb.normal)) < cosine;
+                if !curved && error <= tolerance {
+                    return None;
+                }
+                let mut p = initial;
+                for _ in 0..3 {
+                    let (value, g) = sample_field_gradient(field, dims, p);
+                    if g.length_squared() < 1e-12 {
+                        break;
+                    }
+                    p -= g * (value / g.length_squared());
+                    p = initial + (p - initial).clamp_length_max(0.5);
+                }
+                let color = (0..4).fold(0, |packed, c| {
+                    let value =
+                        (((va.color >> (c * 8)) & 255) + ((vb.color >> (c * 8)) & 255) + 1) / 2;
+                    packed | (value << (c * 8))
+                });
+                let id = mesh.vertices.len() as u32;
+                mesh.vertices.push(MeshVertex {
+                    pos: (origin + p * h).to_array(),
+                    normal: (-sample_gradient(field, dims, p))
+                        .normalize_or_zero()
+                        .to_array(),
+                    color,
+                    mat: va.mat,
+                });
+                if !mesh.vert_atom.is_empty() {
+                    mesh.vert_atom.push(mesh.vert_atom[a as usize]);
+                }
+                Some(id)
+            })
+        };
+        let [a, b, c] = [tri[0], tri[1], tri[2]];
+        let ab = edge(a, b);
+        let bc = edge(b, c);
+        let ca = edge(c, a);
+        match (ab, bc, ca) {
+            (None, None, None) => indices.extend_from_slice(&[a, b, c]),
+            (Some(m), None, None) => indices.extend_from_slice(&[a, m, c, m, b, c]),
+            (None, Some(m), None) => indices.extend_from_slice(&[b, m, a, m, c, a]),
+            (None, None, Some(m)) => indices.extend_from_slice(&[c, m, b, m, a, b]),
+            (Some(ab), Some(bc), None) => {
+                indices.extend_from_slice(&[ab, b, bc]);
+                refine_quad(&mesh.vertices, [a, ab, bc, c], &mut indices);
+            }
+            (None, Some(bc), Some(ca)) => {
+                indices.extend_from_slice(&[bc, c, ca]);
+                refine_quad(&mesh.vertices, [b, bc, ca, a], &mut indices);
+            }
+            (Some(ab), None, Some(ca)) => {
+                indices.extend_from_slice(&[ca, a, ab]);
+                refine_quad(&mesh.vertices, [c, ca, ab, b], &mut indices);
+            }
+            (Some(ab), Some(bc), Some(ca)) => {
+                indices.extend_from_slice(&[a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca])
+            }
+        }
+    }
+    mesh.indices = indices;
+    if std::env::var("MOLAR_VIS_DEBUG_SURF").is_ok() {
+        log::info!(
+            "Surface adaptive refinement: {before} -> {} triangles (quality {quality})",
+            mesh.indices.len() / 3
+        );
+        #[cfg(test)]
+        eprintln!(
+            "Surface adaptive refinement: {before} -> {} triangles (quality {quality})",
+            mesh.indices.len() / 3
+        );
+    }
+}
+
+/// Triangulate a transition quad using its shorter diagonal, preserving winding.
+fn refine_quad(vertices: &[MeshVertex], [a, b, c, d]: [u32; 4], indices: &mut Vec<u32>) {
+    let pos = |i: u32| Vec3::from_array(vertices[i as usize].pos);
+    if pos(a).distance_squared(pos(c)) <= pos(b).distance_squared(pos(d)) {
+        indices.extend_from_slice(&[a, b, c, a, c, d]);
+    } else {
+        indices.extend_from_slice(&[a, b, d, b, c, d]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plane() -> (Vec<f32>, [usize; 3], Vec3) {
+        let dims = [5, 5, 5];
+        let origin = Vec3::splat(-2.0);
+        let mut field = Vec::new();
+        for z in 0..5 {
+            for _ in 0..25 {
+                field.push(-(origin.z + z as f32));
+            }
+        }
+        (field, dims, origin)
+    }
+
+    fn vertex(p: Vec3, angle: f32) -> MeshVertex {
+        MeshVertex {
+            pos: p.to_array(),
+            normal: (glam::Quat::from_rotation_y(angle.to_radians()) * Vec3::Z).to_array(),
+            color: 0xffffffff,
+            mat: 0,
+        }
+    }
+
+    #[test]
+    fn adaptive_splits_preserve_area_winding_and_flat_regions() {
+        let (field, dims, origin) = plane();
+        for (angles, children) in [
+            ([0.0, 0.0, 0.0], 1),
+            ([0.0, 30.0, 15.0], 2),
+            ([15.0, 0.0, 30.0], 2),
+            ([30.0, 15.0, 0.0], 2),
+            ([0.0, 30.0, 0.0], 3),
+            ([0.0, 0.0, 30.0], 3),
+            ([30.0, 0.0, 0.0], 3),
+            ([0.0, 30.0, -30.0], 4),
+        ] {
+            let mut mesh = MeshData {
+                vertices: vec![
+                    vertex(Vec3::ZERO, angles[0]),
+                    vertex(Vec3::X, angles[1]),
+                    vertex(Vec3::Y, angles[2]),
+                ],
+                indices: vec![0, 1, 2],
+                vert_atom: vec![0, 1, 2],
+                ..Default::default()
+            };
+            refine_on_field(&mut mesh, &field, dims, origin, 1.0, 2);
+            assert_eq!(mesh.indices.len() / 3, children);
+            assert_eq!(mesh.vert_atom.len(), mesh.vertices.len());
+            let mut area = 0.0;
+            for tri in mesh.indices.chunks_exact(3) {
+                let a = Vec3::from_array(mesh.vertices[tri[0] as usize].pos);
+                let b = Vec3::from_array(mesh.vertices[tri[1] as usize].pos);
+                let c = Vec3::from_array(mesh.vertices[tri[2] as usize].pos);
+                let signed = (b - a).cross(c - a).z * 0.5;
+                assert!(signed > 0.0);
+                area += signed;
+            }
+            assert!((area - 0.5).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn adaptive_transitions_share_edges_and_obey_quality() {
+        let (field, dims, origin) = plane();
+        let mesh = MeshData {
+            vertices: vec![
+                vertex(Vec3::ZERO, 0.0),
+                vertex(Vec3::X, 0.0),
+                vertex(Vec3::X + Vec3::Y, 30.0),
+                vertex(Vec3::Y, 15.0),
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Default::default()
+        };
+        let mut coarse = mesh.clone();
+        refine_on_field(&mut coarse, &field, dims, origin, 1.0, 0);
+        assert_eq!(coarse.indices, mesh.indices);
+        let mut fine = mesh.clone();
+        refine_on_field(&mut fine, &field, dims, origin, 1.0, 4);
+        assert!(fine.indices.len() > mesh.indices.len());
+        let mut edges = std::collections::HashMap::new();
+        for tri in fine.indices.chunks_exact(3) {
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        for ((a, b), count) in edges {
+            assert!(count == 1 || count == 2);
+            if count == 1 {
+                let a = Vec3::from_array(fine.vertices[a as usize].pos);
+                let b = Vec3::from_array(fine.vertices[b as usize].pos);
+                assert!(
+                    (a.x == b.x && (a.x == 0.0 || a.x == 1.0))
+                        || (a.y == b.y && (a.y == 0.0 || a.y == 1.0)),
+                    "transition must not introduce an internal boundary"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reconstruction_preserves_the_level_set_and_continuous_normals() {
+        let dims = [25, 25, 25];
+        let h = 0.05;
+        let origin = Vec3::splat(-0.6);
+        let radius = 0.2;
+        let mut field = Vec::new();
+        for z in 0..25 {
+            for y in 0..25 {
+                for x in 0..25 {
+                    let p = origin + Vec3::new(x as f32, y as f32, z as f32) * h;
+                    field.push(radius - p.length());
+                }
+            }
+        }
+        let nearest = vec![0; field.len()];
+        let mut mesh = surface_nets(&field, &nearest, &[0xffffffff], &[0], dims, origin, h);
+        relax_on_field(&mut mesh, &field, dims, origin, h);
+        let original_triangles = mesh.indices.len() / 3;
+        refine_on_field(&mut mesh, &field, dims, origin, h, 4);
+        assert!(mesh.indices.len() / 3 > original_triangles);
+        assert!(mesh.indices.len() / 3 < 4 * original_triangles);
+        assert!(mesh.vertices.len() > 100);
+        for v in &mesh.vertices {
+            let p = Vec3::from_array(v.pos);
+            assert!(
+                (p.length() - radius).abs() < h * 0.1,
+                "relaxation must preserve surface size"
+            );
+            assert!(
+                Vec3::from_array(v.normal).dot(p.normalize()) > 0.999,
+                "normals must follow the continuous field"
+            );
+        }
+        let mut edges = std::collections::HashMap::new();
+        for tri in mesh.indices.chunks_exact(3) {
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            edges.values().all(|&count| count == 2),
+            "surface must stay closed"
+        );
+    }
+
+    #[test]
+    fn zero_probe_builds_a_finite_outward_surface() {
+        let atom = Atom::new().with_name("C").guess();
+        let raw = crate::data::RawMolecule::single_atom("surface", atom, Vec3::ZERO).unwrap();
+        let bound = raw.system.select_all_bound();
+        let colorizer = Colorizer::new(crate::color::ColorSpec::default(), &bound, 1, None);
+        let mesh = build(&bound, &colorizer, 0.0, 2, 0);
+        assert!(!mesh.indices.is_empty());
+        for tri in mesh.indices.chunks_exact(3) {
+            let a = &mesh.vertices[tri[0] as usize];
+            let b = &mesh.vertices[tri[1] as usize];
+            let c = &mesh.vertices[tri[2] as usize];
+            let face = (Vec3::from_array(b.pos) - Vec3::from_array(a.pos))
+                .cross(Vec3::from_array(c.pos) - Vec3::from_array(a.pos));
+            let normals = Vec3::from_array(a.normal)
+                + Vec3::from_array(b.normal)
+                + Vec3::from_array(c.normal);
+            assert!(
+                face.dot(normals) > -1e-10,
+                "refinement must preserve outward winding"
+            );
+        }
+        for v in &mesh.vertices {
+            let p = Vec3::from_array(v.pos);
+            let n = Vec3::from_array(v.normal);
+            assert!(p.is_finite() && n.is_finite());
+            assert!(n.dot(p.normalize()) > 0.9);
+        }
+    }
 }

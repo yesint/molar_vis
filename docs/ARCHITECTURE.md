@@ -146,3 +146,20 @@
   intersections and sample patterns therefore give small pixel differences, particularly
   at thin edges. Transparent ray walks are bounded at 256 layers; smaller trace tiles keep
   their GPU submissions within the traversal budget.
+
+- **SES surface reconstruction** — the rolling-probe surface uses a voxel distance field
+  and Surface Nets. The distance-to-solvent seeds include a half-cell boundary correction;
+  a baseline field filter removes occupancy noise even with the smoothing control at zero.
+  Additional smoothing adds filter passes. Two bounded mesh-relaxation passes project back
+  onto the field, followed by adaptive shared-edge refinement projected onto the same level set.
+  Edges split when their normal angle or midpoint field error exceeds the quality tolerance;
+  flat regions stay unchanged. Shared decisions and conforming transition triangles preserve
+  connectivity without blanket fourfold subdivision. Higher quality tightens the tolerances;
+  refinement makes one bounded pass, producing at most four children per original triangle. The field uses continuous cubic reconstruction; normals are its analytic
+  gradients at the final vertex positions, then normalized. Colors
+  blend along mesh edges. RT keeps primary depth on the triangles but corrects secondary-ray
+  origins toward the smooth vertex tangent planes. Closed SES triangles have consistent outward
+  winding; outgoing secondary rays ignore exit faces of the faceted surface, while entry faces
+  of blockers still occlude. Inward shadow rays on a closed surface are classified before
+  the numerical offset, preventing bias-dependent shadow-edge patches. Open cartoon meshes
+  retain two-sided intersection behavior.
