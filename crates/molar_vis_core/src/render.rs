@@ -15,6 +15,8 @@ mod mesh;
 mod raytrace;
 mod sphere;
 mod ssao;
+#[cfg(not(target_arch = "wasm32"))]
+mod unobstructed;
 
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
@@ -608,6 +610,9 @@ pub struct SceneRenderer {
     /// GPU ray tracer (compute + storage buffers); `None` on WebGL2 (no compute). Drives
     /// the raytraced "Save image" and the in-place incremental render.
     raytracer: Option<raytrace::Raytracer>,
+    /// Independent, lazily created compute scorer for native unobstructed view.
+    #[cfg(not(target_arch = "wasm32"))]
+    unobstructed: Option<unobstructed::UnobstructedGpu>,
     /// In-place ray-trace output, kept **separate** from the SSAA raster target and sized
     /// to the **1× viewport** (not SSAA×) so the per-frame trace is cheap. `rt_egui` is its
     /// egui texture id — what the viewport paints while the ray-traced view is shown.
@@ -957,6 +962,8 @@ impl SceneRenderer {
             bg_bind_group,
             oit_enabled,
             raytracer,
+            #[cfg(not(target_arch = "wasm32"))]
+            unobstructed: None,
             rt_color: None,
             rt_egui: None,
             rt_color_size: [0, 0],
@@ -1830,6 +1837,43 @@ impl SceneRenderer {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
         CaptureReadback { buffer, out, render, padded_bpr, bgra, ready }
+    }
+
+    /// Large native searches use compute; small selections and unsupported devices
+    /// keep the CPU scorer. Nothing in this path accesses the ray tracer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn try_unobstructed_direction(
+        &mut self,
+        rs: &RenderState,
+        target: &[(Vec3, f32)],
+        occluders: &[(Vec3, f32)],
+        resolution: usize,
+    ) -> Option<Vec3> {
+        if target.len() < 1024
+            || rs.adapter.get_info().device_type == wgpu::DeviceType::Cpu
+            || std::env::var_os("MOLAR_VIS_DEBUG_UNOBSTRUCTED_CPU").is_some()
+            || !rs
+                .adapter
+                .get_downlevel_capabilities()
+                .flags
+                .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+        {
+            return None;
+        }
+        if self.unobstructed.is_none() {
+            self.unobstructed = unobstructed::UnobstructedGpu::new(&rs.device);
+        }
+        match self
+            .unobstructed
+            .as_ref()?
+            .best_direction(&rs.device, &rs.queue, target, occluders, resolution)
+        {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                log::warn!("unobstructed GPU search failed; using CPU: {e}");
+                None
+            }
+        }
     }
 
     /// Set the color of the active-selection glow. The app derives it from the theme's

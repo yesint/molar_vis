@@ -33,11 +33,12 @@ python examples/render_unobstructed.py                     # both bundled scenes
 python examples/render_unobstructed.py FILE OUTBASE [PAD]  # a custom protein+ligand scene
 ```
 
-The view direction is chosen by a pure CPU search (`molar_vis_core::unobstructed`): every atom
-is a vdW sphere, and the score of a candidate direction is the count of ligand atoms whose
-projected centre is the front-most surface. It maximizes that over a Fibonacci sphere of
-directions plus a local refine, then frames the ligand. Adds
-`Visualizer.unobstructed_view(rep, zoom_out=1.0, resolution=256)` to the API surface above
+The view direction maximizes the number of target atoms whose projected centres are not
+covered by nearer vdW spheres, including other target atoms. It searches a Fibonacci sphere
+of directions plus a local refinement, then frames the target. Native searches with at least
+1024 target atoms use an independent GPU compute scorer when supported; smaller targets and
+browser builds use the CPU scorer (`molar_vis_core::unobstructed`). The API is
+`Visualizer.unobstructed_view(rep, zoom_out=1.0, resolution=256)`
 (`zoom_out` > 1 keeps the orientation but widens the frame for a broader view of the surroundings;
 `resolution` is the coarse direction-search sample count — higher is more thorough but slower). A
 companion `Visualizer.unobstructed_view_multi([rep, ...], zoom_out=1.0, resolution=256)` unobstructs

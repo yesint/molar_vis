@@ -80,3 +80,6 @@ web-sys = { version = "0.3", features = [
     "Url",
     "HtmlAnchorElement",
 ] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+pollster = "0.4"

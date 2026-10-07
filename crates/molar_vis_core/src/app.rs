@@ -818,7 +818,7 @@ impl App {
     ///
     /// Atoms are modeled as vdW spheres (see [`crate::unobstructed`]); occluders are the
     /// atoms of every visible per-atom rep that is *not* in `targets` (Interactions reps
-    /// draw no per-atom geometry and are skipped). Selection/geometry is refreshed first
+    /// draw no per-atom geometry and are skipped). Selections are refreshed first
     /// so a freshly built scene (e.g. from the Python API) has evaluated selections.
     ///
     /// `resolution` is the coarse direction-search sample count (see
@@ -829,78 +829,36 @@ impl App {
         zoom_out: f32,
         resolution: usize,
     ) -> Result<(), String> {
-        if targets.is_empty() {
-            return Err("no target reps given".to_string());
-        }
-        // Make sure selections are evaluated (a just-added rep may still be dirty),
-        // exactly as `render_to_file` does before an offscreen capture. Native only —
-        // on wasm the render state is per-frame, and the update loop keeps the scene
-        // built, so selections are already current when this is called.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(rs) = self.render_state.clone() {
-            let gray_active = self.draw_gray_active();
-            build::rebuild_dirty(
-                &mut self.scene,
-                &self.renderer,
-                &self.settings,
-                self.view_dirty,
-                &rs,
-                gray_active,
-            );
-        }
-
-        // Target atoms: the union of the chosen reps' selections, as (position, vdW
-        // radius), while accumulating the combined bounding box.
-        let mut target: Vec<(glam::Vec3, f32)> = Vec::new();
-        let mut min = glam::Vec3::splat(f32::INFINITY);
-        let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
-        for &(mol, rep) in targets {
-            let m = self
-                .scene
-                .molecules
-                .get(mol)
-                .ok_or_else(|| format!("no molecule {mol}"))?;
-            let sel = m
-                .reps
-                .get(rep)
-                .ok_or_else(|| format!("no rep {rep} on molecule {mol}"))?
-                .sel
-                .as_ref()
-                .ok_or("target rep has no evaluated selection")?;
-            let bound = m.data.bind_with_state(sel, m.render_state());
-            for p in bound.iter_particle() {
-                let pos = glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z);
-                target.push((pos, p.atom.vdw()));
-                min = min.min(pos);
-                max = max.max(pos);
-            }
-        }
-        if target.is_empty() {
-            return Err("target reps select no atoms".to_string());
-        }
-
-        // Occluders: atoms of every other visible, per-atom rep (all molecules) that is
-        // not itself a target. Excluding the target reps here does NOT stop them from
-        // occluding one another: all target atoms go into the combined `target` set
-        // above, and the scorer counts a target atom hidden when any *other* target atom
-        // (from any passed rep) is nearer and covers it — so the group is judged exactly
-        // as one rep whose own front atoms hide its back atoms.
-        let mut occluders: Vec<(glam::Vec3, f32)> = Vec::new();
-        for (mi, m) in self.scene.molecules.iter().enumerate() {
-            for (ri, r) in m.reps.iter().enumerate() {
-                if targets.contains(&(mi, ri)) || !r.visible || r.kind == RepKind::Interactions {
-                    continue;
-                }
-                let Some(sel) = r.sel.as_ref() else { continue };
-                let bound = m.data.bind_with_state(sel, m.render_state());
-                for p in bound.iter_particle() {
-                    occluders.push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), p.atom.vdw()));
-                }
-            }
-        }
+        let started = std::time::Instant::now();
+        // Refresh selections without rebuilding meshes or uploading GPU geometry.
+        // The viewport consumes the remaining geometry dirty flags after this action.
+        self.view_dirty = true;
+        let build::UnobstructedAtoms {
+            target,
+            occluders,
+            min,
+            max,
+        } = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
 
         // Best direction, then orient and frame the combined target box.
-        let dir = crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution);
+        #[cfg(not(target_arch = "wasm32"))]
+        let gpu_dir = self.render_state.as_ref().and_then(|rs| {
+            self.renderer.try_unobstructed_direction(rs, &target, &occluders, resolution)
+        });
+        #[cfg(target_arch = "wasm32")]
+        let gpu_dir = None;
+        let dir = gpu_dir.unwrap_or_else(|| {
+            crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution)
+        });
+        #[cfg(not(target_arch = "wasm32"))]
+        log::info!(
+            "unobstructed view: {}, {} target atoms, {} occluders, {:.1} ms",
+            if gpu_dir.is_some() { "GPU" } else { "CPU" },
+            target.len(),
+            occluders.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
         self.camera.orientation = crate::unobstructed::look_along_quat(dir);
         // `zoom_out` enlarges the framed box about its centre: 1 = tight, >1 shows more
         // of the surroundings (lateral fit and depth slab both grow, so context in front

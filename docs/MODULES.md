@@ -463,6 +463,14 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   BGRA→RGBA, and downsamples `out×ssaa → out` (`image::imageops`) → an `RgbaImage`. Native drives the
   map with `device.poll(wait)` then reads; wasm polls `is_ready` each frame (the browser drives the
   map). The color target carries `COPY_SRC`. UI/IO lives in `app/export.rs` (see the Render menu).
+- `render/unobstructed.rs` + `render/shaders/unobstructed.wgsl` — native GPU scoring for
+  unobstructed view. Independent sphere tree and compute shader; no ray-tracer code or state.
+  Uploads atoms once and scores coarse directions and each refinement ring in batches. Reads
+  back counts plus a bounded list of queries near floating-point boundaries, checked using
+  CPU arithmetic and the sphere tree to preserve scores. Overflow falls back to the full CPU
+  search. `unobstructed.rs` shares the direction search and provides the CPU scorer.
+  Targets below 1024 atoms, browser builds, software adapters, unsupported devices, and searches
+  exceeding device limits use the CPU. The compute pipeline is created on first use.
 - `render/raytrace.rs` + `render/shaders/raytrace.wgsl` — **GPU ray tracer** (Tachyon / PyMOL-`ray`
   quality: ray-traced ambient occlusion + shadows + Blinn-Phong, all rep types). **WebGPU/native
   only** (needs compute + storage buffers; gated on `DownlevelFlags::COMPUTE_SHADERS` → `Option<Raytracer>`
