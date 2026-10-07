@@ -324,7 +324,7 @@ impl App {
             // handle drag is active).
             // Suspended while a pick mode is active (picking re-selects the draw scope in
             // place; see the `draw_mode` note above), so the tool doesn't fight the picker.
-            if self.draw.is_some() && self.pick_mode == PickMode::Off {
+            if self.draw.is_some() && self.pick_mode == PickMode::Off && !self.center_pick {
                 self.draw_input(ui, &response, rect, size_px);
             }
 
@@ -367,8 +367,29 @@ impl App {
             if picking_partner {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            let hovering =
-                (self.pick_mode == PickMode::Click || picking_partner) && !response.dragged();
+            // Centre-of-rotation pick (VMD's `c`): the **C** key toggles it — not while a text
+            // field has focus, and not in Draw mode, where C picks the carbon element. Esc
+            // cancels. The click itself is handled in the hover branch below. Partner pick
+            // takes precedence.
+            if !picking_partner
+                && self.draw.is_none()
+                && !self.scene.molecules.is_empty()
+                && !ui.ctx().egui_wants_keyboard_input()
+                && ui.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.is_none())
+            {
+                self.center_pick = !self.center_pick;
+                ui.ctx().request_repaint();
+            }
+            if self.center_pick && ui.input_mut(|i| i.key_pressed(egui::Key::Escape)) {
+                self.center_pick = false;
+                ui.ctx().request_repaint();
+            }
+            let picking_center = self.center_pick && !picking_partner;
+            if picking_center {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            let hovering = (self.pick_mode == PickMode::Click || picking_partner || picking_center)
+                && !response.dragged();
             let mut residue_hit = false;
             let mut lens_shown = false;
             if hovering {
@@ -438,6 +459,19 @@ impl App {
                                 }
                             }
                         }
+                    } else if picking_center {
+                        // Ring + info box on the atom under the cursor; a click makes it
+                        // the centre of rotation, a click on empty space cancels.
+                        if let Some(hit) = &hit {
+                            draw_pick_overlay(ui, rect, &self.camera, aspect, hit);
+                        }
+                        if response.clicked() {
+                            if let Some(hit) = &hit {
+                                self.set_rotation_center(hit.display);
+                            }
+                            self.center_pick = false;
+                            ui.ctx().request_repaint();
+                        }
                     } else if let Some(hit) = hit {
                         // Click selects the hovered atom/residue: merge it into the
                         // active (pending) selection (Shift = add, Ctrl/⌘ = subtract,
@@ -496,7 +530,7 @@ impl App {
                     // those atoms. Rebuilt as the cursor moves (grid query is cheap).
                     // Off by default (`hover_detail_lens` behavior setting); when off,
                     // `lens_shown` stays false and any stale lens is cleared below.
-                    if !picking_partner && self.settings.behavior.hover_detail_lens {
+                    if !picking_partner && !picking_center && self.settings.behavior.hover_detail_lens {
                         let moved = self.last_lens_ndc.is_none_or(|(lx, ly)| {
                             (lx - ndc_x).abs() > 0.004 || (ly - ndc_y).abs() > 0.004
                         });
@@ -521,39 +555,26 @@ impl App {
                                 }
                                 if mol.hover_grid.is_none() {
                                     // The grid holds the lens **seed** atoms — which
-                                    // residues the view line passes near: for Cartoon the
-                                    // **backbone** (what the ribbon traces); for Surface the
-                                    // **solvent-exposed** atoms (per-atom SASA > 0), not
-                                    // deep-buried ones. The query then keeps the near,
-                                    // camera-facing seeds and expands them to whole residues.
-                                    let has_cartoon = mol.reps.iter().any(|r| {
-                                        r.visible && matches!(r.kind, RepKind::Cartoon)
-                                    });
-                                    let has_surface = mol.reps.iter().any(|r| {
-                                        r.visible && matches!(r.kind, RepKind::Surface)
-                                    });
+                                    // residues the view line passes near: the atoms the
+                                    // visible Cartoon / Surface meshes are drawn from
+                                    // (`MeshCache::atoms` — the ribbon's trace atoms, the
+                                    // surface's nearest atoms), so never deep-buried ones.
+                                    // The query then keeps the near, camera-facing seeds
+                                    // and expands them to whole residues.
                                     let grid = {
                                         let st = mol.render_state();
-                                        let all = mol.data.select_all();
-                                        let b = mol.data.bind_with_state(&all, st);
-                                        let sasa = if has_surface {
-                                            b.sasa().ok().map(|s| s.areas().to_vec())
-                                        } else {
-                                            None
-                                        };
-                                        let pts = b.iter_particle().filter_map(|p| {
-                                            // Cartoon → the N–CA–C chain trace only (no
-                                            // carbonyl / terminal backbone oxygens).
-                                            let keep = (has_cartoon
-                                                && matches!(p.atom.get_name(), "N" | "CA" | "C"))
-                                                || (has_surface
-                                                    && sasa.as_ref().is_some_and(|a| {
-                                                        a.get(p.id).copied().unwrap_or(0.0) > 0.01
-                                                    }));
-                                            keep.then_some((
-                                                p.id as u32,
-                                                glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z),
-                                            ))
+                                        let mut seeds: Vec<u32> = mol
+                                            .reps
+                                            .iter()
+                                            .filter(|r| r.visible && r.kind.draws_mesh())
+                                            .filter_map(|r| r.mesh_cache.as_ref())
+                                            .flat_map(|c| c.atoms.iter().copied())
+                                            .collect();
+                                        seeds.sort_unstable();
+                                        seeds.dedup();
+                                        let pts = seeds.into_iter().filter_map(|a| {
+                                            let p = st.coords.get(a as usize)?;
+                                            Some((a, glam::Vec3::new(p.x, p.y, p.z)))
                                         });
                                         crate::spatial::AtomGrid::build(
                                             pts,
@@ -566,8 +587,7 @@ impl App {
                                 }
                                 // Show the **front-facing residues** under the view line
                                 // (both Cartoon and Surface). The grid seeds mark which
-                                // residues the line passes near — the ribbon backbone for
-                                // Cartoon, the solvent-exposed atoms for Surface; keep only
+                                // residues the line passes near — the mesh source atoms; keep only
                                 // the seeds on the near (camera-facing) half along the ray
                                 // (so the far side no longer bleeds through the
                                 // cleared-depth overlay), then expand each to its whole

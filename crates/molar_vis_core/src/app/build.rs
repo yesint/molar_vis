@@ -132,8 +132,8 @@ pub(super) fn build_glow(
         // Coincident geometry passes the glow pass's `≤` depth test cleanly (no z-fight,
         // no inflation) and a single residue still yields its ribbon segment.
         if matches!(rep.kind, RepKind::Cartoon) {
-            if let Some(cache) = &rep.cartoon_cache {
-                out.append(cartoon_submesh(cache, &res_set));
+            if let Some(cache) = &rep.mesh_cache {
+                out.append(cartoon_submesh(&cache.mesh, &res_set));
             }
             continue;
         }
@@ -192,7 +192,7 @@ pub(super) fn cartoon_submesh(
         }
     }
     geometry::GeometryData {
-        mesh: geometry::MeshData { vertices, indices, vert_res: Vec::new() },
+        mesh: geometry::MeshData { vertices, indices, ..Default::default() },
         ..Default::default()
     }
 }
@@ -202,16 +202,18 @@ pub(super) fn cartoon_submesh(
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) const PICK_ATOM_BITS: u32 = 21;
 
-/// Build the GPU **pick** geometry for one molecule (index `mi`): an id-stamped
-/// sphere per *pickable* atom — exactly the atoms CPU `pick` ray-casts (eligible
-/// atoms of each visible rep, at their displayed position and effective radius). The
-/// id packs `[mi+1, rep<<21 | atom]` so the readback decodes back to (mol, rep, atom).
-/// **Periodic images are baked in**: a rep with periodic display emits one sphere per
-/// atom per drawn image (shifted by the lattice offset), so the single-camera pick
-/// pass covers every image — matching what CPU `pick` tests. The id is the same for
-/// all images, so a hit on any image still reports the (central) atom.
+/// The molecule's GPU pick geometry: what each visible rep **draws**, id-stamped with the
+/// atom a hit resolves to (`[mol + 1, rep << PICK_ATOM_BITS | atom]`; x = 0 = no atom).
+/// Per-atom reps give one sphere per drawn atom; a mesh rep (Cartoon / Surface) gives its
+/// cached mesh, each vertex stamped with its source atom (`MeshData::vert_atom`), so the
+/// pick hits the ribbon / surface itself. Periodic images are baked in. Mirrors the CPU
+/// [`pick::pick`].
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geometry::GeometryData {
+pub(super) fn build_pick(
+    mol: &scene::Molecule,
+    mi: usize,
+    state: &State,
+) -> crate::render::PickGeometry {
     // Box lattice vectors (columns of the box matrix), for periodic image offsets.
     let box_vecs = state.pbox.as_ref().map(|pb| {
         let m = pb.get_matrix();
@@ -221,9 +223,30 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
             glam::Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
         ]
     });
-    let mut spheres: Vec<SphereInstance> = Vec::new();
+    let mut out = crate::render::PickGeometry::default();
+    let pick_x = mi as u32 + 1;
     for (rj, rep) in mol.reps.iter().enumerate() {
         if !rep.visible {
+            continue;
+        }
+        let offsets = match box_vecs {
+            Some([a, b, c]) => rep.periodic.offsets(a, b, c),
+            None => vec![glam::Vec3::ZERO],
+        };
+        let pick_rep = (rj as u32) << PICK_ATOM_BITS;
+        if rep.kind.draws_mesh() {
+            let Some(cache) = &rep.mesh_cache else { continue };
+            let mesh = &cache.mesh;
+            for off in &offsets {
+                let base = out.vertices.len() as u32;
+                for (v, &a) in mesh.vertices.iter().zip(&mesh.vert_atom) {
+                    let p = glam::Vec3::from(v.pos) + *off;
+                    // A vertex with no source atom still occludes, but never hits.
+                    let pick = if a == geometry::NO_ATOM { [0, 0] } else { [pick_x, pick_rep | a] };
+                    out.vertices.push(crate::render::PickVertex { pos: p.to_array(), pick });
+                }
+                out.indices.extend(mesh.indices.iter().map(|i| i + base));
+            }
             continue;
         }
         let Some(sel) = &rep.sel else { continue };
@@ -231,15 +254,9 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
             .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
             .flatten();
         let disp_state: &State = smoothed.as_ref().unwrap_or(state);
-        let offsets = match box_vecs {
-            Some([a, b, c]) => rep.periodic.offsets(a, b, c),
-            None => vec![glam::Vec3::ZERO],
-        };
         let bound = mol.data.bind_with_state(sel, disp_state);
-        let pick_x = mi as u32 + 1;
-        let pick_rep = (rj as u32) << PICK_ATOM_BITS;
         for p in bound.iter_particle() {
-            if !pick::atom_in_rep(rep.kind, p.atom.get_name()) {
+            if !pick::rep_draws_atom(rep, p.id) {
                 continue;
             }
             let base = glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z);
@@ -247,7 +264,7 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
             let id = [pick_x, pick_rep | (p.id as u32)];
             for off in &offsets {
                 let c = base + *off;
-                spheres.push(SphereInstance {
+                out.spheres.push(SphereInstance {
                     center: [c.x, c.y, c.z],
                     radius,
                     color: 0,
@@ -257,7 +274,7 @@ pub(super) fn build_pick(mol: &scene::Molecule, mi: usize, state: &State) -> geo
             }
         }
     }
-    geometry::GeometryData { spheres, ..Default::default() }
+    out
 }
 
 /// A molecule's currently displayed coordinates: the active trajectory frame, or the
@@ -752,13 +769,12 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 };
                 rep.ss_cache = fresh_ss;
                 rep.gpu = renderer.upload(rs, &geom);
-                // Cache the cartoon ribbon CPU mesh (with residue tags) for the
-                // selection glow to extract sub-ribbons from; clear for other styles.
-                rep.cartoon_cache = if matches!(rep.kind, RepKind::Cartoon) {
-                    Some(geom.mesh)
-                } else {
-                    None
-                };
+                // Cache a mesh rep's CPU mesh (with residue + source-atom tags) for
+                // picking and the selection glow; clear for other styles.
+                rep.mesh_cache = rep
+                    .kind
+                    .draws_mesh()
+                    .then(|| scene::MeshCache::new(geom.mesh, n_atoms));
                 rep.geom_dirty = false;
                 rep.coords_dirty = false;
                 changed = true;
@@ -779,8 +795,9 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                     geom
                 };
                 renderer.update(rs, &mut rep.gpu, &geom);
-                if matches!(rep.kind, RepKind::Cartoon) {
-                    rep.cartoon_cache = Some(geom.mesh); // keep the glow's cache fresh
+                if rep.kind.draws_mesh() {
+                    // Keep the pick / glow cache on the drawn geometry.
+                    rep.mesh_cache = Some(scene::MeshCache::new(geom.mesh, n_atoms));
                 }
                 rep.coords_dirty = false;
                 changed = true;
@@ -877,7 +894,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
         #[cfg(not(target_arch = "wasm32"))]
         if rep_geom_changed || mol.pick_dirty {
             let geom = build_pick(mol, mi, render_state);
-            mol.pick_gpu = renderer.upload(rs, &geom);
+            mol.pick_gpu = renderer.upload_pick(rs, &geom);
             mol.pick_dirty = false;
             // No `changed = true`: pick geometry isn't drawn in render_scene, so
             // it doesn't require a scene re-render on its own.

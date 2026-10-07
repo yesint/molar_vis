@@ -227,7 +227,12 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   (A degenerate/zero normal — failed frame, arrow tip — is guarded in `mesh.wgsl` so it doesn't
   `normalize`→NaN→white on NVIDIA.) Every emitted vertex is tagged with its source `resindex` in
   `MeshData::vert_res` (parallel to `vertices`, not uploaded) so the selection glow can extract a
-  given residue's ribbon segment from the *exact* parent mesh (`cartoon_cache` + `cartoon_submesh`).
+  given residue's ribbon segment from the *exact* parent mesh (`mesh_cache` + `cartoon_submesh`),
+  and with its residue's **trace atom** (the spline control point the builder chose — `Residue::trace`)
+  in `MeshData::vert_atom`, which picking resolves a ribbon hit to. The Surface builder fills
+  `vert_atom` too (each vertex's nearest atom). `Representation::mesh_cache` (`scene::MeshCache`:
+  the mesh + the sorted distinct `vert_atom` set `atoms`) is kept for every mesh rep
+  (`RepKind::draws_mesh`: Cartoon, Surface) and refreshed on each geometry / coordinate rebuild.
   **Coarse-grained (Martini) helices** (M22; `cg` path, detected by `BB` beads + no `CA`): a CG
   backbone has no carbonyl to orient the ribbon, and the BB beads spiral the helix axis at
   ~100°/residue (3.66 res/turn, 0.55 nm pitch, ~0.18 nm radius — measured), so the all-atom
@@ -584,11 +589,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `(mol, rep, atom)`) **and lasso selection** (`lasso_select`,
   `point_in_polygon`, `index_selection_string`, `LassoSelection`). Hit-tests the cursor/lasso
   against atoms **as displayed** (smoothed + periodic images, sharing `PeriodicParams::offsets`
-  with the renderer) and reports the atom's **real** stored coordinate. Both hover-pick and lasso
-  share `atom_in_rep(kind, name)` — the **style-specific contribution filter**: a Cartoon rep is
-  hit only on its **backbone** atoms (`cartoon_atom`: N/CA/C/O + terminal OT1/OT2/OXT — what the
-  ribbon is built from, never side chains); every other style hits all selected atoms (Lines
-  included, via its isolated-atom crosses). Drives the hover-info overlay
+  with the renderer) and reports the atom's **real** stored coordinate. **Picking hits what a rep
+  draws**, and never guesses atom names: per-atom reps are spheres at the atoms; a **mesh rep**
+  (Cartoon / Surface) is hit on its cached mesh (`ray_mesh` on the CPU; on native its id-stamped
+  triangles go into the GPU id-buffer via `build_pick` → `PickGeometry` / `PickVertex` +
+  `mesh_pick.wgsl`, after the sphere instances, so the ribbon/surface also hides what is behind
+  it) and the hit resolves to the hit vertex's source atom (`MeshData::vert_atom`). Hover, lasso
+  and `build_pick` share `rep_draws_atom(rep, id)`: an Interactions rep has no atoms, a mesh rep
+  only its `MeshCache::atoms` (Cartoon → the trace atoms, never side chains), every other style
+  all selected atoms (Lines included, via its isolated-atom crosses). The hover detail lens seeds
+  its grid from the same `MeshCache::atoms`. Drives the hover-info overlay
   (`draw_pick_overlay`/`draw_glow_ring` in `app.rs`). The lasso result is staged as a molecule's
   active (pending) selection, highlighted by a GPU glow pass (not an egui overlay) — see *active
   selection* under M11. **`SelectionMode` + `expand_selection`** (toolbar dropdown next to the pick
@@ -723,9 +733,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   in the viewport, picking the molecule with the most atoms in the tube), so it appears **between**
   atoms / in surface dimples too — that's the whole point. A lazily-built, frame/geom-invalidated
   `Molecule::hover_grid` (`AtomGrid`) holds the lens **seed** atoms (which residues the line passes
-  near): **Cartoon → the N–CA–C chain trace** (no carbonyl/terminal backbone oxygens — what the ribbon
-  traces); **Surface → solvent-exposed only** (per-atom SASA `bound.sasa().areas() > 0.01 nm²`, not
-  deep-buried atoms). The query (`AtomGrid::atoms_near_ray_t`, which returns each hit's signed `t`
+  near): the atoms the visible mesh reps are drawn from (`MeshCache::atoms` — **Cartoon → the trace
+  atoms** the ribbon runs through, **Surface → the nearest atoms of its vertices**, so never
+  deep-buried ones). The query (`AtomGrid::atoms_near_ray_t`, which returns each hit's signed `t`
   along the ray) keeps only the seeds on the **near (camera-facing) half** along the ray (`t ≤
   midpoint` of the hit `t`-range — so the far side no longer bleeds through the cleared-depth overlay)
   and **expands them to whole residues** (`pick::expand_selection` Residues), so complete front

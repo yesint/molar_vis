@@ -482,7 +482,7 @@ impl App {
         if let Some(&id) = self.scene.groups[gi].members.get(member) {
             if let Some(mi) = self.scene.mol_index(id) {
                 let (min, max) = self.scene.molecules[mi].current_bbox();
-                self.camera.target = 0.5 * (min + max);
+                self.camera.recenter(0.5 * (min + max));
             }
         }
         self.view_dirty = true;

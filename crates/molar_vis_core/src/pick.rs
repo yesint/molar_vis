@@ -9,7 +9,7 @@ use glam::{Mat4, Vec2, Vec3, Vec4Swizzles};
 use molar::prelude::*;
 
 use crate::geometry::{RepKind, RepParams};
-use crate::scene::{Molecule, Scene};
+use crate::scene::{Molecule, Representation, Scene};
 
 /// What the picker does on hover / drag.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -175,24 +175,15 @@ pub(crate) fn effective_radius(params: &RepParams, atom: impl AtomLike) -> f32 {
     }
 }
 
-/// Whether `name` is a protein **backbone** atom — the only atoms a Cartoon
-/// ribbon is built from (Cα drives the spline path, the carbonyl O its
-/// orientation; N/C round out the backbone). Side-chain atoms contribute nothing
-/// to the drawn ribbon, so they aren't pickable on a Cartoon rep.
-fn cartoon_atom(name: &str) -> bool {
-    matches!(name, "N" | "CA" | "C" | "O" | "OT1" | "OT2" | "OXT")
-}
-
-/// Whether an atom named `name` contributes to the drawn geometry of a rep of
-/// `kind` — the shared style-specific test used by both hover picking and lasso
-/// selection. A Cartoon ribbon is built only from backbone atoms (side chains
-/// aren't part of it); every other style draws something at each selected atom
-/// (Lines included, via its isolated-atom dots).
-pub(crate) fn atom_in_rep(kind: RepKind, name: &str) -> bool {
-    match kind {
-        // An Interactions rep draws only contact lines — no per-atom geometry to hit.
+/// Whether atom `id` is part of the drawn geometry of `rep` — the shared test of hover
+/// picking and lasso selection. An Interactions rep draws only contact lines (no atom); a
+/// mesh rep (Cartoon / Surface) is drawn from the source atoms its builder recorded
+/// ([`MeshCache`](crate::scene::MeshCache)), nothing before its first build; every other
+/// style draws something at each selected atom (Lines included, via its isolated-atom dots).
+pub(crate) fn rep_draws_atom(rep: &Representation, id: usize) -> bool {
+    match rep.kind {
         RepKind::Interactions => false,
-        RepKind::Cartoon => cartoon_atom(name),
+        k if k.draws_mesh() => rep.mesh_cache.as_ref().is_some_and(|c| c.has_atom(id)),
         _ => true,
     }
 }
@@ -333,7 +324,6 @@ pub(crate) fn nearest_bond_dist(
 /// (as decoded from the GPU id-buffer). O(1): the real coord comes from the current
 /// frame, the displayed coord + glow radius from the named rep. Returns `None` if
 /// any index is stale/out of range. Native only (drives the GPU pick path).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn hit_for_atom(scene: &Scene, mi: usize, rep_idx: usize, aid: usize) -> Option<PickHit> {
     let mol = scene.molecules.get(mi)?;
     let atom = mol.data.topology().get_atom(aid)?;
@@ -371,9 +361,11 @@ pub fn hit_for_atom(scene: &Scene, mi: usize, rep_idx: usize, aid: usize) -> Opt
     })
 }
 
-/// Ray-cast the cursor against every visible atom of every visible rep, at its
-/// displayed position, and return the nearest hit (or `None`). `ndc_x`/`ndc_y` are
-/// the cursor in normalized device coords (y up).
+/// Ray-cast the cursor against the drawn geometry of every visible rep and return the
+/// nearest hit (or `None`). `ndc_x`/`ndc_y` are the cursor in normalized device coords
+/// (y up). Per-atom reps are hit as spheres at the atoms' displayed positions; a mesh
+/// rep (Cartoon / Surface) is hit on its cached mesh ([`ray_mesh`]) and resolves to the
+/// source atom of the hit vertex. This is the CPU mirror of the GPU id-buffer pick.
 pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Option<PickHit> {
     let (ro, rd) = cursor_ray(view, proj, ndc_x, ndc_y);
     if rd == Vec3::ZERO {
@@ -406,6 +398,29 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
             if !rep.visible {
                 continue;
             }
+            let offsets = match box_vecs {
+                Some([a, b, c]) => rep.periodic.offsets(a, b, c),
+                None => vec![Vec3::ZERO],
+            };
+
+            if rep.kind.draws_mesh() {
+                // The mesh is built at the displayed coordinates; each periodic image is
+                // the same mesh shifted by its offset (= the ray shifted back).
+                let Some(cache) = &rep.mesh_cache else { continue };
+                for &off in &offsets {
+                    let Some((t, aid)) = ray_mesh(&cache.mesh, ro - off, rd) else { continue };
+                    if t >= best_t {
+                        continue;
+                    }
+                    if let Some(mut h) = hit_for_atom(scene, mi, rep_idx, aid) {
+                        best_t = t;
+                        h.display += off;
+                        best = Some(h);
+                    }
+                }
+                continue;
+            }
+
             let Some(sel) = &rep.sel else {
                 continue;
             };
@@ -415,16 +430,9 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                 .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
                 .flatten();
             let disp_state: &State = smoothed.as_ref().unwrap_or(frame);
-            let offsets = match box_vecs {
-                Some([a, b, c]) => rep.periodic.offsets(a, b, c),
-                None => vec![Vec3::ZERO],
-            };
-
             let bound = mol.data.bind_with_state(sel, disp_state);
             for p in bound.iter_particle() {
-                // Only hit atoms that form part of this rep's visible geometry
-                // (Cartoon → backbone only; everything else → all selected atoms).
-                if !atom_in_rep(rep.kind, p.atom.get_name()) {
+                if !rep_draws_atom(rep, p.id) {
                     continue;
                 }
                 let base = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
@@ -450,6 +458,47 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                     }
                 }
             }
+        }
+    }
+    best
+}
+
+/// Nearest hit of the ray `(ro, rd)` on `mesh`: the ray distance and the source atom
+/// (`MeshData::vert_atom`) of the hit triangle's vertex nearest to the hit point. A
+/// triangle whose nearest vertex has no source atom is skipped. O(triangles), so only
+/// for the CPU pick (the native hover path uses the GPU id-buffer).
+pub(crate) fn ray_mesh(mesh: &crate::geometry::MeshData, ro: Vec3, rd: Vec3) -> Option<(f32, usize)> {
+    let v = |i: u32| Vec3::from(mesh.vertices[i as usize].pos);
+    let mut best: Option<(f32, usize)> = None;
+    for tri in mesh.indices.chunks_exact(3) {
+        let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
+        // Möller–Trumbore, two-sided (mesh reps are drawn without culling).
+        let (e1, e2) = (b - a, c - a);
+        let pv = rd.cross(e2);
+        let det = e1.dot(pv);
+        if det.abs() < 1e-12 {
+            continue;
+        }
+        let inv = 1.0 / det;
+        let tv = ro - a;
+        let u = tv.dot(pv) * inv;
+        if !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        let qv = tv.cross(e1);
+        let w = rd.dot(qv) * inv;
+        if w < 0.0 || u + w > 1.0 {
+            continue;
+        }
+        let t = e2.dot(qv) * inv;
+        if t < 0.0 || best.is_some_and(|(bt, _)| t >= bt) {
+            continue;
+        }
+        // Barycentric weights (1-u-w, u, w) → the vertex nearest the hit.
+        let k = if 1.0 - u - w >= u.max(w) { 0 } else if u >= w { 1 } else { 2 };
+        let atom = mesh.vert_atom.get(tri[k] as usize).copied().unwrap_or(crate::geometry::NO_ATOM);
+        if atom != crate::geometry::NO_ATOM {
+            best = Some((t, atom as usize));
         }
     }
     best
@@ -536,7 +585,7 @@ pub fn lasso_select(scene: &Scene, view: Mat4, proj: Mat4, polygon: &[Vec2]) -> 
             let bound = mol.data.bind_with_state(sel, disp_state);
             for p in bound.iter_particle() {
                 // Same style filter as picking, and skip atoms already selected.
-                if !atom_in_rep(rep.kind, p.atom.get_name()) || picked.contains(&p.id) {
+                if !rep_draws_atom(rep, p.id) || picked.contains(&p.id) {
                     continue;
                 }
                 let base = Vec3::new(p.pos.x, p.pos.y, p.pos.z);
@@ -635,8 +684,11 @@ mod tests {
     /// Load 2lao, set its first rep to `kind` over `sel_text`, and evaluate the
     /// selection so `lasso_select` sees an atom set (the renderer is bypassed).
     fn scene_with_rep(kind: RepKind, sel_text: &str) -> Scene {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
-        let raw = crate::data::load(std::path::Path::new(path)).expect("load 2lao.pdb");
+        scene_from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"), kind, sel_text)
+    }
+
+    fn scene_from(path: &str, kind: RepKind, sel_text: &str) -> Scene {
+        let raw = crate::data::load(std::path::Path::new(path)).expect("load test structure");
         let mut scene = Scene::default();
         scene.add(raw, &crate::settings::RepDefaults { kind, ..Default::default() });
         let mol = &mut scene.molecules[0];
@@ -646,7 +698,32 @@ mod tests {
         let (expr, sel) = mol.data.evaluate(sel_text).expect("eval selection");
         rep.expr = Some(expr);
         rep.sel = Some(sel);
+        build_mesh_caches(&mut scene);
         scene
+    }
+
+    /// Fill every mesh rep's `mesh_cache` the way `app::build` does (secondary structure,
+    /// then the real geometry builder), so the tests pick on the real drawn mesh.
+    fn build_mesh_caches(scene: &mut Scene) {
+        for mol in &mut scene.molecules {
+            let n_atoms = mol.n_atoms;
+            for ri in 0..mol.reps.len() {
+                let rep = &mol.reps[ri];
+                if !rep.kind.draws_mesh() {
+                    continue;
+                }
+                let sel = rep.sel.as_ref().expect("rep selection");
+                let bound = mol.data.bind_with_state(sel, mol.render_state());
+                let ss = crate::geometry::needs_ss(&rep.params, rep.color)
+                    .then(|| crate::secstruct::SsMap::compute(&bound, rep.ss_algo));
+                let geom = crate::geometry::build(
+                    &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
+                    ss.as_ref(), false,
+                );
+                drop(bound);
+                mol.reps[ri].mesh_cache = Some(crate::scene::MeshCache::new(geom.mesh, n_atoms));
+            }
+        }
     }
 
     /// A clip-space polygon larger than the [-1,1] NDC viewport, so a framed
@@ -658,6 +735,96 @@ mod tests {
             Vec2::new(2.0, 2.0),
             Vec2::new(-2.0, 2.0),
         ]
+    }
+
+    /// Mesh reps are picked on the geometry they draw. Over a grid of screen rays, an
+    /// independent ray–triangle test on the rep's cached mesh decides whether the ray hits
+    /// the drawn ribbon / surface: `pick` must hit exactly then, resolve to the source atom
+    /// the builder recorded for that spot (one of `MeshCache::atoms`), and — for Cartoon —
+    /// to the residue of the hit part of the ribbon. Covers an all-atom protein, a CG
+    /// (Martini) one, and a Surface.
+    #[test]
+    fn pick_hits_the_drawn_mesh() {
+        fn tri_hit(ro: Vec3, rd: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, [f32; 3])> {
+            let n = (b - a).cross(c - a);
+            let denom = n.dot(rd);
+            if denom.abs() < 1e-12 {
+                return None;
+            }
+            let t = n.dot(a - ro) / denom;
+            if t < 0.0 {
+                return None;
+            }
+            let p = ro + rd * t;
+            let area = n.length();
+            let wa = (b - p).cross(c - p).dot(n) / (area * area);
+            let wb = (c - p).cross(a - p).dot(n) / (area * area);
+            let wc = 1.0 - wa - wb;
+            (wa >= 0.0 && wb >= 0.0 && wc >= 0.0).then_some((t, [wa, wb, wc]))
+        }
+        for (file, kind) in
+            [("2lao.pdb", RepKind::Cartoon), ("cg.pdb", RepKind::Cartoon), ("2lao.pdb", RepKind::Surface)]
+        {
+            let path = format!("{}/../../tests/{file}", env!("CARGO_MANIFEST_DIR"));
+            let scene = scene_from(&path, kind, "all");
+            let mol = &scene.molecules[0];
+            let cache = mol.reps[0].mesh_cache.as_ref().unwrap();
+            let mesh = &cache.mesh;
+            assert!(!cache.atoms.is_empty(), "{file} {kind:?}: mesh drawn from no atoms");
+            if kind == RepKind::Cartoon {
+                // One trace atom per drawn residue.
+                let topo = mol.data.topology();
+                let mut res: Vec<usize> = cache
+                    .atoms
+                    .iter()
+                    .map(|&a| topo.get_atom(a as usize).unwrap().get_resindex())
+                    .collect();
+                let n = res.len();
+                res.dedup();
+                assert_eq!(res.len(), n, "{file}: two trace atoms in one residue");
+            }
+            let cam = Camera::frame_bbox(mol.bbox_min, mol.bbox_max, 0.9);
+            let (view, proj) = (cam.view(), cam.proj(1.0));
+            let v = |i: u32| Vec3::from(mesh.vertices[i as usize].pos);
+            let n = 24;
+            let mut hits = 0;
+            for iy in 0..n {
+                for ix in 0..n {
+                    let x = -1.0 + 2.0 * (ix as f32 + 0.5) / n as f32;
+                    let y = -1.0 + 2.0 * (iy as f32 + 0.5) / n as f32;
+                    let (ro, rd) = cursor_ray(view, proj, x, y);
+                    // Front-most triangle hit + the vertex nearest the hit point.
+                    let mut front: Option<(f32, u32)> = None;
+                    for t in mesh.indices.chunks_exact(3) {
+                        if let Some((d, w)) = tri_hit(ro, rd, v(t[0]), v(t[1]), v(t[2])) {
+                            if front.is_none_or(|(fd, _)| d < fd) {
+                                let k = (0..3).max_by(|&i, &j| w[i].total_cmp(&w[j])).unwrap();
+                                front = Some((d, t[k]));
+                            }
+                        }
+                    }
+                    let got = pick(&scene, view, proj, x, y);
+                    match front {
+                        None => assert!(got.is_none(), "{file} {kind:?}: hit off the mesh"),
+                        Some((_, vert)) => {
+                            hits += 1;
+                            let h = got.unwrap_or_else(|| panic!("{file} {kind:?}: missed the mesh"));
+                            assert!(cache.has_atom(h.id), "{file} {kind:?}: not a source atom");
+                            if kind == RepKind::Cartoon {
+                                let res = mol.data.topology().get_atom(h.id).unwrap().get_resindex();
+                                // A ray right on a ring boundary may see either owner.
+                                let tagged = mesh.vert_res[vert as usize] as usize;
+                                assert!(
+                                    res.abs_diff(tagged) <= 1,
+                                    "{file}: picked residue {res}, ribbon residue {tagged}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(hits > 10, "{file} {kind:?}: only {hits} rays hit the mesh");
+        }
     }
 
     #[test]
@@ -728,11 +895,12 @@ mod tests {
         assert_eq!(hits.len(), 1);
         let atoms = &hits[0].atoms;
         assert!(!atoms.is_empty(), "cartoon lasso selected nothing");
-        // Every selected atom must be a backbone atom — no side chains.
+        // Every selected atom must be one the ribbon is drawn from — no side chains.
+        let cache = mol.reps[0].mesh_cache.as_ref().unwrap();
         for &id in atoms {
             assert!(
-                cartoon_atom(&name_by_id[id]),
-                "non-backbone atom {} ({}) selected on a Cartoon rep",
+                cache.has_atom(id),
+                "non-trace atom {} ({}) selected on a Cartoon rep",
                 id,
                 name_by_id[id]
             );

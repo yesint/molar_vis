@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use eframe::egui;
-use molar::prelude::{AtomLike, AtomProvider, Measure, ParticleIterProvider, SsAlgorithm, State};
+use molar::prelude::{AtomLike, AtomProvider, ParticleIterProvider, SsAlgorithm, State};
 #[cfg(not(target_arch = "wasm32"))]
 use molar::prelude::FileHandler;
 
@@ -150,6 +150,10 @@ pub struct App {
     /// While set, hovering a rep's geometry (viewport) or a rep row (panel) highlights the
     /// whole rep and clicking delivers it; Esc / empty-click cancels. Transient.
     rep_pick: Option<RepPick>,
+    /// Active **"pick the rotation centre"** mode (VMD's `c`): the `C` key or the toolbar
+    /// button turns it on; the next click on an atom makes that atom the centre of rotation
+    /// (`Camera::set_center`). Esc / empty-click cancels. Transient.
+    center_pick: bool,
     /// Open per-type **Settings** dialog of an Interactions rep, if any: which rep, plus
     /// the active type tab. A movable `egui::Window` (`draw_interactions_dialog`) edits
     /// the rep's `InteractionSettings`. Transient.
@@ -750,6 +754,13 @@ impl App {
         self.view_dirty = true;
     }
 
+    /// Make the world point `p` (nm) the centre of rotation, like VMD's `c` pick. The view
+    /// does not move; later rotations turn about `p`.
+    pub fn set_rotation_center(&mut self, p: glam::Vec3) {
+        self.camera.set_center(p);
+        self.view_dirty = true;
+    }
+
     /// Replace the camera with one framing `[min, max]` and seed the user's default view
     /// (projection / background / depth cue / lighting), as a fresh document gets.
     ///
@@ -769,7 +780,7 @@ impl App {
     pub fn reset_view(&mut self) {
         if let Some((min, max)) = self.scene.bbox() {
             let framed = Camera::frame_bbox(min, max, self.settings.view.fill);
-            self.camera.target = framed.target;
+            self.camera.recenter(framed.target);
             self.camera.distance = framed.distance;
             self.camera.scene_radius = framed.scene_radius;
             self.camera.orientation = framed.orientation;

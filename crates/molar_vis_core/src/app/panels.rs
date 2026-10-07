@@ -177,6 +177,18 @@ impl App {
                         });
                     }
 
+                    // — Centre of rotation (VMD's `c`) — arms a one-shot pick: the next
+                    // click on an atom makes it the rotation centre. Also the **C** key.
+                    ui.separator();
+                    let resp = overlay_button(ui, icon::GPS_FIX, self.center_pick)
+                        .on_hover_text(
+                            "Pick the rotation centre (C): click an atom to rotate about it.\n\
+                             Esc or a click on empty space cancels. Reset view restores the default.",
+                        );
+                    if resp.clicked() {
+                        self.center_pick = !self.center_pick;
+                    }
+
                     // (Draw-mode toggle — which now hosts the Draw/Erase/DihedralRotate
                     // tools — lives in the left-panel Molecule menu.)
                     // (The selection modifier hint (add / subtract / rotate) is drawn
@@ -1215,7 +1227,7 @@ impl App {
                 if let Some(&id) = self.scene.groups[gi].members.get(nc) {
                     if let Some(mi) = self.scene.mol_index(id) {
                         let (min, max) = self.scene.molecules[mi].current_bbox();
-                        self.camera.target = 0.5 * (min + max);
+                        self.camera.recenter(0.5 * (min + max));
                     }
                 }
                 view_dirty = true;

@@ -124,6 +124,16 @@ the same `Molecule::pending` (*not* a rep yet) glowing highlight + minimal accep
 `Click`/`Lasso` mode, while a modifier is held a **modifier hint** (add/subtract, + rotate for
 Lasso-Alt) is drawn as a **floating overlay on the 3D viewport** (a top-center pill,
 `draw_modifier_hint_overlay` in `draw_viewport`) — *not* a toolbar row, so it never resizes the view.
+**centre of rotation** (`GPS_FIX` button, or the **C** key outside Draw mode / text fields) — VMD's
+`c` pick: arms the one-shot `App::center_pick`; the cursor becomes a crosshair, the hovered atom gets
+the pick ring, and a click makes it the rotation centre (`Camera::set_center` → `Camera::pivot`). The
+view does not move; every rotation (`Camera::rotate_by`: orbit, roll, the API's rotate/roll) swings
+the rig about the pivot, so the atom keeps its screen position. Esc or an empty click cancels; any
+re-framing (Reset view, `recenter`, `focus_bbox`) drops the pivot. `Camera::clip_offset` keeps near/far,
+the depth cue and the OIT range on the scene while the pivot rotation moves `target`, so the far side
+is not clipped; it moves with `target` on pan / Shift+RMB (slabbing unchanged).
+Cartoon / Surface reps are picked on the mesh they draw (see `pick.rs` in MODULES.md), so the
+centre pick and Click selection work on a ribbon / surface of any structure (all-atom or CG).
 **view-settings hamburger** (`LIST`, right-aligned) — toggles a **`Window`** (`App::view_menu_open`,
 `view_settings_window`; **not** a `Popup` — a Popup's `CloseOnClickOutside` fights the nested
 click-to-open dropdowns/color pickers below, which was the bug), positioned under the button

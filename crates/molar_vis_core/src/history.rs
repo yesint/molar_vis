@@ -445,7 +445,7 @@ fn reconcile_structure(mol: &mut Molecule, snap: &Arc<StructureSnapshot>) {
             rep.geom_dirty = true;
             rep.coords_dirty = false;
             rep.ss_cache = None;
-            rep.cartoon_cache = None;
+            rep.mesh_cache = None;
         }
         // Transient highlights may reference now-gone atoms — drop them.
         mol.pending = None;

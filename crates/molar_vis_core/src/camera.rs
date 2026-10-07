@@ -246,6 +246,20 @@ pub struct Camera {
     pub axes_on: bool,
     #[serde(skip)]
     pub axes_corner: Corner,
+    /// World-space centre of rotation picked by the user (VMD's `c`), or `None` to rotate
+    /// about `target` (the screen centre). Set by [`set_center`](Self::set_center); a
+    /// rotation then swings the whole rig (target and eye) about this point, so the picked
+    /// atom stays where it is on screen. Cleared by any re-framing. `#[serde(default)]` so
+    /// older sessions still load.
+    #[serde(default)]
+    pub pivot: Option<Vec3>,
+    /// World-space offset from `target` to the point the near/far clip planes, the depth
+    /// cue and the OIT depth range are centred on. A rotation about [`pivot`](Self::pivot)
+    /// moves `target` but not the scene, so this is shifted the other way to keep the clip
+    /// slab on the scene. It moves with `target` on pan / Shift+RMB (so slabbing still
+    /// works). Zero after any re-framing. `#[serde(default)]` so older sessions still load.
+    #[serde(default)]
+    pub clip_offset: Vec3,
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
@@ -315,6 +329,8 @@ impl Camera {
             gi: 0.0,
             axes_on: false,
             axes_corner: Corner::default(),
+            pivot: None,
+            clip_offset: Vec3::ZERO,
         }
     }
 
@@ -325,9 +341,42 @@ impl Camera {
     /// resets the orientation).
     pub fn focus_bbox(&mut self, min: Vec3, max: Vec3) {
         let half = (max - min) * 0.5;
-        self.target = (min + max) * 0.5;
+        self.recenter((min + max) * 0.5);
         self.scene_radius = half.length().max(1e-3);
         self.distance = fit_distance(half, self.fov_y, self.fill);
+    }
+
+    /// Make `p` the centre of rotation (VMD's `c` pick). The view does not move; later
+    /// rotations turn about `p` (see [`pivot`](Self::pivot)).
+    pub fn set_center(&mut self, p: Vec3) {
+        self.pivot = Some(p);
+    }
+
+    /// Re-centre on `p` as a new scene centre: it becomes the look-at point and the
+    /// centre of the clip planes, and a picked rotation centre is dropped.
+    pub fn recenter(&mut self, p: Vec3) {
+        self.target = p;
+        self.pivot = None;
+        self.clip_offset = Vec3::ZERO;
+    }
+
+    /// Apply the world-space rotation `q` to the view: about [`pivot`](Self::pivot) when
+    /// one is set (the rig swings around it, the clip centre stays on the scene), else
+    /// about `target`.
+    fn rotate_by(&mut self, q: Quat) {
+        self.orientation = (q * self.orientation).normalize();
+        if let Some(p) = self.pivot {
+            let t = p + q * (self.target - p);
+            self.clip_offset -= t - self.target;
+            self.target = t;
+        }
+    }
+
+    /// Eye-space distance to the clip centre (`target + clip_offset`): what near/far, the
+    /// depth cue and the OIT range bracket with `scene_radius`. Equals `distance` while
+    /// `clip_offset` is zero.
+    fn clip_depth(&self) -> f32 {
+        self.distance - self.clip_offset.dot(self.orientation * Vec3::Z)
     }
 
     pub fn is_perspective(&self) -> bool {
@@ -340,8 +389,9 @@ impl Camera {
     /// (0 = linear, 1 = exp, 2 = exp²; see [`CueMode`]). When disabled, `strength`
     /// is 0 so the shaders apply no fog.
     pub fn cue_uniform(&self) -> [f32; 4] {
-        let near = (self.distance - self.scene_radius) + self.depth_cue.start * 2.0 * self.scene_radius;
-        let far = (self.distance + self.scene_radius).max(near + 1e-3);
+        let d = self.clip_depth();
+        let near = (d - self.scene_radius) + self.depth_cue.start * 2.0 * self.scene_radius;
+        let far = (d + self.scene_radius).max(near + 1e-3);
         let strength = if self.depth_cue.enabled { self.depth_cue.strength } else { 0.0 };
         let mode = match self.depth_cue.mode {
             CueMode::Linear => 0.0,
@@ -389,8 +439,9 @@ impl Camera {
     /// raw window depth can't discriminate transparent layers; linear eye-space
     /// depth across `[front, back]` can, letting near layers dominate the blend.
     pub fn eye_depth_range(&self) -> [f32; 2] {
-        let front = (self.distance - self.scene_radius).max(1e-3);
-        let back = (self.distance + self.scene_radius).max(front + 1e-3);
+        let d = self.clip_depth();
+        let front = (d - self.scene_radius).max(1e-3);
+        let back = (d + self.scene_radius).max(front + 1e-3);
         [front, back]
     }
 
@@ -415,10 +466,9 @@ impl Camera {
     /// making the perspective↔ortho switch visually continuous.
     pub fn proj(&self, aspect: f32) -> Mat4 {
         let aspect = aspect.max(1e-3);
-        let znear = (self.distance - self.scene_radius)
-            .max(self.scene_radius * 0.02)
-            .max(1e-4);
-        let zfar = self.distance + self.scene_radius * 3.0 + 1e-3;
+        let d = self.clip_depth();
+        let znear = (d - self.scene_radius).max(self.scene_radius * 0.02).max(1e-4);
+        let zfar = (d + self.scene_radius * 3.0).max(znear) + 1e-3;
         match self.projection {
             Projection::Perspective => Mat4::perspective_rh(self.fov_y, aspect, znear, zfar),
             Projection::Orthographic => {
@@ -437,7 +487,7 @@ impl Camera {
         let k = K * sensitivity;
         let q = Quat::from_axis_angle(self.up(), -dx * k)
             * Quat::from_axis_angle(self.right(), -dy * k);
-        self.orientation = (q * self.orientation).normalize();
+        self.rotate_by(q);
     }
 
     /// Roll (shift+left-drag): rotate within the screen plane, about the view
@@ -447,7 +497,7 @@ impl Camera {
         // View axis (screen normal, toward the eye) = orientation·Z.
         let axis = self.orientation * Vec3::Z;
         let q = Quat::from_axis_angle(axis, dx * K * sensitivity);
-        self.orientation = (q * self.orientation).normalize();
+        self.rotate_by(q);
     }
 
     // --- Programmatic nav in intuitive units (for the Python/scripting API) ---
@@ -457,14 +507,14 @@ impl Camera {
     pub fn rotate_deg(&mut self, yaw: f32, pitch: f32) {
         let q = Quat::from_axis_angle(self.up(), -yaw.to_radians())
             * Quat::from_axis_angle(self.right(), -pitch.to_radians());
-        self.orientation = (q * self.orientation).normalize();
+        self.rotate_by(q);
     }
 
     /// Roll about the view axis by an absolute angle (degrees).
     pub fn roll_deg(&mut self, deg: f32) {
         let axis = self.orientation * Vec3::Z;
         let q = Quat::from_axis_angle(axis, deg.to_radians());
-        self.orientation = (q * self.orientation).normalize();
+        self.rotate_by(q);
     }
 
     /// Pan by a fraction of the viewport height (`1.0` = one screen-height), so it
@@ -523,6 +573,7 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec4Swizzles;
 
     #[test]
     fn frame_bbox_centers_and_fits() {
@@ -569,6 +620,41 @@ mod tests {
         assert!(shift.length() > 1e-4, "target should move");
         let axis = cam.orientation * Vec3::Z;
         assert!(shift.normalize().dot(axis).abs() > 0.999, "moves along the view axis");
+    }
+
+    /// `set_center` does not move the view, and later rotations turn about the picked
+    /// point: it keeps its screen position and depth. The clip slab stays on the scene, so
+    /// rotating about a point at the edge does not clip the far side.
+    #[test]
+    fn set_center_pivots_without_clipping_the_scene() {
+        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
+        let center = cam.target;
+        let p = Vec3::new(1.0, 1.0, -1.0);
+        let clip = |c: &Camera, x: Vec3| {
+            let v = c.proj(1.0) * c.view() * x.extend(1.0);
+            v.xyz() / v.w
+        };
+        let before = cam;
+        cam.set_center(p);
+        assert_eq!(cam.view(), before.view(), "picking the centre must not move the view");
+        // Eye-space position of the pivot (screen position + depth) must not change.
+        let eye_p = |c: &Camera| (c.view() * p.extend(1.0)).xyz();
+        let p0 = eye_p(&cam);
+        cam.rotate_deg(180.0, 30.0);
+        cam.orbit(40.0, -25.0, 1.0);
+        cam.roll_deg(70.0);
+        assert!((eye_p(&cam) - p0).length() < 1e-4, "pivot moved in the view");
+        // Another point does move (so we really rotated).
+        assert!((clip(&cam, center) - clip(&before, center)).length() > 1e-2);
+        // Front and back of the scene's bounding sphere stay inside [0, 1] NDC depth.
+        let z = cam.orientation * Vec3::Z;
+        for x in [center + z * cam.scene_radius, center - z * cam.scene_radius] {
+            let d = clip(&cam, x).z;
+            assert!((0.0..=1.0).contains(&d), "depth {d} clipped");
+        }
+        // Re-centring drops the pivot and the clip offset.
+        cam.recenter(center);
+        assert_eq!((cam.pivot, cam.clip_offset), (None, Vec3::ZERO));
     }
 
     #[test]

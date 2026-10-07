@@ -42,6 +42,9 @@ struct Residue {
     class: SsClass,
     chain: char,
     resindex: usize,
+    /// Global index of the trace atom (`ca`'s source). Stamped onto the mesh vertices
+    /// this residue owns (`MeshData::vert_atom`), so a hit on the ribbon resolves to it.
+    trace: u32,
 }
 
 pub fn build(
@@ -55,7 +58,7 @@ pub fn build(
 ) -> MeshData {
     // Group atoms by residue (BTreeMap keeps ascending resindex order).
     struct Acc {
-        ca: Option<(Vector3f, u32)>,
+        ca: Option<(Vector3f, u32, u32)>, // (position, color, atom index)
         o: Option<Vector3f>,
         chain: char,
     }
@@ -74,7 +77,7 @@ pub fn build(
             // Backbone trace point: atomistic Cα, or the Martini CG backbone bead.
             "CA" | "BB" => {
                 cg |= p.atom.get_name() == "BB";
-                acc.ca = Some((v3(p.pos), colorizer.color(p.atom, p.id)));
+                acc.ca = Some((v3(p.pos), colorizer.color(p.atom, p.id), p.id as u32));
             }
             // Ribbon-orientation reference: the atomistic carbonyl O, or (for CG, which
             // has no carbonyl) the first side-chain bead SC1 — the BB→SC1 vector gives
@@ -93,8 +96,9 @@ pub fn build(
     let residues: Vec<Residue> = by_res
         .into_iter()
         .filter_map(|(ri, a)| {
-            a.ca.map(|(ca, color)| Residue {
+            a.ca.map(|(ca, color, trace)| Residue {
                 ca,
+                trace,
                 o: a.o,
                 color,
                 class: ss.class(ri),
@@ -382,20 +386,21 @@ fn build_run(
     };
 
     // Sample the spline into cross-section rings, tagging each with its nearest
-    // residue's `resindex` (so the selection glow can extract just the sub-ribbon of
-    // chosen residues from this exact mesh).
+    // residue (`ring_owner`): its `resindex` lets the selection glow extract just the
+    // sub-ribbon of chosen residues from this exact mesh, its trace atom is what a pick
+    // on the ribbon resolves to.
     let mut rings: Vec<Ring> = Vec::with_capacity((n - 1) * STEPS + 1);
-    let mut ring_res: Vec<u32> = Vec::with_capacity((n - 1) * STEPS + 1);
+    let mut ring_owner: Vec<&Residue> = Vec::with_capacity((n - 1) * STEPS + 1);
     for i in 0..n - 1 {
         for s in 0..STEPS {
             let u = s as f32 / STEPS as f32;
             rings.push(sample(&ctx, i, u));
             let nearest = if u < 0.5 { i } else { i + 1 };
-            ring_res.push(run[nearest].resindex as u32);
+            ring_owner.push(&run[nearest]);
         }
     }
     rings.push(sample(&ctx, n - 2, 1.0));
-    ring_res.push(run[n - 1].resindex as u32);
+    ring_owner.push(&run[n - 1]);
 
     // PBC-break ends: the ribbon is fully opaque up to the box face, then the
     // ghost extension *beyond* the face (rings whose center is outside the box) is
@@ -426,7 +431,7 @@ fn build_run(
         }
     }
 
-    emit(&rings, &ring_res, mesh);
+    emit(&rings, &ring_owner, mesh);
 }
 
 /// The `[start, end]` residue index span of the contiguous helix run containing
@@ -836,9 +841,10 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
 }
 
 /// Turn the list of rings into a triangle mesh (ribbon body + end caps).
-/// `ring_res[i]` is the source residue of ring `i`, stamped onto every vertex of
-/// that ring (and the adjacent end cap) into `mesh.vert_res`.
-fn emit(rings: &[Ring], ring_res: &[u32], mesh: &mut MeshData) {
+/// `owner[i]` is the source residue of ring `i`: its `resindex` and trace atom are
+/// stamped onto every vertex of that ring (and the adjacent end cap) into
+/// `mesh.vert_res` / `mesh.vert_atom`.
+fn emit(rings: &[Ring], owner: &[&Residue], mesh: &mut MeshData) {
     let base = mesh.vertices.len() as u32;
 
     for (ri, r) in rings.iter().enumerate() {
@@ -871,7 +877,8 @@ fn emit(rings: &[Ring], ring_res: &[u32], mesh: &mut MeshData) {
                 color: r.color,
                 mat: 0,
             });
-            mesh.vert_res.push(ring_res[ri]);
+            mesh.vert_res.push(owner[ri].resindex as u32);
+            mesh.vert_atom.push(owner[ri].trace);
         }
     }
 
@@ -890,12 +897,12 @@ fn emit(rings: &[Ring], ring_res: &[u32], mesh: &mut MeshData) {
     }
 
     // Flat end caps (fan around a center vertex).
-    add_cap(mesh, rings.first().unwrap(), ring_res[0], base, true);
+    add_cap(mesh, rings.first().unwrap(), owner[0], base, true);
     let last_base = base + ((rings.len() - 1) * RING) as u32;
-    add_cap(mesh, rings.last().unwrap(), ring_res[rings.len() - 1], last_base, false);
+    add_cap(mesh, rings.last().unwrap(), owner[rings.len() - 1], last_base, false);
 }
 
-fn add_cap(mesh: &mut MeshData, ring: &Ring, res: u32, ring_base: u32, front: bool) {
+fn add_cap(mesh: &mut MeshData, ring: &Ring, owner: &Residue, ring_base: u32, front: bool) {
     // Skip near-degenerate rings (e.g. an arrow point that lands on a run end):
     // their fan would be slivers with unstable normals and ~zero area anyway.
     if ring.hw < 1e-3 || ring.ht < 1e-3 {
@@ -909,7 +916,8 @@ fn add_cap(mesh: &mut MeshData, ring: &Ring, res: u32, ring_base: u32, front: bo
         color: ring.color,
         mat: 0,
     });
-    mesh.vert_res.push(res);
+    mesh.vert_res.push(owner.resindex as u32);
+    mesh.vert_atom.push(owner.trace);
     for k in 0..RING {
         let k2 = (k + 1) % RING;
         let a = ring_base + k as u32;

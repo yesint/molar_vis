@@ -19,6 +19,8 @@ mod ssao;
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
 pub use mesh::MeshVertex;
+#[cfg(not(target_arch = "wasm32"))]
+pub use mesh::PickVertex;
 pub use sphere::SphereInstance;
 
 use background::BgUniform;
@@ -384,6 +386,17 @@ struct MeshBuffers {
     index_count: u32,
 }
 
+/// A molecule's GPU **pick** geometry before upload (see [`SceneRenderer::upload_pick`]):
+/// sphere instances for the per-atom reps, and indexed id-stamped triangles for the mesh
+/// reps. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub struct PickGeometry {
+    pub spheres: Vec<SphereInstance>,
+    pub vertices: Vec<PickVertex>,
+    pub indices: Vec<u32>,
+}
+
 /// Per-representation GPU geometry (any subset may be present).
 #[derive(Default)]
 pub struct RepGpu {
@@ -614,6 +627,10 @@ pub struct SceneRenderer {
     // wasm falls back to the CPU ray-cast.
     #[cfg(not(target_arch = "wasm32"))]
     pick_pipeline: wgpu::RenderPipeline,
+    /// Mesh reps' pick triangles ([`PickVertex`], each molecule's `pick_gpu.mesh`) into
+    /// the same id + depth targets, after the spheres.
+    #[cfg(not(target_arch = "wasm32"))]
+    pick_mesh_pipeline: wgpu::RenderPipeline,
     #[cfg(not(target_arch = "wasm32"))]
     pick_id_tex: wgpu::Texture,
     #[cfg(not(target_arch = "wasm32"))]
@@ -822,6 +839,9 @@ impl SceneRenderer {
         let pick_pipeline =
             sphere::build_pick_pipeline(device, PICK_FORMAT, DEPTH_FORMAT, &camera_bgl);
         #[cfg(not(target_arch = "wasm32"))]
+        let pick_mesh_pipeline =
+            mesh::build_pick_pipeline(device, PICK_FORMAT, DEPTH_FORMAT, &camera_bgl);
+        #[cfg(not(target_arch = "wasm32"))]
         let (pick_id_tex, pick_id_view, pick_depth_view) = make_pick_targets(device, [1, 1]);
         #[cfg(not(target_arch = "wasm32"))]
         let pick_readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -943,6 +963,8 @@ impl SceneRenderer {
             save_target: None,
             #[cfg(not(target_arch = "wasm32"))]
             pick_pipeline,
+            #[cfg(not(target_arch = "wasm32"))]
+            pick_mesh_pipeline,
             #[cfg(not(target_arch = "wasm32"))]
             pick_id_tex,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1090,6 +1112,18 @@ impl SceneRenderer {
                     pass.draw(0..4, 0..s.count);
                 }
             }
+            // Mesh reps (Cartoon / Surface): their drawn triangles, id-stamped per vertex.
+            pass.set_pipeline(&self.pick_mesh_pipeline);
+            for mol in &scene.molecules {
+                if !mol.visible {
+                    continue;
+                }
+                if let Some(m) = &mol.pick_gpu.mesh {
+                    pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                }
+            }
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -1171,6 +1205,38 @@ impl SceneRenderer {
             cylinders: upload_buf(device, &geom.cylinders, "cylinders"),
             lines: upload_buf(device, &geom.lines, "lines"),
             mesh: upload_mesh(device, &geom.mesh),
+        }
+    }
+
+    /// Upload a molecule's **pick** geometry: the per-atom sphere instances and the mesh
+    /// reps' id-stamped triangles (`PickVertex` in the mesh slot — drawn only by the pick
+    /// pass's mesh pipeline). Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn upload_pick(&self, rs: &RenderState, pick: &PickGeometry) -> RepGpu {
+        let device = &rs.device;
+        let mesh = (!pick.indices.is_empty()).then(|| {
+            let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("pick-mesh-verts"),
+                contents: bytemuck::cast_slice(&pick.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("pick-mesh-indices"),
+                contents: bytemuck::cast_slice(&pick.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            MeshBuffers {
+                vertices,
+                indices,
+                vertex_count: pick.vertices.len() as u32,
+                index_count: pick.indices.len() as u32,
+            }
+        });
+        RepGpu {
+            spheres: upload_buf(device, &pick.spheres, "pick-spheres"),
+            cylinders: None,
+            lines: None,
+            mesh,
         }
     }
 

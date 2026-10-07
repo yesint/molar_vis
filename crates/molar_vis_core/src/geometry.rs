@@ -128,6 +128,15 @@ pub enum RepParams {
     },
 }
 
+impl RepKind {
+    /// Whether the rep draws a triangle mesh (Cartoon, Surface) instead of per-atom
+    /// impostors. A mesh rep's atoms are not where its geometry is, so picking hits the
+    /// mesh itself (`Representation::mesh_cache`).
+    pub fn draws_mesh(self) -> bool {
+        matches!(self, RepKind::Cartoon | RepKind::Surface)
+    }
+}
+
 impl RepParams {
     pub fn for_kind(kind: RepKind) -> Self {
         match kind {
@@ -176,13 +185,14 @@ impl GeometryData {
         self.lines.append(&mut other.lines);
         self.mesh.vertices.append(&mut other.mesh.vertices);
         self.mesh.vert_res.append(&mut other.mesh.vert_res);
+        self.mesh.vert_atom.append(&mut other.mesh.vert_atom);
         self.mesh
             .indices
             .extend(other.mesh.indices.iter().map(|i| i + base));
     }
 }
 
-/// An indexed triangle mesh (Cartoon representation).
+/// An indexed triangle mesh (the Cartoon and Surface representations).
 #[derive(Default, Clone)]
 pub struct MeshData {
     pub vertices: Vec<MeshVertex>,
@@ -192,7 +202,17 @@ pub struct MeshData {
     /// residues when building the selection glow); empty for other meshes. Not
     /// uploaded to the GPU.
     pub vert_res: Vec<u32>,
+    /// Per-vertex **source atom** (global atom index in the molecule's `System`),
+    /// parallel to `vertices`: the atom the builder made this part of the mesh from —
+    /// for Cartoon the trace atom (spline control point) of the vertex's residue, for
+    /// Surface the nearest atom. `u32::MAX` = no atom. This is what picking resolves a
+    /// hit on the mesh to, and its distinct values are the atoms the mesh is drawn
+    /// from (see `scene::MeshCache`). Not uploaded to the GPU for drawing.
+    pub vert_atom: Vec<u32>,
 }
+
+/// "No source atom" in [`MeshData::vert_atom`].
+pub const NO_ATOM: u32 = u32::MAX;
 
 /// Whether a representation needs secondary structure (for the Cartoon shape or
 /// the SecStruct color scheme). The caller computes/caches the [`SsMap`] and

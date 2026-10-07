@@ -58,9 +58,12 @@ where
     let mut centers: Vec<Vec3> = Vec::new();
     let mut radii: Vec<f32> = Vec::new();
     let mut colors: Vec<u32> = Vec::new();
+    // Global atom index of each sphere (the `nearest` voxel labels are local indices).
+    let mut ids: Vec<u32> = Vec::new();
     let mut rmax = 0.0_f32;
     for p in bound.iter_particle() {
         centers.push(Vec3::new(p.pos.x, p.pos.y, p.pos.z));
+        ids.push(p.id as u32);
         let r = p.atom.vdw() + probe;
         radii.push(r);
         rmax = rmax.max(r);
@@ -159,7 +162,7 @@ where
 
     // --- Pass 3: Surface Nets isosurface at field = 0 (vertices seeded with the
     // nearest-atom color). ---
-    let mut mesh = surface_nets(&field, &nearest, &colors, dims, lo, h);
+    let mut mesh = surface_nets(&field, &nearest, &colors, &ids, dims, lo, h);
 
     // Laplacian-smooth the mesh: the nearest-atom coloring is patchy (Voronoi
     // cells), so spread it along the surface into smooth gradients; also lightly
@@ -385,11 +388,13 @@ fn dt_1d(f: &[f32]) -> Vec<f32> {
 /// Naive Surface Nets: one vertex per cell straddling `field = 0`, placed at the
 /// average of the cell's edge crossings; quads connect cells across each straddling
 /// grid edge. Watertight by construction. Normals = −∇field; each vertex is seeded
-/// with its nearest atom's color (later Laplacian-smoothed by [`laplacian_smooth`]).
+/// with its nearest atom's color (later Laplacian-smoothed by [`laplacian_smooth`]) and
+/// tagged with that atom's global index `ids[nearest]` in `vert_atom`.
 fn surface_nets(
     field: &[f32],
     nearest: &[u32],
     colors: &[u32],
+    ids: &[u32],
     dims: [usize; 3],
     origin: Vec3,
     h: f32,
@@ -405,6 +410,7 @@ fn surface_nets(
     let mut cell_vert = vec![u32::MAX; cx * cy * cz];
 
     let mut vertices: Vec<MeshVertex> = Vec::new();
+    let mut vert_atom: Vec<u32> = Vec::new();
 
     // The 8 corner offsets and the 12 cube edges (corner index pairs).
     const CORNER: [[usize; 3]; 8] = [
@@ -473,6 +479,7 @@ fn surface_nets(
                     0xffff_ffff
                 };
                 cell_vert[cidx(x, y, z)] = vertices.len() as u32;
+                vert_atom.push(ids.get(aid as usize).copied().unwrap_or(crate::geometry::NO_ATOM));
                 vertices.push(MeshVertex {
                     pos: [pos_world.x, pos_world.y, pos_world.z],
                     normal: [normal.x, normal.y, normal.z],
@@ -541,7 +548,7 @@ fn surface_nets(
         );
     }
 
-    MeshData { vertices, indices, vert_res: Vec::new() }
+    MeshData { vertices, indices, vert_res: Vec::new(), vert_atom }
 }
 
 /// Central-difference gradient of the scalar field at a grid sample (clamped).

@@ -160,6 +160,38 @@ pub struct TrajLoad {
     pub stride: usize,
 }
 
+/// A mesh rep's last-built mesh (CPU copy) and the atoms it is drawn from.
+///
+/// The builder tags every vertex with its source atom (`MeshData::vert_atom`): the
+/// residue's trace atom for Cartoon, the nearest atom for Surface. `atoms` is the
+/// distinct set of those — the atoms the rep's visible geometry is made from. Pick, lasso
+/// and the hover lens use it, so none of them has to know how a builder chooses its atoms.
+#[derive(Default, Clone)]
+pub struct MeshCache {
+    pub mesh: crate::geometry::MeshData,
+    /// Distinct source atoms of `mesh` (global indices), ascending.
+    pub atoms: Vec<u32>,
+}
+
+impl MeshCache {
+    /// Cache `mesh`, collecting its source atoms (`n_atoms` = the molecule's atom count).
+    pub fn new(mesh: crate::geometry::MeshData, n_atoms: usize) -> Self {
+        let mut seen = vec![false; n_atoms];
+        for &a in &mesh.vert_atom {
+            if let Some(s) = seen.get_mut(a as usize) {
+                *s = true;
+            }
+        }
+        let atoms = (0..n_atoms as u32).filter(|&a| seen[a as usize]).collect();
+        Self { mesh, atoms }
+    }
+
+    /// Whether atom `id` is one the mesh is drawn from.
+    pub fn has_atom(&self, id: usize) -> bool {
+        self.atoms.binary_search(&(id as u32)).is_ok()
+    }
+}
+
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
     pub kind: RepKind,
@@ -219,11 +251,12 @@ pub struct Representation {
     /// Cached secondary structure from the last full (structural) build, reused
     /// for coordinate-only frame updates when `ss_per_frame` is off. Transient.
     pub ss_cache: Option<SsMap>,
-    /// Cached CPU copy of the last-built **Cartoon** ribbon mesh (with per-vertex
-    /// `vert_res` residue tags), so the selection glow can extract just the chosen
-    /// residues' sub-ribbon from this *exact* geometry (coincident → no z-fight, and
-    /// works for a single residue). `None` for non-cartoon reps. Transient.
-    pub cartoon_cache: Option<crate::geometry::MeshData>,
+    /// Cached CPU copy of the last-built mesh of a **mesh rep** (Cartoon / Surface — see
+    /// [`RepKind::draws_mesh`]) plus the atoms it is drawn from. Picking hits this exact
+    /// geometry and resolves to the vertices' source atoms; the Cartoon selection glow
+    /// extracts the chosen residues' sub-ribbon from it (coincident → no z-fight, and
+    /// works for a single residue). `None` for other reps. Transient.
+    pub mesh_cache: Option<MeshCache>,
     /// Transient UI state: whether this rep's inline settings panel is expanded.
     /// Not part of `EditState` (view state, not undoable).
     pub params_open: bool,
@@ -374,7 +407,7 @@ impl Representation {
             dynamic,
             ss_per_frame,
             ss_cache: None,
-            cartoon_cache: None,
+            mesh_cache: None,
             params_open: false,
             settings_tab: SettingsTab::default(),
             sel_dirty: true,

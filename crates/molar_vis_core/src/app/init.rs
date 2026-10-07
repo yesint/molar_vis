@@ -565,6 +565,7 @@ impl App {
             selection_mode,
             lasso_path: Vec::new(),
             rep_pick: None,
+            center_pick: false,
             align_dialog: None,
             themed_bg: None,
             charge_status: None,

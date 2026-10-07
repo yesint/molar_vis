@@ -101,3 +101,90 @@ pub fn build_pipeline(
         cache: None,
     })
 }
+
+/// One vertex of a mesh rep's **pick** geometry: world position + the pick id of the
+/// vertex's source atom (`[mol + 1, rep << PICK_ATOM_BITS | atom]`, as the sphere pick
+/// instances). Periodic images are baked in (one copy of the mesh per image offset).
+#[cfg(not(target_arch = "wasm32"))]
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct PickVertex {
+    pub pos: [f32; 3],
+    pub pick: [u32; 2],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PickVertex {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<PickVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Uint32x2,
+            },
+        ],
+    };
+}
+
+/// Build the **pick** pipeline for mesh reps: [`PickVertex`] triangles into the `Rg32Uint`
+/// id target with depth test + write (shared with the sphere pick pass), so the drawn
+/// ribbon / surface hides what is behind it exactly as on screen. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_pick_pipeline(
+    device: &wgpu::Device,
+    id_format: wgpu::TextureFormat,
+    depth_format: wgpu::TextureFormat,
+    camera_bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("mesh-pick-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mesh_pick.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("mesh-pick-layout"),
+        bind_group_layouts: &[Some(camera_bgl)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("mesh-pick-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[PickVertex::LAYOUT],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: depth_format,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_pick"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: id_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
