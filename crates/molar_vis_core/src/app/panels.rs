@@ -648,7 +648,7 @@ impl App {
             }).response);
 
             menu_buttons.push(ui.menu_button("Help", |ui| {
-                if ui.button("Selection language").clicked() {
+                if ui.button("Selection language...").clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(
                         "https://yesint.github.io/molar_vis/selection-language.html",
                     ));
