@@ -128,3 +128,20 @@
   `PartialEq` vs `last_render_camera`), the viewport resized, or `view_dirty`
   (visibility/structure). No continuous repaint → **idle = 0 GPU**; egui repaints on input.
 
+
+- **Ray-traced appearance** — the R-key still is a more finely sampled version of the live
+  view. `render/shaders/lighting.wgsl` is compiled into both paths and defines material
+  shading, per-primitive fill lights, outlines, fog and transparency weights. Raster AO uses
+  a screen-space disk kernel; traced AO casts cosine-weighted rays into the surface
+  hemisphere, so it detects 3D cavities and blockers outside the camera depth buffer. Both
+  keep the same nm radius, bias and linear strength; traced AO has no scene-size scaling
+  or artificial contrast boost. Shadow rays use the same light camera, converted depth bias and
+  filter footprint as the raster shadow map; softness applies to both. Fog and normalized
+  color clamping precede deferred AO/shadow multiplication. Transparent layers use weighted
+  OIT and do not act as opaque AO/shadow blockers. Gradient backgrounds and camera clip
+  planes are preserved. GI is an explicit alternative lighting model, off by default;
+  its tone mapping applies to GI radiance, while the background keeps its configured color.
+  Ray-traced lines remain thin cylinders approximating screen-space quads. Analytic
+  intersections and sample patterns therefore give small pixel differences, particularly
+  at thin edges. Transparent ray walks are bounded at 256 layers; smaller trace tiles keep
+  their GPU submissions within the traversal budget.

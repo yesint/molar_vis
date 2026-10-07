@@ -60,8 +60,18 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   *not* the app (it has captured the user's browser instead), and `-f` full-screen captures blank on
   this compositor. If a real window is ever unavoidable, capture it *immediately* — a fresh window
   only holds focus for a moment.
+- Native rep-magnifier searches run in a background worker. After 0.5 seconds they show
+  `Computing... Press Esc to cancel` and a busy cursor. Esc discards the result immediately;
+  `MOLAR_VIS_DEBUG_UNOBSTRUCTED=1` starts this action on rep 0 for hidden UI capture.
+  CPU work stops at its next cancellation check and GPU work stops after the current small
+  batch. The camera changes only on successful completion. Python/headless calls remain
+  synchronous, and browser builds retain their existing synchronous CPU path.
 - Unobstructed-view GPU verification (native compute adapter required):
   `cargo test -p molar_vis_core render::unobstructed::tests -- --ignored --nocapture`.
+  Appearance verification (native GPU, no window):
+  `cargo test -p molar_vis_core render::appearance_tests -- --include-ignored --nocapture`.
+  It compares actual pixels for six styles, both projections, AO, shadows, gradients,
+  outlines, transparent materials, linear/sRGB targets and camera clipping.
   Shader validation and sphere-tree tests also run in the normal suite without a GPU.
   `MOLAR_VIS_DEBUG_UNOBSTRUCTED_CPU=1` forces the CPU path for timing comparisons;
   `RUST_LOG=molar_vis_core=info` reports the selected backend, atom counts and search time.
@@ -75,7 +85,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   shows in a screenshot),
   `MOLAR_VIS_DEBUG_AO[=strength]` (enable screen-space ambient occlusion),
   `MOLAR_VIS_DEBUG_SHADOW[=strength]` (enable real-time cast shadows) +
-  `MOLAR_VIS_DEBUG_SHADOW_SOFT=<0..1>` (set shadow softness — only visible in the ray-traced render),
+  `MOLAR_VIS_DEBUG_SHADOW_SOFT=<0..1>` (set shadow softness in both renderers),
   `MOLAR_VIS_DEBUG_BG=gradient|white` (set a gradient / white viewport background),
   `MOLAR_VIS_DEBUG_PERSP=1` (force perspective projection) +
   `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor`),

@@ -20,16 +20,7 @@ struct Camera {
 // grows. cue = [near, far, strength, mode]; mode 0 = linear, 1 = exp, 2 = exp2.
 // All curves are normalized to reach full fog at the far plane, scaled by strength.
 fn apply_fog(color: vec3<f32>, eye_z: f32) -> vec3<f32> {
-    let d = -eye_z; // eye-space distance (camera looks down -Z)
-    let t = clamp((d - camera.cue.x) / max(camera.cue.y - camera.cue.x, 1e-6), 0.0, 1.0);
-    let k = 3.0;
-    var b = t; // linear
-    if (camera.cue.w > 1.5) {
-        b = (1.0 - exp(-k * k * t * t)) / (1.0 - exp(-k * k)); // exp2
-    } else if (camera.cue.w > 0.5) {
-        b = (1.0 - exp(-k * t)) / (1.0 - exp(-k)); // exp
-    }
-    return mix(color, camera.fog_color.rgb, b * camera.cue.z);
+    return depth_cue(color, -eye_z, camera.cue, camera.fog_color.rgb);
 }
 
 struct Instance {
@@ -76,42 +67,10 @@ fn unpack_mat(m: u32) -> vec4<f32> {
     return vec4<f32>(amb, dif, spc, shn);
 }
 
-// VMD "Outline": darken fragments at grazing angles (silhouette edge). The flag is
-// the top bit of the packed shininess byte (see sphere.wgsl).
-fn apply_outline(color: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, m: u32) -> vec3<f32> {
-    let on = f32((m >> 31u) & 1u);
-    let edge = pow(1.0 - abs(dot(normal, view_dir)), 2.0);
-    return color * (1.0 - on * 0.9 * edge);
-}
-
-// Blinn-Phong shade in view space (white specular highlight; `view_dir` to eye).
-fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: vec4<f32>) -> vec3<f32> {
-    let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
-    let ndotl = max(dot(normal, light_dir), 0.0);
-    let half = normalize(light_dir + view_dir);
-    let ndoth = max(dot(normal, half), 0.0);
-    let exponent = 2.0 + mat.w * 128.0;
-    let spec = mat.z * pow(ndoth, exponent);
-    // Subtle fill from the opposite-lower side. The single headlight leaves undersides
-    // and the curvature-discontinuity creases at sphere↔cylinder joints at pure ambient
-    // — near-black rings that read as "gaps" breaking the sticks. Gated by (1 − ndotl)
-    // so it only lifts the shadowed side; the lit side and the highlight are untouched
-    // (the slick look is preserved). See sphere.wgsl for the matching term.
-    let fill_dir = normalize(vec3<f32>(-0.2, -0.3, 0.6));
-    let fill = max(dot(normal, fill_dir), 0.0) * (1.0 - ndotl) * FILL_STRENGTH;
-    return base * (mat.x + mat.y * (ndotl + fill)) + vec3<f32>(spec);
-}
-
-// Fill-light strength (see shade_material). Shared with sphere.wgsl.
-const FILL_STRENGTH: f32 = 0.35;
-
 // Weighted-blended OIT weight, biased strongly toward the camera using linear
 // eye-space depth across the molecule's extent (see sphere.wgsl for rationale).
 fn oit_weight(eye_z: f32, a: f32) -> f32 {
-    let d = -eye_z;
-    let t = clamp((d - camera.depth_range.x) / max(camera.depth_range.y - camera.depth_range.x, 1e-6), 0.0, 1.0);
-    let bias = pow(1.0 - t, 3.0);
-    return clamp(a * (1.0e-2 + bias * 1.0e3), 1.0e-3, 1.0e3);
+    return transparency_weight(-eye_z, a, camera.depth_range.xy);
 }
 
 @vertex
@@ -319,7 +278,7 @@ fn compute_hit(in: VsOut) -> Hit {
 
     // Per-material Blinn-Phong (view dir to eye: origin for perspective, +z ortho).
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-hit), camera.params.x > 0.5);
-    var lit = shade_material(base_color.rgb, normal, view_dir, unpack_mat(in.mat));
+    var lit = shade_material(base_color.rgb, normal, view_dir, unpack_mat(in.mat), false);
     lit = apply_outline(lit, normal, view_dir, in.mat);
 
     return Hit(apply_fog(lit, hit.z), base_color.a, clip.z / clip.w, hit.z, normal, view_dir);

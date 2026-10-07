@@ -1365,7 +1365,11 @@ impl App {
                 RepAction::ZoomTo(j) => {
                     if zoom_unobstructed {
                         // Rotate + scale so this rep shows with the least obstruction.
-                        if let Err(e) = self.unobstructed_view(mi, j, 1.0, 256) {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let result = self.start_unobstructed_view(mi, j, ui.ctx());
+                        #[cfg(target_arch = "wasm32")]
+                        let result = self.unobstructed_view(mi, j, 1.0, 256);
+                        if let Err(e) = result {
                             log::warn!("unobstructed view: {e}");
                         }
                         view_dirty = true;

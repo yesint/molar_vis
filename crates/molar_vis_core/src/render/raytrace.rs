@@ -614,22 +614,30 @@ fn build_bvh(aabbs: &[Aabb]) -> (Vec<BvhNode>, Vec<u32>) {
 // ===========================================================================
 
 /// Per-render uniform for the tracer. Mirrors `RtUniform` in `raytrace.wgsl`
-/// (mat4x4 + 7×vec4 = 176 bytes, 16-byte aligned).
+/// Matrices and vec4 fields are 16-byte aligned.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct RtUniform {
     pub inv_view_proj: [[f32; 4]; 4],
+    pub view: [[f32; 4]; 4],
+    pub proj: [[f32; 4]; 4],
+    /// World space -> light clip space; shared with the raster shadow camera.
+    pub shadow_matrix: [[f32; 4]; 4],
+    /// World-space displacements of one shadow-map texel along its axes.
+    pub shadow_u: [f32; 4],
+    pub shadow_v: [f32; 4],
+    pub bg_top: [f32; 4],
+    pub bg_bottom: [f32; 4],
+    pub depth_range: [f32; 4],
     /// xyz = eye world pos; w = perspective flag (1 persp / 0 ortho).
     pub eye: [f32; 4],
     /// xyz = world-space direction toward the key light (shadow ray).
     pub light_dir: [f32; 4],
-    /// xyz = world-space direction toward the shading headlight.
-    pub head_dir: [f32; 4],
     /// radius (nm), bias, strength, enabled.
     pub ao: [f32; 4],
-    /// strength, bias, enabled, _.
+    /// strength, world-space bias (nm), enabled, softness.
     pub shadow: [f32; 4],
-    /// background color (linear), w unused.
+    /// Background clear color, w = GI strength.
     pub bg: [f32; 4],
     /// Depth cue (fog), exactly as the rasterizer's camera uniform carries it:
     /// `near, far` (eye-space distances), `strength`, `mode` (0 linear / 1 exp / 2 exp²).
@@ -659,6 +667,7 @@ pub struct Raytracer {
     nodes: Option<wgpu::Buffer>,
     prim_indices: Option<wgpu::Buffer>,
     has_scene: bool,
+    has_transparent: bool,
     // Linear HDR accumulators (ping-pong: read one, write the other, swap). Each holds the
     // running *average* radiance. Recreated on size change.
     accum: Option<[(wgpu::Texture, wgpu::TextureView); 2]>,
@@ -680,6 +689,7 @@ struct TraceCursor {
     uniform: RtUniform,
     total: u32,
     chunk_cap: u32,
+    tile_size: u32,
     ox: u32,
     oy: u32,
 }
@@ -707,7 +717,7 @@ impl Raytracer {
 
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raytrace"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/raytrace.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(super::lit_shader_source(include_str!("shaders/raytrace.wgsl")).into()),
         });
 
         let storage = wgpu::BindingType::Buffer {
@@ -857,6 +867,7 @@ impl Raytracer {
             nodes: None,
             prim_indices: None,
             has_scene: false,
+            has_transparent: false,
             accum: None,
             accum_size: [0, 0],
             read_idx: 0,
@@ -868,6 +879,9 @@ impl Raytracer {
     /// (Re)upload the scene's primitive + BVH buffers. Call when geometry changes.
     pub fn upload(&mut self, rs: &RenderState, scene: &RtScene) {
         self.has_scene = !scene.is_empty();
+        self.has_transparent = scene.spheres.iter().any(|s| s.m[0] >> 24 < 255)
+            || scene.cylinders.iter().any(|c| c.m[0] >> 24 < 255 || c.m[2] >> 24 < 255)
+            || scene.mesh_verts.iter().any(|v| v.p[3].to_bits() >> 24 < 255);
         if !self.has_scene {
             return;
         }
@@ -997,14 +1011,25 @@ impl Raytracer {
         let shadow_on = uniform.shadow[2] > 0.5;
         // bg.w is the GI strength (0 = off); GI path-traces `GI_BOUNCES` extra bounces.
         let gi_bounces = if uniform.bg[3] > 0.001 { GI_BOUNCES } else { 0 };
-        let rays_per_sample =
+        let mut rays_per_sample =
             (1 + if ao_on { AO_RAYS } else { 0 } + u32::from(shadow_on)) * (1 + gi_bounces);
-        let chunk_cap = (RAY_BUDGET / (TRACE_TILE * TRACE_TILE * rays_per_sample)).max(1);
+        // Weighted transparency may visit many layers per path. Shrink the tile
+        // as well as the sample chunk so one dispatch remains bounded.
+        if self.has_transparent {
+            const MAX_TRANSPARENT_LAYERS: u32 = 256; // same limit as cs_trace
+            rays_per_sample += MAX_TRANSPARENT_LAYERS * (1 + gi_bounces) * (1 + u32::from(shadow_on));
+        }
+        let mut tile_size = TRACE_TILE;
+        while tile_size * tile_size * rays_per_sample > RAY_BUDGET && tile_size > 8 {
+            tile_size /= 2;
+        }
+        let chunk_cap = (RAY_BUDGET / (tile_size * tile_size * rays_per_sample)).max(1);
         self.cursor = Some(TraceCursor {
             size,
             uniform,
             total: total_samples.max(1),
             chunk_cap,
+            tile_size,
             ox: 0,
             oy: 0,
         });
@@ -1043,8 +1068,8 @@ impl Raytracer {
                     ],
                 })
             };
-            let tw = TRACE_TILE.min(w - cur.ox);
-            let th = TRACE_TILE.min(h - cur.oy);
+            let tw = cur.tile_size.min(w - cur.ox);
+            let th = cur.tile_size.min(h - cur.oy);
             let mut u = cur.uniform;
             u.dims = [w, h, chunk, prior];
             u.accum = [prior, u32::from(reset), cur.ox, cur.oy];
@@ -1065,10 +1090,10 @@ impl Raytracer {
             submits += 1;
             // Advance the tile sweep; completing the last tile finishes this sample-chunk
             // (bump the running total + swap the ping-pong) and restarts the sweep.
-            cur.ox += TRACE_TILE;
+            cur.ox += cur.tile_size;
             if cur.ox >= w {
                 cur.ox = 0;
-                cur.oy += TRACE_TILE;
+                cur.oy += cur.tile_size;
                 if cur.oy >= h {
                     cur.oy = 0;
                     self.total_samples += chunk;

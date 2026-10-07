@@ -54,6 +54,8 @@ mod pickers;
 mod rep_panel;
 mod session_io;
 mod settings_dialog;
+#[cfg(not(target_arch = "wasm32"))]
+mod unobstructed_job;
 mod viewport;
 mod widgets;
 
@@ -116,6 +118,9 @@ pub struct App {
     /// don't capture (forces one re-render).
     view_dirty: bool,
     status: String,
+    /// Interactive search snapshot; dropping it cancels the worker and discards its result.
+    #[cfg(not(target_arch = "wasm32"))]
+    unobstructed_job: Option<unobstructed_job::ViewJob>,
     history: History,
     /// Number of steps to undo/redo this frame (set by keyboard or the toolbar
     /// dropdowns), applied after the panel is drawn.
@@ -934,6 +939,17 @@ impl eframe::App for App {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).
         let ctx = ui.ctx().clone();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.service_unobstructed_job(&ctx) {
+            ui.disable();
+            self.draw_left_panel(ui);
+            self.draw_view_toolbar(ui);
+            self.draw_viewport(ui, frame);
+            self.draw_unobstructed_progress(&ctx);
+            self.rt.service_debug_ui_capture(&ctx);
+            return;
+        }
 
         // A charge-computation failure is transient: drop it on the next interaction, so a
         // stale error can't sit under the Color tab reading as if it were still true. Tested

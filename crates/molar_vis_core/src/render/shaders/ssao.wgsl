@@ -39,7 +39,7 @@ fn shadow_factor(p_view: vec3<f32>) -> f32 {
     var lit = 0.0;
     for (var j = -1; j <= 1; j = j + 1) {
         for (var i = -1; i <= 1; i = i + 1) {
-            let o = vec2<f32>(f32(i), f32(j)) * texel;
+            let o = vec2<f32>(f32(i), f32(j)) * texel * shadow_filter_width(u.shadow_params.w);
             lit += textureSampleCompareLevel(shadow_map, shadow_samp, uv + o, z_ref);
         }
     }
@@ -72,7 +72,6 @@ fn view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
 }
 
 const N: i32 = 16;
-const GOLDEN: f32 = 2.3999632; // golden angle, for an even spiral kernel
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -97,10 +96,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let imax = vec2<i32>(dim) - vec2<i32>(1, 1);
     var occ = 0.0;
     for (var i = 0; i < N; i = i + 1) {
-        let fi = f32(i) + 0.5;
-        let rr = sqrt(fi / f32(N));      // varied radii → less banding
-        let a = fi * GOLDEN;
-        let off = vec2<f32>(cos(a), sin(a)) * rr;
+        let off = ao_disk_offset(f32(i));
         let suv = uv + off * r_uv;
         let scoord = clamp(vec2<i32>(suv * dim), vec2<i32>(0, 0), imax);
         let sd = textureLoad(depth_tex, scoord, 0);
@@ -111,7 +107,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let dz = q.z - p.z;              // > 0: neighbour is closer to the camera
         let dist = length(q - p);
         // Ignore neighbours beyond the radius (no haloing from distant geometry).
-        let range = 1.0 - smoothstep(radius * 0.7, radius, dist);
+        let range = ao_range(dist, radius);
         occ += select(0.0, range, dz > bias);
     }
     let ao = clamp(1.0 - (occ / f32(N)) * strength, 0.0, 1.0);

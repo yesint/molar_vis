@@ -552,6 +552,8 @@ impl App {
             last_size: [0, 0],
             view_dirty: true,
             status,
+            #[cfg(not(target_arch = "wasm32"))]
+            unobstructed_job: None,
             history,
             rt: RtState { scene_dirty: true, ..Default::default() },
             pending_undo_n: None,
@@ -982,6 +984,14 @@ impl App {
         // length after relaxation. Presets: methane, ethane, water, benzene.
         if let Ok(preset) = std::env::var("MOLAR_VIS_DEBUG_DRAW") {
             app.debug_draw_preset(&preset.to_ascii_lowercase());
+        }
+
+        // Start the same asynchronous search as the rep magnifier for hidden UI capture.
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("MOLAR_VIS_DEBUG_UNOBSTRUCTED").is_some() {
+            if let Err(e) = app.start_unobstructed_view(0, 0, &cc.egui_ctx) {
+                log::error!("debug unobstructed view: {e}");
+            }
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_EXIT=1 quits the process right here — after

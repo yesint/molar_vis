@@ -143,13 +143,13 @@ fn boundary_visible(atoms: &[[f32; 4]], nodes: &[Node], order: &[u32], id: usize
     true
 }
 
-pub(super) struct UnobstructedGpu {
+pub(crate) struct UnobstructedGpu {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
 }
 
 impl UnobstructedGpu {
-    pub(super) fn new(device: &wgpu::Device) -> Option<Self> {
+    pub(crate) fn new(device: &wgpu::Device) -> Option<Self> {
         let limits = device.limits();
         if limits.max_storage_buffers_per_shader_stage < 6
             || limits.max_compute_workgroup_size_x < WORKGROUP_SIZE
@@ -226,15 +226,31 @@ impl UnobstructedGpu {
         occluders: &[(Vec3, f32)],
         resolution: usize,
     ) -> Result<Vec3, String> {
+        self.best_direction_cancellable(device, queue, target, occluders, resolution, &|| false)
+    }
+
+    pub(crate) fn best_direction_cancellable(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &[(Vec3, f32)],
+        occluders: &[(Vec3, f32)],
+        resolution: usize,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec3, String> {
+        if cancelled() {
+            return Err("cancelled".into());
+        }
         if target.is_empty() {
             return Ok(Vec3::Z);
         }
         let scene = ScoringScene::new(device, target, occluders)?;
         crate::unobstructed::search_directions(resolution, |dirs| {
-            self.scores(device, queue, &scene, dirs)
+            self.scores_cancellable(device, queue, &scene, dirs, cancelled)
         })
     }
 
+    #[cfg(test)]
     fn scores(
         &self,
         device: &wgpu::Device,
@@ -242,10 +258,24 @@ impl UnobstructedGpu {
         scene: &ScoringScene,
         dirs: &[Vec3],
     ) -> Result<Vec<u32>, String> {
-        let batch_size =
-            BATCH_SIZE.min(device.limits().max_compute_workgroups_per_dimension as usize);
+        self.scores_cancellable(device, queue, scene, dirs, &|| false)
+    }
+
+    fn scores_cancellable(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &ScoringScene,
+        dirs: &[Vec3],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<u32>, String> {
+        // Short submissions bound cancellation latency and let UI rendering share the GPU.
+        let batch_size = 4.min(device.limits().max_compute_workgroups_per_dimension as usize);
         let mut result = Vec::with_capacity(dirs.len());
         for batch in dirs.chunks(batch_size) {
+            if cancelled() {
+                return Err("cancelled".into());
+            }
             let directions: Vec<Direction> = batch.iter().copied().map(Into::into).collect();
             queue.write_buffer(&scene.directions, 0, bytemuck::cast_slice(&directions));
             let buffers = [
@@ -595,6 +625,20 @@ mod tests {
                 .map(|&d| crate::unobstructed::visible_count(target, occluders, d))
                 .collect();
             assert_eq!(scores, expected, "t={t}, o={o}");
+            let checks = std::cell::Cell::new(0);
+            let cancelled = || {
+                checks.set(checks.get() + 1);
+                checks.get() >= 2
+            };
+            assert!(scorer
+                .scores_cancellable(&device, &queue, &scene, &directions, &cancelled)
+                .is_err());
+            // Cancellation after the first submission leaves readback reusable.
+            assert_eq!(
+                scorer.scores(&device, &queue, &scene, &directions).unwrap(),
+                expected
+            );
+
             assert_eq!(
                 scorer
                     .best_direction(&device, &queue, target, occluders, 32)
@@ -654,9 +698,13 @@ mod tests {
         use molar::prelude::*;
         let (device, queue) = gpu();
         let scorer = UnobstructedGpu::new(&device).unwrap();
-        for name in ["2lao.pdb", "cg.pdb"] {
+        for name in ["2lao.pdb", "cg.pdb", "large_375k.gro"] {
             let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests"))
                 .join(name);
+            // The large performance fixture is generated locally and is not in git.
+            if name == "large_375k.gro" && !path.exists() {
+                continue;
+            }
             let raw = crate::data::load(&path).unwrap();
             let bound = raw.system.select_all_bound();
             let atoms: Vec<_> = bound

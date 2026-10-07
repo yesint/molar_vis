@@ -7,6 +7,8 @@
 //! impostors, whose fragment shaders write analytic depth and must occlude
 //! correctly against each other (and later the cartoon mesh).
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod appearance_tests;
 mod background;
 mod camera_uniform;
 mod cylinder;
@@ -16,7 +18,7 @@ mod raytrace;
 mod sphere;
 mod ssao;
 #[cfg(not(target_arch = "wasm32"))]
-mod unobstructed;
+pub(crate) mod unobstructed;
 
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
@@ -78,6 +80,23 @@ const CAMERA_STRIDE: u64 = 256;
 /// separate, flatter fill; this is the shadow-casting key.)
 const SHADOW_LIGHT_DIR_VIEW: glam::Vec3 = glam::Vec3::new(0.45, 0.78, 0.45);
 
+/// One shadow camera for raster depth mapping and ray-traced shadow filtering.
+fn shadow_camera(view: Mat4, depth_range: [f32; 2]) -> (Mat4, Mat4, f32) {
+    let inv_view = view.inverse();
+    let eye = inv_view.transform_point3(Vec3::ZERO);
+    let fwd = inv_view.transform_vector3(Vec3::NEG_Z).normalize();
+    let center = eye + fwd * ((depth_range[0] + depth_range[1]) * 0.5);
+    let radius = ((depth_range[1] - depth_range[0]) * 0.5).max(0.1);
+    let light_world = inv_view.transform_vector3(SHADOW_LIGHT_DIR_VIEW).normalize();
+    let light_eye = center + light_world * (radius * 2.0);
+    let up = if light_world.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
+    (
+        Mat4::look_at_rh(light_eye, center, up),
+        Mat4::orthographic_rh(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5),
+        radius,
+    )
+}
+
 /// Bind-group binding size for one camera entry (the actual `CameraUniform`).
 fn camera_binding_size() -> Option<std::num::NonZeroU64> {
     std::num::NonZeroU64::new(std::mem::size_of::<CameraUniform>() as u64)
@@ -95,14 +114,20 @@ fn camera_binding_size() -> Option<std::num::NonZeroU64> {
 /// wasm and unsupported adapters keep working. Only `fs_main` is tagged: the OIT/
 /// glow/pick entries are untouched.
 fn inject_early_z(src: &'static str, enable: bool) -> std::borrow::Cow<'static, str> {
+    let src = lit_shader_source(src);
     if enable {
         std::borrow::Cow::Owned(src.replace(
             "@fragment\nfn fs_main",
             "@fragment @early_depth_test(greater_equal)\nfn fs_main",
         ))
     } else {
-        std::borrow::Cow::Borrowed(src)
+        std::borrow::Cow::Owned(src)
     }
+}
+
+/// Compile every lit renderer with the same material lighting implementation.
+fn lit_shader_source(src: &str) -> String {
+    format!("{src}\n{}", include_str!("render/shaders/lighting.wgsl"))
 }
 
 /// (Re)create the camera bind group over `buf` with a dynamic-offset binding.
@@ -1396,23 +1421,13 @@ impl SceneRenderer {
         // bounding sphere (center/radius recovered from the view + `depth_range`).
         let shadow_on = shadow[2] > 0.5 && self.ssao_pipeline.is_some();
         let (shadow_light_idx, shadow_matrix) = if shadow_on {
-            let inv_view = view.inverse();
-            let eye = inv_view.transform_point3(Vec3::ZERO);
-            let fwd = inv_view.transform_vector3(Vec3::NEG_Z).normalize();
-            let center = eye + fwd * ((depth_range[0] + depth_range[1]) * 0.5);
-            let radius = ((depth_range[1] - depth_range[0]) * 0.5).max(0.1);
-            let light_world = inv_view.transform_vector3(SHADOW_LIGHT_DIR_VIEW).normalize();
-            let light_eye = center + light_world * (radius * 2.0);
-            let up = if light_world.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
-            let light_view = Mat4::look_at_rh(light_eye, center, up);
-            let light_proj =
-                Mat4::orthographic_rh(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5);
+            let (light_view, light_proj, _) = shadow_camera(view, depth_range);
             // Ortho (perspective = false) so the impostors ray-cast with parallel
             // rays in light space when filling the depth map.
             cameras.push(CameraUniform::new(
                 light_view, light_proj, false, viewport, cue, BG, depth_range, 1.0, glow,
             ));
-            (cameras.len() as u32 - 1, light_proj * light_view * inv_view)
+            (cameras.len() as u32 - 1, light_proj * light_view * view.inverse())
         } else {
             (0, Mat4::IDENTITY)
         };
@@ -1931,6 +1946,7 @@ impl SceneRenderer {
         samples: u32,
         frame_seed: u32,
         gi_strength: f32,
+        shadow_res: u32,
     ) -> raytrace::RtUniform {
         let aspect = w as f32 / h.max(1) as f32;
         let view = camera.view();
@@ -1943,23 +1959,29 @@ impl SceneRenderer {
         // `normalize(0.3,0.4,1)`) so the lit color matches the realtime view.
         let inv_view = view.inverse();
         let light = inv_view.transform_vector3(SHADOW_LIGHT_DIR_VIEW).normalize();
-        let head = inv_view.transform_vector3(glam::Vec3::new(0.3, 0.4, 1.0)).normalize();
         let bg = camera.background.clear_color();
-        // Ray-traced AO uses a **scene-relative** occlusion distance, not the raw
-        // atom-scale nm radius SSAO uses. Molecular cavities/folds (cartoon ribbons,
-        // surface dimples) are far larger than the ~0.4 nm atom-contact scale, so a
-        // fixed small radius lets every hemisphere ray escape → no occluders → AO is
-        // invisible (the user's bug). Scaling by the bounding-sphere radius makes the
-        // AO reach real cavities at any rep/zoom, matching VMD-Tachyon / PyMOL-ray.
-        let mut ao = camera.ao_uniform();
-        ao[0] = (camera.scene_radius * camera.ao.radius).clamp(0.3, 6.0);
+        let (light_view, light_proj, radius) = shadow_camera(view, camera.eye_depth_range());
+        let texel = 2.0 * radius / shadow_res.max(1) as f32;
+        let light_to_world = light_view.inverse();
+        let shadow_u = light_to_world.transform_vector3(Vec3::X) * texel;
+        let shadow_v = light_to_world.transform_vector3(Vec3::Y) * texel;
+        let mut shadow = camera.shadow_uniform();
+        // Raster bias is in normalized light depth; ray bias must be in nm.
+        shadow[1] *= 3.0 * radius;
         raytrace::RtUniform {
             inv_view_proj: inv_vp.to_cols_array_2d(),
+            view: view.to_cols_array_2d(),
+            proj: proj.to_cols_array_2d(),
+            shadow_matrix: (light_proj * light_view).to_cols_array_2d(),
+            shadow_u: [shadow_u.x, shadow_u.y, shadow_u.z, 0.0],
+            shadow_v: [shadow_v.x, shadow_v.y, shadow_v.z, 0.0],
+            bg_top: if camera.background.is_gradient() { camera.background.top } else { bg },
+            bg_bottom: if camera.background.is_gradient() { camera.background.bottom } else { bg },
+            depth_range: [camera.eye_depth_range()[0], camera.eye_depth_range()[1], 0.0, 0.0],
             eye: [eye.x, eye.y, eye.z, persp],
             light_dir: [light.x, light.y, light.z, 0.0],
-            head_dir: [head.x, head.y, head.z, 0.0],
-            ao,
-            shadow: camera.shadow_uniform(),
+            ao: camera.ao_uniform(),
+            shadow,
             // bg.w carries the GI strength (0 = tier-1 direct shading; >0 = path-traced GI,
             // scaling the indirect/sky-ambient contribution).
             bg: [bg[0], bg[1], bg[2], gi_strength.clamp(0.0, 1.0)],
@@ -1989,7 +2011,7 @@ impl SceneRenderer {
             return None;
         }
         // The offline "Save image" render honors the GI (global-illumination) strength slider.
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi);
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi, self.shadow_res);
         let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rt-capture-color"),
             size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
@@ -2060,7 +2082,7 @@ impl SceneRenderer {
         }
         let size = [size[0].max(1), size[1].max(1)];
         self.ensure_rt_color(rs, size);
-        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, camera.gi);
+        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, camera.gi, self.shadow_res);
         self.raytracer.as_mut().unwrap().trace_begin(rs, size, uniform, samples);
     }
 
@@ -2120,7 +2142,7 @@ impl SceneRenderer {
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi);
+        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi, self.shadow_res);
         self.raytracer.as_mut().unwrap().trace_begin(rs, [out_w, out_h], uniform, samples);
         self.save_target = Some((tex, view));
         true

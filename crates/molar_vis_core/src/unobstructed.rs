@@ -58,17 +58,32 @@ impl VisibilityScratch {
     /// a target atom is hidden when any other atom nearer the camera covers its projected
     /// centre. A target atom hidden by a nearer atom of the target rep is also counted as
     /// hidden (only the front one of an overlapping pair shows).
+    #[cfg(test)]
     fn visible_count(&mut self, target: &[(Vec3, f32)], occluders: &[(Vec3, f32)], d: Vec3) -> u32 {
+        self.visible_count_cancellable(target, occluders, d, &|| false)
+            .unwrap()
+    }
+
+    fn visible_count_cancellable(
+        &mut self,
+        target: &[(Vec3, f32)],
+        occluders: &[(Vec3, f32)],
+        d: Vec3,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<u32, String> {
         let t = target.len();
         if t == 0 {
-            return 0;
+            return Ok(0);
         }
         let (t1, t2) = tangent_basis(d);
         self.proj.clear();
         let (mut umin, mut umax) = (f32::INFINITY, f32::NEG_INFINITY);
         let (mut vmin, mut vmax) = (f32::INFINITY, f32::NEG_INFINITY);
         let mut rmax = 1e-3_f32;
-        for (p, r) in target.iter().chain(occluders.iter()) {
+        for (i, (p, r)) in target.iter().chain(occluders.iter()).enumerate() {
+            if i % 1024 == 0 && cancelled() {
+                return Err("cancelled".into());
+            }
             let u = p.dot(t1);
             let v = p.dot(t2);
             self.proj.push([u, v, p.dot(d), *r]);
@@ -138,6 +153,9 @@ impl VisibilityScratch {
             (1, 1),
         ];
         for i in 0..t {
+            if i % 256 == 0 && cancelled() {
+                return Err("cancelled".into());
+            }
             let [ui, vi, di, _] = self.proj[i];
             let cell = self.atom_cells[i];
             let cx = (cell % nx) as isize;
@@ -174,7 +192,7 @@ impl VisibilityScratch {
                 visible += 1;
             }
         }
-        visible
+        Ok(visible)
     }
 }
 
@@ -194,18 +212,33 @@ pub fn best_unobstructed_direction(
     occluders: &[(Vec3, f32)],
     resolution: usize,
 ) -> Vec3 {
+    best_unobstructed_direction_cancellable(target, occluders, resolution, &|| false).unwrap()
+}
+
+/// Cancellation is checked between directions and within long scoring loops.
+pub(crate) fn best_unobstructed_direction_cancellable(
+    target: &[(Vec3, f32)],
+    occluders: &[(Vec3, f32)],
+    resolution: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec3, String> {
+    if cancelled() {
+        return Err("cancelled".into());
+    }
     if target.is_empty() {
-        return Vec3::Z;
+        return Ok(Vec3::Z);
     }
     let mut scratch = VisibilityScratch::default();
     search_directions(resolution, |dirs| {
-        Ok::<_, std::convert::Infallible>(
-            dirs.iter()
-                .map(|&d| scratch.visible_count(target, occluders, d))
-                .collect(),
-        )
+        dirs.iter()
+            .map(|&d| {
+                if cancelled() {
+                    return Err("cancelled".into());
+                }
+                scratch.visible_count_cancellable(target, occluders, d, cancelled)
+            })
+            .collect()
     })
-    .unwrap()
 }
 
 /// Both scorers use the same directions, tie order and three refinement rings.
@@ -267,6 +300,36 @@ pub fn look_along_quat(d: Vec3) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_discards_partial_direction_search() {
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let target = vec![(Vec3::ZERO, 0.2); 4096];
+        let cancelled = || {
+            calls.set(calls.get() + 1);
+            calls.get() >= 4
+        };
+        assert!(best_unobstructed_direction_cancellable(&target, &[], 256, &cancelled).is_err());
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn cancellable_search_preserves_direction() {
+        let target = [(Vec3::ZERO, 0.2), (Vec3::Z, 0.2)];
+        let expected = search_directions(32, |dirs| {
+            Ok::<_, String>(
+                dirs.iter()
+                    .map(|&d| brute_visible(&target, &[], d))
+                    .collect(),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            best_unobstructed_direction_cancellable(&target, &[], 32, &|| false).unwrap(),
+            expected
+        );
+    }
 
     // Independent pairwise oracle for the current centre/depth visibility rule.
     fn brute_visible(target: &[(Vec3, f32)], occluders: &[(Vec3, f32)], d: Vec3) -> u32 {

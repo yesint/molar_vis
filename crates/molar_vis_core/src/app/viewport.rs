@@ -200,7 +200,8 @@ impl App {
             let rt_ok = self.renderer.raytrace_supported()
                 && !self.scene.molecules.is_empty()
                 && self.draw.is_none();
-            if rt_ok
+            if ui.is_enabled()
+                && rt_ok
                 && self.rt.warm.is_none()
                 && self.rt.job.is_none()
                 && !ui.ctx().egui_wants_keyboard_input()
@@ -324,7 +325,7 @@ impl App {
             // handle drag is active).
             // Suspended while a pick mode is active (picking re-selects the draw scope in
             // place; see the `draw_mode` note above), so the tool doesn't fight the picker.
-            if self.draw.is_some() && self.pick_mode == PickMode::Off && !self.center_pick {
+            if ui.is_enabled() && self.draw.is_some() && self.pick_mode == PickMode::Off && !self.center_pick {
                 self.draw_input(ui, &response, rect, size_px);
             }
 
@@ -371,7 +372,8 @@ impl App {
             // field has focus, and not in Draw mode, where C picks the carbon element. Esc
             // cancels. The click itself is handled in the hover branch below. Partner pick
             // takes precedence.
-            if !picking_partner
+            if ui.is_enabled()
+                && !picking_partner
                 && self.draw.is_none()
                 && !self.scene.molecules.is_empty()
                 && !ui.ctx().egui_wants_keyboard_input()

@@ -134,7 +134,7 @@ pub fn build_pick_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sphere-pick-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sphere.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(super::lit_shader_source(include_str!("shaders/sphere.wgsl")).into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("sphere-pick-layout"),

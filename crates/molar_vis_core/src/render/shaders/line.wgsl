@@ -21,16 +21,7 @@ struct Camera {
 // grows. cue = [near, far, strength, mode]; mode 0 = linear, 1 = exp, 2 = exp2.
 // All curves are normalized to reach full fog at the far plane, scaled by strength.
 fn apply_fog(color: vec3<f32>, eye_z: f32) -> vec3<f32> {
-    let d = -eye_z; // eye-space distance (camera looks down -Z)
-    let t = clamp((d - camera.cue.x) / max(camera.cue.y - camera.cue.x, 1e-6), 0.0, 1.0);
-    let k = 3.0;
-    var b = t; // linear
-    if (camera.cue.w > 1.5) {
-        b = (1.0 - exp(-k * k * t * t)) / (1.0 - exp(-k * k)); // exp2
-    } else if (camera.cue.w > 0.5) {
-        b = (1.0 - exp(-k * t)) / (1.0 - exp(-k)); // exp
-    }
-    return mix(color, camera.fog_color.rgb, b * camera.cue.z);
+    return depth_cue(color, -eye_z, camera.cue, camera.fog_color.rgb);
 }
 
 struct VsIn {
@@ -108,10 +99,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, seg: VsIn) -> VsOut {
 // Weighted-blended OIT weight, biased strongly toward the camera using linear
 // eye-space depth across the molecule's extent (see sphere.wgsl for rationale).
 fn oit_weight(eye_z: f32, a: f32) -> f32 {
-    let d = -eye_z;
-    let t = clamp((d - camera.depth_range.x) / max(camera.depth_range.y - camera.depth_range.x, 1e-6), 0.0, 1.0);
-    let bias = pow(1.0 - t, 3.0);
-    return clamp(a * (1.0e-2 + bias * 1.0e3), 1.0e-3, 1.0e3);
+    return transparency_weight(-eye_z, a, camera.depth_range.xy);
 }
 
 @fragment

@@ -483,11 +483,11 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `samples` paths (camera ray via `inv(proj·view)` unproject — persp+ortho; explicit-stack BVH
   traversal w/ robust slab test; analytic ray-sphere/ray-**capsule** lifted from the impostor shaders +
   Möller–Trumbore; per hit: Blinn-Phong shading × a cast shadow × AO; sub-pixel jitter = AA; PCG RNG)
-  into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** tonemaps (clamp) into the
+  into a linear `Rgba32Float` target, then a fullscreen **`fs_resolve`** clamps into the
   sRGB scene color target (GPU auto-encodes — shade linear, no manual gamma). Reuses `Camera::ao`/
   `shadow`/`background`/**`depth_cue`** so the trace matches the controls — the fog is the shared
   rasterizer model verbatim (the same `near/far/strength/mode` from `cue_uniform`, the same three
-  falloff curves, applied last to the primary hit's finished colour), since a fogged view traced
+  falloff curves, applied before deferred AO/shadows), since a fogged view traced
   unfogged comes back flat; its axial eye-space distance needs no extra uniform because the view
   axis comes from unprojecting the frustum centre (`view_axis`), correct for both projections.
   Materials via the shared `unpack_mat`.
@@ -508,36 +508,23 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   dashes come from *two* molecules, so they don't come out of `geometry::build` at all — the gather
   calls the same `app::build::build_interactions` (now `pub(crate)`) the second `rebuild_dirty` pass
   uses.
-  **The shading deliberately mirrors the rasterizer's `shade_material` so the trace matches the
-  realtime view** (the user's reference, esp. with AO/shadows OFF — a fixed inflated ambient made the
-  trace ~55 % too bright): Blinn-Phong `base·(mat.x + mat.y·N·L) + spec` lit by the **same view-space
-  headlight** (`head_dir = inv_view·(0.3,0.4,1)`) using each **material's own** ambient/diffuse
-  coefficients (`unpack_mat`), + VMD outline (top shininess bit, like the raster `apply_outline`).
-  Shadows and AO are **deferred whole-color multiplies** (`color × shadow_vis × ao_vis`), exactly as
-  the raster's SSAO/shadow pass does — so AO-off + shadow-off == the raster shading. The shadow is a
-  **cone-jittered** ray toward a *separate* **world-space key light** (`inv_view·SHADOW_LIGHT_DIR_VIEW`
-  — decoupled from the shading headlight, again like the raster, whose shadow map uses the key light;
-  back faces shadow without a ray; per-sample cone = `shadow.softness × MAX_SHADOW_CONE` (0.45 rad ≈
-  26°) → softness 0 razor-hard, 1 broad/diffuse).
-  **AO is tuned to read as strongly as the realtime SSAO pass** (the user's reference) — three things
-  matter, all calibrated by rendering VDW/cartoon both ways and matching molecule-region brightness:
-  (1) **scene-relative occlusion distance** (`rt_uniform`: `scene_radius × ao.radius`, clamped
-  0.3–6 nm), *not* the raw atom-scale nm radius — molecular cavities/folds (cartoon ribbons, surface
-  dimples) are far larger than the ~0.4 nm atom-contact scale, so a fixed small radius lets every
-  hemisphere ray escape and AO becomes invisible (was a bug — AO did nothing on cartoon/mesh).
-  (2) **whole-color multiply** (above): AO multiplies the *entire* shaded color, like the SSAO pass —
-  occluding only the ambient term left the key light un-occluded and read far too light.
-  (3) **contrast-boosted occlusion fraction**:
-  cos-weighted hemisphere AO is physically "correct" but light (most surface points see only ~10–20 %
-  occlusion), so the per-sample fraction over `AO_RAYS` rays is raised to `pow(frac, AO_CONTRAST=0.55)`
-  before scaling by strength — turning that modest occlusion into the strong edge/contact darkening
-  SSAO shows. (`AO_RAYS≥3` is needed for the per-sample fraction to be non-binary so the curve
-  applies.) Result: ray-traced AoEdgy VDW now matches the SSAO render's brightness, and cartoon AO is
-  clearly visible.
+  **Appearance is shared with the live renderer.** `render/shaders/lighting.wgsl` supplies
+  material shading (including primitive-specific fill lights), outline, depth cue,
+  shadow filter width and weighted-transparency formulas to both paths. Traced AO casts
+  cosine-weighted rays into the surface hemisphere and sees 3D cavities/occluders absent
+  from the raster depth buffer. Radius and bias retain their nm units and do not scale
+  with scene size; strength remains linear, without a contrast boost. Fog and normalized color clamping
+  happen before deferred AO/shadow multiplication, as in the raster pass sequence.
+  Both shadows use the same light camera and filter footprint. The ray tracer converts
+  normalized shadow depth bias to nm along the light axis and checks actual intersections,
+  including exit intersections when a shadow ray starts inside a sphere/capsule. Softness
+  affects both paths. Background gradients, near/far clipping and material opacity are kept.
+  GPU pixel regressions in `render/appearance_tests.rs` cover styles, projections, effects,
+  outlines, transparency and linear/sRGB targets; shader validation also runs without a GPU.
   Drives the raytraced "Save image" **and the R-key viewport still**, both **frame-pumped** so the UI
   stays responsive. The accumulator is **ping-pong `Rgba32Float`** holding a **running average**, and
   the trace is a **resumable tiled stepper** (`trace_begin` + `trace_step`): it sweeps the image in
-  `TRACE_TILE`×`TRACE_TILE` (256²) blocks, one block × one sample-chunk per GPU submit, doing
+  up to `TRACE_TILE`×`TRACE_TILE` (256²) blocks (smaller for transparent scenes), one block × one sample-chunk per GPU submit, doing
   `RT_STEP_SUBMITS` (4) submits per UI frame and resolving the latest *complete* chunk into the target —
   so the image refines progressively over frames while the window stays interactive (a "Ray tracing…" /
   "Saving…" overlay shows meanwhile). Tiling is **mandatory on big scenes**: a single whole-image
@@ -577,20 +564,18 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   surfaces. GI **blends with tier-1 by the strength** — `mix(tier1, full_gi, gi)` per sample — so a tiny strength
   barely changes the look and it ramps **continuously** up to full GI (switching shading models at
   strength→0 made even 0.01 jolt the whole scene). The **strength rides `U.bg.w`** (0 = tier-1); the
-  resolve likewise blends its tonemap `mix(clamp, ACES, gi)` (clamp = tier-1 raster match, ACES = GI's
-  HDR shoulder), so the tonemap has no jump at 0 either.
+  tone mapping applies only to the GI radiance before blending and fog, so enabling GI
+  does not change the configured background colors.
   The surface decode + tier-1/GI shading are factored into shared shader fns
   (`surface_at`/`shadow_at`/`shade_tier1`/`shade_gi`). GI applies to **both** the Save-image render
   **and the R-key still** (both read `Camera::gi`); the Lighting-tab **Global illumination slider** +
   `MOLAR_VIS_DEBUG_GI=<strength>` drive it. Default **0 (off)** — GI is the heaviest trace (more
   iterations), so it's opt-in via the slider.
-  **Transparency (stochastic):** the primary ray walks through surfaces, accepting each with
-  probability = its **opacity** (the colour's alpha byte, `unpack_opacity`), else passing through to
-  what's behind; averaged over the accumulated samples this is correct, order-independent alpha — so
-  transparent materials (Glass/Ghost/Transparent…) show through instead of reading as solid (they were
-  opaque in the trace before). Opaque surfaces (opacity 1) are always accepted at the first hit, so
-  they're unchanged. Shadow/AO/GI-bounce rays still treat transparent geometry as opaque (a minor v1
-  approximation — transparent things cast a full shadow).
+  **Transparency (weighted OIT):** primary rays accumulate transparent layers in front of
+  the nearest opaque hit using the same depth-based weights and revealage as the live view.
+  AO/shadows affect opaque geometry before transparent compositing, and transparent objects
+  do not cast opaque shadows. The walk is bounded at 256 layers. The tile size and sample
+  chunk account for this additional traversal cost. Lines interpolate endpoint colors.
 - `pick.rs` — atom picking (`PickMode {Off, Click, Lasso}`, `PickHit` (carries the hit `mol` +
   atom `id`), `cursor_ray`, `ray_sphere`, `effective_radius`, `pick` = CPU ray-cast; native hover
   uses the GPU id-buffer instead — `hit_for_atom` rebuilds a `PickHit` from the decoded

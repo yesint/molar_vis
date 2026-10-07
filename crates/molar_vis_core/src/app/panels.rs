@@ -396,7 +396,7 @@ impl App {
                         slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
                         ui.end_row();
                         ui.label("Softness")
-                            .on_hover_text("Soft shadow edges (ray-traced view only)");
+                            .on_hover_text("Shadow edge softness in the live and ray-traced views");
                         slider_with_edit(ui, &mut sh.softness, 0.0..=1.0, sh.enabled);
                         ui.end_row();
                     });
