@@ -102,9 +102,17 @@ fn oit_weight(eye_z: f32, a: f32) -> f32 {
     return transparency_weight(-eye_z, a, camera.depth_range.xy);
 }
 
+struct OpaqueOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(apply_fog(in.color.rgb, in.eye_z), in.color.a);
+fn fs_main(in: VsOut) -> OpaqueOut {
+    var out: OpaqueOut;
+    out.color = vec4<f32>(apply_fog(in.color.rgb, in.eye_z), in.color.a);
+    out.normal = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    return out;
 }
 
 // Additive cyan glow for the active (pending) selection (see sphere.wgsl). Lines

@@ -442,7 +442,7 @@ impl App {
         }
         if let Ok(v) = std::env::var("MOLAR_VIS_DEBUG_SHADOW_SOFT") {
             if let Ok(s) = v.trim().parse::<f32>() {
-                camera.shadow.softness = s.clamp(0.0, 1.0);
+                camera.shadow.softness = s.clamp(crate::camera::Shadow::MIN_SOFTNESS, 1.0);
             }
         }
         // Verification hook: MOLAR_VIS_DEBUG_BG=gradient|white sets the background.

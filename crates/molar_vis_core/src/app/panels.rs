@@ -385,6 +385,7 @@ impl App {
         ui.add_space(6.0);
         egui::Frame::group(ui.style()).show(ui, |ui| {
             let sh = &mut self.camera.shadow;
+            sh.softness = sh.effective_softness();
             ui.checkbox(&mut sh.enabled, "Cast shadows")
                 .on_hover_text("Real-time directional shadows from a key light (shadow map)");
             ui.add_enabled_ui(sh.enabled, |ui| {
@@ -396,8 +397,8 @@ impl App {
                         slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
                         ui.end_row();
                         ui.label("Softness")
-                            .on_hover_text("Shadow edge softness in the live and ray-traced views");
-                        slider_with_edit(ui, &mut sh.softness, 0.0..=1.0, sh.enabled);
+                            .on_hover_text("Shadow edge softness in the live and ray-traced views. Minimum 0.10 avoids jagged hard-shadow edges.");
+                        slider_with_edit(ui, &mut sh.softness, crate::camera::Shadow::MIN_SOFTNESS..=1.0, sh.enabled);
                         ui.end_row();
                     });
             });

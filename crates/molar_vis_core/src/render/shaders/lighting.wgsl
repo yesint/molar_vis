@@ -32,7 +32,7 @@ fn depth_cue(color: vec3<f32>, distance: f32, cue: vec4<f32>, fog: vec3<f32>) ->
     return mix(color, fog, b * cue.z);
 }
 
-const AO_KERNEL_SIZE: f32 = 16.0;
+const AO_KERNEL_SIZE: f32 = 128.0;
 fn ao_disk_offset(index: f32) -> vec2<f32> {
     let fi = index + 0.5;
     let angle = fi * 2.3999632;
@@ -42,8 +42,12 @@ fn ao_range(distance: f32, radius: f32) -> f32 {
     return 1.0 - smoothstep(radius * 0.7, radius, distance);
 }
 fn shadow_filter_width(softness: f32) -> f32 {
-    // Default softness 0.4 retains the live renderer's one-texel PCF spacing.
-    return clamp(softness, 0.0, 1.0) * 2.5;
+    // A disk footprint keeps soft cast-shadow edges smooth at close zoom.
+    return clamp(softness, 0.0, 1.0) * 50.0;
+}
+
+fn shadow_angular_radius(softness: f32) -> f32 {
+    return clamp(softness, 0.0, 1.0) * 0.45;
 }
 
 fn transparency_weight(distance: f32, alpha: f32, depth_range: vec2<f32>) -> f32 {

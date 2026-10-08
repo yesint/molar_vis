@@ -68,11 +68,18 @@ pub fn build_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: super::NORMAL_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                }),
+            ],
             compilation_options: Default::default(),
         }),
         multiview_mask: None,

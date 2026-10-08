@@ -62,6 +62,7 @@ const IDX_MASK: u32 = 0x3fffffffu;
 // AO measures 3D hemisphere visibility with the same radius and strength controls.
 // Shadow rays use the same light frame, world bias and filter footprint as the map.
 const AO_RAYS: u32 = 4u;
+const SHADOW_RAYS: u32 = 4u;
 
 fn pcg(v_in: u32) -> u32 {
     let state = v_in * 747796405u + 2891336453u;
@@ -268,7 +269,7 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
     return hit;
 }
 
-fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32, skip_surface_exits: bool) -> bool {
+fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32, skip_surface_exits: bool, skip_prim: u32) -> bool {
     if (arrayLength(&nodes) == 0u) { return false; }
     let inv = 1.0 / rd;
     var stack: array<u32, 32>;
@@ -287,6 +288,10 @@ fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32, skip_surface_exits: bool) ->
         } else {
             for (var k = 0u; k < count; k = k + 1u) {
                 let tagged = prim_indices[link + k];
+                // Secondary mesh rays start numerically on their source triangle.
+                // Exclude that exact primitive instead of relying on a world-space
+                // epsilon whose rounding differs between GPU vendors.
+                if (tagged == skip_prim) { continue; }
                 let typ = tagged >> 30u;
                 let idx = tagged & IDX_MASK;
                 var t = -1.0;
@@ -300,12 +305,17 @@ fn any_hit(ro: vec3<f32>, rd: vec3<f32>, tmax: f32, skip_surface_exits: bool) ->
                     let a = mesh_verts[tri.x].p.xyz;
                     let b = mesh_verts[tri.y].p.xyz;
                     let c = mesh_verts[tri.z].p.xyz;
-                    // A ray in the smooth outward hemisphere must not be blocked by
-                    // exiting the faceted approximation of its own closed SES surface.
-                    // Entry faces of real blockers still occlude. Open ribbons stay two-sided.
-                    if (skip_surface_exits && tri.w != 0u && dot(cross(b-a,c-a), rd) > 0.0) { continue; }
                     let result = ray_triangle(a, b, c, ro, rd);
                     t = result.x; uv = result.yz;
+                    // Classify exits in the same smooth normal field as shading.
+                    // A geometric face normal can call a grazing exit an entry and
+                    // stamp the triangle onto curved ribbons' shadow terminators.
+                    // Incoming hits on other closed objects still block the ray.
+                    if (t > 0.0 && skip_surface_exits && tri.w != 0u) {
+                        let hit_normal = (1.0 - uv.x - uv.y) * mesh_verts[tri.x].n.xyz
+                            + uv.x * mesh_verts[tri.y].n.xyz + uv.y * mesh_verts[tri.z].n.xyz;
+                        if (dot(hit_normal, rd) > 0.0) { continue; }
+                    }
                 }
                 if (t > 1e-4 && t < tmax && primitive_opacity(tagged, ro + rd * t, uv) >= 0.999) { return true; }
             }
@@ -365,6 +375,7 @@ struct Surf {
     opacity: f32,
     mesh: bool,
     closed: bool,
+    prim: u32,
 };
 
 fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
@@ -441,33 +452,44 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     }
     let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
     if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
-    return Surf(p, ray_p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u, closed);
+    return Surf(p, ray_p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u, closed, hit.prim);
 }
 
 // Sample a finite directional light. Moving the origin across shadow-map texels
 // puts rays inside curved surfaces; varying direction keeps the origin on the surface
 // and gives penumbrae that widen with blocker distance.
-fn shadow_at(s: Surf, light: vec3<f32>, seed: ptr<function, u32>) -> f32 {
+// Progressive, evenly distributed quadrature, shared across pixels. Independent
+// random disks per pixel turn a smooth penumbra into visible grain at still-image
+// sample budgets. The global sample index keeps tiled/progressive renders equal.
+fn effect_sample(index: u32) -> vec2<f32> {
+    return fract((f32(index) + 0.5) * vec2<f32>(0.754877666, 0.569840296));
+}
+
+fn shadow_at(s: Surf, light: vec3<f32>, sample: vec2<f32>) -> f32 {
     if (U.shadow.z <= 0.5) { return 1.0; }
     let lc = U.shadow_matrix * vec4<f32>(s.p, 1.0);
     let ndc = lc.xyz / lc.w;
     if (any(ndc < vec3<f32>(-1.0, -1.0, 0.0)) || any(ndc > vec3<f32>(1.0))) { return 1.0; }
-    let angle = 6.2831853 * rand(seed);
-    let radius = sqrt(rand(seed)) * U.shadow.w * 0.15;
+    let angle = 6.2831853 * sample.x;
+    let radius = sqrt(sample.y) * shadow_angular_radius(U.shadow.w);
     let dir = normalize(light + radius * (cos(angle) * normalize(U.shadow_u.xyz)
         + sin(angle) * normalize(U.shadow_v.xyz)));
     // On a closed smooth surface an inward ray is immediately blocked by the
     // surface itself. Decide this before offsetting: a numerical offset can make
     // grazing inward rays miss, producing a bias-dependent, jagged terminator.
     if (s.closed && dot(s.nrm, dir) <= 0.0) { return 1.0 - U.shadow.x; }
-    // A small normal offset in world units avoids acne without erasing contact shadows
-    // as the scene grows. Back-facing rays still hit the surface's exit intersection.
+    // Mesh positions are planar while their normals describe a smooth surface.
+    // Use the same world-space surface clearance as AO: a floating-point epsilon
+    // alone starts grazing shadow rays inside neighboring facets and reveals their
+    // triangles. Analytic primitives only need the numerical offset. The closed
+    // hemisphere test above keeps the terminator independent of this clearance.
     let bias = max(U.shadow.y, 2e-6 * max(max(abs(s.p.x), abs(s.p.y)), abs(s.p.z)));
-    let ro = s.ray_p + s.nrm * bias;
+    let ro = s.p + s.nrm * select(bias, max(bias, U.ao.y), s.mesh);
     let origin_depth = (U.shadow_matrix * vec4<f32>(ro, 1.0)).z;
     let depth_step = (U.shadow_matrix * vec4<f32>(dir, 0.0)).z;
     let tmax = max(0.0, -origin_depth / depth_step);
-    if (any_hit(ro, dir, tmax, dot(s.nrm, dir) > 0.0)) { return 1.0 - U.shadow.x; }
+    let skip_prim = select(0xffffffffu, s.prim, s.mesh);
+    if (any_hit(ro, dir, tmax, dot(s.nrm, dir) > 0.0, skip_prim)) { return 1.0 - U.shadow.x; }
     return 1.0;
 }
 
@@ -483,20 +505,22 @@ fn camera_hit(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit {
 // True 3D ambient visibility: cosine-weighted rays leave the surface hemisphere
 // and can hit cavities or blockers absent from the camera's depth buffer. Keep
 // the user's radius in nm and strength linear; no scene scaling or contrast boost.
-fn ambient_visibility(s: Surf, seed: ptr<function, u32>) -> f32 {
+fn ambient_visibility(s: Surf, sample_index: u32) -> f32 {
     if (U.ao.w <= 0.5 || U.ao.z <= 0.0) { return 1.0; }
     let ro = s.ray_p + s.nrm * U.ao.y;
+    let skip_prim = select(0xffffffffu, s.prim, s.mesh);
     var occ = 0.0;
     for (var i = 0u; i < AO_RAYS; i = i + 1u) {
-        let dir = cosine_hemisphere(s.nrm, rand(seed), rand(seed));
-        if (any_hit(ro, dir, U.ao.x, true)) { occ = occ + 1.0; }
+        let sample = effect_sample(sample_index * AO_RAYS + i + 47u);
+        let dir = cosine_hemisphere(s.nrm, sample.x, sample.y);
+        if (any_hit(ro, dir, U.ao.x, true, skip_prim)) { occ = occ + 1.0; }
     }
     return clamp(1.0 - U.ao.z * occ / f32(AO_RAYS), 0.0, 1.0);
 }
 
 // Return unoccluded lighting plus the deferred darkening factor. Fog and color
 // clamping precede AO/shadow multiplication in the live renderer.
-fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, seed: ptr<function, u32>) -> vec4<f32> {
+fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, sample_index: u32) -> vec4<f32> {
     let view_dir = select(-rd, normalize(U.eye.xyz - s.p), persp);
     let normal_view = normalize((U.view * vec4<f32>(s.nrm, 0.0)).xyz);
     let dir_view = normalize((U.view * vec4<f32>(view_dir, 0.0)).xyz);
@@ -505,7 +529,12 @@ fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, seed: ptr<
     // Raster AO/shadows act on opaque geometry, before transparent compositing.
     var visibility = 1.0;
     if (s.opacity >= 0.999) {
-        visibility = shadow_at(s, light, seed) * ambient_visibility(s, seed);
+        var shadow = 0.0;
+        let count = select(SHADOW_RAYS, 1u, U.shadow.w <= 0.0 || U.shadow.z <= 0.5);
+        for (var i = 0u; i < count; i = i + 1u) {
+            shadow += shadow_at(s, light, effect_sample(sample_index * count + i));
+        }
+        visibility = (shadow / f32(count)) * ambient_visibility(s, sample_index);
     }
     return vec4<f32>(shaded, visibility);
 }
@@ -524,7 +553,7 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
     var bounce = 0u;
     loop {
         let ndotl = max(dot(s.nrm, light), 0.0);
-        let shadow_vis = shadow_at(s, light, seed);
+        let shadow_vis = shadow_at(s, light, vec2<f32>(rand(seed), rand(seed)));
         radiance = radiance + throughput * s.base * (s.mat.y * ndotl * shadow_vis);
 
         if (bounce >= max_bounces) { break; }
@@ -548,8 +577,8 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
     return radiance;
 }
 
-fn shade_surface(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, axis: vec3<f32>, seed: ptr<function, u32>) -> vec3<f32> {
-    let direct = shade_tier1(s, rd, persp, light, seed);
+fn shade_surface(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, axis: vec3<f32>, sample_index: u32, seed: ptr<function, u32>) -> vec3<f32> {
+    let direct = shade_tier1(s, rd, persp, light, sample_index);
     var tier1 = apply_fog(direct.xyz, s.p, axis);
     if (s.opacity >= 0.999) {
         // Opaque color is stored in a normalized target before deferred effects.
@@ -597,7 +626,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         let first_surface = surface_at(first, ro, rd, persp);
         if (first_surface.opacity >= 0.999) {
-            color = color + shade_surface(first_surface, rd, persp, light, axis, &seed);
+            color = color + shade_surface(first_surface, rd, persp, light, axis, s + U.dims.w, &seed);
             continue;
         }
         // Match the live renderer's weighted OIT, rather than changing transparent
@@ -607,7 +636,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         var opaque_distance = T_MAX;
         if (opaque.prim != 0xffffffffu) {
             let surface = surface_at(opaque, ro, rd, persp);
-            opaque_color = shade_surface(surface, rd, persp, light, axis, &seed);
+            opaque_color = shade_surface(surface, rd, persp, light, axis, s + U.dims.w, &seed);
             opaque_distance = opaque.t;
         }
         var accum_color = vec3<f32>(0.0);
@@ -623,7 +652,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (dot(surface.p - ro, rd) >= opaque_distance || surface.opacity >= 0.999) { break; }
             let eye_z = (U.view * vec4<f32>(surface.p, 1.0)).z;
             let weight = transparency_weight(-eye_z, surface.opacity, U.depth_range.xy);
-            let shaded = shade_surface(surface, rd, persp, light, axis, &seed);
+            let shaded = shade_surface(surface, rd, persp, light, axis, s + U.dims.w, &seed);
             accum_color = accum_color + shaded * surface.opacity * weight;
             accum_weight = accum_weight + surface.opacity * weight;
             reveal = reveal * (1.0 - surface.opacity);

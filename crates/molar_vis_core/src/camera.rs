@@ -87,13 +87,23 @@ impl Default for Ao {
 pub struct Shadow {
     pub enabled: bool,
     pub strength: f32,
-    /// Edge softness in [0,1] (0 = hard). Raster uses a map filter; RT samples a finite light. `#[serde(default)]` so older sessions still load.
+    /// Edge softness, rendered in [`Shadow::MIN_SOFTNESS`]..=1. Legacy zero values are clamped.
+    /// Raster uses a map filter; RT samples a finite light.
     #[serde(default = "default_shadow_softness")]
     pub softness: f32,
 }
 
 fn default_shadow_softness() -> f32 {
     0.4
+}
+
+impl Shadow {
+    /// Unfiltered shadows expose mesh/shadow-map aliasing at grazing angles.
+    pub const MIN_SOFTNESS: f32 = 0.1;
+
+    pub fn effective_softness(&self) -> f32 {
+        self.softness.clamp(Self::MIN_SOFTNESS, 1.0)
+    }
 }
 
 impl Default for Shadow {
@@ -411,7 +421,7 @@ impl Camera {
     /// `softness` controls the map filter or traced light angular radius.
     pub fn shadow_uniform(&self) -> [f32; 4] {
         let enabled = if self.shadow.enabled { 1.0 } else { 0.0 };
-        [self.shadow.strength, 0.0025, enabled, self.shadow.softness.clamp(0.0, 1.0)]
+        [self.shadow.strength, 0.0025, enabled, self.shadow.effective_softness()]
     }
 
     /// Sample-paths/pixel a ray trace runs before it stops — tuned to where the image stops
@@ -423,8 +433,10 @@ impl Camera {
     pub fn rt_sample_target(&self) -> u32 {
         if self.gi > 0.0 {
             48
+        } else if self.ao.enabled && self.shadow.enabled {
+            64
         } else if self.ao.enabled || self.shadow.enabled {
-            24
+            32
         } else {
             12
         }
@@ -574,6 +586,19 @@ mod tests {
     use glam::Vec4Swizzles;
 
     #[test]
+    fn legacy_zero_shadow_softness_uses_filtered_minimum() {
+        let mut cam = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
+        cam.shadow = serde_json::from_str(
+            r#"{"enabled":true,"strength":0.6,"softness":0.0}"#,
+        ).unwrap();
+        assert_eq!(cam.shadow_uniform()[3], Shadow::MIN_SOFTNESS);
+        for (input, expected) in [(-1.0, Shadow::MIN_SOFTNESS), (0.4, 0.4), (2.0, 1.0)] {
+            cam.shadow.softness = input;
+            assert_eq!(cam.shadow_uniform()[3], expected);
+        }
+    }
+
+    #[test]
     fn frame_bbox_centers_and_fits() {
         let cam = Camera::frame_bbox(Vec3::new(-2.0, 0.0, 1.0), Vec3::new(4.0, 6.0, 3.0), 0.9);
         assert!((cam.target - Vec3::new(1.0, 3.0, 2.0)).length() < 1e-5);
@@ -661,6 +686,16 @@ mod tests {
         let t0 = cam.target;
         cam.pan(50.0, -30.0, 800.0);
         assert!((cam.target - t0).length() > 1e-4);
+    }
+
+    #[test]
+    fn combined_rt_effects_get_enough_shadow_samples() {
+        let mut cam = Camera::default();
+        assert_eq!(cam.rt_sample_target(), 12);
+        cam.ao.enabled = true;
+        assert_eq!(cam.rt_sample_target(), 32);
+        cam.shadow.enabled = true;
+        assert_eq!(cam.rt_sample_target(), 64);
     }
 
     /// Wheel-zoom is cursor-centered: the world point under the cursor before the

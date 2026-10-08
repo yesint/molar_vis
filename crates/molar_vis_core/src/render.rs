@@ -40,6 +40,7 @@ use crate::geometry::GeometryData;
 use crate::scene::Scene;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// Weighted-blended OIT targets: `accum` holds the running sum of weighted
 /// premultiplied color (RGB) + weight (A); `reveal` holds the running product of
@@ -156,6 +157,7 @@ fn make_ssao_bind_group(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
     depth_view: &wgpu::TextureView,
+    normal_view: &wgpu::TextureView,
     buf: &wgpu::Buffer,
     shadow_view: &wgpu::TextureView,
     shadow_sampler: &wgpu::Sampler,
@@ -180,17 +182,29 @@ fn make_ssao_bind_group(
                 binding: 3,
                 resource: wgpu::BindingResource::Sampler(shadow_sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(normal_view),
+            },
         ],
     })
 }
 
-/// Color-target descriptors for the opaque pass: a single alpha-blended target.
+/// Color-target descriptors for the opaque pass: shaded color plus the smooth
+/// view-space normal consumed by SSAO.
 fn opaque_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
-    vec![Some(wgpu::ColorTargetState {
-        format: color_format,
-        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-        write_mask: wgpu::ColorWrites::ALL,
-    })]
+    vec![
+        Some(wgpu::ColorTargetState {
+            format: color_format,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+        Some(wgpu::ColorTargetState {
+            format: NORMAL_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
+    ]
 }
 
 /// Color-target descriptors for the weighted-blended OIT pass: `accum` is purely
@@ -252,6 +266,7 @@ struct Targets {
     size: [u32; 2],
     color_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    normal_view: wgpu::TextureView,
     accum_view: wgpu::TextureView,
     reveal_view: wgpu::TextureView,
     oit_bind_group: wgpu::BindGroup,
@@ -259,6 +274,7 @@ struct Targets {
     /// (`copy_texture_to_buffer`); the on-screen path only uses `color_view`.
     color_tex: wgpu::Texture,
     _depth_tex: wgpu::Texture,
+    _normal_tex: wgpu::Texture,
 }
 
 impl Targets {
@@ -296,6 +312,7 @@ impl Targets {
         );
         // The depth target is sampled by the SSAO pass, so it also needs TEXTURE_BINDING.
         let depth_tex = make("scene-depth", DEPTH_FORMAT, attach_sample);
+        let normal_tex = make("scene-normal", NORMAL_FORMAT, attach_sample);
         let accum_tex = make("oit-accum", ACCUM_FORMAT, attach_sample);
         let reveal_tex = make("oit-reveal", REVEAL_FORMAT, attach_sample);
 
@@ -322,11 +339,13 @@ impl Targets {
             size,
             color_view: view(&color_tex),
             depth_view: view(&depth_tex),
+            normal_view: view(&normal_tex),
             accum_view,
             reveal_view,
             oit_bind_group,
             color_tex,
             _depth_tex: depth_tex,
+            _normal_tex: normal_tex,
         }
     }
 }
@@ -602,6 +621,7 @@ pub struct SceneRenderer {
     cylinder_pipeline: [wgpu::RenderPipeline; 3],
     line_pipeline: [wgpu::RenderPipeline; 3],
     mesh_pipeline: [wgpu::RenderPipeline; 3],
+    mesh_shadow_pipeline: wgpu::RenderPipeline,
     oit_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
     /// SSAO: a fullscreen pass (after opaque) that reads the scene depth and
@@ -620,9 +640,11 @@ pub struct SceneRenderer {
     /// comparison sampler) to darken shadowed pixels. Gated to full WebGPU like SSAO.
     shadow_depth_view: wgpu::TextureView,
     shadow_color_view: wgpu::TextureView,
+    shadow_normal_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     _shadow_depth_tex: wgpu::Texture,
     _shadow_color_tex: wgpu::Texture,
+    _shadow_normal_tex: wgpu::Texture,
     /// Fullscreen background-gradient pass (drawn first in the opaque pass when the
     /// background is a gradient; a solid background just uses the clear color).
     bg_buf: wgpu::Buffer,
@@ -821,6 +843,8 @@ impl SceneRenderer {
         let mesh_pipeline = triple(&|t, dw, dc, fs| {
             mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
         });
+        let mesh_shadow_pipeline = mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl,
+            &opaque_targets(color_format), true, wgpu::CompareFunction::Less, "fs_shadow");
 
         // OIT resolve: a fullscreen pass that reads the accum + reveal targets
         // (bind group 0 here, *not* the camera) and blends the order-independent
@@ -909,10 +933,22 @@ impl SceneRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
+        let _shadow_normal_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow-normal-throwaway"),
+            size: shadow_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: NORMAL_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
         let shadow_depth_view =
             _shadow_depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_color_view =
             _shadow_color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_normal_view =
+            _shadow_normal_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow-cmp-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -944,6 +980,7 @@ impl SceneRenderer {
             device,
             &ssao_bgl,
             &targets.depth_view,
+            &targets.normal_view,
             &ssao_buf,
             &shadow_depth_view,
             &shadow_sampler,
@@ -971,6 +1008,7 @@ impl SceneRenderer {
             cylinder_pipeline,
             line_pipeline,
             mesh_pipeline,
+            mesh_shadow_pipeline,
             oit_bgl,
             composite_pipeline,
             ssao_bgl,
@@ -979,9 +1017,11 @@ impl SceneRenderer {
             ssao_bind_group,
             shadow_depth_view,
             shadow_color_view,
+            shadow_normal_view,
             shadow_sampler,
             _shadow_depth_tex,
             _shadow_color_tex,
+            _shadow_normal_tex,
             bg_buf,
             bg_pipeline,
             bg_bind_group,
@@ -1050,15 +1090,29 @@ impl SceneRenderer {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
+            let normal_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("shadow-normal-throwaway"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: NORMAL_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
             self.shadow_depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.shadow_color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.shadow_normal_view =
+                normal_tex.create_view(&wgpu::TextureViewDescriptor::default());
             self._shadow_depth_tex = depth_tex;
             self._shadow_color_tex = color_tex;
+            self._shadow_normal_tex = normal_tex;
             // The SSAO bind group references the (new) shadow depth view → rebuild.
             self.ssao_bind_group = make_ssao_bind_group(
                 device,
                 &self.ssao_bgl,
                 &self.targets.depth_view,
+                &self.targets.normal_view,
                 &self.ssao_buf,
                 &self.shadow_depth_view,
                 &self.shadow_sampler,
@@ -1315,6 +1369,7 @@ impl SceneRenderer {
                 &rs.device,
                 &self.ssao_bgl,
                 &self.targets.depth_view,
+                &self.targets.normal_view,
                 &self.ssao_buf,
                 &self.shadow_depth_view,
                 &self.shadow_sampler,
@@ -1478,15 +1533,26 @@ impl SceneRenderer {
         if shadow_on {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.shadow_color_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.shadow_color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.shadow_normal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -1506,20 +1572,31 @@ impl SceneRenderer {
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("opaque-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.targets.color_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: clear[0] as f64,
-                            g: clear[1] as f64,
-                            b: clear[2] as f64,
-                            a: clear[3] as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.color_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: clear[0] as f64,
+                                g: clear[1] as f64,
+                                b: clear[2] as f64,
+                                a: clear[3] as f64,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.targets.normal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.targets.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -1767,6 +1844,7 @@ impl SceneRenderer {
             &rs.device,
             &self.ssao_bgl,
             &temp.depth_view,
+            &temp.normal_view,
             &self.ssao_buf,
             &self.shadow_depth_view,
             &self.shadow_sampler,
@@ -2169,7 +2247,8 @@ impl SceneRenderer {
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /
     /// mesh once, from the light camera (`light_idx`), into the shadow depth map.
-    /// Reuses the opaque pipelines (index 0); lines and the box wireframe don't cast
+    /// Impostors reuse the opaque pipelines; closed meshes use smooth-normal exit
+    /// faces to avoid self-shadow acne. Lines and the box wireframe don't cast
     /// (too thin to read as shadows). Transparent reps are skipped.
     fn draw_shadow_casters(&self, pass: &mut wgpu::RenderPass, scene: &Scene, light_idx: u32) {
         let off = light_idx * CAMERA_STRIDE as u32;
@@ -2193,7 +2272,7 @@ impl SceneRenderer {
                     pass.draw(0..4, 0..c.count);
                 }
                 if let Some(m) = &rep.gpu.mesh {
-                    pass.set_pipeline(&self.mesh_pipeline[0]);
+                    pass.set_pipeline(&self.mesh_shadow_pipeline);
                     pass.set_vertex_buffer(0, m.vertices.slice(..));
                     pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..m.index_count, 0, 0..1);

@@ -56,6 +56,7 @@ fn gpu() -> RenderState {
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
             .unwrap();
+        eprintln!("Rendering on {:?}", adapter.get_info());
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
@@ -77,13 +78,255 @@ fn gpu() -> RenderState {
     })
 }
 
+/// Close-up, native-resolution reproducer for inner ribbon AO and shadow artifacts.
+/// MOLAR_VIS_HELIX_PDB selects a real structure; output is kept for visual inspection.
+#[test]
+#[ignore = "requires GPU; writes helix close-ups for visual inspection"]
+fn helix_closeup_render() {
+    use crate::{
+        geometry,
+        scene::Representation,
+        secstruct::{SsClass, SsMap},
+    };
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let path = std::env::var("MOLAR_VIS_HELIX_PDB")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb").into());
+    let raw = crate::data::load(std::path::Path::new(&path)).unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mol = &mut scene.molecules[0];
+    let mut rep = Representation::new(geometry::RepKind::Cartoon);
+    let sel = mol.data.select_all();
+    let bound = mol.data.bind_with_state(&sel, mol.render_state());
+    let ss = SsMap::compute(&bound, rep.ss_algo);
+    let mut residues: Vec<_> = ss.entries().map(|(i, _)| i).collect();
+    residues.sort_unstable();
+    let mut runs = Vec::new();
+    let mut run = Vec::new();
+    for i in residues {
+        if ss.class(i) == SsClass::Helix && run.last().is_none_or(|last| i == last + 1) {
+            run.push(i);
+        } else {
+            if !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+            if ss.class(i) == SsClass::Helix {
+                run.push(i);
+            }
+        }
+    }
+    runs.push(run);
+    let run = runs.into_iter().max_by_key(Vec::len).unwrap();
+    eprintln!("Helix residues: {run:?}");
+    let mut geom = geometry::build(
+        &bound,
+        mol.n_atoms,
+        &mol.bonds,
+        &rep.params,
+        rep.color_spec(),
+        rep.material,
+        Some(&ss),
+        true,
+    );
+    geom.mesh.indices = geom
+        .mesh
+        .indices
+        .chunks_exact(3)
+        .filter(|tri| {
+            tri.iter()
+                .all(|&i| run.contains(&(geom.mesh.vert_res[i as usize] as usize)))
+        })
+        .flatten()
+        .copied()
+        .collect();
+    let points: Vec<_> = geom
+        .mesh
+        .indices
+        .iter()
+        .map(|&i| Vec3::from_array(geom.mesh.vertices[i as usize].pos))
+        .collect();
+    let center = points.iter().copied().sum::<Vec3>() / points.len() as f32;
+    let mut axis = Vec3::new(0.3, 0.8, 0.5);
+    for _ in 0..32 {
+        axis = points
+            .iter()
+            .map(|p| (*p - center) * (*p - center).dot(axis))
+            .sum::<Vec3>()
+            .normalize();
+    }
+    let orbit: f32 = std::env::var("MOLAR_VIS_HELIX_ORBIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.5);
+    let rotation = glam::Quat::from_rotation_z(-0.25)
+        * glam::Quat::from_rotation_y(orbit)
+        * glam::Quat::from_rotation_arc(axis, Vec3::Y);
+    for v in &mut geom.mesh.vertices {
+        v.pos = (rotation * (Vec3::from_array(v.pos) - center)).to_array();
+        v.normal = (rotation * Vec3::from_array(v.normal)).to_array();
+        v.color = 0xffb044a0;
+    }
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for &i in &geom.mesh.indices {
+        let p = Vec3::from_array(geom.mesh.vertices[i as usize].pos);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    rep.gpu = renderer.upload(&rs, &geom);
+    rep.sel = Some(sel);
+    mol.reps = vec![rep];
+    let mut camera = Camera::frame_bbox(lo, hi, 0.9);
+    camera.distance *= 0.42;
+    if std::env::var_os("MOLAR_VIS_HELIX_PERSPECTIVE").is_some() {
+        camera.projection = Projection::Perspective;
+    }
+    camera.depth_cue.enabled = false;
+    camera.background = crate::camera::Background::for_theme(false);
+    camera.ao.strength = 0.8;
+    camera.shadow.strength = 0.8;
+    let dir = std::env::var("MOLAR_VIS_TEST_IMAGES").unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join("molar-helix-closeup")
+            .to_string_lossy()
+            .into_owned()
+    });
+    std::fs::create_dir_all(&dir).unwrap();
+    let (w, h) = (640, 800);
+    for effect in ["base", "ao", "shadow", "combined"] {
+        camera.ao.enabled = matches!(effect, "ao" | "combined");
+        camera.shadow.enabled = matches!(effect, "shadow" | "combined");
+        let cap = renderer.capture_begin(
+            &rs,
+            w,
+            h,
+            camera.view(),
+            camera.proj(w as f32 / h as f32),
+            camera.is_perspective(),
+            camera.cue_uniform(),
+            camera.ao_uniform(),
+            camera.shadow_uniform(),
+            camera.background,
+            camera.eye_depth_range(),
+            &scene,
+        );
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+            .save(format!("{dir}/{effect}_raster.png"))
+            .unwrap();
+        renderer
+            .raytracer
+            .as_mut()
+            .unwrap()
+            .upload(&rs, &raytrace::RtScene::from_test_mesh(&geom.mesh, geometry::RepKind::Cartoon));
+        let cap = renderer
+            .capture_begin_raytrace(&rs, w, h, &camera, 64)
+            .unwrap();
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+            .save(format!("{dir}/{effect}_trace.png"))
+            .unwrap();
+    }
+    let mut metric_dirs = vec![dir.clone()];
+    if let Ok(before) = std::env::var("MOLAR_VIS_COMPARE_IMAGES") {
+        metric_dirs.push(before);
+    }
+    for metric_dir in metric_dirs {
+        for mode in ["raster", "trace"] {
+            let base = image::open(format!("{metric_dir}/base_{mode}.png"))
+                .unwrap()
+                .to_rgba8();
+            for effect in ["ao", "shadow"] {
+                let effected = image::open(format!("{metric_dir}/{effect}_{mode}.png"))
+                    .unwrap()
+                    .to_rgba8();
+                let mut roughness = 0.0;
+                let mut count = 0;
+                for y in 5..h - 5 {
+                    for x in 5..w - 5 {
+                        let coords = [(x, y), (x - 4, y), (x + 4, y), (x, y - 4), (x, y + 4)];
+                        let values: Vec<_> = coords
+                            .iter()
+                            .map(|&(xx, yy)| base.get_pixel(xx, yy)[0] as f32)
+                            .collect();
+                        if values
+                            .iter()
+                            .any(|&v| v < 40.0 || v > 230.0 || (v - values[0]).abs() > 8.0)
+                        {
+                            continue;
+                        }
+                        let f: Vec<_> = coords
+                            .iter()
+                            .zip(&values)
+                            .map(|(&(xx, yy), &b)| effected.get_pixel(xx, yy)[0] as f32 / b)
+                            .collect();
+                        roughness += ((f[1] - 2.0 * f[0] + f[2]).abs()
+                            + (f[3] - 2.0 * f[0] + f[4]).abs())
+                            as f64;
+                        count += 1;
+                    }
+                }
+                let curvature = roughness / count as f64;
+                eprintln!(
+                    "{metric_dir}/{effect}/{mode}: interior factor curvature {curvature} ({count} pixels)"
+                );
+                if metric_dir == dir {
+                    assert!(
+                        count > 10_000,
+                        "close-up must contain a substantial smooth surface"
+                    );
+                    let limit = match (mode, effect) {
+                        ("raster", "ao") => 0.0075,
+                        ("trace", "ao") => 0.016,
+                        _ => 0.04,
+                    };
+                    assert!(
+                        curvature < limit,
+                        "{effect}: patchy interior occlusion ({curvature})"
+                    );
+                    assert!(
+                        effected
+                            .pixels()
+                            .zip(base.pixels())
+                            .any(|(e, b)| b[0] < 230 && (e[0] as f32) < b[0] as f32 * 0.9),
+                        "effect must remain visible"
+                    );
+                }
+            }
+        }
+    }
+    if let Ok(before) = std::env::var("MOLAR_VIS_COMPARE_IMAGES") {
+        for name in ["ao_raster", "combined_raster", "combined_trace"] {
+            let old = image::open(format!("{before}/{name}.png"))
+                .unwrap()
+                .to_rgba8();
+            let new = image::open(format!("{dir}/{name}.png")).unwrap().to_rgba8();
+            let mut pair = image::RgbaImage::new(w * 2, h);
+            image::imageops::overlay(&mut pair, &old, 0, 0);
+            image::imageops::overlay(&mut pair, &new, w as i64, 0);
+            pair.save(format!("{dir}/{name}_comparison.png")).unwrap();
+        }
+    }
+}
+
 fn raster_and_trace(
     renderer: &mut SceneRenderer,
     rs: &RenderState,
     scene: &Scene,
     camera: &Camera,
 ) -> (image::RgbaImage, image::RgbaImage) {
-    let (w, h) = (320, 240);
+    raster_and_trace_at(renderer, rs, scene, camera, 320, 240)
+}
+
+fn raster_and_trace_at(
+    renderer: &mut SceneRenderer,
+    rs: &RenderState,
+    scene: &Scene,
+    camera: &Camera,
+    w: u32,
+    h: u32,
+) -> (image::RgbaImage, image::RgbaImage) {
     let cap = renderer.capture_begin(
         rs,
         w,
@@ -370,7 +613,11 @@ fn traced_shadows_keep_lit_surfaces_clean_and_soften_the_terminator() {
     camera.shadow.enabled = true;
     camera.shadow.strength = 1.0;
     camera.shadow.softness = 0.0;
-    let (_, hard) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    let (legacy_raster, hard) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    camera.shadow.softness = crate::camera::Shadow::MIN_SOFTNESS;
+    let (minimum_raster, minimum_trace) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+    assert_eq!(legacy_raster, minimum_raster, "legacy zero must use the raster minimum");
+    assert_eq!(hard, minimum_trace, "legacy zero must use the RT minimum");
     // Central, light-facing sphere surface must not acquire shadow acne.
     for y in 105..125 {
         for x in 150..170 {
@@ -589,10 +836,11 @@ fn smooth_surface_secondary_rays_do_not_create_triangle_patches() {
                 .normalize();
             }
             let facing = normal.dot(light);
-            // Exclude silhouette pixels where stochastic subpixel coverage differs.
+            // Exclude silhouettes and the finite-light penumbra: even legacy zero
+            // softness now uses the minimum filtered light (angular radius 0.45*s).
             if nearest.is_finite()
                 && normal.dot(-direction) > 0.4
-                && facing.abs() > 0.04
+                && facing.abs() > camera.shadow_uniform()[3] * 0.45 + 0.04
                 && open.get_pixel(x, y)[0] > 50
             {
                 let visibility = hard.get_pixel(x, y)[0] as f32 / open.get_pixel(x, y)[0] as f32;
@@ -667,11 +915,21 @@ fn smooth_surface_secondary_rays_do_not_create_triangle_patches() {
             Material::AoChalky,
         );
         camera.shadow.enabled = false;
-        let (_, unshadowed) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+        let (_, unshadowed) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 640, 480);
         unshadowed.save(dir.join("surface_closeup_ao.png")).unwrap();
         camera.shadow.enabled = true;
-        let (raster, trace) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+        let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 640, 480);
         raster.save(dir.join("surface_closeup_raster.png")).unwrap();
         trace.save(dir.join("surface_closeup_trace.png")).unwrap();
+        if std::env::var_os("MOLAR_VIS_SHADOW_SWEEP").is_some() {
+            camera.ao.enabled = false;
+            camera.shadow.strength = 0.6;
+            for softness in [0.0, 0.05, 0.1, 0.15, 0.2] {
+                camera.shadow.softness = softness;
+                let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 640, 480);
+                raster.save(dir.join(format!("surface_softness_{softness:.2}_raster.png"))).unwrap();
+                trace.save(dir.join(format!("surface_softness_{softness:.2}_trace.png"))).unwrap();
+            }
+        }
     }
 }

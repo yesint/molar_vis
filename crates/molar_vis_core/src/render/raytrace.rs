@@ -64,11 +64,16 @@ pub struct GpuMeshVertex {
     pub n: [f32; 4],
 }
 
-/// A mesh triangle: three vertex indices; `.w` is 1 for a closed SES surface.
+/// A mesh triangle: three vertex indices; `.w` is 1 for a closed surface or cartoon.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuTriangle {
     pub i: [u32; 4],
+}
+
+fn mesh_closed_flag(kind: crate::geometry::RepKind) -> u32 {
+    // Cartoons are capped, thick ribbons/tubes, including their concave inner side.
+    u32::from(matches!(kind, crate::geometry::RepKind::Surface | crate::geometry::RepKind::Cartoon))
 }
 
 /// A flattened BVH node, 32 bytes (two `vec4`): `lo.xyz` / `hi.xyz` are the AABB; the
@@ -122,6 +127,38 @@ pub struct RtScene {
 }
 
 impl RtScene {
+    #[cfg(test)]
+    pub(super) fn from_test_mesh(mesh: &crate::geometry::MeshData, kind: crate::geometry::RepKind) -> Self {
+        let mut s = Self::default();
+        s.mesh_verts = mesh
+            .vertices
+            .iter()
+            .map(|v| GpuMeshVertex {
+                p: [v.pos[0], v.pos[1], v.pos[2], f32::from_bits(v.color)],
+                n: [v.normal[0], v.normal[1], v.normal[2], f32::from_bits(v.mat)],
+            })
+            .collect();
+        s.triangles = mesh
+            .indices
+            .chunks_exact(3)
+            .map(|t| GpuTriangle {
+                i: [t[0], t[1], t[2], mesh_closed_flag(kind)],
+            })
+            .collect();
+        let aabbs: Vec<_> = s
+            .triangles
+            .iter()
+            .map(|t| triangle_aabb(&s.mesh_verts, t.i[0], t.i[1], t.i[2]))
+            .collect();
+        let (nodes, order) = build_bvh(&aabbs);
+        s.nodes = nodes;
+        s.prim_indices = order
+            .into_iter()
+            .map(|i| tag(TAG_TRIANGLE, i as usize))
+            .collect();
+        s
+    }
+
     /// Whether there's anything to trace.
     pub fn is_empty(&self) -> bool {
         self.prim_indices.is_empty()
@@ -295,8 +332,10 @@ impl RtScene {
                         let (i0, i1, i2) = (base + t[0], base + t[1], base + t[2]);
                         aabbs.push(triangle_aabb(&self.mesh_verts, i0, i1, i2));
                         tags.push(tag(TAG_TRIANGLE, self.triangles.len()));
-                        let closed = u32::from(matches!(rep.kind, crate::geometry::RepKind::Surface));
-                        self.triangles.push(GpuTriangle { i: [i0, i1, i2, closed] });
+                        let closed = mesh_closed_flag(rep.kind);
+                        self.triangles.push(GpuTriangle {
+                            i: [i0, i1, i2, closed],
+                        });
                     }
                 }
             }
@@ -1004,16 +1043,18 @@ impl Raytracer {
         self.total_samples = 0;
         self.read_idx = 0;
         // Per-submit sample chunk, bounded by *BVH-ray traversals* counting the rays cast per
-        // sample: AO (`AO_RAYS`, matching the shader) + a shadow ray + GI bounces are incoherent
-        // traversals that dominate cost, so e.g. an AO+shadow submit does ~6× a primary-only one.
+        // sample: AO + finite-light quadrature + GI bounces dominate the cost.
+        // Keep the CPU budget in sync with the shader's secondary-ray counts.
         const AO_RAYS: u32 = 4; // must match raytrace.wgsl
+        const SHADOW_RAYS: u32 = 4; // must match raytrace.wgsl
         const RAY_BUDGET: u32 = 2_000_000;
         let ao_on = uniform.ao[3] > 0.5;
         let shadow_on = uniform.shadow[2] > 0.5;
+        let shadow_rays = if !shadow_on { 0 } else if uniform.shadow[3] > 0.0 { SHADOW_RAYS } else { 1 };
         // bg.w is the GI strength (0 = off); GI path-traces `GI_BOUNCES` extra bounces.
         let gi_bounces = if uniform.bg[3] > 0.001 { GI_BOUNCES } else { 0 };
         let mut rays_per_sample =
-            (1 + if ao_on { AO_RAYS } else { 0 } + u32::from(shadow_on)) * (1 + gi_bounces);
+            (1 + if ao_on { AO_RAYS } else { 0 } + shadow_rays) * (1 + gi_bounces);
         // Weighted transparency may visit many layers per path. Shrink the tile
         // as well as the sample chunk so one dispatch remains bounded.
         if self.has_transparent {

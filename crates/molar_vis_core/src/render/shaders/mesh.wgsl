@@ -94,9 +94,33 @@ fn shade(in: VsOut) -> vec4<f32> {
     return vec4<f32>(apply_fog(lit, in.view_pos.z), in.color.a);
 }
 
+struct OpaqueOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+};
+
+// Closed meshes cast from their light-space exit surface. Classify with the
+// interpolated normal, as the ray tracer does: geometric face culling alone
+// leaves triangle-shaped self-shadow stripes at a smooth grazing terminator.
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return shade(in);
+fn fs_shadow(in: VsOut) -> OpaqueOut {
+    if (in.normal_eye.z >= 0.0) { discard; }
+    var out: OpaqueOut;
+    out.color = vec4<f32>(0.0);
+    out.normal = vec4<f32>(0.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> OpaqueOut {
+    let nlen = length(in.normal_eye);
+    var n = select(vec3<f32>(0.0, 0.0, 1.0), in.normal_eye / max(nlen, 1e-12), nlen > 1e-6);
+    let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-in.view_pos), camera.params.x > 0.5);
+    if (dot(n, view_dir) < 0.0) { n = -n; }
+    var out: OpaqueOut;
+    out.color = shade(in);
+    out.normal = vec4<f32>(n, 1.0);
+    return out;
 }
 
 // Additive cyan "rim glow" for the active (pending) selection (see sphere.wgsl):

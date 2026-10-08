@@ -123,3 +123,34 @@ cargo run -p molar_vis -- tests/large_375k.gro
 
 Headless verification env hooks (native): `MOLAR_VIS_DEBUG_REP=vdw|licorice|ballstick|lines`,
 `MOLAR_VIS_DEBUG_ORBIT=<deg>`, `MOLAR_VIS_DEBUG_ORTHO=1`.
+
+## Helix AO and shadow close-ups
+
+Render the longest helix of `2lao.pdb` at 640×800, enlarged to expose the inner
+surface and grazing shadow boundaries:
+
+```sh
+WGPU_BACKEND=vulkan MOLAR_VIS_TEST_IMAGES=/tmp/helix-check \
+  cargo test -p molar_vis_core --lib helix_closeup_render -- --ignored --nocapture
+```
+
+The test prints the actual GPU adapter and saves base, AO-only, shadow-only and
+combined images for raster and RT. Inspect the PNGs at native size; whole-protein
+320×240 comparisons hide these artifacts. It also checks interior occlusion
+continuity, with masking based on the base image so silhouettes are excluded.
+
+Optional overrides: `MOLAR_VIS_HELIX_PDB=<path>`, `MOLAR_VIS_HELIX_ORBIT=<radians>`,
+`MOLAR_VIS_HELIX_PERSPECTIVE=1`. `MOLAR_VIS_COMPARE_IMAGES=<previous output directory>`
+produces side-by-side comparisons (before left, after right). GPU access may
+require running outside a device-restricted sandbox; confirm the printed adapter
+before drawing conclusions about a vendor-specific defect.
+
+Shadow softness has a minimum of 0.10 in both renderers, including when loading
+legacy scenes containing zero. The shadow appearance test checks that legacy zero
+and the minimum produce identical raster and RT images. To inspect surface shadow
+edges at and around the lower limit:
+
+```sh
+WGPU_BACKEND=vulkan MOLAR_VIS_SHADOW_SWEEP=1 MOLAR_VIS_TEST_IMAGES=/tmp/shadow-check \
+  cargo test -p molar_vis_core --lib smooth_surface_secondary_rays_do_not_create_triangle_patches -- --ignored --nocapture
+```

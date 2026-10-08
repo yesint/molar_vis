@@ -185,6 +185,12 @@ struct FsOut {
     @builtin(frag_depth) depth: f32,
 };
 
+struct OpaqueOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
 // Result of ray-casting the impostor cylinder: shaded (fogged) color, opacity
 // and the analytic [0,1] window depth. Misses `discard`. `normal`/`view_dir`
 // (view space) are also returned for the selection glow's Fresnel rim.
@@ -303,11 +309,12 @@ fn fs_glow(in: VsOut) -> FsOut {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> FsOut {
+fn fs_main(in: VsOut) -> OpaqueOut {
     let hit = compute_hit(in);
-    var out: FsOut;
+    var out: OpaqueOut;
     out.depth = hit.depth;
     out.color = vec4<f32>(hit.color, hit.alpha);
+    out.normal = vec4<f32>(hit.normal, 1.0);
     return out;
 }
 
