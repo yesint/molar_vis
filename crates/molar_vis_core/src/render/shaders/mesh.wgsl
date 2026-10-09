@@ -103,12 +103,8 @@ struct OpaqueOut {
 // interpolated normal, as the ray tracer does: geometric face culling alone
 // leaves triangle-shaped self-shadow stripes at a smooth grazing terminator.
 @fragment
-fn fs_shadow(in: VsOut) -> OpaqueOut {
+fn fs_shadow(in: VsOut) {
     if (in.normal_eye.z >= 0.0) { discard; }
-    var out: OpaqueOut;
-    out.color = vec4<f32>(0.0);
-    out.normal = vec4<f32>(0.0);
-    return out;
 }
 
 @fragment

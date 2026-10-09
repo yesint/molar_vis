@@ -836,6 +836,7 @@ impl App {
                         app.view_dirty,
                         rs,
                         gray_active,
+            false,
                     );
                     app.renderer.set_edit_active(gray_active);
                     let aspect = w as f32 / h as f32;
@@ -883,6 +884,7 @@ impl App {
                         app.view_dirty,
                         rs,
                         gray_active,
+            false,
                     );
                     app.renderer.prepare_raytrace(
                         rs,

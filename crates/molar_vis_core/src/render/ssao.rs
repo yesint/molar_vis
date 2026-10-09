@@ -109,9 +109,19 @@ pub fn build_pipeline(
     color_format: wgpu::TextureFormat,
     bgl: &wgpu::BindGroupLayout,
 ) -> wgpu::RenderPipeline {
+    build_pipeline_with_source(device, color_format, bgl,
+        &super::lit_shader_source(include_str!("shaders/ssao.wgsl")))
+}
+
+pub(super) fn build_pipeline_with_source(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    bgl: &wgpu::BindGroupLayout,
+    source: &str,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ssao-shader"),
-        source: wgpu::ShaderSource::Wgsl(super::lit_shader_source(include_str!("shaders/ssao.wgsl")).into()),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("ssao-layout"),

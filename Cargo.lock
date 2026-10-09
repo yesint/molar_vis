@@ -2255,6 +2255,7 @@ dependencies = [
  "molar",
  "molar_ff",
  "pollster",
+ "rayon",
  "rfd",
  "rhai",
  "serde",

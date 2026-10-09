@@ -115,7 +115,12 @@ pub fn build(
         ribbon_thickness,
         bevel_height,
     };
+    build_residues(&residues, &shape, pbox, cg, false)
+}
+
+fn build_residues(residues: &[Residue], shape: &Shape, pbox: Option<&PeriodicBox>, cg: bool, parallel: bool) -> MeshData {
     let mut mesh = MeshData::default();
+    let mut runs = Vec::new();
 
     // Split into runs of consecutive, same-chain residues (break on chain change
     // or a gap in resindex — i.e. a chain break / missing residues) **and on a
@@ -133,6 +138,10 @@ pub fn build(
         {
             end += 1;
         }
+        runs.push((start, end));
+        start = end;
+    }
+    let build_one = |start: usize, end: usize, mesh: &mut MeshData| {
         // The chain continues across this boundary (only a PBC jump split it) iff
         // the neighbour residue is the contiguous next/prev one but wrapped.
         let pbc_break = |i: usize, j: usize| {
@@ -157,10 +166,105 @@ pub fn build(
             run_vec.push(ghost_of(&residues[end], residues[end - 1].ca, pbox));
             ext_hi = 1;
         }
-        build_run(&run_vec, &shape, ext_lo, ext_hi, pbox, cg, &mut mesh);
-        start = end;
+        build_run(&run_vec, shape, ext_lo, ext_hi, pbox, cg, mesh);
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if parallel && residues.len() >= 1024 && runs.len() > 1 {
+        use rayon::prelude::*;
+        let parts: Vec<_> = runs.par_iter().map(|&(start, end)| {
+            let mut part = MeshData::default();
+            build_one(start, end, &mut part);
+            part
+        }).collect();
+        for mut part in parts {
+            let base = mesh.vertices.len() as u32;
+            mesh.vertices.append(&mut part.vertices);
+            mesh.vert_res.append(&mut part.vert_res);
+            mesh.vert_atom.append(&mut part.vert_atom);
+            mesh.indices.extend(part.indices.into_iter().map(|i| i + base));
+        }
+        return mesh;
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = parallel;
+    for (start, end) in runs { build_one(start, end, &mut mesh); }
     mesh
+}
+
+struct CachedResidue {
+    trace: usize,
+    orientation: Option<usize>,
+    color: u32,
+    class: SsClass,
+    chain: char,
+    resindex: usize,
+}
+pub(crate) struct Cache {
+    residues: Vec<CachedResidue>,
+    shape: Shape,
+    cg: bool,
+    material: crate::material::Material,
+}
+impl Cache {
+    pub(crate) fn new(
+        bound: &(impl ParticleIterProvider + AtomProvider), n_atoms: usize,
+        params: &super::RepParams, color: crate::color::ColorSpec,
+        material: crate::material::Material, ss: Option<&SsMap>,
+    ) -> Option<Self> {
+        let super::RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } = *params else { return None; };
+        let ss = ss.expect("ss computed for cartoon");
+        let colors = Colorizer::new(color, bound, n_atoms, Some(ss));
+        let mut by_res = BTreeMap::new();
+        let mut cg = false;
+        for p in bound.iter_particle() {
+            let entry = by_res.entry(p.atom.get_resindex()).or_insert((None, None, p.atom.get_chain()));
+            match p.atom.get_name() {
+                "CA" | "BB" => {
+                    cg |= p.atom.get_name() == "BB";
+                    entry.0 = Some((p.id, colors.color(p.atom, p.id)));
+                }
+                "O" | "OT1" | "OXT" | "SC1" if entry.1.is_none() => entry.1 = Some(p.id),
+                _ => (),
+            }
+        }
+        let residues = by_res.into_iter().filter_map(|(resindex, (trace, orientation, chain))| {
+            trace.map(|(trace, color)| CachedResidue { trace, orientation, chain, resindex, color, class: ss.class(resindex) })
+        }).collect();
+        Some(Self { residues, shape: Shape { coil_radius, ribbon_width, ribbon_thickness, bevel_height }, cg, material })
+    }
+
+    pub(crate) fn build(&self, state: &State, dashed: bool) -> super::GeometryData {
+        self.snapshot(state, dashed).build()
+    }
+    pub(crate) fn snapshot(&self, state: &State, dashed: bool) -> Input {
+        let residues: Vec<_> = self.residues.iter().map(|r| Residue {
+            ca: v3(&state.coords[r.trace]), o: r.orientation.map(|id| v3(&state.coords[id])),
+            color: r.color, class: r.class, chain: r.chain, resindex: r.resindex, trace: r.trace as u32,
+        }).collect();
+        let pbox = if dashed {
+            state.pbox.as_ref().filter(|b| {
+                let e = b.get_box_extents(); e.x.min(e.y).min(e.z) >= super::MIN_USABLE_BOX_NM
+            })
+        } else { None };
+        Input { residues, shape: self.shape, pbox: pbox.cloned(), cg: self.cg, material: self.material }
+    }
+}
+
+pub(crate) struct Input {
+    residues: Vec<Residue>, shape: Shape, pbox: Option<PeriodicBox>, cg: bool,
+    material: crate::material::Material,
+}
+impl Input {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn residue_count(&self) -> usize { self.residues.len() }
+    pub(crate) fn build(self) -> super::GeometryData {
+        let _timing = crate::performance::span("cartoon-cache-build");
+        let mut geom = super::GeometryData {
+            mesh: build_residues(&self.residues, &self.shape, self.pbox.as_ref(), self.cg, true), ..Default::default()
+        };
+        super::stamp_material(&mut geom, self.material);
+        geom
+    }
 }
 
 /// A spline control point placed at `neighbour`'s nearest periodic image to
@@ -191,6 +295,7 @@ fn is_pbc_jump(prev: Vector3f, next: Vector3f, pbox: Option<&PeriodicBox>) -> bo
 }
 
 /// Cross-section dimensions per DSSP class.
+#[derive(Clone, Copy)]
 struct Shape {
     coil_radius: f32,
     ribbon_width: f32,
@@ -1173,6 +1278,90 @@ fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_mesh_equal(a: &MeshData, b: &MeshData) {
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&a.vertices), bytemuck::cast_slice::<_,u8>(&b.vertices));
+        assert_eq!(a.indices, b.indices);
+        assert_eq!(a.vert_res, b.vert_res);
+        assert_eq!(a.vert_atom, b.vert_atom);
+    }
+
+    #[test]
+    #[ignore = "manual CPU cartoon cache benchmark"]
+    fn benchmark_cartoon_coordinate_cache() {
+        use std::{hint::black_box, time::Instant};
+        for file in ["2lao.pdb", "2lao_cg.pdb"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests").join(file);
+            let raw = crate::data::load(&path).unwrap();
+            let mut scene = crate::scene::Scene::default(); scene.add(raw, &crate::settings::RepDefaults::default());
+            let mol = &scene.molecules[0]; let sel = mol.data.select_all();
+            let bound = mol.data.bind_with_state(&sel, mol.render_state());
+            let ss = SsMap::compute(&bound, Default::default());
+            let params = super::super::RepParams::for_kind(super::super::RepKind::Cartoon);
+            let cache = Cache::new(&bound, mol.n_atoms, &params, crate::color::ColorMethod::Element.into(), crate::material::Material::Opaque, Some(&ss)).unwrap();
+            let mut old = Vec::new(); let mut new = Vec::new();
+            for _ in 0..6 {
+                let start = Instant::now();
+                for _ in 0..50 { black_box(super::super::build(&bound, mol.n_atoms, &mol.bonds, &params,
+                    crate::color::ColorMethod::Element.into(), crate::material::Material::Opaque, Some(&ss), false)); }
+                old.push(start.elapsed());
+                let start = Instant::now();
+                for _ in 0..50 { black_box(cache.build(mol.render_state(), false)); }
+                new.push(start.elapsed());
+            }
+            old.remove(0); new.remove(0); old.sort(); new.sort();
+            eprintln!("Cartoon {file}: old={:?}, cache={:?}, speedup={:.2}x", old[2], new[2], old[2].as_secs_f64()/new[2].as_secs_f64());
+        }
+    }
+
+    #[test]
+    fn cartoon_cache_matches_atomistic_and_martini_frames_and_colors() {
+        for file in ["2lao.pdb", "2lao_cg.pdb"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests").join(file);
+            let raw = crate::data::load(&path).unwrap();
+            let mut scene = crate::scene::Scene::default();
+            scene.add(raw, &crate::settings::RepDefaults::default());
+            let mol = &scene.molecules[0];
+            let sel = mol.data.select_all();
+            let bound = mol.data.bind_with_state(&sel, mol.render_state());
+            let ss = SsMap::compute(&bound, Default::default());
+            let params = super::super::RepParams::for_kind(super::super::RepKind::Cartoon);
+            for color in crate::color::ColorMethod::ALL {
+                let cache = Cache::new(&bound, mol.n_atoms, &params, color.into(), crate::material::Material::Transparent, Some(&ss)).unwrap();
+                for frame in 0..3 {
+                    let mut state = mol.render_state().clone();
+                    state.pbox = match frame {
+                        0 => None,
+                        1 => Some(PeriodicBox::from_vectors_angles(2.0, 2.0, 2.0, 90.0,90.0,90.0).unwrap()),
+                        _ => Some(PeriodicBox::from_vectors_angles(0.1,0.1,0.1,90.0,90.0,90.0).unwrap()),
+                    };
+                    for (i,p) in state.coords.iter_mut().enumerate() {
+                        p.x += (i as f32 * 0.17 + frame as f32).sin() * 0.03;
+                    }
+                    let moved = mol.data.bind_with_state(&sel, &state);
+                    let expected = super::super::build(&moved, mol.n_atoms, &mol.bonds, &params,
+                        color.into(), crate::material::Material::Transparent, Some(&ss), true);
+                    assert_mesh_equal(&cache.build(&state, true).mesh, &expected.mesh);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_cartoon_runs_preserve_connectivity_and_source_tags() {
+        let residues: Vec<_> = (0..1536).map(|i| Residue {
+            ca: Vector3f::new((i as f32 * 0.1).cos(), (i as f32 * 0.1).sin(), (i % 512) as f32 * 0.038),
+            o: (i % 4 != 0).then(|| Vector3f::new(0.2, 0.3, (i % 512) as f32 * 0.038)),
+            color: u32::MAX, class: if i % 100 < 40 { SsClass::Helix } else if i % 100 < 60 { SsClass::Sheet } else { SsClass::Coil },
+            chain: char::from_u32('A' as u32 + i as u32 / 512).unwrap(), resindex: i, trace: i as u32 * 3,
+        }).collect();
+        let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness:0.025, bevel_height:0.015 };
+        for cg in [false, true] {
+            let serial = build_residues(&residues, &shape, None, cg, false);
+            let parallel = build_residues(&residues, &shape, None, cg, true);
+            assert_mesh_equal(&parallel, &serial);
+        }
+    }
 
     #[test]
     fn ribbon_ridge_height_is_adjustable() {

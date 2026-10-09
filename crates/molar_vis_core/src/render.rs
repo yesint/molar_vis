@@ -9,6 +9,8 @@
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod appearance_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn test_gpu() -> RenderState { appearance_tests::gpu() }
 mod background;
 pub(crate) mod bond_profile;
 mod camera_uniform;
@@ -114,14 +116,17 @@ fn camera_binding_size() -> Option<std::num::NonZeroU64> {
 /// reject occluded fragments before the ray-cast + shading. Gated on the
 /// `SHADER_EARLY_DEPTH_TEST` device feature (native, Vulkan/GLES 3.1+) — when
 /// `enable` is false the source passes through unchanged (plain late-Z), so WebGL2/
-/// wasm and unsupported adapters keep working. Only `fs_main` is tagged: the OIT/
-/// glow/pick entries are untouched.
+/// wasm and unsupported adapters keep working. Opaque and shadow entries are
+/// tagged; OIT/glow/pick entries retain their original depth behavior.
 fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
     let src = lit_shader_source(src);
     if enable {
         std::borrow::Cow::Owned(src.replace(
             "@fragment\nfn fs_main",
             "@fragment @early_depth_test(greater_equal)\nfn fs_main",
+        ).replace(
+            "@fragment\nfn fs_shadow",
+            "@fragment @early_depth_test(greater_equal)\nfn fs_shadow",
         ))
     } else {
         std::borrow::Cow::Owned(src)
@@ -130,7 +135,7 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    format!("{}\n{}\n{}", envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"))
+    format!("{}\n{}\n{}\n{}", envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
 }
 
 /// (Re)create the camera bind group over `buf` with a dynamic-offset binding.
@@ -434,7 +439,7 @@ struct MeshBuffers {
     index_count: u32,
 }
 
-/// A molecule's GPU **pick** geometry before upload (see [`SceneRenderer::upload_pick`]):
+/// A molecule's GPU **pick** geometry before upload (see [`SceneRenderer::update_pick`]):
 /// sphere instances for the per-atom reps, and indexed id-stamped triangles for the mesh
 /// reps. Native only.
 #[cfg(not(target_arch = "wasm32"))]
@@ -473,6 +478,11 @@ fn upload_buf<T: bytemuck::Pod>(
     if data.is_empty() {
         return None;
     }
+    if crate::performance::enabled() {
+        crate::performance::counters(label, serde_json::json!({
+            "upload_bytes": std::mem::size_of_val(data), "buffer_allocations": 1,
+        }));
+    }
     let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
         contents: bytemuck::cast_slice(data),
@@ -486,8 +496,8 @@ fn upload_buf<T: bytemuck::Pod>(
 }
 
 /// Incrementally update an instance/vertex buffer for a coordinates-only change.
-/// If the element count is unchanged, write into the existing buffer (no
-/// reallocation); otherwise recreate it.
+/// Retain existing capacity when geometry shrinks; draw counts track only the
+/// active data. Empty geometry releases its buffer.
 fn update_buf<T: bytemuck::Pod>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -496,53 +506,68 @@ fn update_buf<T: bytemuck::Pod>(
     label: &str,
 ) {
     match slot {
-        Some(b) if b.count as usize == data.len() && !data.is_empty() => {
+        Some(b) if std::mem::size_of_val(data) as u64 <= b.buffer.size() && !data.is_empty() => {
+            if crate::performance::enabled() {
+                crate::performance::counters(label, serde_json::json!({
+                    "upload_bytes": std::mem::size_of_val(data), "buffer_allocations": 0,
+                    "capacity_bytes": b.buffer.size(),
+                }));
+            }
             queue.write_buffer(&b.buffer, 0, bytemuck::cast_slice(data));
+            b.count = data.len() as u32;
         }
         _ => *slot = upload_buf(device, data, label),
     }
 }
 
 fn upload_mesh(device: &wgpu::Device, mesh: &crate::geometry::MeshData) -> Option<MeshBuffers> {
-    if mesh.indices.is_empty() {
+    upload_indexed(device, &mesh.vertices, &mesh.indices)
+}
+
+fn upload_indexed<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    vertices: &[T],
+    indices: &[u32],
+) -> Option<MeshBuffers> {
+    if indices.is_empty() {
         return None;
     }
-    let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("mesh-verts"),
-        contents: bytemuck::cast_slice(&mesh.vertices),
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-    });
-    let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("mesh-indices"),
-        contents: bytemuck::cast_slice(&mesh.indices),
-        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-    });
     Some(MeshBuffers {
-        vertices,
-        indices,
-        vertex_count: mesh.vertices.len() as u32,
-        index_count: mesh.indices.len() as u32,
+        vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh-verts"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        }),
+        indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh-indices"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        }),
+        vertex_count: vertices.len() as u32,
+        index_count: indices.len() as u32,
     })
 }
 
-/// Incrementally update a cartoon mesh for a coordinates-only change. When the
-/// vertex and index counts are unchanged (same SS → same topology, only the
-/// spline positions moved), write the vertices in place; otherwise recreate.
-fn update_mesh(
+/// Retain capacity while updating both connectivity and active draw counts.
+fn update_indexed<T: bytemuck::Pod>(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     slot: &mut Option<MeshBuffers>,
-    mesh: &crate::geometry::MeshData,
+    vertices: &[T],
+    indices: &[u32],
 ) {
     match slot {
         Some(m)
-            if m.vertex_count as usize == mesh.vertices.len()
-                && m.index_count as usize == mesh.indices.len()
-                && !mesh.indices.is_empty() =>
+            if std::mem::size_of_val(vertices) as u64 <= m.vertices.size()
+                && std::mem::size_of_val(indices) as u64 <= m.indices.size()
+                && !indices.is_empty() =>
         {
-            queue.write_buffer(&m.vertices, 0, bytemuck::cast_slice(&mesh.vertices));
+            queue.write_buffer(&m.vertices, 0, bytemuck::cast_slice(vertices));
+            queue.write_buffer(&m.indices, 0, bytemuck::cast_slice(indices));
+            m.vertex_count = vertices.len() as u32;
+            m.index_count = indices.len() as u32;
         }
-        _ => *slot = upload_mesh(device, mesh),
+        _ => *slot = upload_indexed(device, vertices, indices),
     }
 }
 
@@ -590,6 +615,40 @@ fn build_composite_pipeline(
     })
 }
 
+/// Depth casters are central-image opaque geometry, exactly as drawn below.
+/// Untracked/direct uploads and pending edits always take the fresh-pass fallback.
+#[derive(Clone, PartialEq, Eq)]
+struct ShadowKey {
+    camera: Vec<u8>,
+    casters: Vec<(crate::scene::MolId, usize, u64)>,
+}
+
+impl ShadowKey {
+    fn new(scene: &Scene, camera: &CameraUniform) -> Option<Self> {
+        let mut casters = Vec::new();
+        for mol in &scene.molecules {
+            if !mol.visible {
+                continue;
+            }
+            for (index, rep) in mol.reps.iter().enumerate() {
+                if !rep.visible || rep.material.is_transparent() {
+                    continue;
+                }
+                if rep.geometry_revision == 0
+                    || (rep.cached_geometry(true).is_none() && rep.cached_geometry(false).is_none())
+                {
+                    return None;
+                }
+                casters.push((mol.id, index, rep.geometry_revision));
+            }
+        }
+        Some(Self {
+            camera: bytemuck::bytes_of(camera).to_vec(),
+            casters,
+        })
+    }
+}
+
 pub struct SceneRenderer {
     color_format: wgpu::TextureFormat,
     targets: Targets,
@@ -599,6 +658,9 @@ pub struct SceneRenderer {
     ssaa: u32,
     /// Cast-shadow depth-map resolution (square). From the program settings.
     shadow_res: u32,
+    shadow_key: Option<ShadowKey>,
+    #[cfg(test)]
+    shadow_draw_count: u64,
     /// Selection-glow color, set by the app from the active theme + viewport background
     /// ([`set_glow_color`](Self::set_glow_color)); rides the camera uniform into the glow shaders.
     glow_color: [f32; 4],
@@ -626,6 +688,8 @@ pub struct SceneRenderer {
     cylinder_pipeline: [wgpu::RenderPipeline; 3],
     line_pipeline: [wgpu::RenderPipeline; 3],
     mesh_pipeline: [wgpu::RenderPipeline; 3],
+    sphere_shadow_pipeline: wgpu::RenderPipeline,
+    cylinder_shadow_pipeline: wgpu::RenderPipeline,
     mesh_shadow_pipeline: wgpu::RenderPipeline,
     oit_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
@@ -638,18 +702,10 @@ pub struct SceneRenderer {
     /// depth texture isn't reliable there); the pass is then skipped.
     ssao_pipeline: Option<wgpu::RenderPipeline>,
     ssao_bind_group: wgpu::BindGroup,
-    /// Cast-shadow mapping (deferred): the scene is rendered from a key light into
-    /// `shadow_depth_view` (a fixed-resolution depth map; `shadow_color_view` is a
-    /// throwaway color target so the existing opaque pipelines can be reused for the
-    /// depth-only render), then the AO pass samples it with `shadow_sampler` (a
-    /// comparison sampler) to darken shadowed pixels. Gated to full WebGPU like SSAO.
+    /// Depth-only shadow map sampled by the deferred AO/shadow pass.
     shadow_depth_view: wgpu::TextureView,
-    shadow_color_view: wgpu::TextureView,
-    shadow_normal_view: wgpu::TextureView,
     shadow_sampler: wgpu::Sampler,
     _shadow_depth_tex: wgpu::Texture,
-    _shadow_color_tex: wgpu::Texture,
-    _shadow_normal_tex: wgpu::Texture,
     /// Fullscreen background-gradient pass (drawn first in the opaque pass when the
     /// background is a gradient; a solid background just uses the clear color).
     bg_buf: wgpu::Buffer,
@@ -746,6 +802,14 @@ fn make_pick_targets(
 impl SceneRenderer {
     pub fn new(rs: &RenderState, settings: &crate::settings::RenderingSettings) -> Self {
         let device = &rs.device;
+        if crate::performance::enabled() {
+            crate::performance::counters("adapter", serde_json::json!({
+                "adapter": format!("{:?}", rs.adapter.get_info()),
+                "features": format!("{:?}", device.features()),
+                "debug": cfg!(debug_assertions),
+                "threads": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            }));
+        }
         let color_format = rs.target_format;
         let settings = settings.sanitized();
         let ssaa = settings.ssaa;
@@ -853,8 +917,17 @@ impl SceneRenderer {
         let mesh_pipeline = triple(&|t, dw, dc, fs| {
             mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
         });
-        let mesh_shadow_pipeline = mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl,
-            &opaque_targets(color_format), true, wgpu::CompareFunction::Less, "fs_shadow");
+        let sphere_shadow_pipeline = sphere::build_pipeline(
+            device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), &[], true, less,
+            "fs_shadow", early_z,
+        );
+        let cylinder_shadow_pipeline = cylinder::build_pipeline(
+            device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), &[], true, less,
+            "fs_shadow", early_z,
+        );
+        let mesh_shadow_pipeline = mesh::build_pipeline(
+            device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow",
+        );
 
         // OIT resolve: a fullscreen pass that reads the accum + reveal targets
         // (bind group 0 here, *not* the camera) and blends the order-independent
@@ -915,9 +988,8 @@ impl SceneRenderer {
             mapped_at_creation: false,
         });
 
-        // Cast-shadow map: a fixed-resolution depth target rendered from the light,
-        // plus a throwaway color target (so the opaque pipelines, which output color,
-        // can be reused to fill it) and a comparison sampler for the PCF lookup.
+        // Cast-shadow map: depth-only rendering from the light, sampled later
+        // through a comparison sampler for the PCF lookup.
         let shadow_extent = wgpu::Extent3d {
             width: shadow_res,
             height: shadow_res,
@@ -933,32 +1005,8 @@ impl SceneRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let _shadow_color_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow-color-throwaway"),
-            size: shadow_extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: color_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let _shadow_normal_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow-normal-throwaway"),
-            size: shadow_extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: NORMAL_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
         let shadow_depth_view =
             _shadow_depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let shadow_color_view =
-            _shadow_color_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let shadow_normal_view =
-            _shadow_normal_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow-cmp-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -1007,6 +1055,9 @@ impl SceneRenderer {
             egui_texture,
             ssaa,
             shadow_res,
+            shadow_key: None,
+            #[cfg(test)]
+            shadow_draw_count: 0,
             // Overwritten from the theme before the first render; this is the dark-backdrop cyan.
             glow_color: [0.51, 0.84, 1.0, 1.0],
             edit_active: None,
@@ -1020,6 +1071,8 @@ impl SceneRenderer {
             cylinder_pipeline,
             line_pipeline,
             mesh_pipeline,
+            sphere_shadow_pipeline,
+            cylinder_shadow_pipeline,
             mesh_shadow_pipeline,
             oit_bgl,
             composite_pipeline,
@@ -1028,12 +1081,8 @@ impl SceneRenderer {
             ssao_pipeline,
             ssao_bind_group,
             shadow_depth_view,
-            shadow_color_view,
-            shadow_normal_view,
             shadow_sampler,
             _shadow_depth_tex,
-            _shadow_color_tex,
-            _shadow_normal_tex,
             bg_buf,
             bg_pipeline,
             bg_bind_group,
@@ -1075,6 +1124,7 @@ impl SceneRenderer {
         self.ssaa = settings.ssaa;
         if settings.shadow_res != self.shadow_res {
             self.shadow_res = settings.shadow_res;
+            self.shadow_key = None;
             let device = &rs.device;
             let extent = wgpu::Extent3d {
                 width: self.shadow_res,
@@ -1092,33 +1142,8 @@ impl SceneRenderer {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            let color_tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("shadow-color-throwaway"),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.color_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let normal_tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("shadow-normal-throwaway"),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: NORMAL_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
             self.shadow_depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.shadow_color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.shadow_normal_view =
-                normal_tex.create_view(&wgpu::TextureViewDescriptor::default());
             self._shadow_depth_tex = depth_tex;
-            self._shadow_color_tex = color_tex;
-            self._shadow_normal_tex = normal_tex;
             // The SSAO bind group references the (new) shadow depth view → rebuild.
             self.ssao_bind_group = make_ssao_bind_group(
                 device,
@@ -1171,6 +1196,7 @@ impl SceneRenderer {
         }
         let (px, py) = (px.min(size[0] - 1), py.min(size[1] - 1));
 
+        let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
         let mut encoder = rs
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pick") });
@@ -1195,11 +1221,13 @@ impl SceneRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("pick")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_bind_group, &[0]);
+            // Only this pixel is copied back; preserve the full viewport projection.
+            pass.set_scissor_rect(px, py, 1, 1);
             pass.set_pipeline(&self.pick_pipeline);
             for mol in &scene.molecules {
                 if !mol.visible {
@@ -1240,7 +1268,7 @@ impl SceneRenderer {
             },
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
-        rs.queue.submit(std::iter::once(encoder.finish()));
+        crate::performance::submit(rs, encoder, gpu_timing);
 
         // Kick off the async map; the callback flips `ready` when the GPU is done.
         // `poll_pick` (driven each frame) advances the device and collects it.
@@ -1297,6 +1325,7 @@ impl SceneRenderer {
 
     /// Build GPU buffers for one representation's geometry.
     pub fn upload(&self, rs: &RenderState, geom: &GeometryData) -> RepGpu {
+        let _timing = crate::performance::span("geometry-upload");
         let device = &rs.device;
         RepGpu {
             spheres: upload_buf(device, &geom.spheres, "spheres"),
@@ -1308,49 +1337,23 @@ impl SceneRenderer {
         }
     }
 
-    /// Upload a molecule's **pick** geometry: the per-atom sphere instances and the mesh
-    /// reps' id-stamped triangles (`PickVertex` in the mesh slot — drawn only by the pick
-    /// pass's mesh pipeline). Native only.
+    /// Reuse pick buffers on coordinate changes and shrinking selections.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn upload_pick(&self, rs: &RenderState, pick: &PickGeometry) -> RepGpu {
-        let device = &rs.device;
-        let mesh = (!pick.indices.is_empty()).then(|| {
-            let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("pick-mesh-verts"),
-                contents: bytemuck::cast_slice(&pick.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("pick-mesh-indices"),
-                contents: bytemuck::cast_slice(&pick.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            MeshBuffers {
-                vertices,
-                indices,
-                vertex_count: pick.vertices.len() as u32,
-                index_count: pick.indices.len() as u32,
-            }
-        });
-        RepGpu {
-            spheres: upload_buf(device, &pick.spheres, "pick-spheres"),
-            cylinders: None,
-            lines: None,
-            mesh,
-            envelope: None,
-        }
+    pub fn update_pick(&self, rs: &RenderState, gpu: &mut RepGpu, pick: &PickGeometry) {
+        update_buf(&rs.device, &rs.queue, &mut gpu.spheres, &pick.spheres, "pick-spheres");
+        update_indexed(&rs.device, &rs.queue, &mut gpu.mesh, &pick.vertices, &pick.indices);
     }
 
     /// Incrementally update a representation's existing GPU buffers from new
-    /// geometry (used for coordinate-only trajectory frame changes). Buffers whose
-    /// element counts are unchanged are written in place via `queue.write_buffer`
-    /// (no reallocation); any whose size changed are recreated.
+    /// geometry. Buffers with sufficient capacity are written in place; growth
+    /// allocates replacement buffers, and empty geometry releases them.
     pub fn update(&self, rs: &RenderState, gpu: &mut RepGpu, geom: &GeometryData) {
+        let _timing = crate::performance::span("geometry-update");
         let (device, queue) = (&rs.device, &rs.queue);
         update_buf(device, queue, &mut gpu.spheres, &geom.spheres, "spheres");
         update_buf(device, queue, &mut gpu.cylinders, &geom.cylinders, "cylinders");
         update_buf(device, queue, &mut gpu.lines, &geom.lines, "lines");
-        update_mesh(device, queue, &mut gpu.mesh, &geom.mesh);
+        update_indexed(device, queue, &mut gpu.mesh, &geom.mesh.vertices, &geom.mesh.indices);
         if let Some(layout) = self.envelope_bgl.as_ref().filter(|_| envelope::needed(geom) && envelope::fits(device, geom)) {
             match &mut gpu.envelope {
                 Some(envelope) => envelope.update(device, queue, layout, geom),
@@ -1385,6 +1388,24 @@ impl SceneRenderer {
             (size_px[0] * self.ssaa).clamp(1, max_dim),
             (size_px[1] * self.ssaa).clamp(1, max_dim),
         ];
+        let _timing = crate::performance::span("raster-submit");
+        if crate::performance::enabled() {
+            let mut spheres = 0u64;
+            let mut cylinders = 0u64;
+            let mut triangles = 0u64;
+            for rep in scene.molecules.iter().filter(|m| m.visible)
+                .flat_map(|m| m.reps.iter()).filter(|r| r.visible)
+            {
+                spheres += rep.gpu.spheres.as_ref().map_or(0, |b| b.count as u64);
+                cylinders += rep.gpu.cylinders.as_ref().map_or(0, |b| b.count as u64);
+                triangles += rep.gpu.mesh.as_ref().map_or(0, |m| m.index_count as u64 / 3);
+            }
+            crate::performance::counters("raster", serde_json::json!({
+                "viewport": size_px, "target": render_size, "ssaa": self.ssaa,
+                "ao": ao, "shadow": shadow, "spheres": spheres,
+                "cylinders": cylinders, "triangles": triangles,
+            }));
+        }
         if render_size != self.targets.size {
             self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
             // The SSAO bind group references the (new) depth view → recreate it.
@@ -1511,6 +1532,12 @@ impl SceneRenderer {
         };
 
 
+        let shadow_key = shadow_on.then(|| ShadowKey::new(scene, &cameras[shadow_light_idx as usize])).flatten();
+        let reuse_shadow = shadow_key.is_some() && shadow_key == self.shadow_key;
+        if crate::performance::enabled() && shadow_on {
+            crate::performance::counters("shadow-cache", serde_json::json!({"reused": reuse_shadow}));
+        }
+
         // Grow the dynamic camera buffer if needed, then upload all entries
         // (each padded to CAMERA_STRIDE so dynamic offsets stay aligned).
         if cameras.len() as u32 > self.camera_capacity {
@@ -1544,38 +1571,22 @@ impl SceneRenderer {
         });
         let use_oit = has_transparent && self.oit_enabled;
 
+        let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
         let mut encoder = rs
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("scene-encoder"),
             });
 
-        // Pass 0 — cast-shadow map: render opaque geometry from the light into the
-        // shadow depth target (front-most wins). The throwaway color target lets us
-        // reuse the existing opaque pipelines, so no depth-only variants are needed.
-        if shadow_on {
+        // Pass 0 — depth-only shadow map. Keep the same analytic intersections
+        // and mesh exit-face rule without allocating or writing color targets.
+        if shadow_on && !reuse_shadow {
+            #[cfg(test)]
+            { self.shadow_draw_count += 1; }
+            self.shadow_key = shadow_key;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-pass"),
-                color_attachments: &[
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &self.shadow_color_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Discard,
-                        },
-                    }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &self.shadow_normal_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Discard,
-                        },
-                    }),
-                ],
+                color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.shadow_depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -1584,7 +1595,7 @@ impl SceneRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("shadow-pass")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1628,7 +1639,7 @@ impl SceneRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("opaque-pass")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1679,7 +1690,7 @@ impl SceneRenderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("ssao-pass")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1724,7 +1735,7 @@ impl SceneRenderer {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("oit-pass")),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -1745,7 +1756,7 @@ impl SceneRenderer {
                         },
                     })],
                     depth_stencil_attachment: None,
-                    timestamp_writes: None,
+                    timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("oit-composite-pass")),
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -1782,7 +1793,7 @@ impl SceneRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("glow-pass")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1820,14 +1831,14 @@ impl SceneRenderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("hover-detail-pass")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             self.draw_hover_detail(&mut pass, scene);
         }
 
-        rs.queue.submit(std::iter::once(encoder.finish()));
+        crate::performance::submit(rs, encoder, gpu_timing);
     }
 
     /// Render the scene at `out_w × out_h` (× SSAA internally) into a throwaway target
@@ -2034,8 +2045,7 @@ impl SceneRenderer {
                 proj: camera.proj(w / h),
                 viewport_h: h,
             };
-            let rt_scene = raytrace::RtScene::gather(scene, view, dashed_pbc);
-            rt.upload(rs, &rt_scene);
+            rt.prepare(rs, scene, view, dashed_pbc);
         }
     }
 
@@ -2276,7 +2286,7 @@ impl SceneRenderer {
 
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /
     /// mesh once, from the light camera (`light_idx`), into the shadow depth map.
-    /// Impostors reuse the opaque pipelines; closed meshes use smooth-normal exit
+    /// Depth-only impostors keep analytic depth; closed meshes use smooth-normal exit
     /// faces to avoid self-shadow acne. Lines and the box wireframe don't cast
     /// (too thin to read as shadows). Transparent reps are skipped.
     fn draw_shadow_casters(&self, pass: &mut wgpu::RenderPass, scene: &Scene, light_idx: u32) {
@@ -2292,12 +2302,12 @@ impl SceneRenderer {
                     continue;
                 }
                 if let Some(s) = &rep.gpu.spheres {
-                    pass.set_pipeline(&self.sphere_pipeline[0]);
+                    pass.set_pipeline(&self.sphere_shadow_pipeline);
                     pass.set_vertex_buffer(0, s.buffer.slice(..));
                     pass.draw(0..4, 0..s.count);
                 }
                 if let Some(c) = &rep.gpu.cylinders {
-                    pass.set_pipeline(&self.cylinder_pipeline[0]);
+                    pass.set_pipeline(&self.cylinder_shadow_pipeline);
                     pass.set_vertex_buffer(0, c.buffer.slice(..));
                     pass.draw(0..4, 0..c.count);
                 }

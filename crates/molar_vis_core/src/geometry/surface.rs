@@ -55,21 +55,37 @@ pub fn build<S>(
 where
     S: ParticleIterProvider + PosProvider + AtomProvider,
 {
+    Input::new(bound, colorizer, probe, quality, smoothing).build(|| false)
+}
+
+/// Owned numeric input: no borrowed molecule/provider crosses the worker boundary.
+pub(crate) struct Input {
+    centers: Vec<Vec3>, radii: Vec<f32>, colors: Vec<u32>, ids: Vec<u32>,
+    probe: f32, quality: u32, smoothing: u32,
+}
+impl Input {
+    pub(crate) fn new(bound: &impl ParticleIterProvider, colorizer: &Colorizer,
+        probe: f32, quality: u32, smoothing: u32) -> Self {
     // Gather atom spheres (SAS radius = vdW + probe) + per-atom color.
     let mut centers: Vec<Vec3> = Vec::new();
     let mut radii: Vec<f32> = Vec::new();
     let mut colors: Vec<u32> = Vec::new();
     // Global atom index of each sphere (the `nearest` voxel labels are local indices).
     let mut ids: Vec<u32> = Vec::new();
-    let mut rmax = 0.0_f32;
     for p in bound.iter_particle() {
         centers.push(Vec3::new(p.pos.x, p.pos.y, p.pos.z));
         ids.push(p.id as u32);
         let r = p.atom.vdw() + probe;
         radii.push(r);
-        rmax = rmax.max(r);
         colors.push(colorizer.color(p.atom, p.id));
     }
+        Self { centers, radii, colors, ids, probe, quality, smoothing }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn atom_count(&self) -> usize { self.centers.len() }
+    pub(crate) fn build(self, cancelled: impl Fn() -> bool) -> MeshData {
+        let Self { centers, radii, colors, ids, probe, quality, smoothing } = self;
+        if cancelled() { return MeshData::default(); }
     if centers.is_empty() {
         return MeshData::default();
     }
@@ -116,6 +132,7 @@ where
     let mut nearest = vec![u32::MAX; n];
     let mut best_d2 = vec![f32::INFINITY; n];
     for (a, (&c, &r)) in centers.iter().zip(&radii).enumerate() {
+        if a % 256 == 0 && cancelled() { return MeshData::default(); }
         // Voxel range covering this atom's SAS sphere.
         let vlo = ((c - Vec3::splat(r) - lo) / h).floor();
         let vhi = ((c + Vec3::splat(r) - lo) / h).ceil();
@@ -145,19 +162,23 @@ where
         }
     }
 
+    drop(best_d2);
+
     // --- Pass 2: exact EDT from each inside voxel to the nearest outside voxel. ---
     // Seed: 0 at outside (feature) voxels, +inf at inside; the separable transform
     // gives distance to solvent voxel centers. Subtract the half-cell boundary offset
     // and probe radius to form the SES level set.
     let big = (nx * nx + ny * ny + nz * nz) as f32 + 1.0;
     let mut g: Vec<f32> = (0..n).map(|i| if inside[i] { big } else { 0.0 }).collect();
+    drop(inside);
+    if cancelled() { return MeshData::default(); }
     edt_3d(&mut g, nx, ny, nz);
     // The EDT measures to solvent voxel centers, half a cell beyond the boundary.
     // Correct that offset; retain negative values outside even for a zero-radius probe.
-    let mut field: Vec<f32> = g
-        .iter()
-        .map(|&d2| d2.sqrt() * h - 0.5 * h - probe)
-        .collect();
+    let mut field = g;
+    for d2 in &mut field {
+        *d2 = d2.sqrt() * h - 0.5 * h - probe;
+    }
 
     // Light separable [1,2,1] blur of the distance field: the binary occupancy makes
     // the EDT (and its gradient = our normals) stair-step at voxel resolution, which
@@ -166,10 +187,12 @@ where
     // smooth, at O(voxels) cost. The slider adds passes to the baseline reconstruction.
     // One reconstruction pass removes binary-occupancy stair steps even at smoothing 0.
     // The control adds further filtering, rather than relying on shading to hide them.
+    if cancelled() { return MeshData::default(); }
     smooth_field(&mut field, dims, 1 + smoothing as usize);
 
     // --- Pass 3: Surface Nets isosurface at field = 0 (vertices seeded with the
     // nearest-atom color). ---
+    if cancelled() { return MeshData::default(); }
     let mut mesh = surface_nets(&field, &nearest, &colors, &ids, dims, lo, h);
 
     // Laplacian-smooth the mesh: the nearest-atom coloring is patchy (Voronoi
@@ -181,10 +204,13 @@ where
     } else {
         ((0.2 / h * (0.2 / h)).round() as usize).clamp(4, 64)
     };
+    if cancelled() { return MeshData::default(); }
     relax_on_field(&mut mesh, &field, dims, lo, h);
     laplacian_smooth(&mut mesh, color_iters);
+    if cancelled() { return MeshData::default(); }
     refine_on_field(&mut mesh, &field, dims, lo, h, quality);
     mesh
+    }
 }
 
 /// Blend colors along mesh edges so nearest-atom patches become continuous gradients
@@ -221,9 +247,19 @@ fn smooth_attr(attr: &mut [[f32; 3]], indices: &[u32], iters: usize) {
     let n = attr.len();
     let mut sum = vec![[0.0f32; 3]; n];
     let mut cnt = vec![0u32; n];
+    // Connectivity is fixed throughout the color filter. Count the two
+    // triangle-mates once per vertex incidence, retaining duplicate weights.
+    for tri in indices.chunks_exact(3) {
+        for &vertex in tri {
+            cnt[vertex as usize] += 2;
+        }
+    }
+    let inv_count: Vec<f32> = cnt
+        .into_iter()
+        .map(|n| if n == 0 { 0.0 } else { 1.0 / n as f32 })
+        .collect();
     for _ in 0..iters {
         sum.iter_mut().for_each(|s| *s = [0.0; 3]);
-        cnt.iter_mut().for_each(|c| *c = 0);
         for tri in indices.chunks_exact(3) {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             // Each vertex accumulates its two triangle-mates.
@@ -231,12 +267,11 @@ fn smooth_attr(attr: &mut [[f32; 3]], indices: &[u32], iters: usize) {
                 sum[i][0] += attr[j][0];
                 sum[i][1] += attr[j][1];
                 sum[i][2] += attr[j][2];
-                cnt[i] += 1;
             }
         }
         for v in 0..n {
-            if cnt[v] > 0 {
-                let inv = 1.0 / cnt[v] as f32;
+            if inv_count[v] > 0.0 {
+                let inv = inv_count[v];
                 attr[v] = [sum[v][0] * inv, sum[v][1] * inv, sum[v][2] * inv];
             }
         }
@@ -247,6 +282,10 @@ fn smooth_attr(attr: &mut [[f32; 3]], indices: &[u32], iters: usize) {
 /// axis (edges clamped). Cheap (O(voxels·passes)); smooths the distance field so the
 /// extracted surface and its gradient normals lose the voxel-staircase ruggedness.
 fn smooth_field(field: &mut [f32], dims: [usize; 3], passes: usize) {
+    smooth_field_impl(field, dims, passes, true);
+}
+fn smooth_field_impl(field: &mut [f32], dims: [usize; 3], passes: usize, allow_parallel: bool) {
+    let _timing = crate::performance::span("surface-field-smoothing");
     if passes == 0 {
         return;
     }
@@ -259,6 +298,30 @@ fn smooth_field(field: &mut [f32], dims: [usize; 3], passes: usize) {
         let c = line[(i + 1).min(len - 1)];
         (a + 2.0 * b + c) * 0.25
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    if allow_parallel && use_parallel_z(field.len(), nx * ny, nz) {
+        use rayon::prelude::*;
+        let mut transposed = vec![0.0; field.len()];
+        for _ in 0..passes {
+            field.par_chunks_mut(nx * ny).for_each_init(|| vec![0.0; nx.max(ny)], |line, plane| {
+                for row in plane.chunks_mut(nx) {
+                    line[..nx].copy_from_slice(row);
+                    for x in 0..nx { row[x] = blur(line, x, nx); }
+                }
+                for x in 0..nx {
+                    for y in 0..ny { line[y] = plane[y * nx + x]; }
+                    for y in 0..ny { plane[y * nx + x] = blur(line, y, ny); }
+                }
+            });
+            parallel_z_lines(field, nx * ny, nz, &mut transposed, |row, scratch| {
+                scratch.line[..nz].copy_from_slice(row);
+                for z in 0..nz { row[z] = blur(&scratch.line, z, nz); }
+            });
+        }
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = allow_parallel;
     for _ in 0..passes {
         for z in 0..nz {
             for y in 0..ny {
@@ -298,41 +361,128 @@ fn smooth_field(field: &mut [f32], dims: [usize; 3], passes: usize) {
 /// then z. Input `g` holds the seed (0 at features, large elsewhere); output holds
 /// the squared distance (in voxel units) to the nearest feature.
 fn edt_3d(g: &mut [f32], nx: usize, ny: usize, nz: usize) {
-    let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
-    let mut line = vec![0.0f32; nx.max(ny).max(nz)];
-    // Along x.
-    for z in 0..nz {
-        for y in 0..ny {
-            for x in 0..nx {
-                line[x] = g[idx(x, y, z)];
-            }
-            let d = dt_1d(&line[..nx]);
-            for x in 0..nx {
-                g[idx(x, y, z)] = d[x];
-            }
+    edt_3d_impl(g, nx, ny, nz, true);
+}
+fn edt_3d_impl(g: &mut [f32], nx: usize, ny: usize, nz: usize, allow_parallel_z: bool) {
+    let _timing = crate::performance::span("surface-edt");
+    let plane_len = nx * ny;
+    // X and Y transforms are independent between XY planes. Combining them per
+    // plane retains the arithmetic order along each line and improves locality.
+    #[cfg(not(target_arch = "wasm32"))]
+    let parallel = g.len() >= 262_144 && nz > 1;
+    #[cfg(target_arch = "wasm32")]
+    let parallel = false;
+    #[cfg(not(target_arch = "wasm32"))]
+    if parallel {
+        use rayon::prelude::*;
+        g.par_chunks_mut(plane_len).for_each_init(
+            || EdtScratch::new(nx.max(ny)),
+            |scratch, plane| scratch.xy(plane, nx, ny),
+        );
+    }
+    if !parallel {
+        let mut scratch = EdtScratch::new(nx.max(ny));
+        for plane in g.chunks_mut(plane_len) {
+            scratch.xy(plane, nx, ny);
         }
     }
-    // Along y.
-    for z in 0..nz {
-        for x in 0..nx {
-            for y in 0..ny {
-                line[y] = g[idx(x, y, z)];
-            }
-            let d = dt_1d(&line[..ny]);
-            for y in 0..ny {
-                g[idx(x, y, z)] = d[y];
-            }
+    #[cfg(not(target_arch = "wasm32"))]
+    if allow_parallel_z && use_parallel_z(g.len(), plane_len, nz) {
+        let mut transposed = vec![0.0; g.len()];
+        parallel_z_lines(g, plane_len, nz, &mut transposed, |line, scratch| {
+            scratch.line[..nz].copy_from_slice(line);
+            scratch.transform(nz);
+            line.copy_from_slice(&scratch.d[..nz]);
+        });
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = allow_parallel_z;
+    // Small grids retain the low-memory strided serial path.
+    let mut scratch = EdtScratch::new(nz);
+    for xy in 0..plane_len {
+        for z in 0..nz {
+            scratch.line[z] = g[xy + plane_len * z];
+        }
+        scratch.transform(nz);
+        for z in 0..nz {
+            g[xy + plane_len * z] = scratch.d[z];
         }
     }
-    // Along z.
-    for y in 0..ny {
-        for x in 0..nx {
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn use_parallel_z(voxels: usize, plane: usize, nz: usize) -> bool {
+    // One shared transpose volume, never one volume per worker. Cap extra scratch.
+    (1_048_576..=67_108_864).contains(&voxels) && plane >= 64 && nz >= 16
+        && rayon::current_num_threads() > 1
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parallel_z_lines(
+    grid: &mut [f32], plane_len: usize, nz: usize, transposed: &mut [f32],
+    transform: impl Fn(&mut [f32], &mut EdtScratch) + Sync,
+) {
+    use rayon::prelude::*;
+    // Gather in XY tiles, keeping each worker's transpose writes cache-local.
+    transposed.par_chunks_mut(nz * 64).enumerate().for_each_init(
+        || EdtScratch::new(nz),
+        |scratch, (tile, output)| {
+            let count = output.len() / nz;
             for z in 0..nz {
-                line[z] = g[idx(x, y, z)];
+                for xy in 0..count { output[xy * nz + z] = grid[tile * 64 + xy + z * plane_len]; }
             }
-            let d = dt_1d(&line[..nz]);
-            for z in 0..nz {
-                g[idx(x, y, z)] = d[z];
+            for line in output.chunks_mut(nz) { transform(line, scratch); }
+        },
+    );
+    // Each worker owns whole Z slabs; no overlapping mutable strided writes.
+    grid.par_chunks_mut(plane_len * 16).enumerate().for_each(|(slab, output)| {
+        let count = output.len() / plane_len;
+        for xy in 0..plane_len {
+            for z in 0..count { output[z * plane_len + xy] = transposed[xy * nz + slab * 16 + z]; }
+        }
+    });
+}
+
+struct EdtScratch {
+    line: Vec<f32>,
+    d: Vec<f32>,
+    v: Vec<usize>,
+    boundaries: Vec<f32>,
+}
+
+impl EdtScratch {
+    fn new(len: usize) -> Self {
+        Self {
+            line: vec![0.0; len],
+            d: vec![0.0; len],
+            v: vec![0; len],
+            boundaries: vec![0.0; len + 1],
+        }
+    }
+
+    fn transform(&mut self, len: usize) {
+        dt_1d(
+            &self.line[..len],
+            &mut self.d,
+            &mut self.v,
+            &mut self.boundaries,
+        );
+    }
+
+    fn xy(&mut self, plane: &mut [f32], nx: usize, ny: usize) {
+        for row in plane.chunks_mut(nx) {
+            self.line[..nx].copy_from_slice(row);
+            self.transform(nx);
+            row.copy_from_slice(&self.d[..nx]);
+        }
+        for x in 0..nx {
+            for y in 0..ny {
+                self.line[y] = plane[x + nx * y];
+            }
+            self.transform(ny);
+            for y in 0..ny {
+                plane[x + nx * y] = self.d[y];
             }
         }
     }
@@ -340,11 +490,8 @@ fn edt_3d(g: &mut [f32], nx: usize, ny: usize, nz: usize) {
 
 /// 1-D squared distance transform (lower envelope of parabolas), Felzenszwalb &
 /// Huttenlocher 2012.
-fn dt_1d(f: &[f32]) -> Vec<f32> {
+fn dt_1d(f: &[f32], d: &mut [f32], v: &mut [usize], z: &mut [f32]) {
     let n = f.len();
-    let mut d = vec![0.0f32; n];
-    let mut v = vec![0usize; n];
-    let mut z = vec![0.0f32; n + 1];
     let mut k: isize = 0;
     v[0] = 0;
     z[0] = f32::NEG_INFINITY;
@@ -375,7 +522,6 @@ fn dt_1d(f: &[f32]) -> Vec<f32> {
         let dq = qf - vk as f32;
         d[q] = dq * dq + f[vk];
     }
-    d
 }
 
 /// Naive Surface Nets: one vertex per cell straddling `field = 0`, placed at the
@@ -806,6 +952,112 @@ fn refine_quad(vertices: &[MeshVertex], [a, b, c, d]: [u32; 4], indices: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_filter_preserves_shared_edge_weights_and_isolated_vertices() {
+        let mut colors = [
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [9.0, 10.0, 11.0],
+        ];
+        smooth_attr(&mut colors, &[0, 1, 2, 0, 2, 3], 2);
+        // Shared-edge neighbors occur twice, in the original triangle order.
+        assert_eq!(
+            colors,
+            [
+                [2.0, 2.5, 3.0],
+                [3.0, 3.75, 4.5],
+                [3.0, 3.75, 4.5],
+                [3.0, 3.75, 4.5],
+                [9.0, 10.0, 11.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn tiled_z_transform_and_field_smoothing_match_serial_on_partial_tiles() {
+        // Neither the XY plane count nor the Z count is a multiple of a tile size.
+        let dims = [33usize, 37, 1000];
+        let count = dims.iter().product();
+        let mut seeds = vec![1e12; count];
+        for index in (0..count).step_by(7919) { seeds[index] = 0.0; }
+        let mut serial = seeds.clone();
+        edt_3d_impl(&mut serial, dims[0], dims[1], dims[2], false);
+        #[cfg(not(target_arch = "wasm32"))]
+        for threads in [2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let mut actual = seeds.clone();
+            pool.install(|| edt_3d_impl(&mut actual, dims[0], dims[1], dims[2], true));
+            assert!(actual.iter().zip(&serial).all(|(a,b)| a.to_bits() == b.to_bits()));
+            let mut expected = serial.clone();
+            smooth_field_impl(&mut expected, dims, 3, false);
+            pool.install(|| smooth_field_impl(&mut actual, dims, 3, true));
+            assert!(actual.iter().zip(&expected).all(|(a,b)| a.to_bits() == b.to_bits()));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual CPU surface grid benchmark"]
+    fn benchmark_parallel_z_and_field_smoothing() {
+        use std::{hint::black_box, time::Instant};
+        for size in [64usize, 128, 256] {
+            let dims = [size; 3];
+            let mut seed = vec![1e12; size * size * size];
+            for i in (0..seed.len()).step_by(7919) { seed[i] = 0.0; }
+            let mut old_dt = Vec::new(); let mut new_dt = Vec::new();
+            let mut old_smooth = Vec::new(); let mut new_smooth = Vec::new();
+            for _ in 0..6 {
+                let mut a = seed.clone(); let mut b = seed.clone();
+                let start = Instant::now(); edt_3d_impl(&mut a, size, size, size, false); old_dt.push(start.elapsed());
+                let start = Instant::now(); edt_3d_impl(&mut b, size, size, size, true); new_dt.push(start.elapsed());
+                assert!(a.iter().zip(&b).all(|(a,b)| a.to_bits() == b.to_bits()));
+                let start = Instant::now(); smooth_field_impl(&mut a, dims, 3, false); old_smooth.push(start.elapsed());
+                let start = Instant::now(); smooth_field_impl(&mut b, dims, 3, true); new_smooth.push(start.elapsed());
+                assert!(a.iter().zip(&b).all(|(a,b)| a.to_bits() == b.to_bits()));
+                black_box((a,b));
+            }
+            for (label, mut old, mut new) in [("EDT", old_dt, new_dt), ("smooth", old_smooth, new_smooth)] {
+                old.remove(0); new.remove(0); old.sort(); new.sort();
+                eprintln!("{label} {size}³: old={:?}, new={:?}, speedup={:.2}x", old[2], new[2], old[2].as_secs_f64()/new[2].as_secs_f64());
+            }
+        }
+    }
+
+    #[test]
+    fn distance_transform_matches_nearest_seed_on_rectangular_grids() {
+        // The large case exercises native parallel planes; short/unequal axes
+        // exercise scratch reuse with different transform lengths.
+        for [nx, ny, nz] in [[1, 1, 1], [2, 7, 3], [9, 2, 5], [65, 67, 63]] {
+            let seeds = [
+                [0, 0, 0],
+                [nx - 1, ny - 1, nz - 1],
+                [nx / 2, ny / 3, nz / 2],
+            ];
+            let big = (nx * nx + ny * ny + nz * nz) as f32 + 1.0;
+            let mut grid = vec![big; nx * ny * nz];
+            for [x, y, z] in seeds {
+                grid[x + nx * (y + ny * z)] = 0.0;
+            }
+            edt_3d(&mut grid, nx, ny, nz);
+            for z in 0..nz {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        let expected = seeds
+                            .iter()
+                            .map(|&[sx, sy, sz]| {
+                                (x.abs_diff(sx).pow(2)
+                                    + y.abs_diff(sy).pow(2)
+                                    + z.abs_diff(sz).pow(2)) as f32
+                            })
+                            .fold(f32::INFINITY, f32::min);
+                        assert_eq!(grid[x + nx * (y + ny * z)], expected);
+                    }
+                }
+            }
+        }
+    }
 
     fn plane() -> (Vec<f32>, [usize; 3], Vec3) {
         let dims = [5, 5, 5];

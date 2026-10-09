@@ -655,6 +655,7 @@ impl App {
             self.view_dirty,
             &rs,
             gray_active,
+            false,
         );
         self.renderer.set_edit_active(gray_active);
 

@@ -93,11 +93,10 @@
 - **Cast shadows (real-time shadow mapping, deferred)** — VMD's ray-traced shadows, but real-time.
   An extra **shadow pass** (pass 0, before opaque, only when `Camera::shadow.enabled`) renders the
   opaque geometry from a **key light** into a fixed `2048²` `Depth32Float` shadow map
-  (`shadow_depth_view`); a throwaway color target (`shadow_color_view`) lets us **reuse the existing
-  opaque pipelines** for the depth fill (impostors compute correct light-space analytic `frag_depth`
-  because the light camera is just another `CameraUniform` entry — ortho, `perspective=false` — so
-  **no depth-only pipeline variants are needed**; `draw_shadow_casters` draws spheres/cylinders/mesh
-  only — lines/box don't cast). The light is directional (`SHADOW_LIGHT_DIR_VIEW`, a view-space
+  (`shadow_depth_view`). Dedicated depth-only pipelines preserve the impostors' analytic
+  `frag_depth` and the mesh exit-face rule without color or normal attachments. The light camera
+  is another `CameraUniform` entry (ortho, `perspective=false`); `draw_shadow_casters` draws
+  spheres/cylinders/mesh only — lines/box don't cast. The light is directional (`SHADOW_LIGHT_DIR_VIEW`, a view-space
   upper-right key off the view axis so shadows fall on camera-visible surfaces — a near-camera
   headlight would hide them); its **orthographic frustum is fit to the scene's bounding sphere**,
   recovered from `view` + `depth_range`. The shadow is then applied **deferred in the AO pass**: the
@@ -163,3 +162,67 @@
   of blockers still occlude. Inward shadow rays on a closed surface are classified before
   the numerical offset, preventing bias-dependent shadow-edge patches. Open cartoon meshes
   retain two-sided intersection behavior.
+
+- **Surface CPU execution** — the distance transform reuses line scratch buffers.
+  On native builds, grids of at least 262,144 voxels use Rayon to process independent
+  XY planes in parallel; each plane runs X then Y, and the Z pass follows after all
+  planes finish. Native Z transforms and field filtering use a shared transposed grid for
+  1,048,576–67,108,864 voxels (at least 64 XY entries and 16 Z layers). The extra scratch is
+  4 bytes per voxel, at most 256 MiB; no worker holds a full-grid copy. Small grids and
+  browser builds use serial Z/filter paths. The transform
+  preserves the arithmetic order within each line. The distance buffer is converted
+  into the surface field in place, and occupancy scratch is released before extraction.
+- **Rendering work reuse** — steady hover highlights do not request pulse animation.
+  GPU picking restricts rasterization to the requested pixel with a scissor rectangle.
+  Smoothed trajectory states are reused per window within each geometry/pick build,
+  with no cache retained across frames. Ray tracing caches both ping-pong bind groups
+  and invalidates them on scene-buffer or accumulator replacement. Same-size mesh
+  updates write both vertices and indices because equal counts do not imply unchanged
+  connectivity. Instance, mesh and pick buffers retain capacity when geometry shrinks,
+  update active draw counts, and release storage when geometry becomes empty. Box,
+  aromatic-ring and highlight updates use the same buffer reuse path. Surface color
+  smoothing computes its fixed neighbor weights once for all filter passes.
+
+- **CPU geometry caches** — VDW, Licorice, Balls+Sticks and Lines retain selected
+  atom IDs, colors, radii and compact bond connectivity between coordinate-only
+  updates. Structural rebuilds replace these inputs; dynamic selections and
+  per-frame secondary structure still take the full rebuild path. Each frame
+  recalculates periodic dashes, bond smoothing and positions from the displayed
+  (possibly smoothed) state. Cartoon caches ordered residue trace/orientation IDs, colors
+  and classification; current coordinates determine run boundaries and frames. Native cartoons
+  with at least 1,024 residues and multiple runs build runs in parallel and merge in original
+  order. Cartoon and Surface still rebuild mesh positions when coordinates change.
+  Ray tracing borrows clean raster geometry. Preparation keys include visible geometry revisions,
+  periodic images and boxes; camera inputs are included for lines, offset strands and boxes.
+  Unchanged independent scenes skip conversion, BVH preparation and upload. Changed coordinates
+  permit refits when type counts match, with full rebuilds after eight refits or a 1.5× SAH-cost
+  increase. BVH split evaluation uses prefix/suffix bin bounds; depth is capped at 31 for shader
+  stacks. Closest-hit traversal visits nearer children first with stable equal-hit rules.
+  Meshes share the existing pick/glow
+  cache; primitive styles retain one CPU instance copy. Dirty selections, geometry
+  or coordinates, a different dashed-PBC setting, and gray draw-mode geometry reject
+  reuse. Uncached and headless scenes retain the full-build fallback.
+
+- **Opt-in performance measurements** — `MOLAR_VIS_PROFILE=1` emits JSONL CPU timings,
+  scene/adapter metadata and GPU timestamp durations for render and compute passes. Native
+  device creation requests the timestamp feature only when profiling and supported. Query
+  results map asynchronously; at most four readbacks may be outstanding. Unsupported devices
+  retain CPU measurements without GPU queries; the browser path leaves profiling disabled.
+  `scripts/summarize_render_profile.py` reports median, p95 and ranges after warmup.
+
+- **Background geometry** — native static viewport rebuilds can run Surface (at least 256
+  atoms) and Cartoon (at least 1,024 residues) as owned numeric jobs in the existing Rayon
+  pool. At most two jobs are active; further work retries the current input instead of queuing
+  snapshots. Job ownership is tied to the representation. Dirty edits, replacement and removal
+  cancel/drop its old receiver before any result can be installed. Upload and scene mutation
+  stay on the UI thread. Previous complete meshes remain displayed until replacement is ready;
+  picking uses those mesh caches and progressive tracing waits. Captures, drawing, trajectory
+  playback and browsers keep synchronous geometry. Worker failure disables jobs for that rep.
+
+- **Exact shader and shadow reuse** — AO and soft-shadow disk offsets share a generated
+  constant table while retaining 128 samples. Smooth-bond marching caches unshifted cubic
+  constants per ray; normals, tolerances and the 192-step cap remain unchanged. An explicit
+  diagnostic solver entry point exposes iteration counts. Shadow-map reuse requires identical
+  light-camera uniform bytes and ordered visible opaque caster revisions. Unknown/dirty/pending
+  geometry falls back to redraw, and map replacement clears the key. Camera-relative lighting
+  is included in the key. The deferred shadow application still runs for the current view.

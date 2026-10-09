@@ -63,11 +63,10 @@ fn shadow_factor(p_view: vec3<f32>, normal_view: vec3<f32>) -> f32 {
     let texel = u.misc.z; // 1/shadow_res (PCF step), from the settings
     var lit = 0.0;
     let samples = select(128, 1, u.shadow_params.w <= 0.0);
+    let filter_width = texel * shadow_filter_width(u.shadow_params.w);
     for (var i = 0; i < samples; i = i + 1) {
-        let fi = f32(i) + 0.5;
-        let angle = fi * 2.3999632;
-        let o = vec2<f32>(cos(angle), sin(angle)) * sqrt(fi / f32(samples))
-            * texel * shadow_filter_width(u.shadow_params.w);
+        // Hard shadows have zero filter width; the disk sample is immaterial.
+        let o = ao_disk_offset(f32(i)) * filter_width;
         lit += textureSampleCompareLevel(shadow_map, shadow_samp, uv + o, z_ref + dot(depth_slope, o));
     }
     lit /= f32(samples);

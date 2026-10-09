@@ -42,6 +42,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # and keeps settings in memory, so it's native-only too.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.15"
+# Native geometry parallelism and bounded workers; browser builds retain serial paths.
+rayon = "1"
 directories = "5"
 # espaloma partial charges (the `Charge` coloring's [Compute charges] button). Native only:
 # it bundles a ~600 kB ONNX model and pulls `tract`, neither of which belongs in the wasm

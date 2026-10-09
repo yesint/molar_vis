@@ -25,6 +25,8 @@ use crate::scene::Scene;
 const LEAF_SIZE: usize = 4;
 /// SAH bin count (longest-axis binning).
 const BINS: usize = 12;
+/// Root depth 0; depth 31 leaves fit all 32-entry shader DFS stacks.
+const MAX_BVH_DEPTH: usize = 31;
 
 // Primitive type tags, packed into the top 2 bits of each `prim_indices` entry.
 const TAG_SHIFT: u32 = 30;
@@ -153,6 +155,7 @@ impl RtScene {
             .iter()
             .map(|t| triangle_aabb(&s.mesh_verts, t.i[0], t.i[1], t.i[2]))
             .collect();
+        let _timing = crate::performance::span("rt-bvh");
         let (nodes, order) = build_bvh(&aabbs);
         s.nodes = nodes;
         s.prim_indices = order
@@ -167,25 +170,78 @@ impl RtScene {
         self.prim_indices.is_empty()
     }
 
-    /// Gather all visible primitives from the scene (re-running `geometry::build` per
-    /// visible representation, exactly as `rebuild_dirty` does — same displayed frame /
-    /// smoothing) and build the BVH. `dashed_pbc` matches the live render's setting.
+    /// Gather visible primitives, reusing clean raster CPU geometry when available,
+    /// and build the BVH. Dirty or uncached reps use the displayed frame / smoothing.
+    /// `dashed_pbc` matches the live render's setting.
+    #[cfg(test)]
     pub fn gather(scene: &Scene, view: RtView, dashed_pbc: bool) -> Self {
         let mut s = Self::default();
         let mut aabbs: Vec<Aabb> = Vec::new();
         let mut tags: Vec<u32> = Vec::new();
-        s.collect(scene, view, dashed_pbc, &mut aabbs, &mut tags);
+        {
+            let _timing = crate::performance::span("rt-collect");
+            s.collect(scene, view, dashed_pbc, &mut aabbs, &mut tags);
+        }
         if aabbs.is_empty() {
             return s;
         }
+        let _timing = crate::performance::span("rt-bvh");
         let (nodes, order) = build_bvh(&aabbs);
         s.nodes = nodes;
         s.prim_indices = order.into_iter().map(|i| tags[i as usize]).collect();
         s
     }
 
-    /// Re-run `geometry::build` for every visible rep and append its spheres, cylinders,
-    /// and mesh triangles, accumulating each primitive's AABB + type-tag.
+    /// Append each visible rep's geometry, accumulating primitive AABBs + type-tags.
+    /// Camera-dependent line widths and bond offsets are converted on every gather.
+    fn gather_with_bvh_cache(
+        scene: &Scene, view: RtView, dashed: bool, cache: &mut Option<BvhCache>,
+    ) -> Self {
+        let mut data = Self::default();
+        let mut bounds = Vec::new();
+        let mut tags = Vec::new();
+        {
+            let _timing = crate::performance::span("rt-collect");
+            data.collect(scene, view, dashed, &mut bounds, &mut tags);
+        }
+        if bounds.is_empty() { *cache = None; return data; }
+        let counts = [data.spheres.len(), data.cylinders.len(), data.triangles.len()];
+        if let Some(previous) = cache.as_mut().filter(|c| c.counts == counts && c.refits < 8) {
+            let _timing = crate::performance::span("rt-bvh-refit");
+            let mut by_type: [Vec<Aabb>; 3] = std::array::from_fn(|i| vec![Aabb::empty(); counts[i]]);
+            for (&tagged, &bound) in tags.iter().zip(&bounds) {
+                by_type[(tagged >> TAG_SHIFT) as usize][(tagged & TAG_MASK) as usize] = bound;
+            }
+            for index in (0..previous.nodes.len()).rev() {
+                let node = previous.nodes[index];
+                let mut bound = Aabb::empty();
+                if node.count() == 0 {
+                    let left = previous.nodes[node.link() as usize];
+                    let right = previous.nodes[node.link() as usize + 1];
+                    bound = Aabb { min: left.min().min(right.min()), max: left.max().max(right.max()) };
+                } else {
+                    for &tagged in &previous.order[node.link() as usize..(node.link() + node.count()) as usize] {
+                        bound.extend(by_type[(tagged >> TAG_SHIFT) as usize][(tagged & TAG_MASK) as usize]);
+                    }
+                }
+                previous.nodes[index] = BvhNode::new(bound.min, bound.max, node.link(), node.count());
+            }
+            if bvh_cost(&previous.nodes) <= previous.build_cost * 1.5 {
+                previous.refits += 1;
+                data.nodes = std::mem::take(&mut previous.nodes);
+                data.prim_indices = std::mem::take(&mut previous.order);
+                return data;
+            }
+        }
+        let _timing = crate::performance::span("rt-bvh");
+        let (nodes, order) = build_bvh(&bounds);
+        data.nodes = nodes;
+        data.prim_indices = order.into_iter().map(|i| tags[i as usize]).collect();
+        *cache = Some(BvhCache { nodes: Vec::new(), order: Vec::new(), counts,
+            build_cost: bvh_cost(&data.nodes), refits: 0 });
+        data
+    }
+
     fn collect(
         &mut self,
         scene: &Scene,
@@ -250,32 +306,33 @@ impl RtScene {
                     continue;
                 }
                 let Some(sel) = rep.sel.as_ref() else { continue };
-                let smoothed = (rep.smooth_window > 1)
-                    .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
-                    .flatten();
-                let state = smoothed.as_ref().unwrap_or(render_state);
-
-                let bound = mol.data.bind_with_state(sel, state);
-                let ss = geometry::needs_ss(&rep.params, rep.color)
-                    .then(|| SsMap::compute(&bound, rep.ss_algo));
-                let geom = geometry::build(
-                    &bound,
-                    mol.n_atoms,
-                    &mol.bonds,
-                    &rep.params,
-                    rep.color_spec(),
-                    rep.material,
-                    ss.as_ref(),
-                    dashed_pbc,
-                );
+                // Camera changes need new screen-space strand/line conversion and
+                // a BVH, but not another surface, cartoon, or atom geometry build.
+                let fresh;
+                let geom = if let Some(cached) = rep.cached_geometry(dashed_pbc) {
+                    cached
+                } else {
+                    let smoothed = (rep.smooth_window > 1)
+                        .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
+                        .flatten();
+                    let state = smoothed.as_ref().unwrap_or(render_state);
+                    let bound = mol.data.bind_with_state(sel, state);
+                    let ss = geometry::needs_ss(&rep.params, rep.color)
+                        .then(|| SsMap::compute(&bound, rep.ss_algo));
+                    fresh = geometry::build(
+                        &bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(),
+                        rep.material, ss.as_ref(), dashed_pbc,
+                    );
+                    fresh.as_ref()
+                };
 
                 for &off in &offsets {
-                    let envelope_group = if super::envelope::needed(&geom) {
+                    let envelope_group = if geom.cylinders.iter().any(|c| c.color >> 24 < 255) {
                         let group = next_envelope_group;
                         next_envelope_group += 1;
                         group
                     } else { 0 };
-                    for sp in &geom.spheres {
+                    for sp in geom.spheres {
                         let gs = GpuSphere {
                             c: [
                                 sp.center[0] + off.x,
@@ -289,7 +346,7 @@ impl RtScene {
                         tags.push(tag(TAG_SPHERE, self.spheres.len()));
                         self.spheres.push(gs);
                     }
-                    for cy in &geom.cylinders {
+                    for cy in geom.cylinders {
                         // Multi-order bonds' parallel strands are shifted by the *rasterizer's
                         // vertex shader*, from the camera, so they stay side-by-side at any angle
                         // (see `cylinder.wgsl`). The tracer has no vertex stage, so the same shift
@@ -440,7 +497,7 @@ const FLAG_FLAT_ENDS: u32 = 1;
 /// The camera the scene is being gathered *for*. Two pieces of geometry are view-dependent —
 /// multi-order bond strand offsets and the pixel widths of lines — so unlike the rest of the
 /// primitives they can't be baked once; see `App::rt_scene_dirty`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct RtView {
     pub view: glam::Mat4,
     pub proj: glam::Mat4,
@@ -566,6 +623,116 @@ fn triangle_aabb(verts: &[GpuMeshVertex], i0: u32, i1: u32, i2: u32) -> Aabb {
 /// contiguous slice of it. Children are allocated contiguously so an interior node's
 /// right child is `left + 1`.
 fn build_bvh(aabbs: &[Aabb]) -> (Vec<BvhNode>, Vec<u32>) {
+    if aabbs.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let centroids: Vec<Vec3> = aabbs.iter().map(|a| a.centroid()).collect();
+    let mut order: Vec<u32> = (0..aabbs.len() as u32).collect();
+
+    let mut nodes: Vec<BvhNode> = vec![BvhNode::zeroed()]; // root placeholder
+    let mut stack: Vec<(usize, usize, usize, usize)> = vec![(0, 0, order.len(), 0)];
+
+    while let Some((node, start, end, depth)) = stack.pop() {
+        let mut bounds = Aabb::empty();
+        for &i in &order[start..end] {
+            bounds.extend(aabbs[i as usize]);
+        }
+        let count = end - start;
+        let make_leaf = |nodes: &mut Vec<BvhNode>| {
+            nodes[node] = BvhNode::new(bounds.min, bounds.max, start as u32, count as u32);
+        };
+        if count <= LEAF_SIZE || depth >= MAX_BVH_DEPTH {
+            make_leaf(&mut nodes);
+            continue;
+        }
+
+        // Split on the longest centroid axis, binned by SAH.
+        let mut cbounds = Aabb::empty();
+        for &i in &order[start..end] {
+            cbounds.extend(Aabb::point(centroids[i as usize]));
+        }
+        let extent = cbounds.max - cbounds.min;
+        let axis = if extent.x >= extent.y && extent.x >= extent.z {
+            0
+        } else if extent.y >= extent.z {
+            1
+        } else {
+            2
+        };
+        if extent[axis] <= 1e-12 {
+            make_leaf(&mut nodes);
+            continue;
+        }
+
+        let mut bin_box = [Aabb::empty(); BINS];
+        let mut bin_cnt = [0usize; BINS];
+        let scale = BINS as f32 / extent[axis];
+        let bin_of = |c: Vec3| -> usize {
+            (((c[axis] - cbounds.min[axis]) * scale) as usize).min(BINS - 1)
+        };
+        for &i in &order[start..end] {
+            let b = bin_of(centroids[i as usize]);
+            bin_box[b].extend(aabbs[i as usize]);
+            bin_cnt[b] += 1;
+        }
+
+        // Prefix/suffix bounds make all candidate split evaluations O(BINS).
+        let mut prefix_box = [Aabb::empty(); BINS];
+        let mut suffix_box = [Aabb::empty(); BINS];
+        let mut prefix_count = [0usize; BINS];
+        let mut suffix_count = [0usize; BINS];
+        for bin in 0..BINS {
+            prefix_box[bin] = if bin == 0 { bin_box[bin] } else { prefix_box[bin - 1].union(bin_box[bin]) };
+            prefix_count[bin] = bin_cnt[bin] + if bin == 0 { 0 } else { prefix_count[bin - 1] };
+        }
+        for bin in (0..BINS).rev() {
+            suffix_box[bin] = if bin + 1 == BINS { bin_box[bin] } else { suffix_box[bin + 1].union(bin_box[bin]) };
+            suffix_count[bin] = bin_cnt[bin] + if bin + 1 == BINS { 0 } else { suffix_count[bin + 1] };
+        }
+        let mut best_cost = f32::INFINITY;
+        let mut best_split = 0usize;
+        for split in 1..BINS {
+            let (lb, rb) = (prefix_box[split - 1], suffix_box[split]);
+            let (lc, rc) = (prefix_count[split - 1], suffix_count[split]);
+            if lc == 0 || rc == 0 {
+                continue;
+            }
+            let cost = lb.area() * lc as f32 + rb.area() * rc as f32;
+            if cost < best_cost {
+                best_cost = cost;
+                best_split = split;
+            }
+        }
+        if best_split == 0 {
+            make_leaf(&mut nodes);
+            continue;
+        }
+
+        let mut mid = start;
+        for i in start..end {
+            if bin_of(centroids[order[i] as usize]) < best_split {
+                order.swap(i, mid);
+                mid += 1;
+            }
+        }
+        if mid == start || mid == end {
+            make_leaf(&mut nodes);
+            continue;
+        }
+
+        let left = nodes.len();
+        nodes.push(BvhNode::zeroed());
+        nodes.push(BvhNode::zeroed());
+        nodes[node] = BvhNode::new(bounds.min, bounds.max, left as u32, 0);
+        stack.push((left, start, mid, depth + 1));
+        stack.push((left + 1, mid, end, depth + 1));
+    }
+
+    (nodes, order)
+}
+
+#[cfg(test)]
+fn build_bvh_reference(aabbs: &[Aabb]) -> (Vec<BvhNode>, Vec<u32>) {
     if aabbs.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -712,6 +879,60 @@ pub struct RtUniform {
 
 /// GPU ray-tracing resources (compute tracer + fullscreen resolve). Created only on a
 /// device with compute + `Rgba32Float` storage (WebGPU/native); `None` on WebGL2.
+/// Only the tree is retained: large converted primitive/mesh arrays are not duplicated.
+struct BvhCache {
+    nodes: Vec<BvhNode>,
+    order: Vec<u32>,
+    counts: [usize; 3],
+    build_cost: f32,
+    refits: u32,
+}
+fn bvh_cost(nodes: &[BvhNode]) -> f32 {
+    let area = |node: &BvhNode| Aabb { min: node.min(), max: node.max() }.area();
+    let root = nodes.first().map_or(0.0, area);
+    if root <= 0.0 { return f32::INFINITY; }
+    nodes.iter().map(|n| area(n) * n.count().max(1) as f32).sum::<f32>() / root
+}
+
+#[derive(PartialEq)]
+struct PreparedKey {
+    molecules: Vec<PreparedMolecule>,
+    view: Option<RtView>,
+}
+#[derive(PartialEq)]
+struct PreparedMolecule {
+    id: crate::scene::MolId,
+    show_box: bool,
+    box_matrix: Option<[u32; 9]>,
+    reps: Vec<(usize, u64, crate::scene::PeriodicParams)>,
+}
+impl PreparedKey {
+    fn new(scene: &Scene, view: RtView, dashed: bool) -> Option<Self> {
+        let mut molecules = Vec::new();
+        let mut view_dependent = false;
+        for mol in scene.molecules.iter().filter(|m| m.visible) {
+            let box_matrix = mol.data.state().pbox.as_ref().map(|b| {
+                let m = b.get_matrix();
+                std::array::from_fn(|i| m.as_slice()[i].to_bits())
+            });
+            let mut reps = Vec::new();
+            for (index, rep) in mol.reps.iter().enumerate().filter(|(_, r)| r.visible) {
+                // Interactions depend on another molecule; retain their full-gather path.
+                if matches!(rep.kind, crate::geometry::RepKind::Interactions) {
+                    return None;
+                }
+                rep.cached_geometry(dashed)?;
+                view_dependent |= rep.geometry_view_dependent
+                    || (box_matrix.is_some() && rep.periodic.show_box);
+                reps.push((index, rep.geometry_revision, rep.periodic));
+            }
+            view_dependent |= box_matrix.is_some() && mol.show_box;
+            molecules.push(PreparedMolecule { id: mol.id, show_box: mol.show_box, box_matrix, reps });
+        }
+        Some(Self { molecules, view: view_dependent.then_some(view) })
+    }
+}
+
 pub struct Raytracer {
     trace_pipeline: wgpu::ComputePipeline,
     trace_bgl: wgpu::BindGroupLayout,
@@ -726,12 +947,16 @@ pub struct Raytracer {
     triangles: Option<wgpu::Buffer>,
     nodes: Option<wgpu::Buffer>,
     prim_indices: Option<wgpu::Buffer>,
+    bvh_cache: Option<BvhCache>,
+    prepared_key: Option<PreparedKey>,
     has_scene: bool,
     has_transparent: bool,
     // Linear HDR accumulators (ping-pong: read one, write the other, swap). Each holds the
     // running *average* radiance. Recreated on size change.
     accum: Option<[(wgpu::Texture, wgpu::TextureView); 2]>,
     accum_size: [u32; 2],
+    trace_bindings: Option<[wgpu::BindGroup; 2]>,
+    resolve_bindings: Option<[wgpu::BindGroup; 2]>,
     /// Which accumulator is the current (latest) one to read from / resolve.
     read_idx: usize,
     /// Samples accumulated so far (the running-average weight). Reset on camera change.
@@ -926,10 +1151,14 @@ impl Raytracer {
             triangles: None,
             nodes: None,
             prim_indices: None,
+            bvh_cache: None,
+            prepared_key: None,
             has_scene: false,
             has_transparent: false,
             accum: None,
             accum_size: [0, 0],
+            trace_bindings: None,
+            resolve_bindings: None,
             read_idx: 0,
             total_samples: 0,
             cursor: None,
@@ -937,32 +1166,60 @@ impl Raytracer {
     }
 
     /// (Re)upload the scene's primitive + BVH buffers. Call when geometry changes.
+    pub fn prepare(&mut self, rs: &RenderState, scene: &Scene, view: RtView, dashed: bool) {
+        let key = PreparedKey::new(scene, view, dashed);
+        if key.is_some() && self.prepared_key == key {
+            let _timing = crate::performance::span("rt-scene-cache-hit");
+            return;
+        }
+        let mut cache = self.bvh_cache.take();
+        let mut data = RtScene::gather_with_bvh_cache(scene, view, dashed, &mut cache);
+        self.upload(rs, &data);
+        if let Some(cache) = cache.as_mut() {
+            cache.nodes = std::mem::take(&mut data.nodes);
+            cache.order = std::mem::take(&mut data.prim_indices);
+        }
+        self.bvh_cache = cache;
+        self.prepared_key = key;
+    }
+
     pub fn upload(&mut self, rs: &RenderState, scene: &RtScene) {
+        let _timing = crate::performance::span("rt-upload");
+        self.prepared_key = None;
+        self.bvh_cache = None;
         self.has_scene = !scene.is_empty();
         self.has_transparent = scene.spheres.iter().any(|s| s.m[0] >> 24 < 255)
             || scene.cylinders.iter().any(|c| c.m[0] >> 24 < 255 || c.m[2] >> 24 < 255)
             || scene.mesh_verts.iter().any(|v| v.p[3].to_bits() >> 24 < 255);
         if !self.has_scene {
+            self.trace_bindings = None;
+            self.spheres = None; self.cylinders = None; self.mesh_verts = None;
+            self.triangles = None; self.nodes = None; self.prim_indices = None;
             return;
         }
-        let device = &rs.device;
-        // A WGSL `array<T>` storage binding needs a non-empty buffer; pad empty primitive
-        // classes with one zeroed element (never referenced — its tag is absent).
-        let mk = |bytes: &[u8], stride: usize, label| {
-            let pad = [0u8; 64];
-            let data = if bytes.is_empty() { &pad[..stride] } else { bytes };
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: data,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            })
+        // Only buffer replacement changes bind groups. Active primitive ranges
+        // come from leaf tags, so stale data beyond a shrinking scene is unreachable.
+        let mut replaced = false;
+        let mut write = |slot: &mut Option<wgpu::Buffer>, bytes: &[u8], stride: usize, label| {
+            let zeros = [0u8; 80];
+            let bytes = if bytes.is_empty() { &zeros[..stride] } else { bytes };
+            if let Some(buffer) = slot.as_ref().filter(|b| b.size() >= bytes.len() as u64) {
+                rs.queue.write_buffer(buffer, 0, bytes);
+            } else {
+                *slot = Some(rs.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label), contents: bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                }));
+                replaced = true;
+            }
         };
-        self.spheres = Some(mk(bytemuck::cast_slice(&scene.spheres), 32, "rt-spheres"));
-        self.cylinders = Some(mk(bytemuck::cast_slice(&scene.cylinders), 48, "rt-cylinders"));
-        self.mesh_verts = Some(mk(bytemuck::cast_slice(&scene.mesh_verts), 32, "rt-mesh-verts"));
-        self.triangles = Some(mk(bytemuck::cast_slice(&scene.triangles), 16, "rt-triangles"));
-        self.nodes = Some(mk(bytemuck::cast_slice(&scene.nodes), 32, "rt-nodes"));
-        self.prim_indices = Some(mk(bytemuck::cast_slice(&scene.prim_indices), 4, "rt-prim-indices"));
+        write(&mut self.spheres, bytemuck::cast_slice(&scene.spheres), std::mem::size_of::<GpuSphere>(), "rt-spheres");
+        write(&mut self.cylinders, bytemuck::cast_slice(&scene.cylinders), std::mem::size_of::<GpuCylinder>(), "rt-cylinders");
+        write(&mut self.mesh_verts, bytemuck::cast_slice(&scene.mesh_verts), std::mem::size_of::<GpuMeshVertex>(), "rt-mesh-verts");
+        write(&mut self.triangles, bytemuck::cast_slice(&scene.triangles), std::mem::size_of::<GpuTriangle>(), "rt-triangles");
+        write(&mut self.nodes, bytemuck::cast_slice(&scene.nodes), std::mem::size_of::<BvhNode>(), "rt-bvh");
+        write(&mut self.prim_indices, bytemuck::cast_slice(&scene.prim_indices), std::mem::size_of::<u32>(), "rt-prim-indices");
+        if replaced { self.trace_bindings = None; }
     }
 
     /// Whether a scene has been uploaded (non-empty).
@@ -986,6 +1243,8 @@ impl Raytracer {
                 let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
                 (tex, view)
             };
+            self.trace_bindings = None;
+            self.resolve_bindings = None;
             self.accum = Some([mk(), mk()]);
             self.accum_size = size;
             self.read_idx = 0;
@@ -993,6 +1252,77 @@ impl Raytracer {
         }
     }
 
+
+    // Bindings depend on buffer/texture identities, not tile uniforms. Cache both
+    // ping-pong directions and invalidate them when those resources are replaced.
+    fn ensure_bindings(&mut self, rs: &RenderState) {
+        let accums = self.accum.as_ref().unwrap();
+        if self.trace_bindings.is_none() {
+            self.trace_bindings = Some(std::array::from_fn(|read_idx| {
+                let write_idx = 1 - read_idx;
+                rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rt-trace-bg"),
+                    layout: &self.trace_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.spheres.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.cylinders.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.mesh_verts.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: self.triangles.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: self.nodes.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.prim_indices.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(&accums[write_idx].1),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::TextureView(&accums[read_idx].1),
+                        },
+                    ],
+                })
+            }));
+        }
+        if self.resolve_bindings.is_none() {
+            self.resolve_bindings = Some(std::array::from_fn(|read_idx| {
+                rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rt-resolve-bg"),
+                    layout: &self.resolve_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(&accums[read_idx].1),
+                        },
+                    ],
+                })
+            }));
+        }
+    }
 
     /// Tiled, multi-submit converged render: trace `total_samples` paths/pixel by sweeping the
     /// image in `TILE`×`TILE` blocks over many short GPU submits (a bounded sample-chunk per
@@ -1005,19 +1335,9 @@ impl Raytracer {
     /// flag (`fs_resolve`). The accumulator at `read_idx` always holds a *complete* image (the
     /// last finished sample-chunk), so this is seam-free even mid-chunk.
     fn resolve_into(&self, rs: &RenderState, target: &wgpu::TextureView) {
-        let accums = self.accum.as_ref().unwrap();
-        let resolve_bg = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rt-resolve-bg"),
-            layout: &self.resolve_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 8,
-                    resource: wgpu::BindingResource::TextureView(&accums[self.read_idx].1),
-                },
-            ],
-        });
-        let mut encoder = rs
+        let resolve_bg = &self.resolve_bindings.as_ref().unwrap()[self.read_idx];
+        let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
+            let mut encoder = rs
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-resolve") });
         {
@@ -1033,15 +1353,15 @@ impl Raytracer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: gpu_timing.as_mut().and_then(|f| f.render("rt-resolve-pass")),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.resolve_pipeline);
-            pass.set_bind_group(0, &resolve_bg, &[]);
+            pass.set_bind_group(0, resolve_bg, &[]);
             pass.draw(0..3, 0..1);
         }
-        rs.queue.submit(std::iter::once(encoder.finish()));
+        crate::performance::submit(rs, encoder, gpu_timing);
     }
 
     /// Begin a tiled converged trace of `total_samples` paths/pixel at `size`. Drive it with
@@ -1060,6 +1380,7 @@ impl Raytracer {
             return;
         }
         self.ensure_accum(&rs.device, size);
+        self.ensure_bindings(rs);
         self.total_samples = 0;
         self.read_idx = 0;
         // Per-submit sample chunk, bounded by *BVH-ray traversals* counting the rays cast per
@@ -1112,43 +1433,27 @@ impl Raytracer {
             let reset = prior == 0;
             let read_idx = self.read_idx;
             let write_idx = 1 - read_idx;
-            let trace_bg = {
-                let accums = self.accum.as_ref().unwrap();
-                rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("rt-trace-bg"),
-                    layout: &self.trace_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: self.spheres.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.cylinders.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: self.mesh_verts.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: self.triangles.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: self.nodes.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 6, resource: self.prim_indices.as_ref().unwrap().as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&accums[write_idx].1) },
-                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&accums[read_idx].1) },
-                    ],
-                })
-            };
+            let trace_bg = &self.trace_bindings.as_ref().unwrap()[read_idx];
             let tw = cur.tile_size.min(w - cur.ox);
             let th = cur.tile_size.min(h - cur.oy);
             let mut u = cur.uniform;
             u.dims = [w, h, chunk, prior];
             u.accum = [prior, u32::from(reset), cur.ox, cur.oy];
             rs.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+            let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
             let mut encoder = rs
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("rt-tile-encoder") });
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("rt-tile-pass"),
-                    timestamp_writes: None,
+                    timestamp_writes: gpu_timing.as_mut().and_then(|f| f.compute("rt-tile-pass")),
                 });
                 pass.set_pipeline(&self.trace_pipeline);
-                pass.set_bind_group(0, &trace_bg, &[]);
+                pass.set_bind_group(0, trace_bg, &[]);
                 pass.dispatch_workgroups(tw.div_ceil(8), th.div_ceil(8), 1);
             }
-            rs.queue.submit(std::iter::once(encoder.finish()));
+            crate::performance::submit(rs, encoder, gpu_timing);
             submits += 1;
             // Advance the tile sweep; completing the last tile finishes this sample-chunk
             // (bump the running total + swap the ping-pong) and restarts the sweep.
@@ -1209,6 +1514,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_geometry_matches_fresh_trace_and_rejects_dirty_reps() {
+        use crate::{geometry::{self, RepKind}, scene::Representation};
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+        ))).unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        scene.molecules[0].show_box = false;
+        for kind in [RepKind::Vdw, RepKind::Licorice, RepKind::BallAndStick,
+            RepKind::Lines, RepKind::Cartoon, RepKind::Surface]
+        {
+            let mol = &mut scene.molecules[0];
+            let mut rep = Representation::new(kind);
+            rep.sel = Some(mol.data.evaluate(if kind.draws_mesh() { "name CA" } else { "all" }).unwrap().1);
+            rep.material = crate::material::Material::Transparent;
+            let bound = mol.data.bind_with_state(rep.sel.as_ref().unwrap(), mol.render_state());
+            let ss = geometry::needs_ss(&rep.params, rep.color)
+                .then(|| crate::secstruct::SsMap::compute(&bound, rep.ss_algo));
+            let geom = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params,
+                rep.color_spec(), rep.material, ss.as_ref(), false);
+            let mesh_ptr = geom.mesh.vertices.as_ptr();
+            rep.cache_geometry(geom, mol.n_atoms, false, false);
+            rep.sel_dirty = false;
+            rep.geom_dirty = false;
+            rep.coords_dirty = false;
+            assert!(rep.cached_geometry(false).is_some());
+            assert!(rep.cached_geometry(true).is_none());
+            if kind.draws_mesh() {
+                assert_eq!(mesh_ptr, rep.cached_geometry(false).unwrap().mesh.vertices.as_ptr());
+            }
+            mol.reps = vec![rep];
+            for angle in [0.0, 0.7] {
+                let view = RtView { view: glam::Mat4::from_rotation_y(angle),
+                    proj: glam::Mat4::IDENTITY, viewport_h: 480.0 };
+                let cached = RtScene::gather(&scene, view, false);
+                scene.molecules[0].reps[0].coords_dirty = true;
+                assert!(scene.molecules[0].reps[0].cached_geometry(false).is_none());
+                let fresh = RtScene::gather(&scene, view, false);
+                scene.molecules[0].reps[0].coords_dirty = false;
+                fn bytes<T: bytemuck::Pod>(v: &[T]) -> &[u8] { bytemuck::cast_slice(v) }
+                assert_eq!(bytes(&cached.spheres), bytes(&fresh.spheres), "{kind:?}");
+                assert_eq!(bytes(&cached.cylinders), bytes(&fresh.cylinders), "{kind:?}");
+                assert_eq!(bytes(&cached.mesh_verts), bytes(&fresh.mesh_verts), "{kind:?}");
+                assert_eq!(bytes(&cached.triangles), bytes(&fresh.triangles), "{kind:?}");
+                assert_eq!(bytes(&cached.nodes), bytes(&fresh.nodes), "{kind:?}");
+                assert_eq!(cached.prim_indices, fresh.prim_indices);
+            }
+            let rep = &mut scene.molecules[0].reps[0];
+            rep.sel_dirty = true;
+            assert!(rep.cached_geometry(false).is_none());
+            rep.sel_dirty = false;
+            rep.geom_dirty = true;
+            assert!(rep.cached_geometry(false).is_none());
+            rep.geom_dirty = false;
+            rep.cache_geometry(Default::default(), 0, false, true);
+            assert!(rep.cached_geometry(false).is_none(), "gray draw-mode geometry is not reusable");
+        }
+    }
+
+    #[test]
     fn envelope_groups_isolate_transparent_representations() {
         use crate::{geometry::RepKind, material::Material, scene::Representation};
         let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
@@ -1261,6 +1626,7 @@ mod tests {
     /// Build a sphere-only RtScene (mirrors `gather`'s BVH path) for the traversal tests.
     fn sphere_scene(spheres: Vec<GpuSphere>) -> RtScene {
         let aabbs: Vec<Aabb> = spheres.iter().map(sphere_aabb).collect();
+        let _timing = crate::performance::span("rt-bvh");
         let (nodes, order) = build_bvh(&aabbs);
         // all spheres → tag(SPHERE, i); order is a permutation, so prim_indices = order.
         let prim_indices = order.iter().map(|&i| tag(TAG_SPHERE, i as usize)).collect();
@@ -1317,6 +1683,7 @@ mod tests {
         let spheres: Vec<GpuSphere> =
             (0..50).map(|i| sph(i as f32 * 0.7, (i % 7) as f32, (i % 3) as f32, 0.3)).collect();
         let aabbs: Vec<Aabb> = spheres.iter().map(sphere_aabb).collect();
+        let _timing = crate::performance::span("rt-bvh");
         let (nodes, order) = build_bvh(&aabbs);
         assert!(!nodes.is_empty());
         assert_eq!(order.len(), spheres.len());
@@ -1332,6 +1699,309 @@ mod tests {
             }
         }
         assert!(seen.iter().all(|&s| s), "every primitive is in a leaf");
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; compares BVH traversal against the original WGSL"]
+    fn near_first_traversal_matches_original_mixed_hits() {
+        let rs = super::super::appearance_tests::gpu();
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+        ))).unwrap();
+        let center = (raw.bbox_min + raw.bbox_max) * 0.5;
+        let radius = (raw.bbox_max - raw.bbox_min).length();
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let mol = &mut scene.molecules[0];
+        let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::BallAndStick);
+        rep.params = crate::geometry::RepParams::BallAndStick {
+            sphere_scale: 0.3, bond_radius: 0.02, bond_smoothing: 0.7,
+        };
+        rep.sel = Some(mol.data.select_all());
+        rep.material = crate::material::Material::Transparent;
+        mol.reps = vec![rep];
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h: 480.0 };
+        let mut data = RtScene::gather(&scene, view, false);
+        for sphere in &mut data.spheres { sphere.m[2] = 1; }
+        // Mixed transparent envelope + opaque sphere + triangle leaf types.
+        data.spheres.push(GpuSphere { c: [center.x, center.y, center.z, 0.25], m: [0xffffffff, 0, 0, 0] });
+        data.mesh_verts = [center + Vec3::X, center + Vec3::Y, center - Vec3::X].into_iter()
+            .map(|p| GpuMeshVertex { p: [p.x, p.y, p.z, f32::from_bits(0xffffffff)], n: [0.0,0.0,1.0,0.0] }).collect();
+        data.triangles = vec![GpuTriangle { i: [0,1,2,0] }];
+        let mut bounds = Vec::new();
+        let mut tags = Vec::new();
+        for (i, sp) in data.spheres.iter().enumerate() { bounds.push(sphere_aabb(sp)); tags.push(tag(TAG_SPHERE, i)); }
+        for (i, cy) in data.cylinders.iter().enumerate() { bounds.push(cylinder_aabb(cy)); tags.push(tag(TAG_CYLINDER, i)); }
+        bounds.push(triangle_aabb(&data.mesh_verts, 0, 1, 2)); tags.push(tag(TAG_TRIANGLE, 0));
+        let (nodes, order) = build_bvh(&bounds);
+        data.nodes = nodes;
+        data.prim_indices = order.into_iter().map(|i| tags[i as usize]).collect();
+        let mut rays: Vec<[[f32; 4]; 2]> = seeded_bounds(1024).iter().map(|a| {
+            let direction = (a.centroid() - Vec3::splat(50.0)).normalize();
+            let origin = center + direction * radius;
+            [origin.extend(0.0).to_array(), (-direction).extend(0.0).to_array()]
+        }).collect();
+        for direction in [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X, -Vec3::Y, -Vec3::Z] {
+            rays.push([(center + direction * radius).extend(0.0).to_array(), (-direction).extend(0.0).to_array()]);
+            rays.push([center.extend(0.0).to_array(), direction.extend(0.0).to_array()]);
+        }
+        let source = format!("{}\n{}\n{}", super::super::lit_shader_source(include_str!("shaders/raytrace.wgsl")),
+            include_str!("shaders/raytrace_traversal_reference.wgsl")
+                .replace("fn closest_hit_filtered(", "fn closest_hit_filtered_reference(")
+                .replace("fn any_hit(", "fn any_hit_reference("), r#"
+struct TestRay { origin: vec4<f32>, direction: vec4<f32> }
+@group(1) @binding(0) var<storage, read> test_rays: array<TestRay>;
+@group(1) @binding(1) var<storage, read_write> test_results: array<vec4<u32>>;
+@compute @workgroup_size(64)
+fn test_traversal(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= arrayLength(&test_rays)) { return; }
+    let ray = test_rays[id.x];
+    var flags = 0u;
+    for (var opaque = 0u; opaque < 2u; opaque++) {
+        let actual = closest_hit_filtered(ray.origin.xyz, ray.direction.xyz, opaque == 1u);
+        let expected = closest_hit_filtered_reference(ray.origin.xyz, ray.direction.xyz, opaque == 1u);
+        if (actual.prim != expected.prim || actual.t != expected.t || ((actual.prim >> 30u) == 2u && any(actual.uv != expected.uv))) { flags |= 1u << opaque; }
+    }
+    for (var exits = 0u; exits < 2u; exits++) {
+        let actual = any_hit(ray.origin.xyz, ray.direction.xyz, 100.0, exits == 1u, 0xffffffffu);
+        let expected = any_hit_reference(ray.origin.xyz, ray.direction.xyz, 100.0, exits == 1u, 0xffffffffu);
+        if (actual != expected) { flags |= 4u << exits; }
+    }
+    test_results[id.x] = vec4<u32>(flags, 0u, 0u, 0u);
+}"#);
+        let device = &rs.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(source.into()) });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None, layout: None, module: &module, entry_point: Some("test_traversal"), compilation_options: Default::default(), cache: None,
+        });
+        let buffers: Vec<_> = [bytemuck::cast_slice(&data.spheres), bytemuck::cast_slice(&data.cylinders),
+            bytemuck::cast_slice(&data.mesh_verts), bytemuck::cast_slice(&data.triangles),
+            bytemuck::cast_slice(&data.nodes), bytemuck::cast_slice(&data.prim_indices)]
+            .into_iter().map(|bytes| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None, contents: bytes, usage: wgpu::BufferUsages::STORAGE,
+            })).collect();
+        let entries: Vec<_> = buffers.iter().enumerate().map(|(i,b)| wgpu::BindGroupEntry { binding: i as u32 + 1, resource: b.as_entire_binding() }).collect();
+        let geometry = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &pipeline.get_bind_group_layout(0), entries: &entries });
+        let input = device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(&rays), usage: wgpu::BufferUsages::STORAGE });
+        let size = rays.len() as u64 * 16;
+        let output = device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let test = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &pipeline.get_bind_group_layout(1), entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: input.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: output.as_entire_binding() },
+        ] });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline); pass.set_bind_group(0, &geometry, &[]); pass.set_bind_group(1, &test, &[]);
+            pass.dispatch_workgroups((rays.len() as u32).div_ceil(64), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
+        rs.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap(); rx.recv().unwrap().unwrap();
+        let mapped = readback.slice(..).get_mapped_range();
+        for (i, flags) in bytemuck::cast_slice::<_, [u32; 4]>(&mapped).iter().enumerate() {
+            assert_eq!(flags[0], 0, "ray {i}: closest/opaque/any-hit mismatch");
+        }
+    }
+
+    #[test]
+    fn prepared_scene_keys_track_output_revisions_and_view_dependencies() {
+        let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h: 480.0 };
+        let moved = RtView { view: glam::Mat4::from_rotation_y(0.7), viewport_h: 960.0, ..view };
+        let mol = &mut scene.molecules[0];
+        let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::Vdw);
+        rep.sel = Some(mol.data.select_all());
+        rep.sel_dirty = false;
+        rep.cache_geometry(Default::default(), mol.n_atoms, false, false);
+        mol.reps = vec![rep]; mol.show_box = false;
+        let base = PreparedKey::new(&scene, view, false).unwrap();
+        assert!(PreparedKey::new(&scene, moved, false).as_ref() == Some(&base));
+        assert!(PreparedKey::new(&scene, moved, true).is_none());
+        scene.molecules[0].reps[0].coords_dirty = true;
+        assert!(PreparedKey::new(&scene, view, false).is_none());
+        scene.molecules[0].reps[0].coords_dirty = false;
+        scene.molecules[0].reps[0].geom_dirty = true;
+        assert!(PreparedKey::new(&scene, view, false).is_none());
+        scene.molecules[0].reps[0].geom_dirty = false;
+        scene.molecules[0].reps[0].sel_dirty = true;
+        assert!(PreparedKey::new(&scene, view, false).is_none());
+        scene.molecules[0].reps[0].sel_dirty = false;
+        scene.molecules[0].reps[0].periodic.pos[0] = 1;
+        assert!(PreparedKey::new(&scene, view, false).as_ref() != Some(&base));
+        scene.molecules[0].reps[0].periodic = Default::default();
+        scene.molecules[0].show_box = true;
+        assert!(PreparedKey::new(&scene, moved, false) != PreparedKey::new(&scene, view, false));
+        scene.molecules[0].show_box = false;
+        scene.molecules[0].reps[0].cache_geometry(crate::geometry::GeometryData {
+            lines: vec![crate::render::LineVertex { pos: [0.0;3], color:0, width:1.0, offset_px:0.0 }],
+            ..Default::default()
+        }, 0, false, false);
+        assert!(PreparedKey::new(&scene, view, false).as_ref() != Some(&base));
+        assert!(PreparedKey::new(&scene, moved, false) != PreparedKey::new(&scene, view, false));
+        scene.molecules[0].reps[0].visible = false;
+        assert!(PreparedKey::new(&scene, view, false).as_ref() != Some(&base));
+        scene.molecules[0].visible = false;
+        assert!(PreparedKey::new(&scene, view, false).as_ref() != Some(&base));
+    }
+
+    #[test]
+    fn refitted_bvh_matches_full_build_through_motion_and_rebuild_interval() {
+        let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+        let mut scene = Scene::default(); scene.add(raw, &crate::settings::RepDefaults::default());
+        let mol = &mut scene.molecules[0];
+        let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::Vdw);
+        rep.sel = Some(mol.data.select_all()); mol.reps = vec![rep]; mol.show_box = false;
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h:480.0 };
+        let mut cache: Option<BvhCache> = None;
+        let mut saw_refit = false;
+        let mut saw_rebuild = false;
+        for frame in 0..20 {
+            let mol = &mut scene.molecules[0];
+            let bound = mol.data.bind_with_state(mol.reps[0].sel.as_ref().unwrap(), mol.render_state());
+            let mut geom = crate::geometry::build(&bound, mol.n_atoms, &mol.bonds,
+                &mol.reps[0].params, mol.reps[0].color_spec(), mol.reps[0].material, None, false);
+            for (i,sphere) in geom.spheres.iter_mut().enumerate() {
+                sphere.center[0] += (frame as f32 * 0.1 + i as f32).sin() * 0.01;
+            }
+            mol.reps[0].cache_geometry(geom, mol.n_atoms, false, false);
+            mol.reps[0].sel_dirty = false; mol.reps[0].geom_dirty = false; mol.reps[0].coords_dirty = false;
+            let mut actual = RtScene::gather_with_bvh_cache(&scene, view, false, &mut cache);
+            let expected = RtScene::gather(&scene, view, false);
+            assert_eq!(bytemuck::cast_slice::<_,u8>(&actual.spheres), bytemuck::cast_slice::<_,u8>(&expected.spheres));
+            for x in 0..7 {
+                let origin = Vec3::new(x as f32, 2.5, -10.0);
+                let a = bvh_closest(&actual, origin, Vec3::Z);
+                let b = brute_closest(&expected, origin, Vec3::Z);
+                assert_eq!(a.map(|h| h.1), b.map(|h| h.1));
+            }
+            let c = cache.as_mut().unwrap();
+            saw_refit |= c.refits > 0;
+            saw_rebuild |= frame > 0 && c.refits == 0;
+            c.nodes = std::mem::take(&mut actual.nodes);
+            c.order = std::mem::take(&mut actual.prim_indices);
+        }
+        assert!(saw_refit && saw_rebuild);
+        scene.molecules[0].visible = false;
+        assert!(RtScene::gather_with_bvh_cache(&scene, view, false, &mut cache).is_empty());
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    #[ignore = "requires native GPU; verifies scene and storage-buffer reuse"]
+    fn camera_only_preparation_reuses_buffers_and_empty_scenes_release_storage() {
+        let rs = super::super::appearance_tests::gpu();
+        let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+        let mut scene = Scene::default(); scene.add(raw, &crate::settings::RepDefaults::default());
+        let mol = &mut scene.molecules[0];
+        let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::Vdw);
+        rep.sel = Some(mol.data.select_all());
+        let bound = mol.data.bind_with_state(rep.sel.as_ref().unwrap(), mol.render_state());
+        let geom = crate::geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params,
+            rep.color_spec(), rep.material, None, false);
+        rep.cache_geometry(geom, mol.n_atoms, false, false);
+        rep.sel_dirty = false; mol.reps = vec![rep]; mol.show_box = false;
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h:480.0 };
+        let mut rt = Raytracer::new(&rs, wgpu::TextureFormat::Rgba8Unorm).unwrap();
+        rt.prepare(&rs, &scene, view, false);
+        let spheres = rt.spheres.as_ref().unwrap().clone();
+        let nodes = rt.nodes.as_ref().unwrap().clone();
+        rt.prepare(&rs, &scene, RtView { view: glam::Mat4::from_rotation_y(0.7), ..view }, false);
+        assert_eq!(rt.spheres.as_ref().unwrap(), &spheres);
+        assert_eq!(rt.nodes.as_ref().unwrap(), &nodes);
+        assert_eq!(rt.bvh_cache.as_ref().unwrap().refits, 0, "camera-only change must not refit");
+        let mut data = RtScene::gather(&scene, view, false);
+        data.spheres.truncate(8);
+        let short = sphere_scene(data.spheres);
+        rt.upload(&rs, &short);
+        assert_eq!(rt.spheres.as_ref().unwrap(), &spheres);
+        assert_eq!(rt.nodes.as_ref().unwrap(), &nodes);
+        rt.upload(&rs, &RtScene::default());
+        assert!(rt.spheres.is_none() && rt.nodes.is_none() && rt.trace_bindings.is_none() && rt.bvh_cache.is_none());
+    }
+
+    fn seeded_bounds(n: usize) -> Vec<Aabb> {
+        let mut seed = 19u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / 16777216.0
+        };
+        (0..n).map(|_| {
+            let center = Vec3::new(next(), next(), next()) * 100.0;
+            let radius = Vec3::splat(next() * 0.3 + 0.01);
+            Aabb { min: center - radius, max: center + radius }
+        }).collect()
+    }
+
+    #[test]
+    fn prefix_sah_preserves_reference_tree_and_primitive_order() {
+        for n in [0, 1, 4, 5, 31, 512, 4096] {
+            let bounds = seeded_bounds(n);
+            let (nodes, order) = build_bvh(&bounds);
+            let (reference, reference_order) = build_bvh_reference(&bounds);
+            assert_eq!(bytemuck::cast_slice::<_, u8>(&nodes), bytemuck::cast_slice::<_, u8>(&reference));
+            assert_eq!(order, reference_order);
+        }
+    }
+
+    #[test]
+    fn bvh_depth_and_bounds_fit_shader_stack_for_adversarial_inputs() {
+        let distributions = [seeded_bounds(16384),
+            vec![Aabb::point(Vec3::ZERO); 512],
+            (0..128).map(|i| Aabb::point(Vec3::new(1e17 * 0.5_f32.powi(i), 0.0, 0.0))).collect()];
+        for bounds in distributions {
+            let (nodes, order) = build_bvh(&bounds);
+            let mut visited = vec![false; bounds.len()];
+            let mut stack = vec![(0usize, 0usize)];
+            while let Some((id, depth)) = stack.pop() {
+                assert!(depth <= MAX_BVH_DEPTH);
+                let node = nodes[id];
+                if node.count() == 0 {
+                    for child in [node.link() as usize, node.link() as usize + 1] {
+                        assert!(nodes[child].min().cmpge(node.min()).all());
+                        assert!(nodes[child].max().cmple(node.max()).all());
+                        stack.push((child, depth + 1));
+                    }
+                } else {
+                    for &primitive in &order[node.link() as usize..(node.link() + node.count()) as usize] {
+                        let index = primitive as usize;
+                        assert!(!visited[index]);
+                        visited[index] = true;
+                        assert!(bounds[index].min.cmpge(node.min()).all());
+                        assert!(bounds[index].max.cmple(node.max()).all());
+                    }
+                }
+            }
+            assert!(visited.into_iter().all(|v| v));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual CPU BVH benchmark"]
+    fn benchmark_bvh_prefix_splits() {
+        use std::{hint::black_box, time::Instant};
+        for n in [1024, 16384, 131072] {
+            let bounds = seeded_bounds(n);
+            let mut full = Vec::new();
+            let mut optimized = Vec::new();
+            for _ in 0..6 {
+                let start = Instant::now();
+                black_box(build_bvh_reference(&bounds));
+                full.push(start.elapsed());
+                let start = Instant::now();
+                black_box(build_bvh(&bounds));
+                optimized.push(start.elapsed());
+            }
+            full.remove(0); optimized.remove(0);
+            full.sort(); optimized.sort();
+            eprintln!("BVH {n}: baseline={:?} prefix={:?} speedup={:.2}x",
+                full[2], optimized[2], full[2].as_secs_f64()/optimized[2].as_secs_f64());
+        }
     }
 
     #[test]

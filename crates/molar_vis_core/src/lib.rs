@@ -17,6 +17,8 @@ mod data;
 #[cfg(not(target_arch = "wasm32"))]
 mod docking;
 mod geometry;
+#[cfg(not(target_arch = "wasm32"))]
+mod geometry_jobs;
 mod history;
 mod interactions;
 mod launch;
@@ -24,6 +26,7 @@ mod material;
 mod minimize;
 mod moldata;
 mod pick;
+mod performance;
 mod render;
 mod scene;
 mod script;

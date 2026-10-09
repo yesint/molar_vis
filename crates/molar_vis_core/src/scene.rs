@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::ColorMethod;
 use crate::data::{bond_storage, RawMolecule};
-use crate::geometry::{RepKind, RepParams};
+use crate::geometry::{self, RepKind, RepParams};
 use crate::history::{RepState, StructureSnapshot};
 use crate::material::Material;
 use crate::minimize::{Bond, BondOrder};
@@ -257,6 +257,20 @@ pub struct Representation {
     /// extracts the chosen residues' sub-ribbon from it (coincident → no z-fight, and
     /// works for a single residue). `None` for other reps. Transient.
     pub mesh_cache: Option<MeshCache>,
+    /// Coordinate-independent inputs, replaced on every structural rebuild.
+    pub(crate) primitive_cache: Option<geometry::PrimitiveCache>,
+    pub(crate) cartoon_cache: Option<geometry::CartoonCache>,
+    /// Last displayed primitive geometry. Mesh storage remains in `mesh_cache`.
+    geometry_cache: Option<geometry::GeometryData>,
+    geometry_cache_dashed: Option<bool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) geometry_job: Option<crate::geometry_jobs::Job>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) geometry_waiting: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) geometry_jobs_disabled: bool,
+    pub(crate) geometry_revision: u64,
+    pub(crate) geometry_view_dependent: bool,
     /// Transient UI state: whether this rep's inline settings panel is expanded.
     /// Not part of `EditState` (view state, not undoable).
     pub params_open: bool,
@@ -275,6 +289,42 @@ pub struct Representation {
 }
 
 impl Representation {
+    pub(crate) fn geometry_pending(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.geometry_job.is_some() || self.geometry_waiting }
+        #[cfg(target_arch = "wasm32")]
+        { false }
+    }
+
+    pub(crate) fn cache_geometry(
+        &mut self, mut geom: geometry::GeometryData, n_atoms: usize, dashed: bool, grayed: bool,
+    ) {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.geometry_job = None; self.geometry_waiting = false; }
+        self.mesh_cache = self.kind.draws_mesh()
+            .then(|| MeshCache::new(std::mem::take(&mut geom.mesh), n_atoms));
+        // Draw-mode gray colors must never enter a normal ray-traced image.
+        static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.geometry_revision = NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.geometry_view_dependent = !geom.lines.is_empty()
+            || geom.cylinders.iter().any(|c| c.offset[0] * c.offset[1] != 0.0);
+        self.geometry_cache = (!grayed).then_some(geom);
+        self.geometry_cache_dashed = (!grayed).then_some(dashed);
+    }
+
+    pub(crate) fn cached_geometry(&self, dashed: bool) -> Option<geometry::GeometryRef<'_>> {
+        if self.geometry_pending() || self.sel_dirty || self.geom_dirty || self.coords_dirty || self.sel.is_none()
+            || self.geometry_cache_dashed != Some(dashed)
+        {
+            return None;
+        }
+        let mut geom = self.geometry_cache.as_ref()?.as_ref();
+        if self.kind.draws_mesh() {
+            geom.mesh = &self.mesh_cache.as_ref()?.mesh;
+        }
+        Some(geom)
+    }
+
     /// This rep's color scheme together with its options — what the geometry builders
     /// need to colorize atoms (see [`crate::color::ColorSpec`]).
     pub fn color_spec(&self) -> crate::color::ColorSpec {
@@ -408,6 +458,18 @@ impl Representation {
             ss_per_frame,
             ss_cache: None,
             mesh_cache: None,
+            primitive_cache: None,
+            cartoon_cache: None,
+            geometry_cache: None,
+            geometry_cache_dashed: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            geometry_job: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            geometry_waiting: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            geometry_jobs_disabled: false,
+            geometry_revision: 0,
+            geometry_view_dependent: false,
             params_open: false,
             settings_tab: SettingsTab::default(),
             sel_dirty: true,

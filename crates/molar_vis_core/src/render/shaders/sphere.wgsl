@@ -263,3 +263,10 @@ fn fs_oit(in: VsOut) -> OitOut {
     out.reveal = h.alpha;
     return out;
 }
+
+// Depth-only shadow caster. Unused hit color and lighting are eliminated by the
+// shader compiler; the intersection and analytic depth match the opaque pass.
+@fragment
+fn fs_shadow(in: VsOut) -> @builtin(frag_depth) f32 {
+    return compute_hit(in).depth;
+}

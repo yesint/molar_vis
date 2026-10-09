@@ -198,6 +198,7 @@ impl Trajectory {
     /// Returns `None` when there's nothing to smooth (`window ≤ 1`, `< 3` frames, or
     /// a hard end) — callers then render the raw current frame.
     pub fn smoothed_state(&self, window: u32) -> Option<State> {
+        let _timing = crate::performance::span("trajectory-smoothing");
         let n = self.frames.len();
         if window <= 1 || n < 3 {
             return None;

@@ -34,9 +34,8 @@ fn depth_cue(color: vec3<f32>, distance: f32, cue: vec4<f32>, fog: vec3<f32>) ->
 
 const AO_KERNEL_SIZE: f32 = 128.0;
 fn ao_disk_offset(index: f32) -> vec2<f32> {
-    let fi = index + 0.5;
-    let angle = fi * 2.3999632;
-    return vec2<f32>(cos(angle), sin(angle)) * sqrt(fi / AO_KERNEL_SIZE);
+    // Fixed kernel: no per-pixel transcendental operations or extra GPU binding.
+    return AO_DISK[u32(index)];
 }
 fn ao_range(distance: f32, radius: f32) -> f32 {
     return 1.0 - smoothstep(radius * 0.7, radius, distance);

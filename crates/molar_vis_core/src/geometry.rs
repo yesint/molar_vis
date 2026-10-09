@@ -12,7 +12,14 @@ use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
 use crate::secstruct::SsMap;
 
 mod cartoon;
+pub(crate) use cartoon::Cache as CartoonCache;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use cartoon::Input as CartoonInput;
+mod primitive_cache;
+pub(crate) use primitive_cache::PrimitiveCache;
 mod surface;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use surface::Input as SurfaceInput;
 
 /// Shortest periodic-cell vector (nm) below which a box is treated as **absent** for
 /// PBC-aware rendering. Cryo-EM / NMR PDB entries carry a placeholder
@@ -205,7 +212,19 @@ pub struct GeometryData {
     pub mesh: MeshData,
 }
 
+/// Borrow CPU geometry without copying the existing mesh cache.
+pub(crate) struct GeometryRef<'a> {
+    pub spheres: &'a [SphereInstance],
+    pub cylinders: &'a [CylinderInstance],
+    pub lines: &'a [LineVertex],
+    pub mesh: &'a MeshData,
+}
+
 impl GeometryData {
+    pub(crate) fn as_ref(&self) -> GeometryRef<'_> {
+        GeometryRef { spheres: &self.spheres, cylinders: &self.cylinders, lines: &self.lines, mesh: &self.mesh }
+    }
+
     /// Concatenate another geometry into this one (mesh indices are offset by the
     /// current vertex count). Used to merge several reps' geometry into a single
     /// buffer set — e.g. the active-selection glow, built per rep but drawn as one.
@@ -268,6 +287,7 @@ pub fn build(
     ss: Option<&SsMap>,
     dashed_pbc: bool,
 ) -> GeometryData {
+    let _timing = crate::performance::span("geometry-full-build");
     let colorizer = Colorizer::new(color, bound, n_atoms, ss);
     // The periodic box lets bond rendering use the minimum image, so a bond crossing
     // a box face is drawn as two dashed half-bond stubs (one from each atom toward its
@@ -353,6 +373,11 @@ pub fn build(
         RepParams::Interactions { .. } => GeometryData::default(),
     };
 
+    stamp_material(&mut data, material);
+    data
+}
+
+pub(crate) fn stamp_material(data: &mut GeometryData, material: Material) {
     // Stamp the material onto every element: the packed lighting coefficients
     // (`mat`) drive the lit shaders (spheres/cylinders/mesh), and the opacity rides
     // in the color's alpha channel (read by all shaders; the renderer draws
@@ -382,7 +407,6 @@ pub fn build(
         v.color = (v.color & 0x00ff_ffff) | (blended << 24);
         v.mat = lighting;
     }
-    data
 }
 
 /// Fixed line colors per interaction type (Discovery-Studio style): the type, not the

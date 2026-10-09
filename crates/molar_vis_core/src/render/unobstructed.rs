@@ -272,34 +272,34 @@ impl UnobstructedGpu {
         // Short submissions bound cancellation latency and let UI rendering share the GPU.
         let batch_size = 4.min(device.limits().max_compute_workgroups_per_dimension as usize);
         let mut result = Vec::with_capacity(dirs.len());
+        let buffers = [
+            &scene.atoms,
+            &scene.nodes,
+            &scene.order,
+            &scene.directions,
+            &scene.scores,
+            &scene.params,
+            &scene.corrections,
+        ];
+        let entries: Vec<_> = buffers
+            .iter()
+            .enumerate()
+            .map(|(binding, buffer)| wgpu::BindGroupEntry {
+                binding: binding as u32,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect();
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("unobstructed-bind-group"),
+            layout: &self.layout,
+            entries: &entries,
+        });
         for batch in dirs.chunks(batch_size) {
             if cancelled() {
                 return Err("cancelled".into());
             }
             let directions: Vec<Direction> = batch.iter().copied().map(Into::into).collect();
             queue.write_buffer(&scene.directions, 0, bytemuck::cast_slice(&directions));
-            let buffers = [
-                &scene.atoms,
-                &scene.nodes,
-                &scene.order,
-                &scene.directions,
-                &scene.scores,
-                &scene.params,
-                &scene.corrections,
-            ];
-            let entries: Vec<_> = buffers
-                .iter()
-                .enumerate()
-                .map(|(binding, buffer)| wgpu::BindGroupEntry {
-                    binding: binding as u32,
-                    resource: buffer.as_entire_binding(),
-                })
-                .collect();
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("unobstructed-bind-group"),
-                layout: &self.layout,
-                entries: &entries,
-            });
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("unobstructed-score-batch"),
             });

@@ -214,6 +214,7 @@ pub(super) fn build_pick(
     mi: usize,
     state: &State,
 ) -> crate::render::PickGeometry {
+    let _timing = crate::performance::span("pick-prepare");
     // Box lattice vectors (columns of the box matrix), for periodic image offsets.
     let box_vecs = state.pbox.as_ref().map(|pb| {
         let m = pb.get_matrix();
@@ -225,6 +226,7 @@ pub(super) fn build_pick(
     });
     let mut out = crate::render::PickGeometry::default();
     let pick_x = mi as u32 + 1;
+    let mut smoothed_states = std::collections::HashMap::new();
     for (rj, rep) in mol.reps.iter().enumerate() {
         if !rep.visible {
             continue;
@@ -250,10 +252,15 @@ pub(super) fn build_pick(
             continue;
         }
         let Some(sel) = &rep.sel else { continue };
-        let smoothed = (rep.smooth_window > 1)
-            .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
-            .flatten();
-        let disp_state: &State = smoothed.as_ref().unwrap_or(state);
+        let disp_state: &State = if rep.smooth_window > 1 {
+            smoothed_states
+                .entry(rep.smooth_window)
+                .or_insert_with(|| mol.trajectory.smoothed_state(rep.smooth_window))
+                .as_ref()
+                .unwrap_or(state)
+        } else {
+            state
+        };
         let bound = mol.data.bind_with_state(sel, disp_state);
         for p in bound.iter_particle() {
             if !pick::rep_draws_atom(rep, p.id) {
@@ -624,6 +631,7 @@ pub(super) fn refresh_selection(data: &crate::moldata::MolData, rep: &mut Repres
     if !rep.sel_dirty {
         return false;
     }
+    let _timing = crate::performance::span("selection");
     let mut cleared = false;
     // Parse + evaluate the selection (against the System's own
     // state). On error keep the previous selection/geometry and
@@ -647,6 +655,12 @@ pub(super) fn refresh_selection(data: &crate::moldata::MolData, rep: &mut Repres
             rep.sel_error_span = None;
             rep.sel_empty = true;
             rep.gpu = Default::default();
+            rep.primitive_cache = None;
+            rep.cartoon_cache = None;
+            #[cfg(not(target_arch = "wasm32"))]
+            { rep.geometry_job = None; rep.geometry_waiting = false; }
+            rep.cache_geometry(Default::default(), 0, false, true);
+            rep.mesh_cache = None;
             cleared = true;
         }
         Err(scene::EvalError::Invalid { message, span }) => {
@@ -756,6 +770,68 @@ pub(super) fn gather_unobstructed_atoms(
     Ok(out)
 }
 
+enum GeometryBuild {
+    Ready(geometry::GeometryData),
+    #[cfg(not(target_arch = "wasm32"))]
+    Background(crate::geometry_jobs::Input),
+}
+
+fn prepare_geometry(
+    bound: &(impl ParticleIterProvider + AtomProvider),
+    state: &State,
+    n_atoms: usize,
+    params: &geometry::RepParams,
+    color: crate::color::ColorSpec,
+    material: crate::material::Material,
+    ss: Option<&SsMap>,
+    cartoon: Option<&geometry::CartoonCache>,
+    dashed: bool,
+    background: bool,
+    build: impl FnOnce() -> geometry::GeometryData,
+) -> GeometryBuild {
+    #[cfg(not(target_arch = "wasm32"))]
+    if background {
+        use crate::geometry_jobs::Input;
+        let input = if let Some(cartoon) = cartoon {
+            Some(Input::Cartoon(cartoon.snapshot(state, dashed)))
+        } else if let geometry::RepParams::Surface {
+            probe,
+            quality,
+            smoothing,
+        } = *params
+        {
+            let colors = crate::color::Colorizer::new(color, bound, n_atoms, ss);
+            Some(Input::Surface(
+                geometry::SurfaceInput::new(bound, &colors, probe, quality, smoothing),
+                material,
+            ))
+        } else {
+            None
+        };
+        if let Some(input) = input.filter(|i| i.worth_offloading()) {
+            return GeometryBuild::Background(input);
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (
+        bound, state, n_atoms, params, color, material, ss, cartoon, dashed, background,
+    );
+    GeometryBuild::Ready(build())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_geometry(rep: &mut Representation, input: crate::geometry_jobs::Input) {
+    match crate::geometry_jobs::Job::try_start(input) {
+        Ok(job) => {
+            rep.geometry_job = Some(job);
+            rep.geometry_waiting = false;
+            rep.geom_dirty = false;
+            rep.coords_dirty = false;
+        }
+        Err(_) => rep.geometry_waiting = true, // Retry latest input; never queue stale frames.
+    }
+}
+
 /// Recompile dirty selections and rebuild/reupload dirty geometry. Returns true if any
 /// geometry was uploaded (so the frame needs re-rendering).
 ///
@@ -774,7 +850,10 @@ rs: &eframe::egui_wgpu::RenderState,
 // in Draw mode. `None` when not drawing → nothing greyed. The caller marks all reps
 // `geom_dirty` when this changes, so a rebuild reaches every rep.
 gray_active: Option<(crate::scene::MolId, usize)>,
+background: bool,
 ) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    let _ = background;
     let mut changed = false;
     // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
     // once: the molecule loop below borrows `self.scene` mutably).
@@ -802,7 +881,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
         let any_rep_dirty = mol
             .reps
             .iter()
-            .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty);
+            .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty || r.geometry_pending());
         if !(any_rep_dirty
             || (mol.show_box && mol.box_dirty)
             || mol.aromatic_dirty
@@ -824,10 +903,51 @@ gray_active: Option<(crate::scene::MolId, usize)>,
         // Whether any rep's geometry was (re)built this pass — if so and there's
         // an active selection, its glow must follow the new style/coords.
         let mut rep_geom_changed = false;
+        // Reuse each smoothing window within this rebuild; no stale frame cache.
+        let mut smoothed_states = std::collections::HashMap::new();
         for (j, rep) in mol.reps.iter_mut().enumerate() {
             // Grey out every rep except the one open in the editor (Draw mode only).
             let grayed = matches!(gray_active, Some((tid, tr)) if !(mol_id == tid && j == tr));
             changed |= refresh_selection(&mol.data, rep);
+            #[cfg(not(target_arch = "wasm32"))]
+            let background_allowed = background && gray_active.is_none()
+                && mol.trajectory.frames.len() <= 1 && !mol.trajectory.playing
+                && !rep.geometry_jobs_disabled;
+            #[cfg(target_arch = "wasm32")]
+            let background_allowed = false;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if rep.geometry_job.is_some() && (rep.geom_dirty || rep.coords_dirty || !background_allowed) {
+                    rep.geometry_job = None;
+                    rep.geometry_waiting = false;
+                    // A synchronous capture/edit must install the current state now.
+                    if !background_allowed { rep.geom_dirty = true; }
+                }
+                if let Some(job) = &rep.geometry_job {
+                    match job.poll() {
+                        crate::geometry_jobs::Poll::Pending => continue,
+                        crate::geometry_jobs::Poll::Complete(geom) => {
+                            rep.geometry_job = None;
+                            renderer.update(rs, &mut rep.gpu, &geom);
+                            rep.cache_geometry(geom, n_atoms, dashed, false);
+                            changed = true;
+                            rep_geom_changed = true;
+                            continue;
+                        }
+                        crate::geometry_jobs::Poll::Failed => {
+                            rep.geometry_job = None;
+                            rep.geometry_jobs_disabled = true;
+                            rep.geom_dirty = true;
+                            log::warn!("geometry worker failed; reverting to synchronous builds");
+                        }
+                    }
+                }
+                if !background_allowed { rep.geometry_waiting = false; }
+                if background_allowed && rep.geometry_waiting
+                    && matches!(rep.kind, RepKind::Cartoon | RepKind::Surface)
+                    && !crate::geometry_jobs::Job::capacity_available()
+                { continue; }
+            }
             // Interactions reps read a *partner* molecule, so they can't be built
             // inside this `&mut`-iterator loop — a second pass below handles them.
             // Their selection was just evaluated (above); leave the geometry dirty
@@ -841,38 +961,59 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 continue;
             };
 
-            // Trajectory smoothing: a transient Savitzky–Golay blend of the
-            // frames around `current`, computed here and dropped after the
-            // build (nothing stored). Falls back to the raw current frame.
-            let smoothed = (rep.smooth_window > 1)
-                .then(|| mol.trajectory.smoothed_state(rep.smooth_window))
-                .flatten();
-            let state: &State = smoothed.as_ref().unwrap_or(render_state);
+            if !rep.geom_dirty && !rep.coords_dirty {
+                continue;
+            }
+            let state: &State = if rep.smooth_window > 1 {
+                smoothed_states
+                    .entry(rep.smooth_window)
+                    .or_insert_with(|| mol.trajectory.smoothed_state(rep.smooth_window))
+                    .as_ref()
+                    .unwrap_or(render_state)
+            } else {
+                render_state
+            };
 
             if rep.geom_dirty {
                 // Full structural rebuild: (re)compute secondary structure
                 // into the cache, build geometry, recreate GPU buffers.
-                let (geom, fresh_ss) = {
+                let (geom, fresh_ss, primitive_cache, cartoon_cache) = {
                     let bound = mol.data.bind_with_state(sel, state);
                     let ss = geometry::needs_ss(&rep.params, rep.color)
                         .then(|| SsMap::compute(&bound, rep.ss_algo));
-                    let mut geom = geometry::build(
+                    let primitive_cache = geometry::PrimitiveCache::new(
                         &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
-                        ss.as_ref(), dashed,
+                        ss.as_ref(),
                     );
-                    if grayed {
-                        gray_out(&mut geom);
+                    let cartoon_cache = geometry::CartoonCache::new(
+                        &bound, n_atoms, &rep.params, rep.color_spec(), rep.material, ss.as_ref(),
+                    );
+                    let mut result = prepare_geometry(&bound, state, n_atoms, &rep.params,
+                        rep.color_spec(), rep.material, ss.as_ref(), cartoon_cache.as_ref(), dashed,
+                        background_allowed, || primitive_cache.as_ref().map_or_else(
+                            || cartoon_cache.as_ref().map_or_else(
+                                || geometry::build(&bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), dashed),
+                                |cache| cache.build(state, dashed),
+                            ),
+                            |cache| cache.build(state, dashed),
+                        ));
+                    match &mut result {
+                        GeometryBuild::Ready(geom) => { if grayed { gray_out(geom); } }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        GeometryBuild::Background(_) => (),
                     }
-                    (geom, ss)
+                    (result, ss, primitive_cache, cartoon_cache)
                 };
                 rep.ss_cache = fresh_ss;
+                rep.primitive_cache = primitive_cache;
+                rep.cartoon_cache = cartoon_cache;
+                let geom = match geom {
+                    GeometryBuild::Ready(geom) => geom,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    GeometryBuild::Background(input) => { queue_geometry(rep, input); continue; }
+                };
                 rep.gpu = renderer.upload(rs, &geom);
-                // Cache a mesh rep's CPU mesh (with residue + source-atom tags) for
-                // picking and the selection glow; clear for other styles.
-                rep.mesh_cache = rep
-                    .kind
-                    .draws_mesh()
-                    .then(|| scene::MeshCache::new(geom.mesh, n_atoms));
+                rep.cache_geometry(geom, n_atoms, dashed, grayed);
                 rep.geom_dirty = false;
                 rep.coords_dirty = false;
                 changed = true;
@@ -883,25 +1024,35 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 // existing GPU buffers in place (no reallocation).
                 let geom = {
                     let bound = mol.data.bind_with_state(sel, state);
-                    let mut geom = geometry::build(
-                        &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
-                        rep.ss_cache.as_ref(), dashed,
-                    );
-                    if grayed {
-                        gray_out(&mut geom);
+                    let mut result = prepare_geometry(&bound, state, n_atoms, &rep.params,
+                        rep.color_spec(), rep.material, rep.ss_cache.as_ref(), rep.cartoon_cache.as_ref(),
+                        dashed, background_allowed, || rep.primitive_cache.as_ref().map_or_else(
+                            || rep.cartoon_cache.as_ref().map_or_else(
+                                || geometry::build(&bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, rep.ss_cache.as_ref(), dashed),
+                                |cache| cache.build(state, dashed),
+                            ),
+                            |cache| cache.build(state, dashed),
+                        ));
+                    match &mut result {
+                        GeometryBuild::Ready(geom) => { if grayed { gray_out(geom); } }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        GeometryBuild::Background(_) => (),
                     }
-                    geom
+                    result
+                };
+                let geom = match geom {
+                    GeometryBuild::Ready(geom) => geom,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    GeometryBuild::Background(input) => { queue_geometry(rep, input); continue; }
                 };
                 renderer.update(rs, &mut rep.gpu, &geom);
-                if rep.kind.draws_mesh() {
-                    // Keep the pick / glow cache on the drawn geometry.
-                    rep.mesh_cache = Some(scene::MeshCache::new(geom.mesh, n_atoms));
-                }
+                rep.cache_geometry(geom, n_atoms, dashed, grayed);
                 rep.coords_dirty = false;
                 changed = true;
                 rep_geom_changed = true;
             }
         }
+        drop(smoothed_states);
         mol_changed[mi] = rep_geom_changed;
         // Periodic-box wireframe: (re)build when dirty, regardless of whether
         // it's currently shown — both the molecule-level box toggle *and* a
@@ -916,7 +1067,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 .or_else(|| mol.data.state().pbox.as_ref());
             let lines = pb.map(geometry::box_wireframe).unwrap_or_default();
             let geom = geometry::GeometryData { lines, ..Default::default() };
-            mol.box_gpu = renderer.upload(rs, &geom);
+            renderer.update(rs, &mut mol.box_gpu, &geom);
             mol.box_dirty = false;
             changed = true;
         }
@@ -926,7 +1077,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
         if mol.aromatic_dirty || (rep_geom_changed && !mol.aromatic_rings.is_empty()) {
             let lines = geometry::aromatic_circles(&mol.aromatic_rings, &render_state.coords);
             let geom = geometry::GeometryData { lines, ..Default::default() };
-            mol.aromatic_gpu = renderer.upload(rs, &geom);
+            renderer.update(rs, &mut mol.aromatic_gpu, &geom);
             mol.aromatic_dirty = false;
             changed = true;
         }
@@ -957,7 +1108,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 ),
                 None => geometry::GeometryData::default(),
             };
-            mol.glow_gpu = renderer.upload(rs, &geom);
+            renderer.update(rs, &mut mol.glow_gpu, &geom);
             mol.glow_dirty = false;
             changed = true;
         }
@@ -969,7 +1120,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 ),
                 None => geometry::GeometryData::default(),
             };
-            mol.hover_gpu = renderer.upload(rs, &geom);
+            renderer.update(rs, &mut mol.hover_gpu, &geom);
             mol.hover_dirty = false;
             changed = true;
         }
@@ -982,7 +1133,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
                 }
                 None => geometry::GeometryData::default(),
             };
-            mol.hover_detail_gpu = renderer.upload(rs, &geom);
+            renderer.update(rs, &mut mol.hover_detail_gpu, &geom);
             mol.hover_detail_dirty = false;
             changed = true;
         }
@@ -992,7 +1143,7 @@ gray_active: Option<(crate::scene::MolId, usize)>,
         #[cfg(not(target_arch = "wasm32"))]
         if rep_geom_changed || mol.pick_dirty {
             let geom = build_pick(mol, mi, render_state);
-            mol.pick_gpu = renderer.upload_pick(rs, &geom);
+            renderer.update_pick(rs, &mut mol.pick_gpu, &geom);
             mol.pick_dirty = false;
             // No `changed = true`: pick geometry isn't drawn in render_scene, so
             // it doesn't require a scene re-render on its own.
@@ -1167,5 +1318,65 @@ mod unobstructed_tests {
         assert!(refresh_selection(&mol.data, &mut r));
         assert!(r.sel.is_none() && r.sel_empty && r.sel_error.is_none());
         assert!(!r.sel_dirty);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod geometry_job_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires native GPU; verifies asynchronous mesh invalidation and capture barriers"]
+    fn background_meshes_follow_edits_and_never_replace_newer_geometry() {
+        let rs = crate::render::test_gpu();
+        let settings = Settings::default();
+        let renderer = SceneRenderer::new(&rs, &settings.rendering);
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+        ))).unwrap();
+        let mut scene = Scene::default(); scene.add(raw, &settings.reps);
+        scene.molecules[0].reps = vec![Representation::new(RepKind::Surface)];
+        rebuild_dirty(&mut scene, &renderer, &settings, true, &rs, None, true);
+        assert!(scene.molecules[0].reps[0].geometry_pending());
+        assert!(scene.molecules[0].reps[0].cached_geometry(settings.behavior.dashed_pbc_bonds).is_none());
+        {
+            let rep = &mut scene.molecules[0].reps[0];
+            rep.color = crate::color::ColorMethod::Solid([255, 0, 0, 255]);
+            rep.geom_dirty = true;
+        }
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, true);
+        // The synchronous capture path must cancel old work and install the current edit.
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
+        let rep = &scene.molecules[0].reps[0];
+        assert!(!rep.geometry_pending());
+        let mesh = &rep.mesh_cache.as_ref().unwrap().mesh;
+        assert!(!mesh.vertices.is_empty());
+        assert!(mesh.vertices.iter().all(|v| v.color == 0xff0000ff));
+        let expected = mesh.clone();
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, true);
+        }
+        let mesh = &scene.molecules[0].reps[0].mesh_cache.as_ref().unwrap().mesh;
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&mesh.vertices), bytemuck::cast_slice::<_,u8>(&expected.vertices));
+        {
+            let rep = &mut scene.molecules[0].reps[0];
+            rep.geom_dirty = true;
+        }
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, true);
+        {
+            let rep = &mut scene.molecules[0].reps[0];
+            rep.sel_text = "name NONEXISTENT".into(); rep.sel_dirty = true;
+        }
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, true);
+        let rep = &scene.molecules[0].reps[0];
+        assert!(!rep.geometry_pending() && rep.mesh_cache.is_none() && !rep.gpu.has_geometry());
+        // Removal/replacement also drops the receiver/cancellation token.
+        scene.molecules[0].reps = vec![Representation::new(RepKind::Surface)];
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, true);
+        scene.molecules[0].reps = vec![Representation::new(RepKind::Vdw)];
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
+        assert!(scene.molecules[0].reps[0].gpu.has_geometry());
+        assert!(scene.molecules[0].reps[0].mesh_cache.is_none());
     }
 }

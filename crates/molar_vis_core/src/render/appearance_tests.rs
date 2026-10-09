@@ -30,15 +30,17 @@ fn envelope_shaders_validate_without_a_gpu() {
         include_str!("shaders/sphere.wgsl"),
         include_str!("shaders/cylinder.wgsl"),
     ] {
-        let source = lit_shader_source(&envelope::shader(source, true));
-        let module = wgpu::naga::front::wgsl::parse_str(&source)
-            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-        wgpu::naga::valid::Validator::new(
-            wgpu::naga::valid::ValidationFlags::all(),
-            wgpu::naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap();
+        for early_z in [false, true] {
+            let source = inject_early_z(&envelope::shader(source, true), early_z);
+            let module = wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
     }
 }
 
@@ -76,7 +78,12 @@ pub(super) fn gpu() -> RenderState {
             .unwrap();
         eprintln!("Rendering on {:?}", adapter.get_info());
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: if crate::performance::enabled() {
+                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+                } else { wgpu::Features::empty() },
+                ..Default::default()
+            })
             .await
             .unwrap();
         let target_format = wgpu::TextureFormat::Rgba8Unorm;
@@ -1161,4 +1168,558 @@ fn transparent_envelope_molecule_preview() {
             .save(format!("{dir}/{kind:?}_raytrace.png"))
             .unwrap();
     }
+}
+
+
+#[test]
+#[ignore = "requires a GPU adapter; checks same-size mesh connectivity updates"]
+fn mesh_update_replaces_indices_when_counts_match() {
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/2lao.pdb"
+    )))
+    .unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::Surface);
+    let mut geom = GeometryData::default();
+    geom.mesh.vertices = [
+        [-1.0, -1.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+    ]
+    .into_iter()
+    .map(|pos| MeshVertex {
+        pos,
+        normal: [0.0, 0.0, 1.0],
+        color: 0xffffffff,
+        mat: crate::material::Material::default().pack_lighting(),
+    })
+    .collect();
+    geom.mesh.indices = vec![0, 1, 2];
+    rep.gpu = renderer.upload(&rs, &geom);
+    scene.molecules[0].reps = vec![rep];
+    let camera = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.8);
+    let capture = |renderer: &mut SceneRenderer, scene: &Scene| {
+        let cap = renderer.capture_begin(
+            &rs,
+            64,
+            64,
+            camera.view(),
+            camera.proj(1.0),
+            camera.is_perspective(),
+            camera.cue_uniform(),
+            camera.ao_uniform(),
+            camera.shadow_uniform(),
+            camera.background,
+            camera.eye_depth_range(),
+            scene,
+        );
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+    };
+    let before = capture(&mut renderer, &scene);
+    geom.mesh.indices = vec![0, 2, 3];
+    renderer.update(&rs, &mut scene.molecules[0].reps[0].gpu, &geom);
+    let updated = capture(&mut renderer, &scene);
+    scene.molecules[0].reps[0].gpu = renderer.upload(&rs, &geom);
+    let fresh = capture(&mut renderer, &scene);
+    assert_ne!(before, fresh, "fixture must expose the connectivity change");
+    assert_eq!(updated, fresh, "in-place update must match a fresh upload");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; checks cached trace bindings across uploads and resizes"]
+fn raytrace_bindings_follow_scene_and_accumulator_replacement() {
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let camera = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.8);
+    let mut mesh = crate::geometry::MeshData::default();
+    mesh.vertices = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]]
+        .into_iter()
+        .map(|pos| MeshVertex {
+            pos,
+            normal: [0.0, 0.0, 1.0],
+            color: 0xff0000ff,
+            mat: crate::material::Material::default().pack_lighting(),
+        })
+        .collect();
+    mesh.indices = vec![0, 1, 2];
+    let upload = |renderer: &mut SceneRenderer, mesh: &crate::geometry::MeshData| {
+        renderer.raytracer.as_mut().unwrap().upload(
+            &rs,
+            &raytrace::RtScene::from_test_mesh(mesh, crate::geometry::RepKind::Cartoon),
+        );
+    };
+    let capture = |renderer: &mut SceneRenderer, size| {
+        // 64 samples span multiple chunks, exercising both ping-pong bindings.
+        let cap = renderer
+            .capture_begin_raytrace(&rs, size, size, &camera, 64)
+            .unwrap();
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+    };
+    upload(&mut renderer, &mesh);
+    let red = capture(&mut renderer, 16);
+    assert_eq!(red, capture(&mut renderer, 16));
+    for vertex in &mut mesh.vertices {
+        vertex.color = 0xff00ff00;
+    }
+    upload(&mut renderer, &mesh);
+    let green = capture(&mut renderer, 16);
+    assert_ne!(
+        red, green,
+        "scene replacement must update the bound buffers"
+    );
+    capture(&mut renderer, 32);
+    assert_eq!(
+        green,
+        capture(&mut renderer, 16),
+        "resizing must rebind accumulators"
+    );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; compares depth-only and color-output shadow pipelines"]
+fn depth_only_shadows_match_opaque_pipeline_depth() {
+    use crate::geometry::RepKind;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/2lao.pdb"
+    )))
+    .unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let depth_pipelines = [
+        renderer.sphere_shadow_pipeline.clone(),
+        renderer.cylinder_shadow_pipeline.clone(),
+        renderer.mesh_shadow_pipeline.clone(),
+    ];
+    let legacy_pipelines = [
+        renderer.sphere_pipeline[0].clone(),
+        renderer.cylinder_pipeline[0].clone(),
+        mesh::build_pipeline(
+            &rs.device,
+            DEPTH_FORMAT,
+            &renderer.camera_bgl,
+            &opaque_targets(renderer.color_format),
+            true,
+            wgpu::CompareFunction::Less,
+            "fs_shadow",
+        ),
+    ];
+    let extent = wgpu::Extent3d {
+        width: 64,
+        height: 64,
+        depth_or_array_layers: 1,
+    };
+    let texture = |format, usage| {
+        rs.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let depth = texture(
+        DEPTH_FORMAT,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+    let depth_view = depth.create_view(&Default::default());
+    let color = texture(
+        renderer.color_format,
+        wgpu::TextureUsages::RENDER_ATTACHMENT,
+    )
+    .create_view(&Default::default());
+    let normal = texture(NORMAL_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT)
+        .create_view(&Default::default());
+    let readback = rs.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 64 * 256,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let read = |renderer: &mut SceneRenderer, legacy: bool, scene: &Scene| {
+        let pipelines = if legacy {
+            &legacy_pipelines
+        } else {
+            &depth_pipelines
+        };
+        renderer.sphere_shadow_pipeline = pipelines[0].clone();
+        renderer.cylinder_shadow_pipeline = pipelines[1].clone();
+        renderer.mesh_shadow_pipeline = pipelines[2].clone();
+        let colors: Vec<_> = if legacy {
+            [&color, &normal]
+                .into_iter()
+                .map(|view| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Discard,
+                        },
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut encoder = rs.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &colors,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            renderer.draw_shadow_casters(&mut pass, scene, 0);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &depth,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(64),
+                },
+            },
+            extent,
+        );
+        rs.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let bytes = readback.slice(..).get_mapped_range().to_vec();
+        readback.unmap();
+        bytes
+    };
+    for style in [
+        RepKind::Vdw,
+        RepKind::Licorice,
+        RepKind::BallAndStick,
+        RepKind::Cartoon,
+        RepKind::Surface,
+    ] {
+        populate_rep(
+            &renderer,
+            &rs,
+            &mut scene,
+            style,
+            crate::material::Material::Opaque,
+        );
+        for projection in [Projection::Orthographic, Projection::Perspective] {
+            camera.projection = projection;
+            let uniform = CameraUniform::new(
+                camera.view(),
+                camera.proj(1.0),
+                camera.is_perspective(),
+                [64.0, 64.0],
+                camera.cue_uniform(),
+                camera.background.fog_color(),
+                camera.eye_depth_range(),
+                1.0,
+                [0.0; 4],
+            );
+            rs.queue
+                .write_buffer(&renderer.camera_buf, 0, bytemuck::bytes_of(&uniform));
+            let before = read(&mut renderer, true, &scene);
+            let after = read(&mut renderer, false, &scene);
+            assert!(
+                before
+                    .chunks_exact(4)
+                    .any(|b| f32::from_le_bytes(b.try_into().unwrap()) < 1.0),
+                "fixture must draw shadow depth: {style:?}"
+            );
+            assert_eq!(
+                before, after,
+                "{style:?} {projection:?}: depth must remain exact"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; checks pick buffer reuse and active draw counts"]
+fn pick_buffers_reuse_capacity_and_drop_removed_atoms() {
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/2lao.pdb"
+    )))
+    .unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let uniform = CameraUniform::new(
+        Mat4::IDENTITY,
+        Mat4::orthographic_rh(-2.0, 2.0, -2.0, 2.0, 0.1, 10.0),
+        false,
+        [64.0, 64.0],
+        [0.0; 4],
+        [0.0; 4],
+        [0.1, 10.0],
+        1.0,
+        [0.0; 4],
+    );
+    rs.queue
+        .write_buffer(&renderer.camera_buf, 0, bytemuck::bytes_of(&uniform));
+    let mut pick = PickGeometry::default();
+    pick.spheres = [-1.0, 1.0]
+        .into_iter()
+        .enumerate()
+        .map(|(id, x)| SphereInstance {
+            center: [x, 0.0, -3.0],
+            radius: 0.4,
+            color: 0,
+            mat: 0,
+            pick: [1, id as u32],
+        })
+        .collect();
+    pick.vertices = (0..6)
+        .map(|i| PickVertex {
+            pos: [i as f32 * 0.1, -1.5, -3.0],
+            pick: [1, 0],
+        })
+        .collect();
+    pick.indices = vec![0, 1, 2, 3, 4, 5];
+    let all_spheres = pick.spheres.clone();
+    let all_vertices = pick.vertices.clone();
+    let all_indices = pick.indices.clone();
+    renderer.update_pick(&rs, &mut scene.molecules[0].pick_gpu, &pick);
+    let gpu = &scene.molecules[0].pick_gpu;
+    let sphere_buffer = gpu.spheres.as_ref().unwrap().buffer.clone();
+    let vertex_buffer = gpu.mesh.as_ref().unwrap().vertices.clone();
+    let index_buffer = gpu.mesh.as_ref().unwrap().indices.clone();
+    let query = |renderer: &mut SceneRenderer, scene: &Scene| {
+        renderer.request_pick(&rs, scene, 48, 32, [64, 64]);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        renderer.poll_pick(&rs).expect("readback must complete")
+    };
+    assert_eq!(query(&mut renderer, &scene), Some((0, 0, 1)));
+    for count in [1, 2] {
+        pick.spheres = all_spheres[..count].to_vec();
+        pick.vertices = all_vertices[..count * 3].to_vec();
+        pick.indices = all_indices[..count * 3].to_vec();
+        renderer.update_pick(&rs, &mut scene.molecules[0].pick_gpu, &pick);
+        let gpu = &scene.molecules[0].pick_gpu;
+        assert_eq!(gpu.spheres.as_ref().unwrap().buffer, sphere_buffer);
+        assert_eq!(gpu.mesh.as_ref().unwrap().vertices, vertex_buffer);
+        assert_eq!(gpu.mesh.as_ref().unwrap().indices, index_buffer);
+        assert_eq!(gpu.spheres.as_ref().unwrap().count, count as u32);
+        assert_eq!(gpu.mesh.as_ref().unwrap().index_count, (count * 3) as u32);
+        assert_eq!(
+            query(&mut renderer, &scene),
+            if count == 1 { None } else { Some((0, 0, 1)) }
+        );
+    }
+    pick.spheres.push(all_spheres[0]);
+    renderer.update_pick(&rs, &mut scene.molecules[0].pick_gpu, &pick);
+    assert_ne!(
+        scene.molecules[0].pick_gpu.spheres.as_ref().unwrap().buffer,
+        sphere_buffer
+    );
+    renderer.update_pick(
+        &rs,
+        &mut scene.molecules[0].pick_gpu,
+        &PickGeometry::default(),
+    );
+    assert!(!scene.molecules[0].pick_gpu.has_geometry());
+    assert_eq!(query(&mut renderer, &scene), None);
+}
+
+#[test]
+#[ignore = "requires native GPU; compares fixed kernels against the original shader"]
+fn precomputed_effect_kernel_matches_original_images() {
+    use crate::{geometry::RepKind, material::Material};
+    let rs = gpu();
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+    ))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let original = lit_shader_source(include_str!("shaders/ssao.wgsl"))
+        .replace("return AO_DISK[u32(index)];", "let fi = index + 0.5; let angle = fi * 2.3999632; return vec2<f32>(cos(angle), sin(angle)) * sqrt(fi / AO_KERNEL_SIZE);")
+        .replace("let o = ao_disk_offset(f32(i)) * filter_width;", "let fi = f32(i) + 0.5; let angle = fi * 2.3999632; let o = vec2<f32>(cos(angle), sin(angle)) * sqrt(fi / f32(samples)) * texel * shadow_filter_width(u.shadow_params.w);");
+    for ssaa in [1, 4] {
+        let mut settings = crate::settings::RenderingSettings::default();
+        settings.ssaa = ssaa;
+        let mut renderer = SceneRenderer::new(&rs, &settings);
+        let fixed = renderer.ssao_pipeline.as_ref().unwrap().clone();
+        let reference = ssao::build_pipeline_with_source(&rs.device, renderer.color_format, &renderer.ssao_bgl, &original);
+        for style in [RepKind::Vdw, RepKind::Cartoon, RepKind::Surface] {
+            populate_rep(&renderer, &rs, &mut scene, style, Material::Opaque);
+            for projection in [Projection::Orthographic, Projection::Perspective] {
+                camera.projection = projection;
+                for (ao, shadow, softness) in [(true, false, 0.0), (false, true, 0.0), (false, true, 0.7), (true, true, 0.7)] {
+                    camera.ao.enabled = ao;
+                    camera.shadow.enabled = shadow;
+                    camera.shadow.softness = softness;
+                    let capture = |renderer: &mut SceneRenderer| {
+                        let cap = renderer.capture_begin(&rs, 160, 120, camera.view(),
+                            camera.proj(160.0/120.0), camera.is_perspective(), camera.cue_uniform(),
+                            camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+                            camera.eye_depth_range(), &scene);
+                        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        cap.read()
+                    };
+                    renderer.ssao_pipeline = Some(reference.clone());
+                    let expected = capture(&mut renderer);
+                    renderer.ssao_pipeline = Some(fixed.clone());
+                    let actual = capture(&mut renderer);
+                    let mut total = 0u64;
+                    let mut differing_pixels = 0usize;
+                    for (a, b) in actual.pixels().zip(expected.pixels()) {
+                        let delta = (0..3).map(|c| a[c].abs_diff(b[c]) as u64).sum::<u64>();
+                        total += delta;
+                        differing_pixels += usize::from(delta > 12);
+                    }
+                    // CPU/GPU trig implementations can round offsets differently.
+                    // Permit <0.1 byte mean error and <0.1% noticeably changed pixels.
+                    let pixels = actual.width() as usize * actual.height() as usize;
+                    assert!(total as f64 / ((pixels * 3) as f64) < 0.1,
+                        "kernel mean error: {style:?}/{projection:?}, SSAA {ssaa}, {ao}/{shadow}/{softness}");
+                    assert!(differing_pixels as f64 / (pixels as f64) < 0.001,
+                        "kernel edge error: {style:?}/{projection:?}, SSAA {ssaa}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires GPU; verifies shadow reuse and dependency invalidation against fresh images"]
+fn shadow_maps_reuse_only_matching_casters_and_light_inputs() {
+    let rs = gpu();
+    let settings = crate::settings::RenderingSettings::default();
+    let mut renderer = SceneRenderer::new(&rs, &settings);
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/2lao.pdb"
+    )))
+    .unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+    camera.shadow.enabled = true;
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    populate_rep(
+        &renderer,
+        &rs,
+        &mut scene,
+        crate::geometry::RepKind::BallAndStick,
+        crate::material::Material::default(),
+    );
+    let mol = &mut scene.molecules[0];
+    let rep = &mut mol.reps[0];
+    let bound = mol
+        .data
+        .bind_with_state(rep.sel.as_ref().unwrap(), mol.data.state());
+    let geom = crate::geometry::build(
+        &bound,
+        mol.n_atoms,
+        &mol.bonds,
+        &rep.params,
+        rep.color_spec(),
+        rep.material,
+        None,
+        true,
+    );
+    rep.cache_geometry(geom, mol.n_atoms, true, false);
+    rep.sel_dirty = false;
+    rep.geom_dirty = false;
+    rep.coords_dirty = false;
+    let capture = |renderer: &mut SceneRenderer, scene: &Scene, camera: &Camera| {
+        let cap = renderer.capture_begin(
+            &rs,
+            96,
+            72,
+            camera.view(),
+            camera.proj(96.0 / 72.0),
+            camera.is_perspective(),
+            camera.cue_uniform(),
+            camera.ao_uniform(),
+            camera.shadow_uniform(),
+            camera.background,
+            camera.eye_depth_range(),
+            scene,
+        );
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+    };
+    let first = capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 1);
+    assert_eq!(first, capture(&mut renderer, &scene, &camera));
+    assert_eq!(renderer.shadow_draw_count, 1);
+    renderer.shadow_key = None;
+    assert_eq!(first, capture(&mut renderer, &scene, &camera));
+    assert_eq!(renderer.shadow_draw_count, 2);
+    camera.orientation = glam::Quat::from_rotation_y(0.2);
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 3);
+    scene.molecules[0].reps[0].geometry_revision += 100;
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 4);
+    scene.molecules[0].reps[0].visible = false;
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 5);
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 5);
+    scene.molecules[0].reps[0].visible = true;
+    scene.molecules[0].reps[0].coords_dirty = true;
+    capture(&mut renderer, &scene, &camera);
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(
+        renderer.shadow_draw_count, 7,
+        "untracked/pending changes must always render fresh"
+    );
+    scene.molecules[0].reps[0].coords_dirty = false;
+    let mut changed = settings;
+    changed.shadow_res /= 2;
+    renderer.reconfigure(&rs, &changed);
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 8);
+    scene.molecules[0].reps[0].material = crate::material::Material::Transparent;
+    let transparent = capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 9);
+    assert_eq!(transparent, capture(&mut renderer, &scene, &camera));
+    assert_eq!(renderer.shadow_draw_count, 9);
+    renderer.shadow_key = None;
+    assert_eq!(transparent, capture(&mut renderer, &scene, &camera));
+    assert_eq!(renderer.shadow_draw_count, 10);
+    scene.molecules[0].reps[0].material = crate::material::Material::Opaque;
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 11);
+    scene.molecules.clear();
+    capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 12);
 }

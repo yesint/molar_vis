@@ -83,6 +83,9 @@ pub fn early_z_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
                 {
                     required_features |= wgpu::Features::SHADER_EARLY_DEPTH_TEST;
                 }
+                if crate::performance::enabled() {
+                    required_features |= adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+                }
                 wgpu::DeviceDescriptor {
                     label: Some("molar_vis wgpu device"),
                     required_features,

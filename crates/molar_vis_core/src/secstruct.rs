@@ -41,6 +41,7 @@ impl SsMap {
     /// against the sorted distinct resindices (both from a `BTreeMap` over the
     /// same particles).
     pub fn compute(bound: &(impl ParticleIterProvider + PosProvider), algo: SsAlgorithm) -> Self {
+        let _timing = crate::performance::span("secondary-structure");
         let mut resindices: BTreeMap<usize, ()> = BTreeMap::new();
         // Coarse-grained (Martini) backbone beads, for the CG SS path. DSSP needs the
         // all-atom backbone (N/CA/C/O), which CG doesn't have, so when the residues are

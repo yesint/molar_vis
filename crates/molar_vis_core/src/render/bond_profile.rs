@@ -170,8 +170,25 @@ mod tests {
                 result[6] = bond_profile_ray(base,axis,0.15,0.006,p,smoothing,vec3<f32>(0.0,0.018,0.0),vec3<f32>(0.075,0.1,0.0),vec3<f32>(0.0,-1.0,0.0),false);
                 result[7] = vec4<f32>(bond_profile_radius(0.06,0.15,0.015,p,smoothing),0.0,0.0);
                 result[8] = bond_profile_ray(base,axis,0.15,0.006,p,smoothing,vec3<f32>(0.0,0.018,0.0),vec3<f32>(0.06,0.1,0.0),vec3<f32>(0.0,-1.0,0.0),false);
+                for (var i = 0u; i < 512u; i += 1u) {{
+                    let angle = f32(i) * 2.39996323;
+                    let inside = i % 3u == 0u;
+                    let offset = i % 4u == 0u;
+                    let shift = select(vec3<f32>(0.0), vec3<f32>(0.0,0.018,0.0), offset);
+                    let neck = select(0.015, 0.006, offset);
+                    let ro = vec3<f32>(f32(i % 37u) * 0.006 - 0.03, cos(angle), sin(angle)) * vec3<f32>(1.0, select(0.1,0.002,inside),select(0.1,0.002,inside));
+                    let rd = normalize(vec3<f32>(sin(angle*0.3)*0.2, -cos(angle), -sin(angle)));
+                    let actual = bond_profile_ray_diagnostic(base,axis,0.15,neck,p,smoothing,shift,ro,rd,inside);
+                    result[9u+i*3u] = actual.hit;
+                    result[10u+i*3u] = bond_profile_ray_reference(base,axis,0.15,neck,p,smoothing,shift,ro,rd,inside);
+                    result[11u+i*3u] = vec4<f32>(f32(actual.iterations),0.0,0.0,0.0);
+                }}
             }}"#,
-                include_str!("shaders/bond_profile.wgsl"),
+                format!(
+                    "{}\n{}",
+                    include_str!("shaders/bond_profile.wgsl"),
+                    include_str!("shaders/bond_profile_ray_reference.wgsl")
+                ),
                 p[0],
                 p[1],
                 p[2],
@@ -195,13 +212,13 @@ mod tests {
                 });
             let output = rs.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
-                size: 144,
+                size: 24720,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
             let readback = rs.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
-                size: 144,
+                size: 24720,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -222,7 +239,7 @@ mod tests {
                 pass.set_bind_group(0, &group, &[]);
                 pass.dispatch_workgroups(1, 1, 1);
             }
-            encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 144);
+            encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 24720);
             rs.queue.submit([encoder.finish()]);
             let (tx, rx) = std::sync::mpsc::channel();
             readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
@@ -232,6 +249,30 @@ mod tests {
             rx.recv().unwrap().unwrap();
             let bytes = readback.slice(..).get_mapped_range();
             let v: &[[f32; 4]] = bytemuck::cast_slice(&bytes);
+            let mut iterations = Vec::new();
+            for i in 0..512 {
+                let actual = v[9 + i * 3];
+                let reference = v[10 + i * 3];
+                assert_eq!(
+                    actual[0] < 0.0,
+                    reference[0] < 0.0,
+                    "hit mismatch ray {i} smoothing {smoothing}"
+                );
+                for component in 0..4 {
+                    assert!(
+                        (actual[component] - reference[component]).abs() < 2e-5,
+                        "ray {i} smoothing {smoothing}: {actual:?} != {reference:?}"
+                    );
+                }
+                iterations.push(v[11 + i * 3][0] as u32);
+            }
+            iterations.sort_unstable();
+            eprintln!(
+                "bond smoothing {smoothing}: mean iterations {:.1}, p95 {}, max {}",
+                iterations.iter().sum::<u32>() as f32 / 512.0,
+                iterations[486],
+                iterations[511]
+            );
             assert!((v[0][0] - 0.015).abs() < 1e-6 && v[0][1].abs() < 1e-6);
             assert!(
                 (v[0][2] - (p[1] + 0.015) * 0.5).abs() > 1e-4,

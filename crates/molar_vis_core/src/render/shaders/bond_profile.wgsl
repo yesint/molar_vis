@@ -102,8 +102,51 @@ fn bond_profile_field(p: vec3<f32>, base: vec3<f32>, axis: vec3<f32>, length_axi
 }
 // Conservative sphere tracing of the spline solid. Work is confined to its
 // bounding box and runs only for the optional flared profile. Return t + normal.
+// Constants reused by every march step; original helpers remain the reference
+// for normals and standalone containment. Cubic arithmetic retains its order.
+struct BondCubicCache {
+    waists: vec2<f32>, spans: vec2<f32>, left: vec4<f32>, right: vec4<f32>,
+}
+fn bond_cubic_coefficients(y0: f32, y1: f32, m0: f32, m1: f32, span: f32) -> vec4<f32> {
+    return vec4<f32>(2.0 * y0 - 2.0 * y1 + span * (m0 + m1),
+        -3.0 * y0 + 3.0 * y1 - span * (2.0 * m0 + m1), span * m0, y0);
+}
+fn bond_cubic_cache(length_axis: f32, neck: f32, profile: vec4<f32>, smoothing: f32) -> BondCubicCache {
+    let waists = bond_profile_waists(length_axis, neck, profile, smoothing);
+    let spans = max(vec2<f32>(waists.x - profile.x, profile.z - waists.y), vec2<f32>(1e-8));
+    return BondCubicCache(waists, spans,
+        bond_cubic_coefficients(profile.y, neck, -profile.x / profile.y, 0.0, spans.x),
+        bond_cubic_coefficients(neck, profile.w, 0.0, (length_axis - profile.z) / profile.w, spans.y));
+}
+fn bond_cached_radius(s: f32, length_axis: f32, neck: f32, profile: vec4<f32>, cache: BondCubicCache) -> f32 {
+    if (s > cache.waists.x && s < cache.waists.y) { return neck; }
+    var u: f32;
+    var c: vec4<f32>;
+    if (s <= 0.5 * length_axis) {
+        u = clamp((s - profile.x) / cache.spans.x, 0.0, 1.0); c = cache.left;
+    } else {
+        u = clamp((s - cache.waists.y) / cache.spans.y, 0.0, 1.0); c = cache.right;
+    }
+    return ((c.x * u + c.y) * u + c.z) * u + c.w;
+}
+fn bond_cached_field(p: vec3<f32>, base: vec3<f32>, axis: vec3<f32>, length_axis: f32,
+    neck: f32, profile: vec4<f32>, smoothing: f32, shift: vec3<f32>, lipschitz: f32, cache: BondCubicCache) -> f32 {
+    if (dot(shift, shift) > 1e-16) {
+        return bond_offset_surface(p, base, axis, length_axis, neck, profile, smoothing, shift).x;
+    }
+    let s = dot(p - base, axis);
+    let radius = bond_cached_radius(s, length_axis, neck, profile, cache);
+    let delta = p - base - axis * s;
+    return max((length(delta) - radius) / lipschitz, max(profile.x - s, s - profile.z));
+}
+struct BondRayDiagnostic { hit: vec4<f32>, iterations: u32 }
+
 fn bond_profile_ray(base: vec3<f32>, axis: vec3<f32>, length_axis: f32, neck: f32,
     profile: vec4<f32>, smoothing: f32, shift: vec3<f32>, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> vec4<f32> {
+    return bond_profile_ray_diagnostic(base, axis, length_axis, neck, profile, smoothing, shift, ro, rd, exit_inside).hit;
+}
+fn bond_profile_ray_diagnostic(base: vec3<f32>, axis: vec3<f32>, length_axis: f32, neck: f32,
+    profile: vec4<f32>, smoothing: f32, shift: vec3<f32>, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> BondRayDiagnostic {
     let offset = dot(shift, shift) > 1e-16;
     let radii = bond_profile_atom_radii(length_axis, profile);
     let extent = vec3<f32>(max(max(neck, radii.x), radii.y) + length(shift) + smoothing * min(radii.x, radii.y) / 3.0);
@@ -118,23 +161,26 @@ fn bond_profile_ray(base: vec3<f32>, axis: vec3<f32>, length_axis: f32, neck: f3
     let far = max(ta, tb);
     var t = max(max(near.x, near.y), max(near.z, 1e-5));
     let end = min(min(far.x, far.y), far.z);
-    if (t > end) { return vec4<f32>(-1.0, 0.0, 0.0, 0.0); }
+    if (t > end) { return BondRayDiagnostic(vec4<f32>(-1.0, 0.0, 0.0, 0.0), 0u); }
     let lipschitz = bond_profile_lipschitz(length_axis, neck, profile, smoothing, shift);
     let epsilon = max(1e-6, neck * 1e-4);
-    let initial = bond_profile_field(ro + rd * t, base, axis, length_axis, neck, profile, smoothing, shift, lipschitz);
-    if (initial < -epsilon && !exit_inside) { return vec4<f32>(-1.0, 0.0, 0.0, 0.0); }
+    let cache = bond_cubic_cache(length_axis, neck, profile, smoothing);
+    let initial = bond_cached_field(ro + rd * t, base, axis, length_axis, neck, profile, smoothing, shift, lipschitz, cache);
+    if (initial < -epsilon && !exit_inside) { return BondRayDiagnostic(vec4<f32>(-1.0, 0.0, 0.0, 0.0), 0u); }
+    var iterations = 0u;
     for (var i = 0u; i < 192u; i = i + 1u) {
         if (t > end) { break; }
         let p = ro + rd * t;
-        let distance = bond_profile_field(p, base, axis, length_axis, neck, profile, smoothing, shift, lipschitz);
+        iterations = i + 1u;
+        let distance = bond_cached_field(p, base, axis, length_axis, neck, profile, smoothing, shift, lipschitz, cache);
         if (abs(distance) < epsilon) {
             let s = dot(p - base, axis);
             var normal = bond_profile_normal(p, base, axis, length_axis, neck, profile, smoothing, shift);
             if (!offset && s <= profile.x + epsilon && length(p - a) < profile.y - epsilon) { normal = -axis; }
             if (!offset && s >= profile.z - epsilon && length(p - b) < profile.w - epsilon) { normal = axis; }
-            return vec4<f32>(t, normal);
+            return BondRayDiagnostic(vec4<f32>(t, normal), iterations);
         }
         t = t + max(abs(distance) * 0.9, epsilon * 0.5);
     }
-    return vec4<f32>(-1.0, 0.0, 0.0, 0.0);
+    return BondRayDiagnostic(vec4<f32>(-1.0, 0.0, 0.0, 0.0), iterations);
 }

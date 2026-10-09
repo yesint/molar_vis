@@ -212,7 +212,7 @@ fn ray_triangle(v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>, ro: vec3<f32>, rd: 
     return vec3<f32>(t, u, v);
 }
 
-struct Hit { t: f32, prim: u32, uv: vec2<f32> };
+struct Hit { t: f32, prim: u32, uv: vec2<f32>, leaf: u32 };
 
 fn primitive_opacity(prim: u32, p: vec3<f32>, uv: vec2<f32>) -> f32 {
     let typ = prim >> 30u;
@@ -286,6 +286,17 @@ fn inside_envelope(p: vec3<f32>, own: u32) -> bool {
     return false;
 }
 
+// Entry distance for ordering children. The interval and epsilon match hit_aabb.
+fn aabb_entry(lo: vec3<f32>, hi: vec3<f32>, ro: vec3<f32>, inv: vec3<f32>, tmax: f32) -> f32 {
+    let t0 = (lo - ro) * inv;
+    let t1 = (hi - ro) * inv;
+    let near = min(t0, t1);
+    let far = max(t0, t1);
+    let enter = max(max(near.x, near.y), max(near.z, 1e-4));
+    let exit = min(min(far.x, far.y), min(far.z, tmax));
+    return select(T_MAX, enter, enter <= exit);
+}
+
 fn closest_hit(ro: vec3<f32>, rd: vec3<f32>) -> Hit {
     return closest_hit_filtered(ro, rd, false);
 }
@@ -294,6 +305,7 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
     var hit: Hit;
     hit.t = T_MAX;
     hit.prim = 0xffffffffu;
+    hit.leaf = 0u;
     if (arrayLength(&nodes) == 0u) { return hit; }
     let inv = 1.0 / rd;
     var stack: array<u32, 32>;
@@ -307,8 +319,18 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
         let count = bitcast<u32>(n.hi.w);
         let link = bitcast<u32>(n.lo.w);
         if (count == 0u) {
-            stack[sp] = link; sp = sp + 1;
-            stack[sp] = link + 1u; sp = sp + 1;
+            let left = nodes[link];
+            let right = nodes[link + 1u];
+            let dl = aabb_entry(left.lo.xyz, left.hi.xyz, ro, inv, hit.t);
+            let dr = aabb_entry(right.lo.xyz, right.hi.xyz, ro, inv, hit.t);
+            // Far child first on the stack, near child first during traversal.
+            if (dl < dr) {
+                if (dr < T_MAX) { stack[sp] = link + 1u; sp = sp + 1; }
+                if (dl < T_MAX) { stack[sp] = link; sp = sp + 1; }
+            } else {
+                if (dl < T_MAX) { stack[sp] = link; sp = sp + 1; }
+                if (dr < T_MAX) { stack[sp] = link + 1u; sp = sp + 1; }
+            }
         } else {
             for (var k = 0u; k < count; k = k + 1u) {
                 let tagged = prim_indices[link + k];
@@ -316,14 +338,14 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
                 let idx = tagged & IDX_MASK;
                 if (typ == 0u) {
                     let t = ray_sphere(spheres[idx], ro, rd, false);
-                    if (t > 0.0 && t < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; }
+                    if (t > 0.0 && (t < hit.t || (t == hit.t && hit.prim != 0xffffffffu && link > hit.leaf)) && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; hit.leaf = link; }
                 } else if (typ == 1u) {
                     let t = ray_cylinder(cylinders[idx], ro, rd, false);
-                    if (t > 0.0 && t < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; }
+                    if (t > 0.0 && (t < hit.t || (t == hit.t && hit.prim != 0xffffffffu && link > hit.leaf)) && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; hit.leaf = link; }
                 } else {
                     let tri = triangles[idx];
                     let r = ray_triangle(mesh_verts[tri.x].p.xyz, mesh_verts[tri.y].p.xyz, mesh_verts[tri.z].p.xyz, ro, rd);
-                    if (r.x > 0.0 && r.x < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * r.x, r.yz) >= 0.999)) { hit.t = r.x; hit.prim = tagged; hit.uv = r.yz; }
+                    if (r.x > 0.0 && (r.x < hit.t || (r.x == hit.t && hit.prim != 0xffffffffu && link > hit.leaf)) && (!opaque_only || primitive_opacity(tagged, ro + rd * r.x, r.yz) >= 0.999)) { hit.t = r.x; hit.prim = tagged; hit.leaf = link; hit.uv = r.yz; }
                 }
             }
         }

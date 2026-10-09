@@ -32,7 +32,7 @@ impl App {
             .scene
             .molecules
             .iter()
-            .any(|m| m.visible && (m.pending.is_some() || m.hover.is_some()));
+            .any(|m| m.visible && m.pending.is_some());
         if !has_glow {
             return (1.0, false);
         }
@@ -67,7 +67,12 @@ impl App {
                 self.view_dirty,
                 render_state,
                 gray_active,
+                true,
             );
+
+            let geometry_pending = self.scene.molecules.iter().filter(|m| m.visible)
+                .any(|m| m.reps.iter().any(|r| r.geometry_pending()));
+            if geometry_pending { ui.ctx().request_repaint_after(std::time::Duration::from_millis(33)); }
 
             // Claim the whole central area as a draggable, scrollable surface.
             let available = ui.available_size();
@@ -199,7 +204,8 @@ impl App {
             // ignored while a text field has focus (so typing "r" in a selection doesn't fire).
             let rt_ok = self.renderer.raytrace_supported()
                 && !self.scene.molecules.is_empty()
-                && self.draw.is_none();
+                && self.draw.is_none()
+                && !geometry_pending;
             if ui.is_enabled()
                 && rt_ok
                 && self.rt.warm.is_none()
@@ -230,7 +236,7 @@ impl App {
             // immediately instead of only after the gather finishes. `force_raster` re-renders
             // the behind-view this frame so its glow is hidden (`glow_pulse = 0`, set above).
             let mut force_raster = false;
-            if self.rt.warm.is_some() {
+            if self.rt.warm.is_some() && !geometry_pending {
                 if self.rt.warm_shown {
                     if self.rt.scene_dirty {
                         let dashed = self.settings.behavior.dashed_pbc_bonds;
