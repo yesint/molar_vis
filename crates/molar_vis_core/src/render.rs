@@ -12,6 +12,7 @@ mod appearance_tests;
 mod background;
 mod camera_uniform;
 mod cylinder;
+mod envelope;
 mod line;
 mod mesh;
 mod raytrace;
@@ -114,7 +115,7 @@ fn camera_binding_size() -> Option<std::num::NonZeroU64> {
 /// `enable` is false the source passes through unchanged (plain late-Z), so WebGL2/
 /// wasm and unsupported adapters keep working. Only `fs_main` is tagged: the OIT/
 /// glow/pick entries are untouched.
-fn inject_early_z(src: &'static str, enable: bool) -> std::borrow::Cow<'static, str> {
+fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
     let src = lit_shader_source(src);
     if enable {
         std::borrow::Cow::Owned(src.replace(
@@ -128,7 +129,7 @@ fn inject_early_z(src: &'static str, enable: bool) -> std::borrow::Cow<'static, 
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    format!("{src}\n{}", include_str!("render/shaders/lighting.wgsl"))
+    format!("{}\n{}", envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"))
 }
 
 /// (Re)create the camera bind group over `buf` with a dynamic-offset binding.
@@ -450,6 +451,7 @@ pub struct RepGpu {
     cylinders: Option<DrawBuffer>, // 4 verts/instance
     lines: Option<DrawBuffer>,     // vertex count (LineList)
     mesh: Option<MeshBuffers>,     // indexed triangles (cartoon)
+    envelope: Option<envelope::Gpu>,
 }
 
 impl RepGpu {
@@ -617,6 +619,8 @@ pub struct SceneRenderer {
     // cyan over the color target, depth-test `≤` against the scene, no depth-write).
     // The OIT pipelines are resolved into the color target by `composite_pipeline`
     // after the transparent pass; the glow pipelines run in a final pass.
+    envelope_bgl: Option<wgpu::BindGroupLayout>,
+    empty_envelope: Option<envelope::Gpu>,
     sphere_pipeline: [wgpu::RenderPipeline; 3],
     cylinder_pipeline: [wgpu::RenderPipeline; 3],
     line_pipeline: [wgpu::RenderPipeline; 3],
@@ -831,11 +835,16 @@ impl SceneRenderer {
         };
         // Early-Z applies only to the opaque pass (`fs_main`); the OIT/glow slots
         // keep late-Z (depth-write off there anyway).
+        let envelope_bgl = (device.limits().max_storage_buffers_per_shader_stage >= 2
+            && rs.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::FRAGMENT_STORAGE))
+            .then(|| envelope::layout(device));
+        let empty_envelope = envelope_bgl.as_ref()
+            .map(|layout| envelope::Gpu::new(device, layout, &GeometryData::default()));
         let sphere_pipeline = triple(&|t, dw, dc, fs| {
-            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, early_z && fs == "fs_main")
+            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), t, dw, dc, fs, early_z && fs == "fs_main")
         });
         let cylinder_pipeline = triple(&|t, dw, dc, fs| {
-            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, early_z && fs == "fs_main")
+            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), t, dw, dc, fs, early_z && fs == "fs_main")
         });
         let line_pipeline = triple(&|t, dw, dc, fs| {
             line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
@@ -1004,6 +1013,8 @@ impl SceneRenderer {
             camera_buf,
             camera_bind_group,
             camera_capacity,
+            envelope_bgl,
+            empty_envelope,
             sphere_pipeline,
             cylinder_pipeline,
             line_pipeline,
@@ -1291,6 +1302,8 @@ impl SceneRenderer {
             cylinders: upload_buf(device, &geom.cylinders, "cylinders"),
             lines: upload_buf(device, &geom.lines, "lines"),
             mesh: upload_mesh(device, &geom.mesh),
+            envelope: self.envelope_bgl.as_ref().filter(|_| envelope::needed(geom) && envelope::fits(device, geom))
+                .map(|layout| envelope::Gpu::new(device, layout, geom)),
         }
     }
 
@@ -1323,6 +1336,7 @@ impl SceneRenderer {
             cylinders: None,
             lines: None,
             mesh,
+            envelope: None,
         }
     }
 
@@ -1336,6 +1350,14 @@ impl SceneRenderer {
         update_buf(device, queue, &mut gpu.cylinders, &geom.cylinders, "cylinders");
         update_buf(device, queue, &mut gpu.lines, &geom.lines, "lines");
         update_mesh(device, queue, &mut gpu.mesh, &geom.mesh);
+        if let Some(layout) = self.envelope_bgl.as_ref().filter(|_| envelope::needed(geom) && envelope::fits(device, geom)) {
+            match &mut gpu.envelope {
+                Some(envelope) => envelope.update(device, queue, layout, geom),
+                None => gpu.envelope = Some(envelope::Gpu::new(device, layout, geom)),
+            }
+        } else {
+            gpu.envelope = None;
+        }
     }
 
     /// Render every visible representation of every visible molecule into the
@@ -2245,6 +2267,12 @@ impl SceneRenderer {
         Some(self.begin_readback(rs, &tex, [out_w, out_h], [out_w, out_h]))
     }
 
+    fn bind_envelope(&self, pass: &mut wgpu::RenderPass, envelope: Option<&envelope::Gpu>) {
+        if let Some(envelope) = envelope.or(self.empty_envelope.as_ref()) {
+            pass.set_bind_group(1, &envelope.binding, &[]);
+        }
+    }
+
     /// Draw the shadow casters: every visible **opaque** rep's spheres / cylinders /
     /// mesh once, from the light camera (`light_idx`), into the shadow depth map.
     /// Impostors reuse the opaque pipelines; closed meshes use smooth-normal exit
@@ -2253,6 +2281,7 @@ impl SceneRenderer {
     fn draw_shadow_casters(&self, pass: &mut wgpu::RenderPass, scene: &Scene, light_idx: u32) {
         let off = light_idx * CAMERA_STRIDE as u32;
         pass.set_bind_group(0, &self.camera_bind_group, &[off]);
+        self.bind_envelope(pass, None);
         for mol in &scene.molecules {
             if !mol.visible {
                 continue;
@@ -2306,6 +2335,7 @@ impl SceneRenderer {
     /// Draw one glow geometry with the additive `GLOW` pipelines (camera bind group
     /// already set by the caller).
     fn draw_glow_geom(&self, pass: &mut wgpu::RenderPass, g: &RepGpu) {
+        self.bind_envelope(pass, None);
         if let Some(s) = &g.spheres {
             pass.set_pipeline(&self.sphere_pipeline[GLOW]);
             pass.set_vertex_buffer(0, s.buffer.slice(..));
@@ -2394,6 +2424,7 @@ impl SceneRenderer {
                 }
                 for &cam in &images[mi][j] {
                     pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
+                    self.bind_envelope(pass, rep.gpu.envelope.as_ref());
                     if let Some(s) = &rep.gpu.spheres {
                         pass.set_pipeline(&self.sphere_pipeline[i]);
                         pass.set_vertex_buffer(0, s.buffer.slice(..));

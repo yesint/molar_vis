@@ -17,6 +17,8 @@ struct Camera {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 
+// ENVELOPE
+
 // Depth cueing (VMD cuemode): fade toward the background as eye-space distance
 // grows. cue = [near, far, strength, mode]; mode 0 = linear, 1 = exp, 2 = exp2.
 // All curves are normalized to reach full fog at the far plane, scaled by strength.
@@ -33,6 +35,7 @@ struct Instance {
 };
 
 struct VsOut {
+    @location(6) @interpolate(flat) instance: u32,
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,    // this fragment's point on the billboard, view space
     @location(1) view_center: vec3<f32>, // sphere center, view space
@@ -72,7 +75,7 @@ fn oit_weight(eye_z: f32, a: f32) -> f32 {
 }
 
 @vertex
-fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
+fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: u32, inst: Instance) -> VsOut {
     // Triangle-strip quad corners in [-1,1]^2.
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(-1.0, -1.0),
@@ -92,6 +95,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, inst: Instance) -> VsOut {
     let view_pos = view_center + vec3<f32>(corner * r, 0.0);
 
     var out: VsOut;
+    out.instance = instance;
     out.clip = camera.proj * vec4<f32>(view_pos, 1.0);
     // Conservative near-depth for `@early_depth_test(greater_equal)`: override the
     // *interpolated* depth to the sphere's near pole (one radius toward the camera) so
@@ -139,6 +143,7 @@ struct OpaqueOut {
 // the analytic [0,1] window depth. Misses `discard`. `normal`/`view_dir` (view
 // space) are also returned for the selection glow's Fresnel rim.
 struct Hit {
+    position: vec3<f32>,
     color: vec3<f32>,
     alpha: f32,
     depth: f32,
@@ -186,7 +191,7 @@ fn compute_hit(in: VsOut) -> Hit {
     var lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat), false);
     lit = apply_outline(lit, normal, view_dir, in.mat);
 
-    return Hit(apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
+    return Hit(hit, apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
 }
 
 // Additive cyan "rim glow" used to highlight the active (pending) selection: the
@@ -215,6 +220,7 @@ fn fs_glow(in: VsOut) -> FsOut {
 @fragment
 fn fs_main(in: VsOut) -> OpaqueOut {
     let h = compute_hit(in);
+    if (envelope_hidden(h.position, in.instance, false)) { discard; }
     var out: OpaqueOut;
     out.depth = h.depth;
     out.color = vec4<f32>(h.color, h.alpha);
@@ -249,6 +255,7 @@ struct OitOut {
 @fragment
 fn fs_oit(in: VsOut) -> OitOut {
     let h = compute_hit(in);
+    if (envelope_hidden(h.position, in.instance, false)) { discard; }
     let w = oit_weight(h.eye_z, h.alpha);
     var out: OitOut;
     out.depth = h.depth;

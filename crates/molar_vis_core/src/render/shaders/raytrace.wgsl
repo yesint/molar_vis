@@ -224,6 +224,58 @@ fn primitive_opacity(prim: u32, p: vec3<f32>, uv: vec2<f32>) -> f32 {
         + uv.y * unpack_opacity(bitcast<u32>(mesh_verts[tri.z].p.w));
 }
 
+// Match the rasterizer's union boundary; groups isolate representations and images.
+fn envelope_group(tagged: u32) -> u32 {
+    let typ = tagged >> 30u;
+    let idx = tagged & IDX_MASK;
+    if (typ == 0u) { return spheres[idx].m.z; }
+    if (typ == 1u) { return cylinders[idx].m.w >> 1u; }
+    return 0u;
+}
+fn inside_envelope(p: vec3<f32>, own: u32) -> bool {
+    let group = envelope_group(own);
+    if (group == 0u) { return false; }
+    var stack: array<u32, 32>;
+    var sp = 1u;
+    stack[0] = 0u;
+    loop {
+        if (sp == 0u) { break; }
+        sp = sp - 1u;
+        let n = nodes[stack[sp]];
+        if (any(p < n.lo.xyz - vec3<f32>(1e-5)) || any(p > n.hi.xyz + vec3<f32>(1e-5))) { continue; }
+        let count = bitcast<u32>(n.hi.w);
+        let link = bitcast<u32>(n.lo.w);
+        if (count == 0u) {
+            stack[sp] = link; stack[sp + 1u] = link + 1u; sp = sp + 2u;
+        } else {
+            for (var k = 0u; k < count; k = k + 1u) {
+                let tagged = prim_indices[link + k];
+                if (tagged == own || envelope_group(tagged) != group) { continue; }
+                let typ = tagged >> 30u;
+                let idx = tagged & IDX_MASK;
+                var nearest: vec3<f32>;
+                var radius: f32;
+                if (typ == 0u) {
+                    nearest = spheres[idx].c.xyz;
+                    radius = spheres[idx].c.w;
+                } else {
+                    let c = cylinders[idx];
+                    let ab = c.c1.xyz - c.c0.xyz;
+                    let along = clamp(dot(p - c.c0.xyz, ab) / max(dot(ab, ab), 1e-16), 0.0, 1.0);
+                    nearest = c.c0.xyz + along * ab;
+                    radius = c.c0.w;
+                }
+                let delta = p - nearest;
+                let r2 = radius * radius;
+                let d2 = dot(delta, delta);
+                let tolerance = max(1e-10, r2 * 2e-4);
+                if (d2 < r2 - tolerance || (abs(d2 - r2) <= tolerance && tagged < own)) { return true; }
+            }
+        }
+    }
+    return false;
+}
+
 fn closest_hit(ro: vec3<f32>, rd: vec3<f32>) -> Hit {
     return closest_hit_filtered(ro, rd, false);
 }
@@ -254,10 +306,10 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
                 let idx = tagged & IDX_MASK;
                 if (typ == 0u) {
                     let t = ray_sphere(spheres[idx], ro, rd, false);
-                    if (t > 0.0 && t < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999)) { hit.t = t; hit.prim = tagged; }
+                    if (t > 0.0 && t < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; }
                 } else if (typ == 1u) {
                     let t = ray_cylinder(cylinders[idx], ro, rd, false);
-                    if (t > 0.0 && t < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999)) { hit.t = t; hit.prim = tagged; }
+                    if (t > 0.0 && t < hit.t && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; }
                 } else {
                     let tri = triangles[idx];
                     let r = ray_triangle(mesh_verts[tri.x].p.xyz, mesh_verts[tri.y].p.xyz, mesh_verts[tri.z].p.xyz, ro, rd);

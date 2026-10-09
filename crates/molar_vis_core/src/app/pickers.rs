@@ -543,8 +543,64 @@ pub(super) fn push_preview_sphere(
     }
 }
 
-/// Append a shaded bond (a side-on cylinder: a quad strip shaded across its width by
-/// the cross-section normal) between `a` and `b` to `mesh`.
+/// Append the visible front of a sphere with its bond-facing cap removed.
+/// The cut plane is the sphere/cylinder intersection, so adjacent patches meet
+/// exactly and transparent previews blend each covered pixel only once.
+#[allow(clippy::too_many_arguments)]
+fn push_preview_sphere_cap(
+    mesh: &mut egui::Mesh,
+    center: egui::Pos2,
+    radius: f32,
+    bond_radius: f32,
+    left: bool,
+    base: glam::Vec3,
+    p: &MaterialParams,
+    light: glam::Vec3,
+    half: glam::Vec3,
+    exp: f32,
+    alpha: f32,
+) {
+    const SLICES: usize = 18;
+    const CROSS: usize = 16;
+    let join = (radius * radius - bond_radius * bond_radius).sqrt();
+    let cut_angle = (join / radius).acos();
+    let (begin, end) = if left {
+        (std::f32::consts::PI, cut_angle)
+    } else {
+        (std::f32::consts::PI - cut_angle, 0.0)
+    };
+    let start = mesh.vertices.len() as u32;
+    for i in 0..=SLICES {
+        let theta = begin + (end - begin) * i as f32 / SLICES as f32;
+        let (mut x, mut width) = (radius * theta.cos(), radius * theta.sin());
+        // Use identical positions on both sides of the joint, including the
+        // silhouette. Also collapse the sphere's outer pole exactly.
+        if (left && i == SLICES) || (!left && i == 0) {
+            x = if left { join } else { -join };
+            width = bond_radius;
+        } else if (left && i == 0) || (!left && i == SLICES) {
+            x = if left { -radius } else { radius };
+            width = 0.0;
+        }
+        for j in 0..=CROSS {
+            let phi = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * j as f32 / CROSS as f32;
+            let y = width * phi.sin();
+            let z = width * phi.cos().max(0.0);
+            let n = glam::Vec3::new(x, y, z) / radius;
+            mesh.colored_vertex(center + egui::vec2(x, y), preview_shade(n, base, p, light, half, exp, alpha));
+        }
+    }
+    for i in 0..SLICES {
+        for j in 0..CROSS {
+            let a = start + (i * (CROSS + 1) + j) as u32;
+            let b = a + (CROSS + 1) as u32;
+            if !(left && i == 0) { mesh.add_triangle(a, b + 1, a + 1); }
+            if !(!left && i == SLICES - 1) { mesh.add_triangle(a, b, b + 1); }
+        }
+    }
+}
+
+/// Append only the exposed bond wall, between the two sphere intersection planes.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_preview_bond(
     mesh: &mut egui::Mesh,
@@ -558,26 +614,23 @@ pub(super) fn push_preview_bond(
     exp: f32,
     alpha: f32,
 ) {
-    const N: usize = 9;
+    const CROSS: usize = 16;
     let dir = (b - a).normalized();
     let perp = egui::vec2(-dir.y, dir.x);
     let start = mesh.vertices.len() as u32;
     for end in [a, b] {
-        for j in 0..N {
-            let t = -1.0 + 2.0 * j as f32 / (N - 1) as f32;
-            let nz = (1.0 - t * t).max(0.0).sqrt();
-            let n = glam::Vec3::new(perp.x * t, perp.y * t, nz);
-            mesh.colored_vertex(
-                end + perp * (t * half_w),
-                preview_shade(n, base, p, light, half, exp, alpha),
-            );
+        for j in 0..=CROSS {
+            let phi = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * j as f32 / CROSS as f32;
+            let t = phi.sin();
+            let n = glam::Vec3::new(perp.x * t, perp.y * t, phi.cos().max(0.0));
+            mesh.colored_vertex(end + perp * (t * half_w), preview_shade(n, base, p, light, half, exp, alpha));
         }
     }
-    for j in 0..(N as u32 - 1) {
-        let (a0, a1) = (start + j, start + j + 1);
-        let (b0, b1) = (start + N as u32 + j, start + N as u32 + j + 1);
-        mesh.add_triangle(a0, b0, b1);
-        mesh.add_triangle(a0, b1, a1);
+    for j in 0..CROSS as u32 {
+        let a = start + j;
+        let b = a + (CROSS + 1) as u32;
+        mesh.add_triangle(a, b, b + 1);
+        mesh.add_triangle(a, b + 1, a + 1);
     }
 }
 
@@ -595,25 +648,28 @@ pub(super) fn paint_material_preview(painter: &egui::Painter, rect: egui::Rect, 
     let a = egui::pos2(rect.center().x - r * 1.45, cy);
     let b = egui::pos2(rect.center().x + r * 1.45, cy);
     let mut mesh = egui::Mesh::default();
-    // Bond first, then spheres on top (so the spheres cap the bond ends).
-    push_preview_bond(&mut mesh, a, b, r * 0.5, base, &p, light, half, exp, alpha);
-    push_preview_sphere(&mut mesh, a, r, base, &p, light, half, exp, alpha);
-    push_preview_sphere(&mut mesh, b, r, base, &p, light, half, exp, alpha);
+    // The exterior envelope consists of two trimmed sphere patches and the
+    // exposed tube wall. These meet without any overlapping projected triangles.
+    let bond_radius = r * 0.5;
+    let join = (r * r - bond_radius * bond_radius).sqrt();
+    push_preview_bond(&mut mesh, a + egui::vec2(join, 0.0), b - egui::vec2(join, 0.0), bond_radius, base, &p, light, half, exp, alpha);
+    push_preview_sphere_cap(&mut mesh, a, r, bond_radius, true, base, &p, light, half, exp, alpha);
+    push_preview_sphere_cap(&mut mesh, b, r, bond_radius, false, base, &p, light, half, exp, alpha);
     painter.add(egui::Shape::mesh(mesh));
 }
 
 pub(super) fn paint_material_icon(painter: &egui::Painter, rect: egui::Rect, material: Material) {
-    use egui::Color32;
     let p = material.params();
-    let c = rect.center();
-    let r = rect.height() * 0.42;
-    let a = ((p.opacity * 0.85 + 0.15) * 255.0) as u8; // keep faint materials visible
-    painter.circle_filled(c, r, Color32::from_rgba_unmultiplied(150, 152, 165, a));
-    if p.specular > 0.35 {
-        let hl = c + egui::vec2(-r * 0.32, -r * 0.34);
-        let hr = r * (0.18 + p.shininess * 0.18);
-        painter.circle_filled(hl, hr, Color32::from_white_alpha(235));
-    }
+    let base = glam::Vec3::new(0.60, 0.62, 0.68);
+    let light = glam::Vec3::new(-0.4, -0.5, 0.78).normalize();
+    let half = (light + glam::Vec3::Z).normalize();
+    let exp = 2.0 + p.shininess * 128.0;
+    let alpha = (p.opacity * 0.85 + 0.15).clamp(0.0, 1.0);
+    let mut mesh = egui::Mesh::default();
+    // Bake the highlight into the surface shading rather than layering a second
+    // opaque circle over a transparent material.
+    push_preview_sphere(&mut mesh, rect.center(), rect.height() * 0.42, base, &p, light, half, exp, alpha);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// A grid cell in the material picker: a two-sphere-and-bond **preview** rendered

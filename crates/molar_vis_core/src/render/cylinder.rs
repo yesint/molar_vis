@@ -83,6 +83,7 @@ pub fn build_pipeline(
     device: &wgpu::Device,
     depth_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
+    envelope_bgl: Option<&wgpu::BindGroupLayout>,
     targets: &[Option<wgpu::ColorTargetState>],
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
@@ -92,14 +93,14 @@ pub fn build_pipeline(
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("cylinder-shader"),
         source: wgpu::ShaderSource::Wgsl(super::inject_early_z(
-            include_str!("shaders/cylinder.wgsl"),
+            &super::envelope::shader(include_str!("shaders/cylinder.wgsl"), envelope_bgl.is_some()),
             early_z,
         )),
     });
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cylinder-pipeline-layout"),
-        bind_group_layouts: &[Some(camera_bgl)],
+        bind_group_layouts: &std::iter::once(Some(camera_bgl)).chain(envelope_bgl.map(Some)).collect::<Vec<_>>(),
         immediate_size: 0,
     });
 

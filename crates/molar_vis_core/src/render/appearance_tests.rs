@@ -25,6 +25,24 @@ fn shared_shaders_validate_without_a_gpu() {
 }
 
 #[test]
+fn envelope_shaders_validate_without_a_gpu() {
+    for source in [
+        include_str!("shaders/sphere.wgsl"),
+        include_str!("shaders/cylinder.wgsl"),
+    ] {
+        let source = lit_shader_source(&envelope::shader(source, true));
+        let module = wgpu::naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+    }
+}
+
+#[test]
 fn trace_effects_keep_world_units_and_the_raster_light_frame() {
     for radius in [0.1, 5.0, 50.0] {
         let mut camera = Camera::frame_bbox(Vec3::splat(-radius), Vec3::splat(radius), 0.8);
@@ -48,7 +66,7 @@ fn trace_effects_keep_world_units_and_the_raster_light_frame() {
     }
 }
 
-fn gpu() -> RenderState {
+pub(super) fn gpu() -> RenderState {
     use std::sync::Arc;
     pollster::block_on(async {
         let instance = wgpu::Instance::default();
@@ -931,5 +949,213 @@ fn smooth_surface_secondary_rays_do_not_create_triangle_patches() {
                 trace.save(dir.join(format!("surface_softness_{softness:.2}_trace.png"))).unwrap();
             }
         }
+    }
+}
+
+#[test]
+#[ignore = "requires native GPU; compares transparent envelope pixels"]
+fn transparent_envelope_renders_duplicate_primitives_once() {
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    assert!(renderer.envelope_bgl.is_some());
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/2lao.pdb"
+    )))
+    .unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let material = crate::material::Material::Transparent;
+    let color = ((material.opacity_u8() as u32) << 24) | 0x00b06030;
+    let capsule = CylinderInstance {
+        p0: [-0.4, 0.0, 0.0],
+        p1: [0.4, 0.0, 0.0],
+        radius: 0.1,
+        color,
+        color1: color,
+        mat: material.pack_lighting(),
+        offset: [0.0; 2],
+    };
+    let mut geom = GeometryData {
+        cylinders: vec![capsule],
+        ..Default::default()
+    };
+    let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::Licorice);
+    rep.material = material;
+    rep.gpu = renderer.upload(&rs, &geom);
+    scene.molecules[0].reps = vec![rep];
+    let mut camera = Camera::frame_bbox(Vec3::new(-0.6, -0.3, -0.2), Vec3::new(0.6, 0.3, 0.2), 0.8);
+    camera.projection = Projection::Orthographic;
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    camera.background = crate::camera::Background::for_theme(false);
+    let capture = |renderer: &mut SceneRenderer, scene: &Scene| {
+        let cap = renderer.capture_begin(
+            &rs,
+            320,
+            240,
+            camera.view(),
+            camera.proj(320.0 / 240.0),
+            camera.is_perspective(),
+            camera.cue_uniform(),
+            camera.ao_uniform(),
+            camera.shadow_uniform(),
+            camera.background,
+            camera.eye_depth_range(),
+            scene,
+        );
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+    };
+    let single = capture(&mut renderer, &scene);
+    geom.cylinders.push(capsule);
+    scene.molecules[0].reps[0].gpu = renderer.upload(&rs, &geom);
+    let union = capture(&mut renderer, &scene);
+    scene.molecules[0].reps[0].gpu.envelope = None;
+    let overlapping = capture(&mut renderer, &scene);
+    let error = |a: &image::RgbaImage, b: &image::RgbaImage| -> u64 {
+        a.as_raw()
+            .iter()
+            .zip(b.as_raw())
+            .map(|(x, y)| x.abs_diff(*y) as u64)
+            .sum()
+    };
+    assert!(
+        error(&single, &overlapping) > 10000,
+        "baseline must reproduce overlap darkening"
+    );
+    assert!(
+        error(&single, &union) < 100,
+        "duplicate surfaces must contribute exactly once"
+    );
+    let dir =
+        std::env::var("MOLAR_VIS_TEST_IMAGES").unwrap_or_else(|_| "/tmp/molar-envelope".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    single.save(format!("{dir}/single.png")).unwrap();
+    union.save(format!("{dir}/envelope.png")).unwrap();
+    overlapping.save(format!("{dir}/overlap.png")).unwrap();
+}
+
+#[test]
+#[ignore = "requires native GPU; saves molecule envelope comparisons and measures frames"]
+fn transparent_envelope_molecule_preview() {
+    let rs = gpu();
+    let mut settings = crate::settings::RenderingSettings::default();
+    settings.ssaa = 1;
+    let mut renderer = SceneRenderer::new(&rs, &settings);
+    let raw = crate::data::load(std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/2lao.pdb"
+    )))
+    .unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let dir =
+        std::env::var("MOLAR_VIS_TEST_IMAGES").unwrap_or_else(|_| "/tmp/molar-envelope".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    for kind in [
+        crate::geometry::RepKind::BallAndStick,
+        crate::geometry::RepKind::Licorice,
+    ] {
+        let mol = &mut scene.molecules[0];
+        let mut rep = crate::scene::Representation::new(kind);
+        rep.material = crate::material::Material::Transparent;
+        let selection =
+            std::env::var("MOLAR_VIS_ENVELOPE_SELECTION").unwrap_or_else(|_| "resid 1:3".into());
+        let (expr, sel) = mol.data.evaluate(&selection).unwrap();
+        let bound = mol.data.bind_with_state(&sel, mol.render_state());
+        let geom = crate::geometry::build(
+            &bound,
+            mol.n_atoms,
+            &mol.bonds,
+            &rep.params,
+            rep.color_spec(),
+            rep.material,
+            None,
+            false,
+        );
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for s in &geom.spheres {
+            let p = Vec3::from_array(s.center);
+            lo = lo.min(p - Vec3::splat(s.radius));
+            hi = hi.max(p + Vec3::splat(s.radius));
+        }
+        for c in &geom.cylinders {
+            for p in [c.p0, c.p1] {
+                let p = Vec3::from_array(p);
+                lo = lo.min(p - Vec3::splat(c.radius));
+                hi = hi.max(p + Vec3::splat(c.radius));
+            }
+        }
+        drop(bound);
+        rep.gpu = renderer.upload(&rs, &geom);
+        rep.expr = Some(expr);
+        rep.sel = Some(sel);
+        mol.reps = vec![rep];
+        let mut camera = Camera::frame_bbox(lo, hi, 0.8);
+        camera.orientation = glam::Quat::from_rotation_y(0.5) * glam::Quat::from_rotation_x(0.3);
+        camera.projection = Projection::Orthographic;
+        camera.depth_cue.enabled = false;
+        camera.ao.enabled = false;
+        camera.shadow.enabled = false;
+        camera.background = crate::camera::Background::for_theme(false);
+        let (w, h) = (640, 480);
+        let capture = |renderer: &mut SceneRenderer, scene: &Scene| {
+            let cap = renderer.capture_begin(
+                &rs,
+                w,
+                h,
+                camera.view(),
+                camera.proj(w as f32 / h as f32),
+                camera.is_perspective(),
+                camera.cue_uniform(),
+                camera.ao_uniform(),
+                camera.shadow_uniform(),
+                camera.background,
+                camera.eye_depth_range(),
+                scene,
+            );
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            cap.read()
+        };
+        let envelope = scene.molecules[0].reps[0].gpu.envelope.take();
+        let before = capture(&mut renderer, &scene);
+        let mut times = Vec::new();
+        for _ in 0..9 {
+            let t = std::time::Instant::now();
+            capture(&mut renderer, &scene);
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        let baseline = times[4];
+        scene.molecules[0].reps[0].gpu.envelope = envelope;
+        let after = capture(&mut renderer, &scene);
+        times.clear();
+        for _ in 0..9 {
+            let t = std::time::Instant::now();
+            capture(&mut renderer, &scene);
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        eprintln!("{kind:?}: baseline {baseline:.2} ms, envelope {:.2} ms (capture + GPU wait + readback)", times[4]);
+        let mut pair = image::RgbaImage::new(w * 2, h);
+        image::imageops::overlay(&mut pair, &before, 0, 0);
+        image::imageops::overlay(&mut pair, &after, w as i64, 0);
+        pair.save(format!("{dir}/{kind:?}_comparison.png")).unwrap();
+        assert_ne!(
+            before.as_raw(),
+            after.as_raw(),
+            "envelope must remove intersection layers"
+        );
+        renderer.prepare_raytrace(&rs, &scene, &camera, [w, h], false);
+        let rt = renderer
+            .capture_begin_raytrace(&rs, w, h, &camera, 16)
+            .unwrap();
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rt.read()
+            .save(format!("{dir}/{kind:?}_raytrace.png"))
+            .unwrap();
     }
 }

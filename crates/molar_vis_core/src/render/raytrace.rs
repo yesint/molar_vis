@@ -36,7 +36,7 @@ fn tag(typ: u32, idx: usize) -> u32 {
     (typ << TAG_SHIFT) | (idx as u32 & TAG_MASK)
 }
 
-/// A sphere primitive: `c = (center.xyz, radius)`, `m = (color, mat, _, _)`.
+/// A sphere primitive: `c = (center.xyz, radius)`, `m = (color, mat, envelope_group, _)`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuSphere {
@@ -46,6 +46,7 @@ pub struct GpuSphere {
 
 /// A **capsule** primitive (cylinder wall + a hemispherical cap at each end, like the
 /// rasterizer's bonds): `c0 = (p0.xyz, radius)`, `c1 = (p1.xyz, _)`,
+/// The high bits of `flags` store the envelope group (0 disables clipping).
 /// `m = (color_p0, mat, color_p1, flags)` — two-tone, split at the midpoint.
 /// `flags & FLAG_FLAT_ENDS` drops the caps (for stand-ins for flat-ended line quads).
 #[repr(C)]
@@ -194,6 +195,7 @@ impl RtScene {
         use crate::geometry;
         use crate::secstruct::SsMap;
 
+        let mut next_envelope_group = 1u32;
         for (mi, mol) in scene.molecules.iter().enumerate() {
             if !mol.visible {
                 continue;
@@ -266,6 +268,11 @@ impl RtScene {
                 );
 
                 for &off in &offsets {
+                    let envelope_group = if super::envelope::needed(&geom) {
+                        let group = next_envelope_group;
+                        next_envelope_group += 1;
+                        group
+                    } else { 0 };
                     for sp in &geom.spheres {
                         let gs = GpuSphere {
                             c: [
@@ -274,7 +281,7 @@ impl RtScene {
                                 sp.center[2] + off.z,
                                 sp.radius,
                             ],
-                            m: [sp.color, sp.mat, 0, 0],
+                            m: [sp.color, sp.mat, envelope_group, 0],
                         };
                         aabbs.push(sphere_aabb(&gs));
                         tags.push(tag(TAG_SPHERE, self.spheres.len()));
@@ -292,7 +299,7 @@ impl RtScene {
                         let gc = GpuCylinder {
                             c0: [p0[0], p0[1], p0[2], cy.radius],
                             c1: [p1[0], p1[1], p1[2], 0.0],
-                            m: [cy.color, cy.mat, cy.color1, 0],
+                            m: [cy.color, cy.mat, cy.color1, envelope_group << 1],
                         };
                         aabbs.push(cylinder_aabb(&gc));
                         tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
@@ -1187,6 +1194,29 @@ impl Raytracer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_groups_isolate_transparent_representations() {
+        use crate::{geometry::RepKind, material::Material, scene::Representation};
+        let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let mol = &mut scene.molecules[0];
+        mol.reps.clear();
+        for material in [Material::Transparent, Material::Glass, Material::Opaque] {
+            let mut rep = Representation::new(RepKind::BallAndStick);
+            rep.material = material;
+            rep.sel = Some(mol.data.select_all());
+            mol.reps.push(rep);
+        }
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h: 480.0 };
+        let data = RtScene::gather(&scene, view, false);
+        let sphere_groups: std::collections::BTreeSet<_> = data.spheres.iter().map(|s| s.m[2]).collect();
+        let bond_groups: std::collections::BTreeSet<_> = data.cylinders.iter().map(|c| c.m[3] >> 1).collect();
+        assert_eq!(sphere_groups, [0, 1, 2].into_iter().collect());
+        assert_eq!(bond_groups, sphere_groups);
+        assert!(data.cylinders.iter().all(|c| c.m[3] & 1 == 0));
+    }
 
     fn sph(x: f32, y: f32, z: f32, r: f32) -> GpuSphere {
         GpuSphere { c: [x, y, z, r], m: [0, 0, 0, 0] }
