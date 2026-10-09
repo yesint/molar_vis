@@ -548,6 +548,7 @@ impl App {
             settings,
             rep_defaults,
             settings_dialog: None,
+            last_settings_page: SettingsPage::default(),
             last_render_camera: None,
             last_size: [0, 0],
             view_dirty: true,
@@ -577,10 +578,6 @@ impl App {
             hover_pick: None,
             #[cfg(not(target_arch = "wasm32"))]
             last_pick_px: None,
-            view_menu: ViewMenu {
-                open: std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok(),
-                ..Default::default()
-            },
             #[cfg(target_arch = "wasm32")]
             file_tx,
             #[cfg(target_arch = "wasm32")]
@@ -912,22 +909,31 @@ impl App {
             }
         }
 
+        if std::env::var("MOLAR_VIS_DEBUG_VIEWMENU").is_ok() {
+            app.open_settings(SettingsPage::View);
+            if let Some(d) = &mut app.settings_dialog { d.popup = true; }
+        }
+
         // Verification hook: MOLAR_VIS_DEBUG_SETTINGS=1 (or =appearance|rendering|
         // view|reps|behavior) opens the program-settings modal at the given tab at
         // startup (it can't be driven by a mouse in a headless run), so each tab can
         // be screenshot. Pair with MOLAR_VIS_DEBUG_DEFAULTS=1 to keep the shown values
         // reproducible regardless of the saved config.
         if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_SETTINGS") {
-            app.settings_dialog = Some(SettingsDialog {
-                draft: app.settings.clone(),
-                tab: match tab.to_ascii_lowercase().as_str() {
-                    "rendering" => SettingsPage::Rendering,
-                    "view" => SettingsPage::View,
-                    "reps" | "representations" => SettingsPage::Representations,
-                    "behavior" => SettingsPage::Behavior,
-                    _ => SettingsPage::Appearance,
-                },
+            app.open_settings(match tab.to_ascii_lowercase().as_str() {
+                "rendering" => SettingsPage::Rendering,
+                "view" | "view-defaults" | "view-lighting" | "view-scene" => SettingsPage::View,
+                "reps" | "representations" => SettingsPage::Representations,
+                "behavior" => SettingsPage::Behavior,
+                _ => SettingsPage::Appearance,
             });
+            if let Some(d) = &mut app.settings_dialog {
+                d.view_page = match tab.as_str() {
+                    "view-lighting" => ViewPage::Lighting,
+                    "view-scene" => ViewPage::Scene,
+                    _ => ViewPage::Camera,
+                };
+            }
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[type] opens the

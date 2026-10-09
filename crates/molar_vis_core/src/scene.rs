@@ -501,6 +501,9 @@ pub struct Molecule {
     /// recorded order are `Unspecified`). Mutated only via the helper methods so it
     /// stays consistent.
     pub bonds: Vec<Bond>,
+    /// Source connectivity before distance guessing, retained for live settings edits.
+    pub(crate) bond_guess_source: Vec<Bond>,
+    pub(crate) bond_guess_version: u64,
     /// Monotonic counter bumped by every structural mutation (atom/bond add/remove,
     /// element/order change, `rotate_fragment`). Undo capture uses it to snapshot a
     /// molecule's structure only when it actually changed — see
@@ -681,6 +684,7 @@ impl Molecule {
         bbox_max: Vec3,
         rep_defaults: &crate::settings::RepDefaults,
     ) -> Self {
+        let bond_guess_source = crate::data::bonds::bond_vec(&data.topology().bonds);
         let mut mol = Self {
             id,
             name,
@@ -688,6 +692,8 @@ impl Molecule {
             traj_loads: Vec::new(),
             data,
             bonds,
+            bond_guess_source,
+            bond_guess_version: 0,
             structure_version: 0,
             structure_cache: RefCell::new(None),
             n_atoms,
@@ -1015,6 +1021,53 @@ impl Molecule {
                 Some(idx)
             }
             Err(_) => None,
+        }
+    }
+
+    /// Re-evaluate distance bonds while keeping source connectivity and chemical orders.
+    pub(crate) fn detect_bonds(
+        &self,
+        params: &crate::data::BondParams,
+    ) -> Result<Vec<Bond>, String> {
+        let source = if self.structure_version == self.bond_guess_version {
+            &self.bond_guess_source
+        } else {
+            // Structural edits can change atom indices. Preserve the edited connectivity.
+            &self.bonds
+        };
+        let source = bond_storage(source);
+        let all = Sel::from_vec((0..self.n_atoms).collect()).map_err(|e| e.to_string())?;
+        let state = self.render_state();
+        let bound = self.data.bind_with_state(&all, state);
+        let positions: Vec<_> = bound.iter_pos().map(|p| [p.x, p.y, p.z]).collect();
+        let radii: Vec<_> = bound.iter_atoms().map(|a| a.vdw()).collect();
+        crate::data::bonds::resolve(
+            &source,
+            &bound,
+            &positions,
+            &radii,
+            state.pbox.as_ref(),
+            params,
+        )
+        .map_err(|e| format!("Could not detect bonds for {}: {e}", self.name))
+    }
+
+    pub(crate) fn set_detected_bonds(&mut self, bonds: Vec<Bond>) {
+        if self.structure_version != self.bond_guess_version {
+            self.bond_guess_source = self.bonds.clone();
+        }
+        self.bonds = bonds;
+        self.structure_version += 1;
+        self.bond_guess_version = self.structure_version;
+        self.sync_bonds_to_topology();
+        self.interaction_rings = None;
+        for rep in &mut self.reps {
+            rep.sel_dirty = true;
+            rep.geom_dirty = true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.pick_dirty = true;
         }
     }
 

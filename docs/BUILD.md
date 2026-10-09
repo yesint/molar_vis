@@ -93,7 +93,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_BG=gradient|white` (set a gradient / white viewport background),
   `MOLAR_VIS_DEBUG_PERSP=1` (force perspective projection) +
   `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor`),
-  `MOLAR_VIS_DEBUG_VIEWMENU=1` (open the view-settings hamburger window at startup),
+  `MOLAR_VIS_DEBUG_VIEWMENU=1` (open the compact viewer-settings popup at startup),
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
@@ -136,7 +136,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   AO/shadows, or `MOLAR_VIS_DEBUG_GI=1` for the path-traced global-illumination tier) +
   `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
-  `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|reps|behavior]` (open the program-settings
+  `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|view-lighting|view-scene|reps|behavior]` (open the program-settings
   modal at that tab — `=1`/empty = Appearance — so each tab can be screenshot; the dialog can't be
   mouse-driven headlessly) +
   `MOLAR_VIS_DEBUG_DEFAULTS=1` (use built-in `Settings::default()` and skip the config-file

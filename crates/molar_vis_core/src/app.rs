@@ -109,8 +109,9 @@ pub struct App {
     /// overridden by the `MOLAR_VIS_DEBUG_REP` env hook. Recomputed when settings
     /// change. Used for the initial rep of each loaded molecule + the add-rep button.
     rep_defaults: RepDefaults,
-    /// Open program-settings dialog (the draft being edited + its active tab), if any.
+    /// Open live settings editor and its opening snapshot, if any.
     settings_dialog: Option<SettingsDialog>,
+    last_settings_page: SettingsPage,
     /// Camera at the last 3D render; `None` forces a render.
     last_render_camera: Option<Camera>,
     last_size: [u32; 2],
@@ -184,9 +185,6 @@ pub struct App {
     /// stays idle (0 GPU) instead of re-picking every frame.
     #[cfg(not(target_arch = "wasm32"))]
     last_pick_px: Option<(u32, u32)>,
-    /// The top-bar "view settings" (hamburger) menu: open state, active tab, and the
-    /// close-on-click-outside geometry. See [`ViewMenu`].
-    view_menu: ViewMenu,
     /// Browser file-open channel: the async `<input type=file>` picker reads the
     /// chosen file and sends `(filename, bytes)` here; `ui()` drains it and loads
     /// the structure. Cloned per pick; the receiver is polled each frame. Wasm only.
@@ -258,16 +256,6 @@ enum RepPick {
     /// Fill this side of the alignment dialog from it.
     Align(align_dialog::AlignSide),
 }
-
-/// Tabs in the top-bar "view settings" (hamburger) menu.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-enum ViewTab {
-    #[default]
-    Camera,
-    Lighting,
-    Scene,
-}
-
 
 /// Tabs in the program-settings dialog (the cogwheel modal).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -374,11 +362,29 @@ struct Console {
     repl: crate::script::ScriptSession,
 }
 
-/// The program-settings dialog: a working copy of the settings (edit-then-apply — **Save**
-/// commits, **Cancel**/Escape discards) plus its active tab.
+/// Shared live settings editor and opening snapshot for Revert.
 struct SettingsDialog {
-    draft: Settings,
+    original: Settings,
+    original_reps: Vec<(MolId, Vec<crate::history::RepState>, f32, LoopMode)>,
+    original_bonds: Vec<(MolId, Vec<Bond>, Vec<Bond>)>,
+    bonds_changed: bool,
+    reps_changed: bool,
+    playback_changed: bool,
     tab: SettingsPage,
+    view_page: ViewPage,
+    popup: bool,
+    anchor: egui::Rect,
+    last_rect: Option<egui::Rect>,
+    child_popup_open: bool,
+    save_error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ViewPage {
+    #[default]
+    Camera,
+    Lighting,
+    Scene,
 }
 
 /// The per-type **Settings** dialog of an Interactions rep: which rep it edits (by molecule
@@ -393,40 +399,6 @@ struct InteractionsDialog {
 struct RenameDialog {
     mol: MolId,
     name: String,
-}
-
-/// The top-bar view-settings (hamburger) menu.
-///
-/// Unlike the transient dialogs this is **not** an `Option` whose `Some` means "open": the
-/// menu is a toolbar popover the user flips open and shut constantly, and `tab` is sticky
-/// across that — reopening lands on the tab last used, not back on Camera. So `open` rides
-/// inside, and only `last_rect` is optional.
-#[derive(Default)]
-struct ViewMenu {
-    /// Whether the window is showing. A real `Window` rather than a `Popup` so nested
-    /// click-to-open dropdowns / color pickers work; closed manually on a click outside it
-    /// (see `view_settings_window`).
-    open: bool,
-    /// Active tab (Camera / Lighting / Scene).
-    tab: ViewTab,
-    /// The window's rect **as drawn last frame** — the geometry the user actually clicked
-    /// on. The close-on-click-outside test must use this, not the current frame's rect:
-    /// switching tabs re-lays-out the (right-pivoted) window in the *same* frame, so the
-    /// freshly-narrowed rect no longer covers the leftmost tab the click landed on (see
-    /// `view_settings_window`). Cleared when the menu closes, never mid-life.
-    last_rect: Option<egui::Rect>,
-    /// Whether one of the window's child popups (a dropdown, a colour picker) was open
-    /// **last frame**.
-    ///
-    /// Needed because a popup can extend past the window's own bottom edge, and choosing an
-    /// item closes the popup *within the same frame* — so by the time the
-    /// close-on-click-outside test runs there is no open popup to detect, and a click on such
-    /// an item reads as a click outside the window. That is what dismissed the whole menu when
-    /// the depth-cue type was set to `Exp²`: it is the lowest of four items in a dropdown
-    /// anchored near the top of the content, and its centre lands ~9 px below the window.
-    /// While a popup is up, every click belongs to it — on an item, or outside to dismiss it —
-    /// so the window must sit the frame out either way.
-    popup_open: bool,
 }
 
 /// How a lasso gesture combines with the molecule's existing active selection.

@@ -12,15 +12,13 @@
 //! `save`, using the platform config dir) is the only `#[cfg(not(wasm))]` part;
 //! the browser build keeps settings in memory.
 //!
-//! How each setting takes effect is wired up in `app.rs`/`theme.rs`/`render.rs`:
-//! app-global knobs (theme, anti-aliasing) apply live; new-document defaults
-//! (view, representation, bond/trajectory) are read when the next scene/molecule
-//! is created — they never silently mutate the open document (see the View tab's
-//! "Apply to current view" button for an explicit push).
+//! The settings editor applies all changes to the running app immediately. Save
+//! explicitly writes startup defaults; Revert restores the opening snapshot.
+//! The full settings window and compact viewer popup share the same view controls.
 
 use serde::{Deserialize, Serialize};
 
-use crate::camera::{Ao, Background, Camera, DepthCue, Projection, Shadow};
+use crate::camera::{Ao, Background, Camera, Corner, DepthCue, Projection, Shadow};
 use crate::color::ColorMethod;
 use crate::data::BondParams;
 use crate::geometry::RepKind;
@@ -126,6 +124,9 @@ pub struct ViewDefaults {
     pub ao: Ao,
     pub shadow: Shadow,
     pub background: Background,
+    pub gi: f32,
+    pub axes_on: bool,
+    pub axes_corner: Corner,
 }
 
 impl Default for ViewDefaults {
@@ -137,11 +138,24 @@ impl Default for ViewDefaults {
             ao: Ao::default(),
             shadow: Shadow::default(),
             background: Background::default(),
+            gi: 0.0,
+            axes_on: false,
+            axes_corner: Corner::default(),
         }
     }
 }
 
 impl ViewDefaults {
+    /// Capture view style only; camera pose and zoom are never defaults.
+    pub fn from_camera(cam: &Camera) -> Self {
+        Self {
+            projection: cam.projection, fill: cam.fill,
+            depth_cue: cam.depth_cue, ao: cam.ao, shadow: cam.shadow,
+            background: cam.background, gi: cam.gi,
+            axes_on: cam.axes_on, axes_corner: cam.axes_corner,
+        }
+    }
+
     /// Stamp these view defaults onto `cam` (used when seeding a fresh scene's
     /// camera and by the dialog's "Apply to current view"). Leaves the framing
     /// (target/distance/orientation) alone — only the view-style knobs change.
@@ -152,6 +166,9 @@ impl ViewDefaults {
         cam.shadow = self.shadow;
         cam.background = self.background;
         cam.fill = self.fill;
+        cam.gi = self.gi;
+        cam.axes_on = self.axes_on;
+        cam.axes_corner = self.axes_corner;
     }
 }
 
@@ -389,6 +406,37 @@ mod tests {
         assert_eq!(s.behavior.pick_mode, PickMode::Off);
         assert_eq!(s.behavior.selection_mode, SelectionMode::Atoms);
         assert_eq!(s.behavior.bond_params(), BondParams::default());
+    }
+
+    #[test]
+    fn view_defaults_capture_style_without_changing_camera_pose() {
+        use glam::{Quat, Vec3};
+        let mut source = Camera::frame_bbox(Vec3::ZERO, Vec3::splat(2.0), 0.8);
+        source.projection = Projection::Perspective;
+        source.axes_on = true;
+        source.axes_corner = Corner::BottomLeft;
+        source.gi = 0.7;
+        source.shadow.softness = 0.6;
+        source.ao.radius = 1.2;
+        let defaults = ViewDefaults::from_camera(&source);
+        let json = serde_json::to_string(&defaults).unwrap();
+        let restored: ViewDefaults = serde_json::from_str(&json).unwrap();
+        assert_eq!(defaults, restored);
+        let mut target = Camera::frame_bbox(Vec3::splat(10.0), Vec3::splat(20.0), 0.9);
+        target.orientation = Quat::from_rotation_y(0.5);
+        let pose = (target.target, target.orientation, target.distance);
+        restored.seed_camera(&mut target);
+        assert_eq!(ViewDefaults::from_camera(&target), defaults);
+        assert_eq!((target.target, target.orientation, target.distance), pose);
+    }
+
+    #[test]
+    fn older_view_defaults_fill_new_fields() {
+        let defaults: ViewDefaults = serde_json::from_str(r#"{"fill":0.75}"#).unwrap();
+        assert_eq!(defaults.fill, 0.75);
+        assert_eq!(defaults.gi, 0.0);
+        assert!(!defaults.axes_on);
+        assert_eq!(defaults.axes_corner, Corner::default());
     }
 
     #[test]

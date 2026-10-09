@@ -110,7 +110,7 @@ slider · forward · last); reps listed (indented) when the molecule caret is op
 the viewport — a real panel, **not** a floating `Area` over the 3D image; spans the central
 area right of the left panel, added in `ui()` between the left panel and `draw_viewport`).
 Left-aligned **selection controls**, then a right-aligned (`Layout::right_to_left`) **hamburger**
-opening the view-settings menu:
+opening the compact view-settings popup:
 **selection** — a **`Selection mode`-labelled pick-mode dropdown** (`Off` default / `Click` / `Lasso` —
 see `pick.rs` / M11; **`Click`** hovers to show the atom's identity/glow (as before) and **on click
 selects** the hovered atom/residue — merging it into the molecule's **active (pending) selection**
@@ -135,40 +135,29 @@ the depth cue and the OIT range on the scene while the pivot rotation moves `tar
 is not clipped; it moves with `target` on pan / Shift+RMB (slabbing unchanged).
 Cartoon / Surface reps are picked on the mesh they draw (see `pick.rs` in MODULES.md), so the
 centre pick and Click selection work on a ribbon / surface of any structure (all-atom or CG).
-**view-settings hamburger** (`LIST`, right-aligned) — toggles a **`Window`** (`App::view_menu_open`,
-`view_settings_window`; **not** a `Popup` — a Popup's `CloseOnClickOutside` fights the nested
-click-to-open dropdowns/color pickers below, which was the bug), positioned under the button
-(`Align2::RIGHT_TOP` pivot). It **closes on a click outside it** — tested against the window's rect
-**as drawn the _previous_ frame** (`App::view_menu_rect`), **not** this frame's rect (nor
-`ctx.layer_id_at`, which reads the same just-updated area state). The window is right-pivoted, so
-clicking a tab switches `view_tab` and `Window::show` *immediately* re-lays-out for the new tab in the
-same frame; a narrower tab moves the left edge right, so the freshly-updated rect no longer covers the
-leftmost tab the click landed on → the menu wrongly closed (this fooled an earlier "fix" that swapped
-`rect` for `layer_id_at` — both reflect the post-relayout geometry; the real fix is to test against
-the geometry the user actually clicked, i.e. last frame's rect). Still kept open while a child popup
-is open (`egui::Popup::is_any_open`) and on clicks on the hamburger itself (`anchor`). Tabs via the shared
-`tab_bar`: **Camera / Lighting / Scene** (`App::view_tab: ViewTab`), each rendered by
-`view_tab_camera/lighting/scene`:
-  - **Camera**: **Projection** two **icon-only** `selectable_label`s (Persp/Ortho glyphs, tooltips;
-    orthographic is the default) + a **Depth cue** group (`egui::Frame::group`): a **Type** dropdown
-    (None / Linear / Exp / Exp²) that **opens on click, downward** (an `egui::Popup::menu`; None ⇄
-    `enabled=false`) + **Strength** / **Start** rows, each a `slider_with_edit` (a `Slider` + a
-    `DragValue` edit box).
-  - **Lighting**: **Ambient occlusion** (enable + Strength/Radius; `Camera::ao`) + **Cast shadows**
-    (enable + Strength + **Softness**; `Camera::shadow` — Softness rides `shadow_uniform`'s 4th slot
-    and is used only by the ray tracer's soft penumbra) + a **Ray tracing** group — a "Press R to
-    ray-trace the view" hint (the viewport still is the **R key**, PyMOL-`ray` style; greyed without a
-    compute-capable device) + a **Global illumination** strength slider (`Camera::gi`, 0..1, 0 = off/default —
-    path-traced GI applied to both the R-key still and Save image). The AO/shadow controls feed both
-    the R-key still and Save image.
-  - **Scene**: an **Axes** group with a monitor-like **screen widget** (`draw_axes_widget`,
-    hand-laid-out: a rectangle showing a **live mini downsampled render of the scene** (the
-    `renderer.texture_id()` painted into the rect), an on/off **checkbox in its center** (on a
-    translucent backing so it reads over the render), and a corner **radio outside each of the four
-    corners** = where the gizmo is anchored (`Corner`, drawn onto the 3D image by `draw_axes_overlay`);
-    a **Background** group (Solid/Gradient radios + `color_submenu` swatches — a `Button`-swatch that
-    **opens on click, downward** a `Popup::menu` (`CloseOnClickOutside`) with an inline
-    `color_picker_color32`, linear↔Color32 via `egui::Rgba` for WYSIWYG; `Camera::background`).
+**View-settings hamburger** (`LIST`, right-aligned) opens a compact popup anchored
+under the button, with Camera / Lighting / Scene tabs. It contains only the **View**
+page. **Edit → Settings** opens the full movable settings window and reopens its
+last-used section. Both presentations use the same `settings_page_view` controls.
+The popup closes on an outside click, except when a child dropdown/color picker
+owns that click; the full window closes with its X button or Escape.
+
+All settings apply to the running session immediately, without saving startup defaults.
+The shared footer contains exactly **Default / Revert / Save** on every tab:
+- **Default** applies factory settings across all sections.
+- **Revert** restores the settings captured when the dialog opened, including distinct
+  per-representation and playback values and previously detected bonds. Save does not
+  move this baseline. Camera position, orientation, and zoom are not reset.
+- **Save** persists all current settings as defaults for future sessions, while keeping
+  the editor open. Closing keeps live changes and does not save them as defaults.
+
+View controls include projection, frame fill (used on the next framing action), fog,
+background, AO radius in nm, shadow softness, GI, and axes. Representation preferences
+update loaded representations and also govern new ones. Picking and playback changes
+apply live. Bond-detection settings re-evaluate loaded connectivity and govern new loads;
+recorded chemical orders and source bonds are preserved. Save failures appear in the editor.
+Native defaults persist across restarts; browser defaults remain in memory for this run.
+
 Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered
 by ink bounds** `Galley::mesh_bounds`, not the font line-box); the **`toolbar_label`** helper draws
 the `Selection mode`/`Scope` labels with the **same ink-centering** so they line up with the buttons next

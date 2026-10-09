@@ -25,16 +25,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `-m a.pdb -m b.pdb` = two molecules.
 - `app.rs` + `app/` — the `eframe::App`. **Split into a thin root + `app/` submodules** (M25,
   was a single 7276-line file): the root (`app.rs`, ~690 lines) holds the `App` struct + small
-  private enums (`ViewTab`/`SettingsPage`/`Corner`/`LassoOp`), the `impl eframe::App for App { ui }`
+  private enums (`ViewPage`/`SettingsPage`/`Corner`/`LassoOp`), the `impl eframe::App for App { ui }`
   loop, `rebuild_dirty()` + render-skip logic, `defuse_broken_ime`, the `mod`/`use` wiring, and the
   IME tests. Everything else moved into `app/` (the `impl App` methods read `App`'s **private fields
   directly** — descendant modules see an ancestor's privates; the cross-module helpers/methods/types
   are `pub(super)`, the only non-mechanical change of the split):
   - `app/init.rs` — `App::new` + `debug_draw_preset` (the `MOLAR_VIS_DEBUG_*` hooks fire here).
   - `app/viewport.rs` — `draw_viewport` + hover/lasso/pending-selection methods.
-  - `app/panels.rs` — left panel, menu bar, molecule list, top view toolbar, view-settings window.
+  - `app/panels.rs` — left panel, menu bar, molecule list, top view toolbar, unified settings entry points.
   - `app/rep_panel.rs` — rep rows: selection field, rep params, Traj/Periodic tabs, traj bar.
-  - `app/settings_dialog.rs` — the program-settings dialog (per-tab pages, apply, axes widget).
+  - `app/settings_dialog.rs` — the unified settings window (shared view controls, compact viewer popup, live apply, opening snapshot for Revert, explicit Save, axes widget).
   - `app/pickers.rs` — style/color/material pickers + their icon/preview painters.
   - `app/widgets.rs` — shared egui helpers (`tab_bar`, `slider_with_edit`, `picker_button`, …).
   - `app/overlay.rs` — viewport overlays (pick/residue info, modifier hint, axes gizmo, glow ring).
@@ -341,24 +341,26 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   (`directories::ProjectDirs::from("","","molar_vis")` → `~/.config/molar_vis/settings.json` on
   Linux). These are the launch-time defaults that used to be hardcoded: `AppearanceSettings`
   (theme mode / font scale / accent — `theme.rs`), `RenderingSettings` (SSAA / shadow-map res —
-  `render.rs`), `ViewDefaults` (projection / depth-cue / AO / shadow / background / fit-fraction,
+  `render.rs`), `ViewDefaults` (projection / depth-cue / AO / shadow / background / fit-fraction / GI / axes,
   seeded onto a **new** scene's camera via `ViewDefaults::seed_camera`), `RepDefaults` (new-rep
   style / color / material / selection / surface-quality — `Representation::from_defaults`),
   `BehaviorSettings` (mouse sensitivity, default pick/selection mode, trajectory fps/loop,
   bond-guessing thresholds + **periodic search** → `data::BondParams`, and **`dashed_pbc_bonds`** —
-  the only live render toggle here, applied by marking all reps `geom_dirty` on Save). Same design
+  the only live render toggle here, applied live by marking all reps `geom_dirty`). Same design
   as `session.rs`: pure data + serde,
   WASM-safe, every field `#[serde(default)]` with `Default` impls reproducing the **exact** old
   constants (a fresh config = old behavior); forward/back-compatible. Native IO
   (`load_or_create`/`save`/`config_path`, `#[cfg(not(wasm))]`) creates the file with defaults on
   first launch, and on a parse error backs the bad file up to `*.bak` and resets. The browser keeps
-  settings in memory (no filesystem). The dialog UI + apply logic live in `app.rs` (cogwheel
+  settings in memory (no filesystem). The dialog UI + apply logic live in `app/settings_dialog.rs` (cogwheel
   button → `draw_settings_dialog`; `apply_settings`); the **app-global** knobs (theme, SSAA, shadow
-  map) apply live on Save, the **new-document defaults** (view/rep/behavior) are read when the next
-  scene/molecule is created and never mutate the open document. The dialog is a **free, movable
-  `egui::Window`** (not a centered `Modal` — a Modal re-centers each frame so its top jumps as the
-  per-tab content height changes; a top-anchored fixed-width Window grows/shrinks only at the
-  **bottom**), closed via Save / Cancel / Escape. 4 round-trip/default/compat tests.
+  map) apply live. All sections edit the running session immediately; representation,
+  playback, picking, and bond-detection changes also update loaded objects. A shared
+  Default / Revert / Save footer loads factory settings, restores the opening snapshot,
+  or explicitly persists all settings for new sessions. The full editor is a movable
+  `egui::Window`; the viewer opens only its shared View page in a compact anchored popup.
+  Live application is separate from disk writes. View-style capture excludes camera pose.
+
 - `script.rs` (+ `script/command.rs`) — **the command layer, always compiled**: `Command` (the
   vocabulary of scene mutations) + `apply_scene_command` + the `parse_*` helpers. The app's own menu
   actions and the Python/JS hosts drive the viewer through it, so it does **not** ride the `scripting`

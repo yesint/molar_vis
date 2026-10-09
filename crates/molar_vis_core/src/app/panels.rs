@@ -1,7 +1,6 @@
 //! Left panel, menu bar, molecule list, top view toolbar, view-settings window.
 use super::*;
 use super::widgets::*;
-use super::settings_dialog::*;
 use super::rep_panel::*;
 #[cfg(target_arch = "wasm32")]
 use super::loaders::pick_file;
@@ -196,278 +195,23 @@ impl App {
                     // `draw_modifier_hint_overlay` in `draw_viewport` — so it never
                     // resizes the view.)
 
-                    // — View-settings hamburger (right-aligned) — toggles a tabbed
-                    // Window (Camera / Lighting / Scene). A Window (not a Popup) so
-                    // the nested click-to-open dropdowns / color pickers work; it
-                    // closes on a click outside it (see `view_settings_window`).
-                    let anchor = ui
-                        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let resp = overlay_button(ui, icon::LIST, self.view_menu.open)
-                                .on_hover_text("View settings (camera, lighting, scene)");
-                            if resp.clicked() {
-                                self.view_menu.open = !self.view_menu.open;
-                            }
-                            resp.rect
-                        })
-                        .inner;
-                    self.view_settings_window(ui.ctx(), anchor);
-                });
-            });
-    }
-
-    /// The view-settings window (Camera / Lighting / Scene tabs), opened from the
-    /// toolbar hamburger. Hosted in a `Window` so nested click-downward dropdowns
-    /// and color pickers behave; closed on a click outside it — but **not** while a
-    /// child popup (a dropdown / color picker) is open, nor when the click is on the
-    /// hamburger button itself (`anchor`).
-    pub(super) fn view_settings_window(&mut self, ctx: &egui::Context, anchor: egui::Rect) {
-        if !self.view_menu.open {
-            self.view_menu.last_rect = None;
-            self.view_menu.popup_open = false;
-            return;
-        }
-        // Read *before* drawing: the child popups are shown (and closed) inside the closure
-        // below, so afterwards this frame's state is already the post-click one.
-        let popup_was_open = self.view_menu.popup_open;
-        let inner = egui::Window::new("view_settings")
-            .title_bar(false)
-            .resizable(false)
-            .movable(false)
-            .pivot(egui::Align2::RIGHT_TOP)
-            .fixed_pos(anchor.right_bottom() + egui::vec2(0.0, 4.0))
-            .show(ctx, |ui| {
-                // A non-resizable window sizes to its content's `min_rect`, so it stays
-                // snug — *provided the content has no width-filling widget*. (A bare
-                // `ui.separator()` fills the available width, which becomes the content
-                // size and made the menu balloon to the screen edge; the tabs use
-                // `Frame::group`s instead, which size to content.) `min_width` is just a
-                // sensible floor so the menu isn't too narrow / jittery across tabs.
-                ui.set_min_width(248.0);
-                tab_bar(
-                    ui,
-                    &mut self.view_menu.tab,
-                    &[
-                        (ViewTab::Camera, "Camera"),
-                        (ViewTab::Lighting, "Lighting"),
-                        (ViewTab::Scene, "Scene"),
-                    ],
-                );
-                ui.add_space(6.0);
-                match self.view_menu.tab {
-                    ViewTab::Camera => self.view_tab_camera(ui),
-                    ViewTab::Lighting => self.view_tab_lighting(ui),
-                    ViewTab::Scene => self.view_tab_scene(ui),
-                }
-            });
-        // Close on a click outside the window. **Test against the rect drawn _last_
-        // frame** (`ViewMenu::last_rect`), not this frame's: clicking a tab switches
-        // the tab and `Window::show` immediately re-lays-out the (right-pivoted)
-        // window for the new tab — a narrower tab moves the left edge right, so the
-        // freshly-updated rect (and `layer_id_at`, which reads the same just-updated
-        // area state) no longer covers the leftmost tab the click actually landed on,
-        // and the menu wrongly closed. The previous frame's rect is the geometry the
-        // user saw and clicked. Clicks on the hamburger (`anchor`) are its toggle.
-        //
-        // A child popup (dropdown / colour picker) suppresses the test — and it has to be
-        // suppressed for the frame the popup **closes** in as well, not only while it is up:
-        // a popup can extend past the window's bottom edge (the depth-cue type dropdown's last
-        // item, `Exp²`, sits ~9 px below it), and choosing an item closes the popup in that
-        // same frame, so `is_any_open` is already false here and the click would read as
-        // "outside the window". Hence `popup_was_open`, sampled before the closure ran. While a
-        // popup is up every click belongs to it — on an item, or outside it to dismiss it — so
-        // the window sits out that click either way and a second one closes it.
-        if let Some(inner) = inner {
-            let hit_rect = self.view_menu.last_rect.unwrap_or(inner.response.rect);
-            let popup_open = egui::Popup::is_any_open(ctx);
-            let clicked = ctx.input(|i| i.pointer.any_click());
-            if clicked && !popup_open && !popup_was_open {
-                if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
-                    if !hit_rect.contains(p) && !anchor.contains(p) {
-                        self.view_menu.open = false;
-                    }
-                }
-            }
-            self.view_menu.last_rect = Some(inner.response.rect);
-            self.view_menu.popup_open = popup_open;
-        }
-    }
-
-    /// Camera tab of the view-settings menu: projection + depth cue.
-    pub(super) fn view_tab_camera(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Projection").strong());
-        ui.horizontal(|ui| {
-            let persp = self.camera.is_perspective();
-            if ui
-                .selectable_label(persp, egui::RichText::new(icon::PERSPECTIVE).size(18.0))
-                .on_hover_text("Perspective")
-                .clicked()
-            {
-                self.camera.projection = Projection::Perspective;
-            }
-            if ui
-                .selectable_label(!persp, egui::RichText::new(icon::CUBE).size(18.0))
-                .on_hover_text("Orthographic")
-                .clicked()
-            {
-                self.camera.projection = Projection::Orthographic;
-            }
-        });
-        ui.add_space(6.0);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(egui::RichText::new("Depth cue").strong());
-            let cue = &mut self.camera.depth_cue;
-            egui::Grid::new("cue_grid")
-                .num_columns(2)
-                .spacing(egui::vec2(8.0, 6.0))
-                .show(ui, |ui| {
-                    ui.label("Type");
-                    // Click-to-open dropdown (opens downward), as a nested menu so it
-                    // stays within the parent CloseOnClickOutside menu's hierarchy.
-                    let cur = if cue.enabled { cue.mode.label() } else { "None" };
-                    let header = ui.button(format!("{}  {}", cur, icon::CARET_DOWN));
-                    egui::Popup::menu(&header).show(|ui| {
-                        if ui.selectable_label(!cue.enabled, "None").clicked() {
-                            cue.enabled = false;
-                            ui.close();
-                        }
-                        for m in CueMode::ALL {
-                            let sel = cue.enabled && cue.mode == m;
-                            if ui.selectable_label(sel, m.label()).clicked() {
-                                cue.enabled = true;
-                                cue.mode = m;
-                                ui.close();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let active = self.settings_dialog.as_ref().is_some_and(|d| d.popup);
+                        let button = overlay_button(ui, icon::LIST, active)
+                            .on_hover_text("View settings (camera, lighting, scene)");
+                        if button.clicked() {
+                            if active { self.settings_dialog = None; }
+                            else {
+                                self.open_settings(SettingsPage::View);
+                                if let Some(d) = &mut self.settings_dialog { d.popup = true; }
                             }
                         }
+                        if let Some(d) = &mut self.settings_dialog {
+                            if d.popup { d.anchor = button.rect; }
+                        }
                     });
-                    ui.end_row();
-
-                    ui.label("Strength");
-                    slider_with_edit(ui, &mut cue.strength, 0.0..=1.0, cue.enabled);
-                    ui.end_row();
-
-                    ui.label("Start");
-                    slider_with_edit(ui, &mut cue.start, 0.0..=1.0, cue.enabled);
-                    ui.end_row();
                 });
-        });
-    }
-
-    /// Lighting tab: ambient occlusion + cast shadows (both screen-space darkening).
-    /// Each is a `Frame::group` (like the Camera/Scene tabs) — content-sized, so the
-    /// window stays snug; a width-filling `ui.separator()` between them would balloon it.
-    pub(super) fn view_tab_lighting(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            let ao = &mut self.camera.ao;
-            ui.checkbox(&mut ao.enabled, "Ambient occlusion")
-                .on_hover_text(
-                    "Darken creases and cavities (true hemisphere AO in the ray-traced view, \
-                     screen-space AO in the realtime view)",
-                );
-            ui.add_enabled_ui(ao.enabled, |ui| {
-                egui::Grid::new("ao_opts")
-                    .num_columns(2)
-                    .spacing(egui::vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.label("Strength");
-                        slider_with_edit(ui, &mut ao.strength, 0.0..=1.0, ao.enabled);
-                        ui.end_row();
-                        ui.label("Radius").on_hover_text(
-                            "Occlusion reach. In the ray-traced view this scales with the \
-                             molecule size (a fraction of the scene), so AO finds cavities at \
-                             any scale.",
-                        );
-                        slider_with_edit(ui, &mut ao.radius, 0.1..=1.0, ao.enabled);
-                        ui.end_row();
-                    });
             });
-        });
-        ui.add_space(6.0);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            let sh = &mut self.camera.shadow;
-            sh.softness = sh.effective_softness();
-            ui.checkbox(&mut sh.enabled, "Cast shadows")
-                .on_hover_text("Real-time directional shadows from a key light (shadow map)");
-            ui.add_enabled_ui(sh.enabled, |ui| {
-                egui::Grid::new("shadow_opts")
-                    .num_columns(2)
-                    .spacing(egui::vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.label("Strength");
-                        slider_with_edit(ui, &mut sh.strength, 0.0..=1.0, sh.enabled);
-                        ui.end_row();
-                        ui.label("Softness")
-                            .on_hover_text("Shadow edge softness in the live and ray-traced views. Minimum 0.10 avoids jagged hard-shadow edges.");
-                        slider_with_edit(ui, &mut sh.softness, crate::camera::Shadow::MIN_SOFTNESS..=1.0, sh.enabled);
-                        ui.end_row();
-                    });
-            });
-        });
-        ui.add_space(6.0);
-        // Ray tracing (WebGPU/native only): press R to ray-trace the current view (PyMOL-
-        // `ray` style) + an optional global-illumination tier for Save image.
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            let supported = self.renderer.raytrace_supported();
-            if supported {
-                ui.label("Ray tracing").on_hover_text(
-                    "Press R in the viewport to ray-trace the current view (ambient occlusion \
-                     + shadows); it holds until you move the camera. Render ▸ Save image \
-                     ray-traces to a file at any resolution.",
-                );
-                ui.label(
-                    egui::RichText::new("Press R to ray-trace the view")
-                        .weak()
-                        .small(),
-                );
-                ui.add_space(2.0);
-                ui.label("Global illumination").on_hover_text(
-                    "Path-traced GI strength — 0 = off, higher = stronger sky-dome ambient + \
-                     indirect colour bleeding. Applies to the R-key ray trace and Render ▸ Save \
-                     image. Heavier (extra bounces), so it converges slower.",
-                );
-                slider_with_edit(ui, &mut self.camera.gi, 0.0..=1.0, true);
-            } else {
-                ui.label(
-                    egui::RichText::new("Ray tracing needs WebGPU (unavailable on this device)")
-                        .weak()
-                        .small(),
-                );
-            }
-        });
-    }
-
-    /// Scene tab: orientation axes + background.
-    pub(super) fn view_tab_scene(&mut self, ui: &mut egui::Ui) {
-        let scene_tex = self.renderer.texture_id();
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(egui::RichText::new("Axes").strong());
-            draw_axes_widget(ui, &mut self.camera.axes_on, &mut self.camera.axes_corner, Some(scene_tex));
-        });
-        ui.add_space(6.0);
-
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.label(egui::RichText::new("Background").strong());
-            let bg = &mut self.camera.background;
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut bg.kind, BgKind::Solid, "Solid color");
-                color_submenu(ui, "bg_solid", &mut bg.color);
-            });
-            ui.radio_value(&mut bg.kind, BgKind::Gradient, "Gradient");
-            let grad = bg.kind == BgKind::Gradient;
-            ui.add_enabled_ui(grad, |ui| {
-                egui::Grid::new("bg_grad")
-                    .num_columns(2)
-                    .spacing(egui::vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        ui.label("Top");
-                        color_submenu(ui, "bg_top", &mut bg.top);
-                        ui.end_row();
-                        ui.label("Bottom");
-                        color_submenu(ui, "bg_bottom", &mut bg.bottom);
-                        ui.end_row();
-                    });
-            });
-        });
     }
 
     /// The left-panel **menu bar** — three drop-down menus that hold every global
@@ -600,15 +344,10 @@ impl App {
 
                 if ui
                     .button(format!("{}  Settings…", icon::GEAR_SIX))
-                    .on_hover_text("Program settings")
+                    .on_hover_text("Application preferences and session view")
                     .clicked()
                 {
-                    if self.settings_dialog.is_none() {
-                        self.settings_dialog = Some(SettingsDialog {
-                            draft: self.settings.clone(),
-                            tab: SettingsPage::default(),
-                        });
-                    }
+                    self.open_settings(self.last_settings_page);
                     ui.close();
                 }
             }).response);
@@ -1290,7 +1029,6 @@ impl App {
         GroupOutcome { view_dirty, escalate }
     }
 }
-
 
 /// Regression test for the view-settings window dismissing itself when a dropdown item is
 /// chosen from *below* its bottom edge.
