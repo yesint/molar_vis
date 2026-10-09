@@ -11,6 +11,7 @@ struct Primitive {
     a: [f32; 4],    // xyz center/base, w radius
     b: [f32; 4],    // xyz far endpoint, w 0=sphere / 1=capsule
     lane: [f32; 4], // signed slot and gap; same view-dependent shift as cylinder.wgsl
+    profile: [f32; 4], // cubic spline join positions/radii (zero for capsules)
 }
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -34,12 +35,14 @@ impl Tree {
                 a: [s.center[0], s.center[1], s.center[2], s.radius],
                 b: [s.center[0], s.center[1], s.center[2], 0.0],
                 lane: [0.0; 4],
+                profile: [0.0; 4],
             })
             .collect();
         primitives.extend(geom.cylinders.iter().map(|c| Primitive {
             a: [c.p0[0], c.p0[1], c.p0[2], c.radius],
             b: [c.p1[0], c.p1[1], c.p1[2], 1.0],
-            lane: [c.offset[0], c.offset[1], 0.0, 0.0],
+            lane: [c.offset[0], c.offset[1], 0.0, c.smoothing],
+            profile: c.profile,
         }));
         Self {
             primitives,
@@ -78,7 +81,10 @@ impl Tree {
         let a = Vec3::from_slice(&p.a[..3]);
         let b = Vec3::from_slice(&p.b[..3]);
         // Conservative for every camera orientation, including multi-order lanes.
-        let extent = Vec3::splat(p.a[3] + (p.lane[0] * p.lane[1]).abs() + 1e-5);
+        let r0 = p.profile[0].hypot(p.profile[1]);
+        let r1 = (a.distance(b) - p.profile[2]).hypot(p.profile[3]);
+        let flare = if p.profile[1] > 0.0 { r0.max(r1) + p.lane[3] * r0.min(r1) / 3.0 } else { 0.0 };
+        let extent = Vec3::splat(p.a[3].max(flare) + (p.lane[0] * p.lane[1]).abs() + 1e-5);
         (a.min(b) - extent, a.max(b) + extent)
     }
     fn subtree(&mut self, ids: &mut [u32]) {
@@ -284,6 +290,8 @@ mod tests {
                     color1: 0x4d804020,
                     mat: 0,
                     offset: [0.0; 2],
+                    profile: [0.0; 4],
+                    smoothing: 0.0,
                 },
                 CylinderInstance {
                     p0: [0.0; 3],
@@ -293,6 +301,8 @@ mod tests {
                     color1: 0x4d804020,
                     mat: 0,
                     offset: [0.0; 2],
+                    profile: [0.0; 4],
+                    smoothing: 0.0,
                 },
             ],
             ..Default::default()
@@ -430,7 +440,7 @@ mod tests {
             @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) i: vec3<u32>) {{\n\
                 let c = cases[i.x]; let id = bitcast<u32>(c.w);\n\
                 result[i.x] = select(0u, 1u, envelope_hidden((camera.view * vec4<f32>(c.xyz,1.0)).xyz, id >> 1u, (id & 1u) != 0u));\n\
-            }}", include_str!("shaders/envelope.wgsl"));
+            }}", format!("{}\n{}", include_str!("shaders/envelope.wgsl"), include_str!("shaders/bond_profile.wgsl")));
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("envelope-test"),
             source: wgpu::ShaderSource::Wgsl(source.into()),

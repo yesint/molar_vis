@@ -10,6 +10,8 @@ struct Sphere {
     m: vec4<u32>,   // x = color (RGBA8), y = packed material
 };
 struct Cyl {
+    profile: vec4<f32>,
+    lane: vec4<f32>,
     c0: vec4<f32>,  // xyz = p0, w = radius
     c1: vec4<f32>,  // xyz = p1
     m: vec4<u32>,   // x = color, y = packed material
@@ -142,6 +144,9 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 
     let seg = length(axis);
     if (seg < 1e-9) { return -1.0; }
     let ua = axis / seg;
+    if (bond_profile_enabled(c.profile)) {
+        return bond_profile_ray(p0, ua, seg, r, c.profile, c.lane.w, c.lane.xyz, ro, rd, exit_inside).x;
+    }
     let oc = ro - p0;
     var best = -1.0;
 
@@ -261,6 +266,11 @@ fn inside_envelope(p: vec3<f32>, own: u32) -> bool {
                 } else {
                     let c = cylinders[idx];
                     let ab = c.c1.xyz - c.c0.xyz;
+                    if (bond_profile_enabled(c.profile)) {
+                        let d = bond_profile_containment(p, c.c0.xyz, normalize(ab), length(ab), c.c0.w, c.profile, c.lane.w, c.lane.xyz);
+                        if (d < -2e-4 || (abs(d) <= 2e-4 && tagged < own)) { return true; }
+                        continue;
+                    }
                     let along = clamp(dot(p - c.c0.xyz, ab) / max(dot(ab, ab), 1e-16), 0.0, 1.0);
                     nearest = c.c0.xyz + along * ab;
                     radius = c.c0.w;
@@ -455,6 +465,9 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         // Clamped nearest axis point ⇒ the wall's radial normal *and* both caps' spherical ones.
         let ap = cy.c0.xyz + ua * clamp(h, 0.0, seg);
         nrm = normalize(p - ap);
+        if (bond_profile_enabled(cy.profile)) {
+            nrm = bond_profile_normal(p, cy.c0.xyz, ua, seg, cy.c0.w, cy.profile, cy.lane.w, cy.lane.xyz);
+        }
         // Two-tone half-bond coloring, split at the midpoint exactly as the rasterizer does:
         // `m.x` is the p0 half, `m.z` the p1 half. Tracing only `m.x` painted every bond in its
         // first atom's color, so a C–F bond came out all grey and the fluorine vanished.

@@ -29,6 +29,9 @@ pub struct CylinderInstance {
     /// stay side-by-side and legible from any view angle (never collapsing edge-on).
     /// Single/Unspecified bonds use `[0, 0]` → the shift is a no-op.
     pub offset: [f32; 2],
+    /// Cubic spline join positions/radii; all zero for a straight capsule.
+    pub profile: [f32; 4],
+    pub smoothing: f32,
 }
 
 impl CylinderInstance {
@@ -36,6 +39,12 @@ impl CylinderInstance {
         array_stride: std::mem::size_of::<CylinderInstance>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
+            wgpu::VertexAttribute { offset: 64, shader_location: 8, format: wgpu::VertexFormat::Float32 },
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 7,
+                format: wgpu::VertexFormat::Float32x4,
+            },
             wgpu::VertexAttribute {
                 offset: 0,
                 shader_location: 0,

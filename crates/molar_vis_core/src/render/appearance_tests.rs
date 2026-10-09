@@ -680,14 +680,14 @@ fn capsule_shadow_rays_find_the_valid_exit() {
     let start = source.find("fn ray_cylinder(").unwrap();
     let end = source[start..].find("// Möller").unwrap() + start;
     let source = format!(
-        "struct Cyl {{ c0: vec4<f32>, c1: vec4<f32>, m: vec4<u32> }};\n{}\n\
+        "struct Cyl {{ profile: vec4<f32>, lane: vec4<f32>, c0: vec4<f32>, c1: vec4<f32>, m: vec4<u32> }};\n{}\n\
         @group(0) @binding(0) var<storage, read_write> result: array<f32>;\n\
         @compute @workgroup_size(1) fn main() {{\n\
-            let c = Cyl(vec4<f32>(0.0,0.0,0.0,0.2),vec4<f32>(0.0,0.0,1.0,0.0),vec4<u32>(0u));\n\
+            let c = Cyl(vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(0.0,0.0,0.0,0.2),vec4<f32>(0.0,0.0,1.0,0.0),vec4<u32>(0u));\n\
             result[0] = ray_cylinder(c, vec3<f32>(0.1,0.0,0.5), vec3<f32>(0.0,0.0,1.0), true);\n\
             result[1] = ray_cylinder(c, vec3<f32>(0.1,0.0,-0.1), vec3<f32>(0.0,0.0,1.0), true);\n\
         }}",
-        &source[start..end]
+        format!("{}\n{}", &source[start..end], include_str!("shaders/bond_profile.wgsl"))
     );
     let shader = rs
         .device
@@ -975,6 +975,8 @@ fn transparent_envelope_renders_duplicate_primitives_once() {
         color1: color,
         mat: material.pack_lighting(),
         offset: [0.0; 2],
+                    profile: [0.0; 4],
+                    smoothing: 0.0,
     };
     let mut geom = GeometryData {
         cylinders: vec![capsule],
@@ -1044,10 +1046,10 @@ fn transparent_envelope_molecule_preview() {
     let mut settings = crate::settings::RenderingSettings::default();
     settings.ssaa = 1;
     let mut renderer = SceneRenderer::new(&rs, &settings);
-    let raw = crate::data::load(std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/2lao.pdb"
-    )))
+    let input = std::env::var("MOLAR_VIS_ENVELOPE_INPUT").unwrap_or_else(|_| concat!(
+        env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+    ).into());
+    let raw = crate::data::load(std::path::Path::new(&input))
     .unwrap();
     let mut scene = Scene::default();
     scene.add(raw, &crate::settings::RepDefaults::default());
@@ -1061,6 +1063,9 @@ fn transparent_envelope_molecule_preview() {
         let mol = &mut scene.molecules[0];
         let mut rep = crate::scene::Representation::new(kind);
         rep.material = crate::material::Material::Transparent;
+        if let crate::geometry::RepParams::BallAndStick { bond_smoothing, .. } = &mut rep.params {
+            *bond_smoothing = std::env::var("MOLAR_VIS_SMOOTH_JOINS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        }
         let selection =
             std::env::var("MOLAR_VIS_ENVELOPE_SELECTION").unwrap_or_else(|_| "resid 1:3".into());
         let (expr, sel) = mol.data.evaluate(&selection).unwrap();
@@ -1144,11 +1149,9 @@ fn transparent_envelope_molecule_preview() {
         image::imageops::overlay(&mut pair, &before, 0, 0);
         image::imageops::overlay(&mut pair, &after, w as i64, 0);
         pair.save(format!("{dir}/{kind:?}_comparison.png")).unwrap();
-        assert_ne!(
-            before.as_raw(),
-            after.as_raw(),
-            "envelope must remove intersection layers"
-        );
+        if kind == crate::geometry::RepKind::BallAndStick || std::env::var_os("MOLAR_VIS_ENVELOPE_INPUT").is_none() {
+            assert!(before.as_raw() != after.as_raw(), "envelope must remove intersection layers");
+        }
         renderer.prepare_raytrace(&rs, &scene, &camera, [w, h], false);
         let rt = renderer
             .capture_begin_raytrace(&rs, w, h, &camera, 16)

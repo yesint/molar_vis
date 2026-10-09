@@ -97,8 +97,11 @@ pub enum RepParams {
     BallAndStick {
         /// VDW radius multiplier for the balls.
         sphere_scale: f32,
-        /// Stick radius.
+        /// Stick radius (waist radius with smooth joins enabled).
         bond_radius: f32,
+        /// Spline blend length: 0 = straight bonds, 1 = broad tangent flares.
+        #[serde(default, alias = "smooth_joins", deserialize_with = "deserialize_bond_smoothing")]
+        bond_smoothing: f32,
     },
     Lines {
         /// Line width in pixels (screen-space, constant at any zoom — like VMD's
@@ -133,6 +136,16 @@ pub enum RepParams {
 }
 
 // Accept the earlier checkbox setting when loading saved sessions.
+fn deserialize_bond_smoothing<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Smoothing { Value(f32), Enabled(bool) }
+    Ok(match <Smoothing as serde::Deserialize>::deserialize(deserializer)? {
+        Smoothing::Value(value) => value.clamp(0.0, 1.0),
+        Smoothing::Enabled(enabled) => if enabled { 1.0 } else { 0.0 },
+    })
+}
+
 fn deserialize_bevel_height<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
@@ -161,6 +174,7 @@ impl RepParams {
             RepKind::BallAndStick => RepParams::BallAndStick {
                 sphere_scale: 0.25,
                 bond_radius: 0.015,
+                bond_smoothing: 0.0,
             },
             RepKind::Lines => RepParams::Lines { width: 1.0 },
             RepKind::Cartoon => RepParams::Cartoon {
@@ -283,15 +297,22 @@ pub fn build(
             let bonded = bonded_mask(bonds, &lut);
             GeometryData {
                 spheres: spheres_where(bound, &colorizer, |_| bond_radius, |i| !bonded[i]),
-                cylinders: cylinders(&lut, bonds, bond_radius, pbox),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox, None, 0.0),
                 ..Default::default()
             }
         }
-        RepParams::BallAndStick { sphere_scale, bond_radius } => {
+        RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
+            let radii = (bond_smoothing > 0.0).then(|| {
+                let mut radii = vec![0.0; n_atoms];
+                for particle in bound.iter_particle() {
+                    radii[particle.id] = particle.atom.vdw() * sphere_scale;
+                }
+                radii
+            });
             GeometryData {
                 spheres: spheres(bound, &colorizer, |a| a.vdw() * sphere_scale),
-                cylinders: cylinders(&lut, bonds, bond_radius, pbox),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox, radii.as_deref(), bond_smoothing),
                 ..Default::default()
             }
         }
@@ -720,6 +741,8 @@ fn cylinders(
     bonds: &[Bond],
     radius: f32,
     pbox: Option<&PeriodicBox>,
+    sphere_radii: Option<&[f32]>,
+    smoothing: f32,
 ) -> Vec<CylinderInstance> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
@@ -728,13 +751,13 @@ fn cylinders(
     // A normal strand is a single **two-tone capsule** `pa → pb` (the shader colors the
     // pa half `color`, the pb half `color1`, and rounds both ends). A PBC-wrapping bond
     // is instead two single-color dashed stubs.
-    let mut push = |p0, p1, color, color1, rad: f32, offset: [f32; 2], dashed: bool| {
+    let mut push = |p0, p1, color, color1, rad: f32, offset: [f32; 2], dashed: bool, profile: [f32; 4]| {
         if dashed {
             for (s, e) in dashes(p0, p1) {
-                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, color1, mat: 0, offset });
+                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, color1, mat: 0, offset, profile, smoothing });
             }
         } else {
-            v.push(CylinderInstance { p0, radius: rad, p1, color, color1, mat: 0, offset });
+            v.push(CylinderInstance { p0, radius: rad, p1, color, color1, mat: 0, offset, profile, smoothing });
         }
     };
     for bond in bonds {
@@ -745,8 +768,8 @@ fn cylinders(
             // stubs (each atom → its partner's nearest image). A normal bond is one
             // two-tone capsule per chemical-order strand.
             if wrapped {
-                push(pa, a_end, ca, ca, radius, [0.0, 0.0], true);
-                push(pb, b_end, cb, cb, radius, [0.0, 0.0], true);
+                push(pa, a_end, ca, ca, radius, [0.0, 0.0], true, [0.0; 4]);
+                push(pb, b_end, cb, cb, radius, [0.0, 0.0], true, [0.0; 4]);
                 continue;
             }
             let slots = strand_slots(bond.order);
@@ -758,7 +781,11 @@ fn cylinders(
             };
             let gap = if multi { rad * CYL_STRAND_GAP_FACTOR } else { 0.0 };
             for &(slot, dash) in slots {
-                push(pa, pb, ca, cb, rad, [slot, gap], dash);
+                let profile = sphere_radii.filter(|_| !dash).map_or([0.0; 4], |radii| {
+                    let length = glam::Vec3::from_array(pa).distance(glam::Vec3::from_array(pb));
+                    crate::render::bond_profile::tangent_joins(length, radii[a], radii[b], rad, smoothing)
+                });
+                push(pa, pb, ca, cb, rad, [slot, gap], dash, profile);
             }
         }
     }

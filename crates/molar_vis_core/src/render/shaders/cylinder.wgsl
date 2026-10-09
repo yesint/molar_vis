@@ -26,6 +26,8 @@ fn apply_fog(color: vec3<f32>, eye_z: f32) -> vec3<f32> {
 }
 
 struct Instance {
+    @location(7) profile: vec4<f32>,
+    @location(8) smoothing: f32,
     @location(0) p0: vec3<f32>,
     @location(1) radius: f32,
     @location(2) p1: vec3<f32>,
@@ -40,6 +42,9 @@ struct Instance {
 };
 
 struct VsOut {
+    @location(9) @interpolate(flat) profile: vec4<f32>,
+    @location(10) @interpolate(flat) shift: vec3<f32>,
+    @location(11) @interpolate(flat) smoothing: f32,
     @location(8) @interpolate(flat) instance: u32,
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,
@@ -87,6 +92,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     // the strands stay side-by-side from any angle. If the bond points at the camera
     // (axis ∥ Z) the cross degenerates → fall back to a fixed X. The shift is applied
     // in view space (so the impostor math below is unchanged); [0,0] → no-op.
+    var lane_shift = vec3<f32>(0.0);
     if (inst.offset.y != 0.0) {
         let ax = a1 - a0;
         let axl = length(ax);
@@ -95,8 +101,11 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
         let spl = length(sp);
         sp = select(vec3<f32>(1.0, 0.0, 0.0), sp / spl, spl > 1e-4);
         let shift = sp * (inst.offset.x * inst.offset.y);
-        a0 = a0 + shift;
-        a1 = a1 + shift;
+        lane_shift = shift;
+        if (!bond_profile_enabled(inst.profile)) {
+            a0 = a0 + shift;
+            a1 = a1 + shift;
+        }
     }
 
     let axis_v = a1 - a0;
@@ -127,7 +136,9 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     // Oversize by 1.4× so the curved silhouette is fully covered (extra fragments miss
     // the ray test and `discard`); the sphere impostor does the same (1.25×). Extent
     // along the tube = projected half-length + cap; across = the radius.
-    let bb = inst.radius * 1.4;
+    let atom_radii = bond_profile_atom_radii(seg_len, inst.profile);
+    let bound_radius = select(inst.radius, max(max(inst.radius, atom_radii.x), atom_radii.y) + length(lane_shift) + inst.smoothing * min(atom_radii.x, atom_radii.y) / 3.0, bond_profile_enabled(inst.profile));
+    let bb = bound_radius * 1.4;
     let half_axis = 0.5 * abs(dot(a1 - a0, u)); // projected half-length of the tube
     let su = half_axis + bb;
     let sw = bb;
@@ -139,6 +150,9 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
 
     var out: VsOut;
     out.instance = instance;
+    out.profile = inst.profile;
+    out.smoothing = inst.smoothing;
+    out.shift = lane_shift;
     out.clip = camera.proj * vec4<f32>(pos, 1.0);
     // Conservative near-depth for `@early_depth_test(greater_equal)`. Keep clip.xy /
     // clip.w — hence the screen coverage, near-plane clipping, AND the interpolated
@@ -158,7 +172,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     // the nearest-by-*distance* axis point along the eye ray, which is wrong for
     // perspective — distance ≠ eye-z — and left early-Z unsound at grazing close-ups.)
     // Since only z matters, x,y are arbitrary.
-    let near_z = max(a0.z, a1.z) + inst.radius;
+    let near_z = max(a0.z, a1.z) + bound_radius;
     let near_c = camera.proj * vec4<f32>(0.0, 0.0, near_z, 1.0);
     // Guard the near-plane / behind-eye case (w → 0): fall back to depth 0 (the
     // nearest representable depth — a valid lower bound, just no early-Z benefit).
@@ -231,6 +245,10 @@ fn compute_hit(in: VsOut) -> Hit {
     var best_t = 1e30;
     var normal = vec3<f32>(0.0, 0.0, 1.0);
 
+    if (bond_profile_enabled(in.profile)) {
+        let profile_hit = bond_profile_ray(in.base, ua, in.seg_len, in.radius, in.profile, in.smoothing, in.shift, ro, rd, false);
+        if (profile_hit.x > 0.0) { best_t = profile_hit.x; normal = profile_hit.yzw; }
+    } else {
     // Cylinder wall (infinite cylinder, then clip h to the segment).
     let oc = ro - in.base;
     let rd_p = rd - ua * dot(rd, ua);
@@ -276,6 +294,8 @@ fn compute_hit(in: VsOut) -> Hit {
             best_t = tf;
             normal = normalize((ro + tf * rd) - far);
         }
+    }
+
     }
 
     if (best_t > 1e29) {

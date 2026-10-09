@@ -22,7 +22,7 @@ pub(super) fn build_hover_detail(
         return geometry::GeometryData::default();
     };
     let bound = data.bind_with_state(&sel, state);
-    let params = RepParams::BallAndStick { sphere_scale: 0.25, bond_radius: 0.04 };
+    let params = RepParams::BallAndStick { sphere_scale: 0.25, bond_radius: 0.04, bond_smoothing: 0.0 };
     let mut geom = geometry::build(
         &bound,
         n_atoms,

@@ -3,6 +3,7 @@ struct EnvelopePrimitive {
     a: vec4<f32>,
     b: vec4<f32>,
     lane: vec4<f32>,
+    profile: vec4<f32>,
 };
 struct EnvelopeNode {
     lo: vec3<f32>,
@@ -33,6 +34,7 @@ fn envelope_hidden(p: vec3<f32>, instance: u32, capsule: bool) -> bool {
         let primitive = envelope_primitives[n.primitive];
         var a = (camera.view * vec4<f32>(primitive.a.xyz, 1.0)).xyz;
         var b = (camera.view * vec4<f32>(primitive.b.xyz, 1.0)).xyz;
+        var lane_shift = vec3<f32>(0.0);
         if (primitive.lane.x != 0.0) {
             let axis = b - a;
             let length_axis = length(axis);
@@ -41,7 +43,14 @@ fn envelope_hidden(p: vec3<f32>, instance: u32, capsule: bool) -> bool {
             let length_side = length(side);
             let perpendicular = select(vec3<f32>(1.0, 0.0, 0.0), side / max(length_side, 1e-8), length_side > 1e-4);
             let shift = perpendicular * primitive.lane.x * primitive.lane.y;
-            a = a + shift; b = b + shift;
+            lane_shift = shift;
+            if (!bond_profile_enabled(primitive.profile)) { a = a + shift; b = b + shift; }
+        }
+        if (bond_profile_enabled(primitive.profile)) {
+            let ab = b - a;
+            let distance = bond_profile_containment(p, a, normalize(ab), length(ab), primitive.a.w, primitive.profile, primitive.lane.w, lane_shift);
+            if (distance < -2e-4 || (abs(distance) <= 2e-4 && n.primitive < own)) { return true; }
+            continue;
         }
         let ab = b - a;
         let along = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-16), 0.0, 1.0);

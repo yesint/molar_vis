@@ -52,6 +52,8 @@ pub struct GpuSphere {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuCylinder {
+    pub profile: [f32; 4],
+    pub lane: [f32; 4],
     pub c0: [f32; 4],
     pub c1: [f32; 4],
     pub m: [u32; 4],
@@ -295,8 +297,14 @@ impl RtScene {
                         // single strand, its siblings hidden inside it. The strand shift is
                         // translation-invariant, so the periodic `off` just adds on top of it.
                         let [p0, p1] = strand_offset(cy, view.view);
-                        let (p0, p1) = (p0 + off, p1 + off);
+                        let smooth = cy.profile[1] > 0.0;
+                        let shift = if smooth { p0 - Vec3::from(cy.p0) } else { Vec3::ZERO };
+                        let (p0, p1) = if smooth {
+                            (Vec3::from(cy.p0) + off, Vec3::from(cy.p1) + off)
+                        } else { (p0 + off, p1 + off) };
                         let gc = GpuCylinder {
+                            profile: cy.profile,
+                            lane: [shift.x, shift.y, shift.z, cy.smoothing],
                             c0: [p0[0], p0[1], p0[2], cy.radius],
                             c1: [p1[0], p1[1], p1[2], 0.0],
                             m: [cy.color, cy.mat, cy.color1, envelope_group << 1],
@@ -486,6 +494,8 @@ fn line_capsule(
         b += shift;
     }
     Some(GpuCylinder {
+        profile: [0.0; 4],
+        lane: [0.0; 4],
         c0: [a[0], a[1], a[2], radius],
         c1: [b[0], b[1], b[2], 0.0],
         m: [v0.color, FLAT_MAT, v1.color, FLAG_FLAT_ENDS],
@@ -530,7 +540,10 @@ fn strand_offset(cy: &crate::render::cylinder::CylinderInstance, view: glam::Mat
 fn cylinder_aabb(c: &GpuCylinder) -> Aabb {
     let p0 = Vec3::new(c.c0[0], c.c0[1], c.c0[2]);
     let p1 = Vec3::new(c.c1[0], c.c1[1], c.c1[2]);
-    let r = Vec3::splat(c.c0[3].max(0.0));
+    let r0 = c.profile[0].hypot(c.profile[1]);
+    let r1 = (p0.distance(p1) - c.profile[2]).hypot(c.profile[3]);
+    let flare = if c.profile[1] > 0.0 { r0.max(r1) + c.lane[3] * r0.min(r1) / 3.0 } else { 0.0 };
+    let r = Vec3::splat(c.c0[3].max(flare).max(0.0) + Vec3::new(c.lane[0], c.lane[1], c.lane[2]).length());
     Aabb { min: p0 - r, max: p0 + r }.union(Aabb { min: p1 - r, max: p1 + r })
 }
 
@@ -1363,7 +1376,7 @@ mod tests {
     #[test]
     fn cylinder_aabb_is_never_degenerate() {
         // An axis-aligned bond: the union-of-end-spheres box must have nonzero thickness.
-        let c = GpuCylinder { c0: [0.0, 0.0, 0.0, 0.1], c1: [1.0, 0.0, 0.0, 0.0], m: [0, 0, 0, 0] };
+        let c = GpuCylinder { profile: [0.0; 4], lane: [0.0; 4], c0: [0.0, 0.0, 0.0, 0.1], c1: [1.0, 0.0, 0.0, 0.0], m: [0, 0, 0, 0] };
         let a = cylinder_aabb(&c);
         assert!(a.max.y - a.min.y >= 0.19 && a.max.z - a.min.z >= 0.19);
         assert!(a.min.x <= -0.1 && a.max.x >= 1.1);

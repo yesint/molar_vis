@@ -10,6 +10,7 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod appearance_tests;
 mod background;
+pub(crate) mod bond_profile;
 mod camera_uniform;
 mod cylinder;
 mod envelope;
@@ -129,7 +130,7 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    format!("{}\n{}", envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"))
+    format!("{}\n{}\n{}", envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"))
 }
 
 /// (Re)create the camera bind group over `buf` with a dynamic-offset binding.

@@ -294,12 +294,16 @@ pub(super) fn draw_rep_params(
                 changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.10)).changed();
                 ui.end_row();
             }
-            RepParams::BallAndStick { sphere_scale, bond_radius } => {
+            RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing } => {
                 ui.label("Sphere scale");
                 changed |= ui.add(egui::Slider::new(sphere_scale, 0.05..=0.6)).changed();
                 ui.end_row();
                 ui.label("Bond radius (nm)");
                 changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.05)).changed();
+                ui.end_row();
+                ui.label("Fluid bonds");
+                changed |= ui.add(egui::Slider::new(bond_smoothing, 0.0..=1.0))
+                    .on_hover_text("0: straight bonds. Low values: short, sharp tangent joins. 1: broad, smooth spline joins. Bond radius sets the narrow waist.").changed();
                 ui.end_row();
             }
             RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
