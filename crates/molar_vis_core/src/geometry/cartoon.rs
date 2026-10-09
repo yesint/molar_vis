@@ -54,6 +54,7 @@ pub fn build(
     coil_radius: f32,
     ribbon_width: f32,
     ribbon_thickness: f32,
+    bevel_height: f32,
     pbox: Option<&PeriodicBox>,
 ) -> MeshData {
     // Group atoms by residue (BTreeMap keeps ascending resindex order).
@@ -112,6 +113,7 @@ pub fn build(
         coil_radius,
         ribbon_width,
         ribbon_thickness,
+        bevel_height,
     };
     let mut mesh = MeshData::default();
 
@@ -193,6 +195,7 @@ struct Shape {
     coil_radius: f32,
     ribbon_width: f32,
     ribbon_thickness: f32,
+    bevel_height: f32,
 }
 
 impl Shape {
@@ -431,7 +434,7 @@ fn build_run(
         }
     }
 
-    emit(&rings, &ring_owner, mesh);
+    emit(&rings, &ring_owner, shape.bevel_height, mesh);
 }
 
 /// The `[start, end]` residue index span of the contiguous helix run containing
@@ -844,7 +847,12 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
 /// `owner[i]` is the source residue of ring `i`: its `resindex` and trace atom are
 /// stamped onto every vertex of that ring (and the adjacent end cap) into
 /// `mesh.vert_res` / `mesh.vert_atom`.
-fn emit(rings: &[Ring], owner: &[&Residue], mesh: &mut MeshData) {
+fn emit(rings: &[Ring], owner: &[&Residue], bevel_height: f32, mesh: &mut MeshData) {
+    // Duplicate face endpoints for sharp ridge normals. Keep the same topology
+    // throughout a run, including coils and transitions, for trajectory updates.
+    let bevel_height = if bevel_height.is_finite() { bevel_height.max(0.0) } else { 0.0 };
+    let edge_ridges = bevel_height > 0.0;
+    let ring_size = if edge_ridges { 2 * RING } else { RING };
     let base = mesh.vertices.len() as u32;
 
     for (ri, r) in rings.iter().enumerate() {
@@ -855,11 +863,16 @@ fn emit(rings: &[Ring], owner: &[&Residue], mesh: &mut MeshData) {
         // lens, which is what made foreshortened helix turns look like solid blobs.
         // Round cross-sections (coil tube: thickness ≈ width) keep the smooth ellipse.
         let flat = r.ht < 0.6 * r.hw;
-        for k in 0..RING {
+        for vertex in 0..ring_size {
+            let k = if edge_ridges {
+                (vertex / 2 + vertex % 2) % RING
+            } else {
+                vertex
+            };
             let theta = std::f32::consts::TAU * k as f32 / RING as f32;
             let (s, c) = theta.sin_cos();
-            let offset = r.width * (r.hw * c) + r.normal * (r.ht * s);
-            let nrm = if flat {
+            let mut offset = r.width * (r.hw * c) + r.normal * (r.ht * s);
+            let mut nrm = if flat {
                 if s > 1e-4 {
                     r.normal
                 } else if s < -1e-4 {
@@ -871,6 +884,14 @@ fn emit(rings: &[Ring], owner: &[&Residue], mesh: &mut MeshData) {
                 (r.width * (c / r.hw.max(1e-4)) + r.normal * (s / r.ht.max(1e-4)))
                     .normalize_or_zero()
             };
+            if edge_ridges && owner[ri].class != SsClass::Coil {
+                let (x, y) = ridge_point(r, k, bevel_height);
+                offset = r.width * x + r.normal * y;
+                let face = vertex / 2;
+                let (ax, ay) = ridge_point(r, face, bevel_height);
+                let (bx, by) = ridge_point(r, (face + 1) % RING, bevel_height);
+                nrm = (r.width * (by - ay) - r.normal * (bx - ax)).normalize_or_zero();
+            }
             mesh.vertices.push(MeshVertex {
                 pos: (r.center + offset).to_array(),
                 normal: nrm.to_array(),
@@ -884,10 +905,10 @@ fn emit(rings: &[Ring], owner: &[&Residue], mesh: &mut MeshData) {
 
     // Quad strip between consecutive rings.
     for r in 0..rings.len() - 1 {
-        let a0 = base + (r * RING) as u32;
-        let b0 = base + ((r + 1) * RING) as u32;
-        for k in 0..RING {
-            let k2 = (k + 1) % RING;
+        let a0 = base + (r * ring_size) as u32;
+        let b0 = base + ((r + 1) * ring_size) as u32;
+        for k in (0..ring_size).step_by(if edge_ridges { 2 } else { 1 }) {
+            let k2 = (k + 1) % ring_size;
             let a = a0 + k as u32;
             let b = a0 + k2 as u32;
             let c = b0 + k2 as u32;
@@ -897,12 +918,50 @@ fn emit(rings: &[Ring], owner: &[&Residue], mesh: &mut MeshData) {
     }
 
     // Flat end caps (fan around a center vertex).
-    add_cap(mesh, rings.first().unwrap(), owner[0], base, true);
-    let last_base = base + ((rings.len() - 1) * RING) as u32;
-    add_cap(mesh, rings.last().unwrap(), owner[rings.len() - 1], last_base, false);
+    add_cap(
+        mesh,
+        rings.first().unwrap(),
+        owner[0],
+        base,
+        ring_size,
+        true,
+    );
+    let last_base = base + ((rings.len() - 1) * ring_size) as u32;
+    add_cap(
+        mesh,
+        rings.last().unwrap(),
+        owner[rings.len() - 1],
+        last_base,
+        ring_size,
+        false,
+    );
 }
 
-fn add_cap(mesh: &mut MeshData, ring: &Ring, owner: &Residue, ring_base: u32, front: bool) {
+/// A flat ribbon with triangular raised rails on both faces of each edge.
+/// Keep the broad faces at ±ht; ridge peaks protrude beyond those surfaces.
+/// Scale the rails down at sheet arrow tips and narrow helix/coil transitions.
+fn ridge_point(r: &Ring, k: usize, bevel_height: f32) -> (f32, f32) {
+    let ridge = (r.ht * 0.65).min(r.hw * 0.2);
+    // Fade the ridge to zero at narrow arrow tips while keeping its specified
+    // height over the full-width ribbon. Its width is independent of its height.
+    let height = bevel_height * (r.hw / r.ht.max(1e-4)).min(1.0);
+    let (w, t) = (r.hw, r.ht);
+    [
+        (w, t), (w - ridge, t + height), (w - 2.0 * ridge, t),
+        (-w + 2.0 * ridge, t), (-w + ridge, t + height), (-w, t),
+        (-w, -t), (-w + ridge, -t - height), (-w + 2.0 * ridge, -t),
+        (w - 2.0 * ridge, -t), (w - ridge, -t - height), (w, -t),
+    ][k]
+}
+
+fn add_cap(
+    mesh: &mut MeshData,
+    ring: &Ring,
+    owner: &Residue,
+    ring_base: u32,
+    ring_size: usize,
+    front: bool,
+) {
     // Skip near-degenerate rings (e.g. an arrow point that lands on a run end):
     // their fan would be slivers with unstable normals and ~zero area anyway.
     if ring.hw < 1e-3 || ring.ht < 1e-3 {
@@ -918,14 +977,28 @@ fn add_cap(mesh: &mut MeshData, ring: &Ring, owner: &Residue, ring_base: u32, fr
     });
     mesh.vert_res.push(owner.resindex as u32);
     mesh.vert_atom.push(owner.trace);
-    for k in 0..RING {
-        let k2 = (k + 1) % RING;
-        let a = ring_base + k as u32;
-        let b = ring_base + k2 as u32;
+    let mut triangle = |a: u32, b: u32, c: u32| {
         if front {
-            mesh.indices.extend_from_slice(&[center_idx, b, a]);
+            mesh.indices.extend_from_slice(&[a, c, b]);
         } else {
-            mesh.indices.extend_from_slice(&[center_idx, a, b]);
+            mesh.indices.extend_from_slice(&[a, b, c]);
+        }
+    };
+    if ring_size == 2 * RING && owner.class != SsClass::Coil {
+        // This profile is concave: cap the rectangular body and the four raised
+        // rails separately. A fan through ridge peaks would extend outside it.
+        let core = [0, 2, 3, 5, 6, 8, 9, 11];
+        let vertex = |k: usize| ring_base + (2 * k) as u32;
+        for k in 0..core.len() {
+            triangle(center_idx, vertex(core[k]), vertex(core[(k + 1) % core.len()]));
+        }
+        for [a, b, c] in [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]] {
+            triangle(vertex(a), vertex(b), vertex(c));
+        }
+    } else {
+        for k in (0..ring_size).step_by(ring_size / RING) {
+            let k2 = (k + 1) % ring_size;
+            triangle(center_idx, ring_base + k as u32, ring_base + k2 as u32);
         }
     }
 }
@@ -1095,4 +1168,106 @@ fn lerp_color(a: u32, b: u32, t: f32) -> u32 {
         | (mix(chan(a, 8), chan(b, 8)) << 8)
         | (mix(chan(a, 16), chan(b, 16)) << 16)
         | (0xff << 24)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ribbon_ridge_height_is_adjustable() {
+        for height in [0.005, 0.0195, 0.06] {
+            for class in [SsClass::Helix, SsClass::Sheet, SsClass::Coil] {
+                let residue = Residue {
+                    ca: Vector3f::zeros(),
+                    o: None,
+                    color: u32::MAX,
+                    class,
+                    chain: 'A',
+                    resindex: 7,
+                    trace: 42,
+                };
+                let rings: Vec<_> = [0.0, 1.0]
+                    .into_iter()
+                    .map(|z| Ring {
+                        center: Vector3f::new(0.0, 0.0, z),
+                        tangent: Vector3f::new(0.0, 0.0, 1.0),
+                        width: Vector3f::new(1.0, 0.0, 0.0),
+                        normal: Vector3f::new(0.0, 1.0, 0.0),
+                        hw: 0.15,
+                        ht: 0.03,
+                        color: u32::MAX,
+                    })
+                    .collect();
+                let mut plain = MeshData::default();
+                let mut ridged = MeshData::default();
+                emit(&rings, &[&residue, &residue], 0.0, &mut plain);
+                emit(&rings, &[&residue, &residue], height, &mut ridged);
+                assert_eq!(plain.indices.len(), ridged.indices.len());
+                assert_eq!(ridged.vert_res, vec![7; ridged.vertices.len()]);
+                assert_eq!(ridged.vert_atom, vec![42; ridged.vertices.len()]);
+                assert!(ridged
+                    .indices
+                    .iter()
+                    .all(|&i| (i as usize) < ridged.vertices.len()));
+                if class == SsClass::Coil {
+                    // Duplicating vertices leaves the coil's shape and shading intact.
+                    for k in 0..RING {
+                        assert_eq!(plain.vertices[k].pos, ridged.vertices[2 * k].pos);
+                        assert_eq!(plain.vertices[k].normal, ridged.vertices[2 * k].normal);
+                    }
+                } else {
+                    // The broad face stays flat; both edges have raised peaks on both sides.
+                    assert_eq!(ridged.vertices[4].normal, [0.0, 1.0, 0.0]);
+                    let diagonal = ridged.vertices[0].normal;
+                    assert!(diagonal[0] > 0.0 && diagonal[1] > 0.0);
+                    assert_eq!(diagonal, ridged.vertices[1].normal);
+                    assert!((ridged.vertices[4].pos[1] - 0.03).abs() < 1e-6);
+                    assert!((ridged.vertices[5].pos[1] - 0.03).abs() < 1e-6);
+                    for k in [1, 4] {
+                        assert!(
+                            (ridged.vertices[2 * k].pos[1] - rings[0].ht - height).abs() < 1e-6
+                        );
+                    }
+                    for k in [7, 10] {
+                        assert!(
+                            (ridged.vertices[2 * k].pos[1] + rings[0].ht + height).abs() < 1e-6
+                        );
+                    }
+                }
+                // Body and cap triangles retain nonzero area and valid outward normals.
+                for triangle in ridged.indices.chunks_exact(3) {
+                    let vertex = |i: u32| {
+                        let p = ridged.vertices[i as usize].pos;
+                        Vector3f::new(p[0], p[1], p[2])
+                    };
+                    let a = vertex(triangle[0]);
+                    let cross = (vertex(triangle[1]) - a).cross(&(vertex(triangle[2]) - a));
+                    assert!(cross.norm() > 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cartoon_ridge_defaults_and_session_compatibility() {
+        use crate::geometry::{RepKind, RepParams};
+        let old = r#"{"Cartoon":{"coil_radius":0.03,"ribbon_width":0.15,"ribbon_thickness":0.03}}"#;
+        let mut params: RepParams = serde_json::from_str(old).unwrap();
+        assert_eq!(params, RepParams::for_kind(RepKind::Cartoon));
+        if let RepParams::Cartoon { bevel_height, .. } = &mut params {
+            *bevel_height = 0.045;
+        }
+        for field in ["edge_ridges", "bevel_edges"] {
+            for (enabled, height) in [(false, 0.0), (true, 0.0195)] {
+                let legacy = old.replace("0.03}}", &format!("0.03,\"{field}\":{enabled}}}}}"));
+                let loaded: RepParams = serde_json::from_str(&legacy).unwrap();
+                assert!(
+                    matches!(loaded, RepParams::Cartoon { bevel_height, .. } if bevel_height == height)
+                );
+            }
+        }
+        let saved = serde_json::to_string(&params).unwrap();
+        assert_eq!(params, serde_json::from_str::<RepParams>(&saved).unwrap());
+    }
 }

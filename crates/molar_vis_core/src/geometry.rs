@@ -112,6 +112,10 @@ pub enum RepParams {
         ribbon_width: f32,
         /// Helix/sheet ribbon half-thickness.
         ribbon_thickness: f32,
+        /// Height of raised edge ridges above the ribbon surface (nm). Zero disables them.
+        #[serde(default, alias = "edge_ridges", alias = "bevel_edges",
+            deserialize_with = "deserialize_bevel_height")]
+        bevel_height: f32,
     },
     Surface {
         /// Probe radius added to each vdW radius (nm). 0 → vdW surface, 0.14 → SAS.
@@ -126,6 +130,18 @@ pub enum RepParams {
         /// Interactions **Settings** dialog (there are too many to fit inline).
         settings: crate::interactions::InteractionSettings,
     },
+}
+
+// Accept the earlier checkbox setting when loading saved sessions.
+fn deserialize_bevel_height<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Height { Height(f32), Enabled(bool) }
+    Ok(match <Height as serde::Deserialize>::deserialize(deserializer)? {
+        Height::Height(height) => height,
+        Height::Enabled(true) => 0.0195,
+        Height::Enabled(false) => 0.0,
+    })
 }
 
 impl RepKind {
@@ -151,6 +167,7 @@ impl RepParams {
                 coil_radius: 0.03,
                 ribbon_width: 0.15,
                 ribbon_thickness: 0.03,
+                bevel_height: 0.0,
             },
             RepKind::Surface => RepParams::Surface {
                 probe: 0.14,
@@ -290,7 +307,7 @@ pub fn build(
                 ..Default::default()
             }
         }
-        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness } => {
+        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
             let ss = ss.expect("ss computed for cartoon");
             GeometryData {
                 mesh: cartoon::build(
@@ -300,6 +317,7 @@ pub fn build(
                     coil_radius,
                     ribbon_width,
                     ribbon_thickness,
+                    bevel_height,
                     pbox,
                 ),
                 ..Default::default()
@@ -328,6 +346,7 @@ pub fn build(
     }
     for c in &mut data.cylinders {
         c.color = with_opacity(c.color);
+        c.color1 = with_opacity(c.color1);
         c.mat = lighting;
     }
     for l in &mut data.lines {
@@ -787,4 +806,43 @@ fn lines(
         }
     }
     v
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+
+    #[test]
+    fn material_opacity_applies_to_both_bond_halves() {
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+        ))).unwrap();
+        let mut scene = crate::scene::Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let mol = &scene.molecules[0];
+        let sel = mol.data.select_all();
+        let bound = mol.data.bind_with_state(&sel, mol.render_state());
+        for kind in [RepKind::BallAndStick, RepKind::Licorice] {
+            let params = RepParams::for_kind(kind);
+            let opaque = build(&bound, mol.n_atoms, &mol.bonds, &params,
+                crate::color::ColorMethod::Element.into(), Material::Opaque, None, false);
+            assert!(!opaque.cylinders.is_empty());
+            assert!(opaque.cylinders.iter().any(|c| c.color != c.color1));
+            for material in [Material::Transparent, Material::Glass, Material::Translucent, Material::Ghost] {
+                let data = build(&bound, mol.n_atoms, &mol.bonds, &params,
+                    crate::color::ColorMethod::Element.into(), material, None, false);
+                let alpha = material.opacity_u8() as u32;
+                assert!(alpha < 255);
+                assert_eq!(data.cylinders.len(), opaque.cylinders.len());
+                for (cylinder, original) in data.cylinders.iter().zip(&opaque.cylinders) {
+                    assert_eq!(cylinder.color >> 24, alpha, "first bond half: {kind:?}");
+                    assert_eq!(cylinder.color1 >> 24, alpha, "second bond half: {kind:?}");
+                    assert_eq!(cylinder.color & 0x00ff_ffff, original.color & 0x00ff_ffff);
+                    assert_eq!(cylinder.color1 & 0x00ff_ffff, original.color1 & 0x00ff_ffff);
+                    assert_eq!(cylinder.mat, material.pack_lighting());
+                }
+                assert!(data.spheres.iter().all(|s| s.color >> 24 == alpha));
+            }
+        }
+    }
 }

@@ -302,7 +302,7 @@ pub(super) fn draw_rep_params(
                 changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.05)).changed();
                 ui.end_row();
             }
-            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness } => {
+            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
                 ui.label("Coil radius (nm)");
                 changed |= ui.add(egui::Slider::new(coil_radius, 0.02..=0.08)).changed();
                 ui.end_row();
@@ -311,6 +311,11 @@ pub(super) fn draw_rep_params(
                 ui.end_row();
                 ui.label("Ribbon thickness (nm)");
                 changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
+                ui.end_row();
+                ui.label("Bevel height (nm)")
+                    .on_hover_text("Height of edge ridges above the ribbon surface; 0 disables them");
+                changed |= ui.add(egui::Slider::new(bevel_height, 0.0..=0.05)
+                    .max_decimals(3)).changed();
                 ui.end_row();
             }
             RepParams::Surface { probe, quality, smoothing } => {
