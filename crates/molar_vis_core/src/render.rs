@@ -135,7 +135,9 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    format!("{}\n{}\n{}\n{}", envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
+    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\n",
+        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD);
+    format!("{}\n{}\n{}\n{}\n{}", constants, envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
 }
 
 /// (Re)create the camera bind group over `buf` with a dynamic-offset binding.
@@ -1663,9 +1665,12 @@ impl SceneRenderer {
         // Pass 1.5 — SSAO + cast shadows: read the opaque depth and multiply-blend a
         // darkening factor (ambient occlusion × cast-shadow term) onto the opaque
         // color, before transparent geometry is composited over it. Skipped when
-        // both AO and shadows are off. AO with strength 0 (when disabled) is a no-op
+        // both AO and shadows are off and no material supplies intrinsic AO.
+        // AO with strength 0 (when disabled) is a no-op
         // so the pass can run for shadows alone.
-        if ao[3] > 0.5 || shadow_on {
+        let material_ao = scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter()
+            .any(|rep| rep.visible && rep.material == crate::material::Material::MolecularNodes));
+        if ao[3] > 0.5 || shadow_on || material_ao {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
             let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };
             let su = SsaoUniform::new(

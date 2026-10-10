@@ -118,7 +118,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Screen-space depth alone cannot compare `q.z > p.z`: half of every tilted
     // plane is closer to the camera and would falsely occlude itself. Use the same
     // smooth normals as lighting; depth derivatives are only a fallback.
-    let stored_normal = textureLoad(normal_tex, coord, 0).xyz;
+    let normal_sample = textureLoad(normal_tex, coord, 0);
+    // Flat outline surfaces remain flat even in scenes with AO/cast shadows.
+    if (normal_sample.w < 0.5) { return vec4<f32>(1.0); }
+    let stored_normal = normal_sample.xyz;
     var normal = stored_normal;
     let stored_len = length(stored_normal);
     if (stored_len <= 0.5) {
@@ -128,9 +131,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     normal = select(vec3<f32>(0.0, 0.0, 1.0), normal / max(normal_len, 1e-12), normal_len > 1e-8);
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-p), u.params.w > 0.5);
     if (dot(normal, view_dir) < 0.0) { normal = -normal; }
-    let radius = u.params.x;
+    let local_ao = normal_sample.w > 1.5 && u.misc.w < 0.5;
+    let radius = select(u.params.x, 0.16, local_ao);
     let bias = u.params.y;
-    let strength = u.params.z;
+    let strength = select(u.params.z, 0.35, local_ao);
     let persp = u.params.w > 0.5;
     // World radius → uv radius (per axis) via the projection scale. Orthographic
     // doesn't shrink with distance; perspective divides by eye-space depth.

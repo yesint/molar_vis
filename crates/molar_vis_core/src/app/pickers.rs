@@ -480,12 +480,23 @@ pub(super) fn preview_shade(
     exp: f32,
     alpha: f32,
 ) -> egui::Color32 {
-    let ndl = n.dot(light).max(0.0);
-    let ndh = n.dot(half).max(0.0);
-    let diff = p.ambient + p.diffuse * ndl;
-    let spec = p.specular * ndh.powf(exp);
-    let rim = (1.0 - n.z.max(0.0)).powi(2);
-    let col = (base * diff + glam::Vec3::splat(spec)) * (1.0 - p.outline * 0.9 * rim);
+    let col = match p.shading {
+        crate::material::Shading::FlatOutline => {
+            let t = ((n.z.abs() - 0.35) / 0.15).clamp(0.0, 1.0);
+            let ink = 1.0 - t * t * (3.0 - 2.0 * t);
+            base.lerp(glam::Vec3::splat(0.045), ink)
+        }
+        crate::material::Shading::MolecularNodes =>
+            crate::material::shade_molecular_nodes(base, n, glam::Vec3::Z),
+        crate::material::Shading::Classic => {
+            let ndl = n.dot(light).max(0.0);
+            let ndh = n.dot(half).max(0.0);
+            let diff = p.ambient + p.diffuse * ndl;
+            let spec = p.specular * ndh.powf(exp);
+            let rim = (1.0 - n.z.max(0.0)).powi(2);
+            (base * diff + glam::Vec3::splat(spec)) * (1.0 - p.outline * 0.9 * rim)
+        }
+    };
     let col = col.clamp(glam::Vec3::ZERO, glam::Vec3::ONE);
     egui::Color32::from_rgba_unmultiplied(
         (col.x * 255.0) as u8,
@@ -675,7 +686,10 @@ pub(super) fn paint_material_icon(painter: &egui::Painter, rect: egui::Rect, mat
 /// A grid cell in the material picker: a two-sphere-and-bond **preview** rendered
 /// with the material's lighting, plus its label. Returns true if clicked.
 pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(82.0, 70.0), egui::Sense::click());
+    let cell_width = Material::ALL.iter().map(|material| ui.painter().layout_no_wrap(
+        material.label().to_owned(), egui::FontId::proportional(11.5), ui.visuals().text_color()).size().x)
+        .fold(74.0_f32, f32::max) + 8.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell_width, 70.0), egui::Sense::click());
     if selected || resp.hovered() {
         ui.painter()
             .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);

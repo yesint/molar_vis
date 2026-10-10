@@ -1,4 +1,4 @@
-//! VMD-style materials: a per-representation appearance preset controlling
+//! VMD-style and illustrative materials: a per-representation appearance preset controlling
 //! lighting (ambient / diffuse / specular / shininess) and **opacity**.
 //!
 //! The values are GPU-packed per geometry element: the four lighting
@@ -8,7 +8,7 @@
 //! depth-write-off, alpha-blended pass.
 
 /// A representation's material preset. Values approximate VMD's built-in
-/// materials (the real-time-relevant subset; ray-tracing-only ones are omitted).
+/// materials (the real-time-relevant subset) and Molecular Nodes appearance recipes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Material {
     #[default]
@@ -28,10 +28,28 @@ pub enum Material {
     /// VMD's `AOEdgy`: matte like AOChalky, plus a dark silhouette **outline**
     /// (grazing-angle edge darkening) — an illustrative, "edgy" look.
     AoEdgy,
+    /// Flat atom colors with crisp dark contour lines and no internal lighting effects.
+    FlatOutline,
+    /// Soft dielectric studio shading with gentle contact occlusion, inspired by
+    /// Molecular Nodes' default Principled material.
+    MolecularNodes,
+}
+
+/// Specialized shading uses reserved material words; existing coefficient encodings
+/// remain byte-identical. These words are injected into all shared shader sources.
+pub(crate) const FLAT_OUTLINE_WORD: u32 = 0xffff_fffe;
+pub(crate) const MOLECULAR_NODES_WORD: u32 = 0xffff_fffd;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shading {
+    Classic,
+    FlatOutline,
+    MolecularNodes,
 }
 
 /// Lighting + opacity coefficients (each 0..1).
 pub struct MaterialParams {
+    pub shading: Shading,
     pub ambient: f32,
     pub diffuse: f32,
     pub specular: f32,
@@ -44,7 +62,7 @@ pub struct MaterialParams {
 }
 
 impl Material {
-    pub const ALL: [Material; 11] = [
+    pub const ALL: [Material; 13] = [
         Material::Opaque,
         Material::Transparent,
         Material::Glass,
@@ -56,6 +74,8 @@ impl Material {
         Material::AoChalky,
         Material::AoShiny,
         Material::AoEdgy,
+        Material::FlatOutline,
+        Material::MolecularNodes,
     ];
 
     pub fn label(self) -> &'static str {
@@ -71,11 +91,14 @@ impl Material {
             Material::AoChalky => "AO Chalky",
             Material::AoShiny => "AO Shiny",
             Material::AoEdgy => "AO Edgy",
+            Material::FlatOutline => "Outline",
+            Material::MolecularNodes => "Mat. Nodes",
         }
     }
 
     pub fn params(self) -> MaterialParams {
         let m = |ambient, diffuse, specular, shininess, opacity, outline| MaterialParams {
+            shading: Shading::Classic,
             ambient,
             diffuse,
             specular,
@@ -98,6 +121,12 @@ impl Material {
             Material::AoShiny => m(0.08, 0.85, 0.50, 0.85, 1.00, 0.0),
             // AOChalky + a silhouette outline.
             Material::AoEdgy => m(0.12, 1.00, 0.00, 0.00, 1.00, 0.7),
+            Material::FlatOutline => MaterialParams {
+                shading: Shading::FlatOutline, ..m(1.0, 0.0, 0.0, 0.0, 1.0, 1.0)
+            },
+            Material::MolecularNodes => MaterialParams {
+                shading: Shading::MolecularNodes, ..m(0.34, 0.62, 0.3, 0.4, 1.0, 0.0)
+            },
         }
     }
 
@@ -110,8 +139,14 @@ impl Material {
     /// `ambient | diffuse<<8 | specular<<16 | shininess<<24` (each a u8). The
     /// shininess byte uses its low **7 bits** for shininess and the **top bit** as
     /// the VMD `outline` flag (silhouette darkening). The shaders unpack this per
-    /// fragment (see the impostor/mesh shaders).
+    /// fragment (see the impostor/mesh shaders). Specialized shading presets use
+    /// reserved words instead of coefficient packing.
     pub fn pack_lighting(self) -> u32 {
+        match self {
+            Self::FlatOutline => return FLAT_OUTLINE_WORD,
+            Self::MolecularNodes => return MOLECULAR_NODES_WORD,
+            _ => {}
+        }
         let p = self.params();
         let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u32;
         let q7 = |x: f32| (x.clamp(0.0, 1.0) * 127.0).round() as u32;
@@ -122,5 +157,44 @@ impl Material {
     /// Whether this material needs the alpha-blended (transparent) pass.
     pub fn is_transparent(self) -> bool {
         self.params().opacity < 0.999
+    }
+}
+
+
+/// CPU version of the studio shader, used by material picker previews.
+pub(crate) fn shade_molecular_nodes(base: glam::Vec3, normal: glam::Vec3, view: glam::Vec3) -> glam::Vec3 {
+    let light = |direction: glam::Vec3| {
+        let l = direction.normalize();
+        let nl = normal.dot(l).max(0.0);
+        let nv = normal.dot(view).max(0.001);
+        let h = (view + l).normalize();
+        let nh = normal.dot(h).max(0.0);
+        let vh = view.dot(h).max(0.0);
+        let alpha2 = 0.0256;
+        let d = alpha2 / (std::f32::consts::PI * (nh * nh * (alpha2 - 1.0) + 1.0).powi(2));
+        let k = 0.245;
+        let g = nv / (nv * (1.0 - k) + k) * nl / (nl * (1.0 - k) + k);
+        let f = 0.04 + 0.96 * (1.0 - vh).powi(5);
+        let spec = d * g * f / (4.0 * nv).max(0.001);
+        base * (1.0 - f) * nl + glam::Vec3::splat(spec)
+    };
+    base * 0.34 + light(glam::vec3(-0.45, 0.65, 1.0)) * 0.62
+        + light(glam::vec3(0.7, -0.2, 0.9)) * 0.28
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specialized_materials_round_trip_without_colliding_with_classic_words() {
+        for material in [Material::FlatOutline, Material::MolecularNodes] {
+            let restored: Material = serde_json::from_str(&serde_json::to_string(&material).unwrap()).unwrap();
+            assert_eq!(material, restored);
+            assert!(!material.is_transparent());
+            assert!(Material::ALL.iter().all(|&other|
+                other == material || other.pack_lighting() != material.pack_lighting()));
+            assert_eq!(crate::script::command::parse_material(material.label()), Some(material));
+        }
     }
 }

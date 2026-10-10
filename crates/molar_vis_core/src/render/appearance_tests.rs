@@ -1846,3 +1846,58 @@ fn ball_and_stick_multiple_bond_radius_preview() {
     }
     assert!(areas[0] > areas[1] && areas[1] > areas[2], "radius must change visible bond area: {areas:?}");
 }
+
+#[test]
+#[ignore = "requires GPU; verifies flat contours and Molecular Nodes studio shading in raster and trace"]
+fn illustrative_materials_match_in_actual_molecular_renders() {
+    use crate::{geometry::RepKind, material::Material};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    for style in [RepKind::Licorice, RepKind::Vdw, RepKind::Cartoon, RepKind::Surface] {
+        let raw = if style == RepKind::Cartoon {
+            crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap()
+        } else {
+            crate::data::load_records(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),
+                "/../../tests/ligands20.sdf")), &Default::default()).unwrap().remove(0)
+        };
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let mut camera = Camera::frame_bbox(scene.molecules[0].bbox_min, scene.molecules[0].bbox_max, 0.72);
+        camera.orientation = glam::Quat::from_rotation_y(0.6) * glam::Quat::from_rotation_x(0.3);
+        camera.depth_cue.enabled = false;
+        camera.ao.enabled = false;
+        camera.shadow.enabled = false;
+        camera.background = crate::camera::Background::for_theme(false);
+        for material in [Material::FlatOutline, Material::MolecularNodes] {
+            populate_rep(&renderer, &rs, &mut scene, style, material);
+            let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 640, 480);
+            let mae = |a: &image::RgbaImage, b: &image::RgbaImage| {
+                let error: f64 = a.pixels().zip(b.pixels()).map(|(a, b)|
+                    (0..3).map(|i| a[i].abs_diff(b[i]) as f64).sum::<f64>()).sum();
+                error / (a.width() * a.height() * 3) as f64
+            };
+            let error = mae(&raster, &trace);
+            eprintln!("{style:?}/{material:?}: raster/trace MAE {error:.2}");
+            assert!(error < 4.0, "material appearance mismatch: {style:?}/{material:?}: {error}");
+            if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let dir = std::path::Path::new(&dir);
+                raster.save(dir.join(format!("{style:?}_{material:?}_raster.png"))).unwrap();
+                trace.save(dir.join(format!("{style:?}_{material:?}_trace.png"))).unwrap();
+            }
+            if material == Material::FlatOutline {
+                camera.ao.enabled = true;
+                camera.shadow.enabled = true;
+                camera.depth_cue.enabled = true;
+                camera.gi = 0.8;
+                let (effects_raster, effects_trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 640, 480);
+                assert!(mae(&raster, &effects_raster) < 0.05, "illustrative raster gained lighting effects: {style:?}/{material:?}");
+                assert!(mae(&trace, &effects_trace) < 0.05, "illustrative trace gained lighting effects: {style:?}/{material:?}");
+                camera.ao.enabled = false;
+                camera.shadow.enabled = false;
+                camera.depth_cue.enabled = false;
+                camera.gi = 0.0;
+            }
+        }
+    }
+}

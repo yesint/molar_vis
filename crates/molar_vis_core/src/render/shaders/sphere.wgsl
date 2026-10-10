@@ -57,11 +57,7 @@ fn unpack_color(c: u32) -> vec4<f32> {
 // specular, shininess), each a u8 packed as ambient|diffuse<<8|specular<<16|
 // shininess<<24.
 fn unpack_mat(m: u32) -> vec4<f32> {
-    let amb = f32((m >> 0u) & 0xffu) / 255.0;
-    let dif = f32((m >> 8u) & 0xffu) / 255.0;
-    let spc = f32((m >> 16u) & 0xffu) / 255.0;
-    let shn = f32((m >> 24u) & 0x7fu) / 127.0; // top bit is the outline flag
-    return vec4<f32>(amb, dif, spc, shn);
+    return unpack_material(m);
 }
 
 // Weighted-blended OIT weight: bias the per-fragment contribution strongly toward
@@ -188,10 +184,10 @@ fn compute_hit(in: VsOut) -> Hit {
 
     // Per-material Blinn-Phong (view dir to eye: origin for perspective, +z ortho).
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-hit), camera.params.x > 0.5);
-    var lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat), false);
+    var lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat), false, in.mat);
     lit = apply_outline(lit, normal, view_dir, in.mat);
 
-    return Hit(hit, apply_fog(lit, hit.z), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
+    return Hit(hit, select(apply_fog(lit, hit.z), lit, in.mat == MATERIAL_FLAT_OUTLINE), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
 }
 
 // Additive cyan "rim glow" used to highlight the active (pending) selection: the
@@ -224,7 +220,7 @@ fn fs_main(in: VsOut) -> OpaqueOut {
     var out: OpaqueOut;
     out.depth = h.depth;
     out.color = vec4<f32>(h.color, h.alpha);
-    out.normal = vec4<f32>(h.normal, 1.0);
+    out.normal = vec4<f32>(h.normal, material_effects(in.mat));
     return out;
 }
 

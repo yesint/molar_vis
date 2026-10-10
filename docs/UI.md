@@ -199,7 +199,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   least one tunable so Defaults is always shown), **[Traj]** (`draw_traj_tab`: *Update every
   frame* = `rep.dynamic`; *Recompute SS every frame* = `ss_per_frame` for Cartoon/SecStruct;
   *Smooth window* = `rep.smooth_window` — odd (1=off, 3,5,7…; a half-width `DragValue` shown as the
-  window via `custom_formatter`), trajectory smoothing; sets `coords_dirty`), **[Periodic]** (`draw_periodic_tab`, **only shown when the
+  window via `custom_formatter`, flanked by −/+ buttons stepping by two frames within
+  1..=31), trajectory smoothing; sets `coords_dirty`), **[Periodic]** (`draw_periodic_tab`, **only shown when the
   molecule has a box** — gated by `mol.system.state().pbox.is_some()`: *Self* / *Box* checkboxes
   + six `spin_u32` spinboxes −x/+x/−y/+y/−z/+z (a `DragValue` flanked by `−`/`+` step buttons,
   range 0..=8) giving the image counts along ±a,±b,±c; these

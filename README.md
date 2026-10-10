@@ -88,6 +88,12 @@ ambient / diffuse / specular / shininess (Blinn-Phong) plus **opacity** and a si
 overlapping translucent surfaces blend correctly without sorting. The material picker isn't a
 plain list — it's a **grid of live previews**, each a little shaded molecule rendered with that
 material, so Glossy, Metal, Glass and the matte AO presets read at a glance.
+Two additional presets are available: **Outline** uses flat atom colors and dark
+contours, suppressing internal lighting, AO, cast shadows, fog, and ray-traced GI;
+**Mat. Nodes** approximates the [default Blender Molecular Nodes material](https://bradyajohnston.github.io/MolecularNodes/api/reference/material.Default.html)
+with dielectric studio highlights and gentle contact occlusion. These materials apply
+per representation to spheres, sticks, cartoons, and surfaces. Mat. Nodes supplies
+mild contact AO even when global AO is off; enabling global AO uses the scene's AO settings.
 
 **Trajectories** (native) — load multi-frame trajectories (xtc/trr/dcd/gro/multi-MODEL pdb)
 into a molecule with a VMD-style playback bar (first / step / play-pause / step / last,
@@ -433,7 +439,7 @@ build), `molar_vis_py` (the native Python module) and `molar_vis_js` (the browse
 - All six representations (Lines, Licorice, Ball-and-Stick, VDW, Cartoon, Surface).
 - Every coloring scheme (incl. **charge** coloring and custom solid colors); the full molar selection
   language with in-field error highlighting and keyword suggestions.
-- Eleven materials incl. order-independent transparency; perspective/orthographic; depth-cue modes;
+- Thirteen materials incl. flat outlines, Molecular Nodes studio shading, and order-independent transparency; perspective/orthographic; depth-cue modes;
   screen-space **ambient occlusion** and real-time **cast shadows**; solid/gradient background.
 - **Trajectory** loading + VMD-style playback (smoothing, frame trim/decimate), on the desktop
   **and in the browser** (the wasm build streams frames in from the picked file incrementally).

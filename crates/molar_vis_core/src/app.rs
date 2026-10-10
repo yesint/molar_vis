@@ -908,6 +908,9 @@ impl eframe::App for App {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).
         let ctx = ui.ctx().clone();
+        // Panels may leave layout gutters uncovered. Paint the root surface too,
+        // so these gaps use the theme instead of the backend's near-black clear color.
+        ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
 
         #[cfg(not(target_arch = "wasm32"))]
         if self.service_unobstructed_job(&ctx) {

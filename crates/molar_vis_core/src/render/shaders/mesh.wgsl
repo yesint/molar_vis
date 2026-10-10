@@ -48,11 +48,7 @@ fn unpack_color(c: u32) -> vec4<f32> {
 // Unpack the per-element material lighting coefficients (ambient, diffuse,
 // specular, shininess).
 fn unpack_mat(m: u32) -> vec4<f32> {
-    let amb = f32((m >> 0u) & 0xffu) / 255.0;
-    let dif = f32((m >> 8u) & 0xffu) / 255.0;
-    let spc = f32((m >> 16u) & 0xffu) / 255.0;
-    let shn = f32((m >> 24u) & 0x7fu) / 127.0; // top bit is the outline flag
-    return vec4<f32>(amb, dif, spc, shn);
+    return unpack_material(m);
 }
 
 // Weighted-blended OIT weight, biased strongly toward the camera using linear
@@ -89,9 +85,9 @@ fn shade(in: VsOut) -> vec4<f32> {
     if (dot(n, view_dir) < 0.0) {
         n = -n;
     }
-    var lit = shade_material(in.color.rgb, n, view_dir, unpack_mat(in.mat), true);
+    var lit = shade_material(in.color.rgb, n, view_dir, unpack_mat(in.mat), true, in.mat);
     lit = apply_outline(lit, n, view_dir, in.mat);
-    return vec4<f32>(apply_fog(lit, in.view_pos.z), in.color.a);
+    return vec4<f32>(select(apply_fog(lit, in.view_pos.z), lit, in.mat == MATERIAL_FLAT_OUTLINE), in.color.a);
 }
 
 struct OpaqueOut {
@@ -115,7 +111,7 @@ fn fs_main(in: VsOut) -> OpaqueOut {
     if (dot(n, view_dir) < 0.0) { n = -n; }
     var out: OpaqueOut;
     out.color = shade(in);
-    out.normal = vec4<f32>(n, 1.0);
+    out.normal = vec4<f32>(n, material_effects(in.mat));
     return out;
 }
 

@@ -514,10 +514,12 @@ impl App {
 
         let history = History::new(EditState::capture(&scene));
 
-        // Verification hook: MOLAR_VIS_DEBUG_PARAMS=1 opens the first rep's gear panel.
-        if std::env::var("MOLAR_VIS_DEBUG_PARAMS").is_ok() {
+        // Verification hook: MOLAR_VIS_DEBUG_PARAMS=1 opens the first rep's gear panel;
+        // =traj selects its trajectory tab for smoothing-control screenshots.
+        if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_PARAMS") {
             if let Some(rep) = scene.molecules.first_mut().and_then(|m| m.reps.first_mut()) {
                 rep.params_open = true;
+                if tab == "traj" { rep.settings_tab = crate::scene::SettingsTab::Traj; }
             }
         }
 

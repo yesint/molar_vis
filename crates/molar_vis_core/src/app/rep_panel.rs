@@ -642,6 +642,13 @@ pub(super) fn draw_traj_tab(ui: &mut egui::Ui, rep: &mut Representation) {
     ui.horizontal(|ui| {
         ui.label("Smooth window");
         let mut half = rep.smooth_window.saturating_sub(1) / 2;
+        let mut changed = false;
+        let step = egui::vec2(20.0, 0.0);
+        if ui.add_enabled(half > 0, egui::Button::new("−").min_size(step))
+            .on_hover_text("Decrease smoothing window by two frames").clicked() {
+            half -= 1;
+            changed = true;
+        }
         let resp = ui
             .add(
                 egui::DragValue::new(&mut half)
@@ -655,7 +662,13 @@ pub(super) fn draw_traj_tab(ui: &mut egui::Ui, rep: &mut Representation) {
                  (odd; 1 = off): a local-polynomial (Savitzky–Golay) blend of \
                  neighbouring frames, shrunk gracefully at the trajectory ends.",
             );
-        if resp.changed() {
+        changed |= resp.changed();
+        if ui.add_enabled(half < 15, egui::Button::new("+").min_size(step))
+            .on_hover_text("Increase smoothing window by two frames").clicked() {
+            half += 1;
+            changed = true;
+        }
+        if changed {
             rep.smooth_window = half * 2 + 1;
             // Coords-only change → incremental rebuild (no DSSP / realloc).
             rep.coords_dirty = true;
@@ -1872,6 +1885,51 @@ mod rep_panel_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod picker_panel_fit_tests {
+    use super::*;
+
+    #[test]
+    fn picker_row_fits_the_painted_controls_panel() {
+        for theme in [crate::settings::ThemeMode::Light, crate::settings::ThemeMode::Dark] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, &crate::settings::AppearanceSettings {
+                theme, ..Default::default()
+            });
+            let mut painted_right = 0.0;
+            let mut allocated_right = 0.0;
+            // Panels learn their content width after the first layout pass.
+            for _ in 0..3 {
+                let _ = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 750.0))),
+                    ..Default::default()
+                }, |ui| {
+                    let panel = egui::Panel::left("controls_panel").resizable(true)
+                        .default_size(300.0).size_range(egui::Rangef::new(220.0, 520.0))
+                        .show_inside(ui, |ui| {
+                            painted_right = ui.clip_rect().right();
+                            ui.style_mut().spacing.scroll.floating = false;
+                            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                ui.indent("reps", |ui| {
+                                    ui.horizontal(|ui| {
+                                        let _ = ui.selectable_label(false, icon::CARET_RIGHT);
+                                        let mut rep = Representation::new(RepKind::Vdw);
+                                        style_picker(ui, &mut rep);
+                                        color_picker(ui, &mut rep);
+                                        material_picker(ui, &mut rep);
+                                    });
+                                });
+                            });
+                        });
+                    allocated_right = panel.response.rect.right();
+                });
+            }
+            assert!(allocated_right <= painted_right + 0.5,
+                "{theme:?}: picker labels create an unpainted panel gutter: {allocated_right} > {painted_right}");
         }
     }
 }

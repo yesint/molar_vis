@@ -87,12 +87,7 @@ fn unpack_opacity(c: u32) -> f32 {
 }
 // Material lighting coefficients; top bit of shininess byte is the outline flag.
 fn unpack_mat(m: u32) -> vec4<f32> {
-    return vec4<f32>(
-        f32(m & 0xffu) / 255.0,
-        f32((m >> 8u) & 0xffu) / 255.0,
-        f32((m >> 16u) & 0xffu) / 255.0,
-        f32((m >> 24u) & 0x7fu) / 127.0,
-    );
+    return unpack_material(m);
 }
 
 fn camera_ray(ndc: vec2<f32>, ro: ptr<function, vec3<f32>>, rd: ptr<function, vec3<f32>>) {
@@ -598,16 +593,19 @@ fn camera_hit(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit {
 // and can hit cavities or blockers absent from the camera's depth buffer. Keep
 // the user's radius in nm and strength linear; no scene scaling or contrast boost.
 fn ambient_visibility(s: Surf, sample_index: u32) -> f32 {
-    if (U.ao.w <= 0.5 || U.ao.z <= 0.0) { return 1.0; }
+    let local_ao = s.mat_raw == MATERIAL_MOLECULAR_NODES && U.ao.w <= 0.5;
+    if (!local_ao && (U.ao.w <= 0.5 || U.ao.z <= 0.0)) { return 1.0; }
+    let radius = select(U.ao.x, 0.16, local_ao);
+    let strength = select(U.ao.z, 0.35, local_ao);
     let ro = s.ray_p + s.nrm * U.ao.y;
     let skip_prim = select(0xffffffffu, s.prim, s.mesh);
     var occ = 0.0;
     for (var i = 0u; i < AO_RAYS; i = i + 1u) {
         let sample = effect_sample(sample_index * AO_RAYS + i + 47u);
         let dir = cosine_hemisphere(s.nrm, sample.x, sample.y);
-        if (any_hit(ro, dir, U.ao.x, true, skip_prim)) { occ = occ + 1.0; }
+        if (any_hit(ro, dir, radius, true, skip_prim)) { occ = occ + 1.0; }
     }
-    return clamp(1.0 - U.ao.z * occ / f32(AO_RAYS), 0.0, 1.0);
+    return clamp(1.0 - strength * occ / f32(AO_RAYS), 0.0, 1.0);
 }
 
 // Return unoccluded lighting plus the deferred darkening factor. Fog and color
@@ -616,11 +614,11 @@ fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, sample_ind
     let view_dir = select(-rd, normalize(U.eye.xyz - s.p), persp);
     let normal_view = normalize((U.view * vec4<f32>(s.nrm, 0.0)).xyz);
     let dir_view = normalize((U.view * vec4<f32>(view_dir, 0.0)).xyz);
-    var shaded = shade_material(s.base, normal_view, dir_view, s.mat, s.mesh);
+    var shaded = shade_material(s.base, normal_view, dir_view, s.mat, s.mesh, s.mat_raw);
     shaded = apply_outline(shaded, s.nrm, view_dir, s.mat_raw);
     // Raster AO/shadows act on opaque geometry, before transparent compositing.
     var visibility = 1.0;
-    if (s.opacity >= 0.999) {
+    if (s.opacity >= 0.999 && s.mat_raw != MATERIAL_FLAT_OUTLINE) {
         var shadow = 0.0;
         let count = select(SHADOW_RAYS, 1u, U.shadow.w <= 0.0 || U.shadow.z <= 0.5);
         for (var i = 0u; i < count; i = i + 1u) {
@@ -671,13 +669,14 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
 
 fn shade_surface(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, axis: vec3<f32>, sample_index: u32, seed: ptr<function, u32>) -> vec3<f32> {
     let direct = shade_tier1(s, rd, persp, light, sample_index);
+    if (s.mat_raw == MATERIAL_FLAT_OUTLINE) { return direct.xyz; }
     var tier1 = apply_fog(direct.xyz, s.p, axis);
     if (s.opacity >= 0.999) {
         // Opaque color is stored in a normalized target before deferred effects.
         tier1 = clamp(tier1, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     tier1 = tier1 * direct.w;
-    if (U.bg.w > 0.001) {
+    if (U.bg.w > 0.001 && s.mat_raw != MATERIAL_FLAT_OUTLINE) {
         let gi = shade_gi(s, persp, light, GI_BOUNCES, seed);
         return mix(tier1, apply_fog(aces(gi), s.p, axis), U.bg.w);
     }
