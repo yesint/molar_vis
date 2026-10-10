@@ -9,7 +9,7 @@
 
 /// A representation's material preset. Values approximate VMD's built-in
 /// materials (the real-time-relevant subset) and Molecular Nodes appearance recipes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Material {
     #[default]
     Opaque,
@@ -33,6 +33,8 @@ pub enum Material {
     /// Soft dielectric studio shading with gentle contact occlusion, inspired by
     /// Molecular Nodes' default Principled material.
     MolecularNodes,
+    /// Edited preset; the stable index refers to ALL, whose order must not change.
+    Custom { preset: u8, options: MaterialOptions },
 }
 
 /// Specialized shading uses reserved material words; existing coefficient encodings
@@ -47,6 +49,18 @@ pub enum Shading {
     MolecularNodes,
 }
 
+/// Persisted shader coefficients, written as full records when a preset is edited.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MaterialOptions {
+    pub ambient: f32,
+    pub diffuse: f32,
+    pub specular: f32,
+    pub shininess: f32,
+    pub opacity: f32,
+    pub outline: f32,
+    pub outline_width: f32,
+}
+
 /// Lighting + opacity coefficients (each 0..1).
 pub struct MaterialParams {
     pub shading: Shading,
@@ -59,9 +73,27 @@ pub struct MaterialParams {
     /// VMD "Outline": silhouette/edge darkening at grazing angles (0 = off). Packed
     /// as a flag (the top bit of the shininess byte) with a fixed shader strength.
     pub outline: f32,
+    pub outline_width: f32,
 }
 
 impl Material {
+    pub fn preset(self) -> Self {
+        match self {
+            Self::Custom { preset, .. } => Self::ALL.get(preset as usize).copied().unwrap_or(Self::Opaque),
+            _ => self,
+        }
+    }
+    pub fn options(self) -> MaterialOptions {
+        if let Self::Custom { options, .. } = self { return options; }
+        let p = self.params();
+        MaterialOptions { ambient: p.ambient, diffuse: p.diffuse, specular: p.specular,
+            shininess: p.shininess, opacity: p.opacity, outline: p.outline, outline_width: 0.5 }
+    }
+    pub fn with_options(self, options: MaterialOptions) -> Self {
+        let preset = Self::ALL.iter().position(|&m| m == self.preset()).unwrap_or(0) as u8;
+        Self::Custom { preset, options }
+    }
+
     pub const ALL: [Material; 13] = [
         Material::Opaque,
         Material::Transparent,
@@ -93,6 +125,7 @@ impl Material {
             Material::AoEdgy => "AO Edgy",
             Material::FlatOutline => "Outline",
             Material::MolecularNodes => "Mat. Nodes",
+            Material::Custom { .. } => self.preset().label(),
         }
     }
 
@@ -105,8 +138,16 @@ impl Material {
             shininess,
             opacity,
             outline,
+            outline_width: 0.5,
         };
         match self {
+            Material::Custom { options: p, .. } => {
+                let mut result = self.preset().params();
+                result.ambient = p.ambient; result.diffuse = p.diffuse;
+                result.specular = p.specular; result.shininess = p.shininess;
+                result.opacity = p.opacity; result.outline = p.outline; result.outline_width = p.outline_width;
+                result
+            }
             Material::Opaque => m(0.10, 0.75, 0.45, 0.55, 1.00, 0.0),
             Material::Transparent => m(0.10, 0.75, 0.45, 0.55, 0.30, 0.0),
             Material::Glass => m(0.10, 0.45, 0.90, 0.85, 0.50, 0.0),
@@ -143,6 +184,18 @@ impl Material {
     /// reserved words instead of coefficient packing.
     pub fn pack_lighting(self) -> u32 {
         match self {
+            Self::Custom { options: p, .. } => {
+                let q = |v: f32| (v.clamp(0.0, 1.0) * 127.0).round() as u32;
+                let mode = match self.preset() {
+                    Self::FlatOutline => 0xa,
+                    Self::MolecularNodes => 0xb,
+                    _ => if p.outline > 0.5 { 0xd } else { 0xc },
+                };
+                let values = if mode == 0xa { [p.outline_width, p.outline, 0.0, 0.0] }
+                    else { [p.ambient, p.diffuse, p.specular, p.shininess] };
+                return (mode << 28) | q(values[0]) | (q(values[1]) << 7)
+                    | (q(values[2]) << 14) | (q(values[3]) << 21);
+            }
             Self::FlatOutline => return FLAT_OUTLINE_WORD,
             Self::MolecularNodes => return MOLECULAR_NODES_WORD,
             _ => {}
@@ -162,7 +215,7 @@ impl Material {
 
 
 /// CPU version of the studio shader, used by material picker previews.
-pub(crate) fn shade_molecular_nodes(base: glam::Vec3, normal: glam::Vec3, view: glam::Vec3) -> glam::Vec3 {
+pub(crate) fn shade_molecular_nodes(base: glam::Vec3, normal: glam::Vec3, view: glam::Vec3, params: &MaterialParams) -> glam::Vec3 {
     let light = |direction: glam::Vec3| {
         let l = direction.normalize();
         let nl = normal.dot(l).max(0.0);
@@ -170,16 +223,17 @@ pub(crate) fn shade_molecular_nodes(base: glam::Vec3, normal: glam::Vec3, view: 
         let h = (view + l).normalize();
         let nh = normal.dot(h).max(0.0);
         let vh = view.dot(h).max(0.0);
-        let alpha2 = 0.0256;
+        let roughness = params.shininess.clamp(0.05, 1.0);
+        let alpha2 = roughness.powi(4);
         let d = alpha2 / (std::f32::consts::PI * (nh * nh * (alpha2 - 1.0) + 1.0).powi(2));
-        let k = 0.245;
+        let k = (roughness + 1.0).powi(2) / 8.0;
         let g = nv / (nv * (1.0 - k) + k) * nl / (nl * (1.0 - k) + k);
         let f = 0.04 + 0.96 * (1.0 - vh).powi(5);
         let spec = d * g * f / (4.0 * nv).max(0.001);
-        base * (1.0 - f) * nl + glam::Vec3::splat(spec)
+        base * (1.0 - f) * nl + glam::Vec3::splat(spec * params.specular / 0.3)
     };
-    base * 0.34 + light(glam::vec3(-0.45, 0.65, 1.0)) * 0.62
-        + light(glam::vec3(0.7, -0.2, 0.9)) * 0.28
+    base * params.ambient + light(glam::vec3(-0.45, 0.65, 1.0)) * params.diffuse
+        + light(glam::vec3(0.7, -0.2, 0.9)) * (params.diffuse * (0.28 / 0.62))
 }
 
 #[cfg(test)]

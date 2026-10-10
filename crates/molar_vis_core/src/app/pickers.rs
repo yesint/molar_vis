@@ -113,7 +113,7 @@ pub(super) fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> 
 /// rep is switched **to** Interactions from another style, returns a clone of the rep in
 /// its *old* style (still visible) so the caller can keep the molecule's current look —
 /// an Interactions rep only draws contact lines, so switching in place would hide it.
-pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) -> Option<Representation> {
+pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation, defaults: &RepDefaults) -> Option<Representation> {
     let color = ui.visuals().text_color();
     let kind = rep.kind;
     let lw = max_label_width(ui, RepKind::ALL.iter().map(|&k| k.label()));
@@ -127,7 +127,7 @@ pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation) -> Optio
                     cloned_old = Some(rep.duplicate());
                 }
                 rep.kind = kind;
-                rep.params = RepParams::for_kind(kind);
+                rep.params = defaults.style_params(kind);
                 rep.geom_dirty = true;
                 // Interactions needs its Partner picker + Settings button visible, so
                 // auto-expand the rep's params panel when it's chosen.
@@ -482,12 +482,13 @@ pub(super) fn preview_shade(
 ) -> egui::Color32 {
     let col = match p.shading {
         crate::material::Shading::FlatOutline => {
-            let t = ((n.z.abs() - 0.35) / 0.15).clamp(0.0, 1.0);
+            let width = p.outline_width.max(0.001);
+            let t = ((n.z.abs() - width * 0.7) / (width * 0.3)).clamp(0.0, 1.0);
             let ink = 1.0 - t * t * (3.0 - 2.0 * t);
-            base.lerp(glam::Vec3::splat(0.045), ink)
+            base.lerp(glam::Vec3::splat(0.045), ink * p.outline)
         }
         crate::material::Shading::MolecularNodes =>
-            crate::material::shade_molecular_nodes(base, n, glam::Vec3::Z),
+            crate::material::shade_molecular_nodes(base, n, glam::Vec3::Z, p),
         crate::material::Shading::Classic => {
             let ndl = n.dot(light).max(0.0);
             let ndh = n.dot(half).max(0.0);
@@ -720,8 +721,17 @@ pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: boo
 /// A drawn material icon + label button that opens a **grid** of material previews
 /// (each a two-sphere-and-bond fragment shaded with that material). A material
 /// change forces a geometry rebuild (opacity/lighting are baked per geometry element).
-pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
-    let material = rep.material;
+pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation, defaults: &RepDefaults) {
+    let mut selected = rep.material;
+    if material_selector(ui, &mut selected, defaults) {
+        rep.material = defaults.material_for(selected);
+        rep.geom_dirty = true;
+    }
+}
+
+pub(super) fn material_selector(ui: &mut egui::Ui, selected: &mut Material, defaults: &RepDefaults) -> bool {
+    let material = if matches!(*selected, Material::Custom { .. }) { *selected } else { defaults.material_for(*selected) };
+    let mut changed = false;
     let lw = max_label_width(ui, Material::ALL.iter().map(|&m| m.label()));
     let resp = picker_button(ui, material.label(), lw, |p, r| paint_material_icon(p, r, material));
 
@@ -730,9 +740,9 @@ pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
             .spacing(egui::vec2(4.0, 4.0))
             .show(ui, |ui| {
                 for (i, material) in Material::ALL.into_iter().enumerate() {
-                    if material_cell(ui, material, material == rep.material) {
-                        rep.material = material;
-                        rep.geom_dirty = true;
+                    if material_cell(ui, defaults.material_for(material), material == selected.preset()) {
+                        *selected = material;
+                        changed = true;
                         ui.close();
                     }
                     if (i + 1) % 3 == 0 {
@@ -741,4 +751,5 @@ pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation) {
                 }
             });
     });
+    changed
 }

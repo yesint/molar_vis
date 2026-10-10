@@ -187,7 +187,7 @@ fn compute_hit(in: VsOut) -> Hit {
     var lit = shade_material(in.color.rgb, normal, view_dir, unpack_mat(in.mat), false, in.mat);
     lit = apply_outline(lit, normal, view_dir, in.mat);
 
-    return Hit(hit, select(apply_fog(lit, hit.z), lit, in.mat == MATERIAL_FLAT_OUTLINE), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
+    return Hit(hit, select(apply_fog(lit, hit.z), lit, material_kind(in.mat) == MATERIAL_FLAT_OUTLINE), in.color.a, clip.z / clip.w, hit.z, normal, view_dir);
 }
 
 // Additive cyan "rim glow" used to highlight the active (pending) selection: the

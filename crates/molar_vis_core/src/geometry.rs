@@ -183,6 +183,15 @@ impl RepKind {
 }
 
 impl RepParams {
+    pub fn kind(self) -> RepKind {
+        match self {
+            Self::Vdw { .. } => RepKind::Vdw, Self::Licorice { .. } => RepKind::Licorice,
+            Self::BallAndStick { .. } => RepKind::BallAndStick, Self::Lines { .. } => RepKind::Lines,
+            Self::Cartoon { .. } => RepKind::Cartoon, Self::Surface { .. } => RepKind::Surface,
+            Self::Interactions { .. } => RepKind::Interactions,
+        }
+    }
+
     /// Conservative extent around an atom for framing before geometry is built.
     /// Mesh caches can additionally supply their exact vertex bounds.
     pub(crate) fn visual_radius(&self, vdw: f32) -> f32 {

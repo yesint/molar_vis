@@ -61,7 +61,7 @@ pub struct RepState {
 /// via `#[serde(with = ...)]`; the variants must stay in sync with molar's enum.
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "SsAlgorithm")]
-enum SsAlgorithmDef {
+pub(crate) enum SsAlgorithmDef {
     Dssp,
     DsspGmx,
     Dss,

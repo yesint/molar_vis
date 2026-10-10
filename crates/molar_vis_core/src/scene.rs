@@ -399,20 +399,17 @@ impl Representation {
     /// of a loaded molecule, the "add representation" button) — applying the default
     /// style, color, material, and selection (and the default Surface quality).
     pub fn from_defaults(d: &crate::settings::RepDefaults) -> Self {
-        let mut params = RepParams::for_kind(d.kind);
-        if let RepParams::Surface { quality, .. } = &mut params {
-            *quality = d.surface_quality;
-        }
+        let params = d.style_params(d.kind);
         Self::restore(
             d.kind,
             params,
             d.color,
-            SsAlgorithm::default(),
+            d.ss_algo,
             d.selection.clone(),
             true,
             false,
             false,
-            d.material,
+            d.material_for(d.material),
             PeriodicParams::default(),
             1,
         )

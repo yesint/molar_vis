@@ -1868,7 +1868,13 @@ fn illustrative_materials_match_in_actual_molecular_renders() {
         camera.ao.enabled = false;
         camera.shadow.enabled = false;
         camera.background = crate::camera::Background::for_theme(false);
-        for material in [Material::FlatOutline, Material::MolecularNodes] {
+        let mut factory_images = Vec::new();
+        let mut outline = Material::FlatOutline.options(); outline.outline_width = 0.75; outline.outline = 0.65;
+        let mut nodes = Material::MolecularNodes.options(); nodes.shininess = 0.8; nodes.specular = 0.8;
+        let mut glass = Material::Opaque.options(); glass.opacity = 0.55; glass.specular = 0.85;
+        for material in [Material::FlatOutline, Material::MolecularNodes, Material::Opaque,
+            Material::FlatOutline.with_options(outline), Material::MolecularNodes.with_options(nodes),
+            Material::Opaque.with_options(glass)] {
             populate_rep(&renderer, &rs, &mut scene, style, material);
             let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 640, 480);
             let mae = |a: &image::RgbaImage, b: &image::RgbaImage| {
@@ -1876,16 +1882,22 @@ fn illustrative_materials_match_in_actual_molecular_renders() {
                     (0..3).map(|i| a[i].abs_diff(b[i]) as f64).sum::<f64>()).sum();
                 error / (a.width() * a.height() * 3) as f64
             };
+            if matches!(material, Material::Custom { .. }) {
+                let baseline = factory_images.iter().find(|(preset, _)| *preset == material.preset()).unwrap();
+                assert!(mae(&raster, &baseline.1) > 0.01, "shader options have no visible effect: {style:?}/{material:?}");
+            } else {
+                factory_images.push((material, raster.clone()));
+            }
             let error = mae(&raster, &trace);
             eprintln!("{style:?}/{material:?}: raster/trace MAE {error:.2}");
             assert!(error < 4.0, "material appearance mismatch: {style:?}/{material:?}: {error}");
             if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
                 std::fs::create_dir_all(&dir).unwrap();
                 let dir = std::path::Path::new(&dir);
-                raster.save(dir.join(format!("{style:?}_{material:?}_raster.png"))).unwrap();
-                trace.save(dir.join(format!("{style:?}_{material:?}_trace.png"))).unwrap();
+                raster.save(dir.join(format!("{style:?}_{}_{:08x}_raster.png", material.label().replace(' ', "_"), material.pack_lighting()))).unwrap();
+                trace.save(dir.join(format!("{style:?}_{}_{:08x}_trace.png", material.label().replace(' ', "_"), material.pack_lighting()))).unwrap();
             }
-            if material == Material::FlatOutline {
+            if material.preset() == Material::FlatOutline {
                 camera.ao.enabled = true;
                 camera.shadow.enabled = true;
                 camera.depth_cue.enabled = true;
@@ -1899,5 +1911,33 @@ fn illustrative_materials_match_in_actual_molecular_renders() {
                 camera.gi = 0.0;
             }
         }
+    }
+}
+
+#[test]
+#[ignore = "requires GPU; checks transparent VdW union in raster and ray tracing"]
+fn transparent_vdw_hides_enclosed_sphere_surfaces() {
+    use crate::{geometry::RepKind, material::Material};
+    use molar::prelude::Atom;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings { ssaa: 1, shadow_res: 256 });
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.22), Vec3::splat(0.22), 0.8);
+    camera.background.color = [1.0; 4];
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    let mut reference = Scene::default();
+    reference.add(crate::data::RawMolecule::single_atom("outer", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
+        &crate::settings::RepDefaults::default());
+    populate_rep(&renderer, &rs, &mut reference, RepKind::Vdw, Material::Transparent);
+    let (base_raster, base_trace) = raster_and_trace(&mut renderer, &rs, &reference, &camera);
+    reference.molecules[0].add_atom(&Atom::new().with_name("H").guess(), Vec3::new(0.0, 0.0, 0.025));
+    populate_rep(&renderer, &rs, &mut reference, RepKind::Vdw, Material::Transparent);
+    assert!(reference.molecules[0].reps[0].gpu.envelope.is_some());
+    let (raster, trace) = raster_and_trace(&mut renderer, &rs, &reference, &camera);
+    for (label, base, actual) in [("raster", base_raster, raster), ("trace", base_trace, trace)] {
+        let error: u64 = base.as_raw().iter().zip(actual.as_raw()).map(|(&a, &b)| a.abs_diff(b) as u64).sum();
+        assert!(error as f64 / (base.as_raw().len() as f64) < 0.1, "{label}: enclosed bead changed visible surfaces");
+        assert!(actual.pixels().any(|p| p[0] < 230), "{label}: molecule is invisible");
+        actual.save(format!("/tmp/transparent_vdw_{label}.png")).unwrap();
     }
 }

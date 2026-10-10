@@ -68,6 +68,7 @@ wgpu = { workspace = true, features = ["webgl"] }
 web-sys = { version = "0.3", features = [
     "Document",
     "Window",
+    "Storage",
     "Element",
     "HtmlElement",
     "HtmlCanvasElement",

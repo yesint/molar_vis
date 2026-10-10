@@ -1669,7 +1669,7 @@ impl SceneRenderer {
         // AO with strength 0 (when disabled) is a no-op
         // so the pass can run for shadows alone.
         let material_ao = scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter()
-            .any(|rep| rep.visible && rep.material == crate::material::Material::MolecularNodes));
+            .any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes));
         if ao[3] > 0.5 || shadow_on || material_ao {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
             let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };

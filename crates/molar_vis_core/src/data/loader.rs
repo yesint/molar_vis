@@ -164,10 +164,8 @@ fn record_name(titles: &[String], i: usize, stem: &str) -> String {
     }
 }
 
-/// Load a structure from in-memory bytes (the browser path: the file picker reads
-/// a `File`/`Blob` into a `Vec<u8>`). The format is taken from `name`'s extension.
-/// Uses molar's `FileHandler::from_reader`, so no filesystem access is needed.
-#[cfg(target_arch = "wasm32")]
+/// Load a structure from in-memory bytes, including bundled preview structures.
+/// The format is taken from the extension; no filesystem access is needed.
 pub fn load_from_bytes(name: &str, bytes: Vec<u8>, bonds: &BondParams) -> Result<RawMolecule, String> {
     let ext = name
         .rsplit('.')

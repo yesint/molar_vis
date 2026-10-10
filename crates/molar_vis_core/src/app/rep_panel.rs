@@ -272,83 +272,7 @@ pub(super) fn draw_rep_params(
     }
 
     // --- [Style] tab: per-style geometry parameters. ---
-    let mut changed = false;
-    egui::Grid::new("rep_params")
-        .num_columns(2)
-        .spacing(egui::vec2(8.0, 4.0))
-        .show(ui, |ui| match &mut rep.params {
-            RepParams::Vdw { scale } => {
-                ui.label("Sphere scale");
-                changed |= ui
-                    .add(egui::Slider::new(scale, 0.1..=2.0).text("× VDW radius"))
-                    .changed();
-                ui.end_row();
-            }
-            RepParams::Lines { width, bond_color_blend } => {
-                ui.label("Line width (px)");
-                changed |= ui.add(egui::Slider::new(width, 1.0..=10.0)).changed();
-                ui.end_row();
-                ui.label("Bond color blend");
-                changed |= ui.add(egui::Slider::new(bond_color_blend, 0.0..=1.0))
-                    .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
-                ui.end_row();
-            }
-            RepParams::Licorice { bond_radius, bond_color_blend } => {
-                ui.label("Bond radius (nm)");
-                changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.10)).changed();
-                ui.end_row();
-                ui.label("Bond color blend");
-                changed |= ui.add(egui::Slider::new(bond_color_blend, 0.0..=1.0))
-                    .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
-                ui.end_row();
-            }
-            RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing, bond_color_blend } => {
-                ui.label("Sphere scale");
-                changed |= ui.add(egui::Slider::new(sphere_scale, 0.05..=0.6)).changed();
-                ui.end_row();
-                ui.label("Bond radius (nm)");
-                changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.05)).changed();
-                ui.end_row();
-                ui.label("Fluid bonds");
-                changed |= ui.add(egui::Slider::new(bond_smoothing, 0.0..=1.0))
-                    .on_hover_text("0: straight bonds. Low values: short, sharp tangent joins. 1: broad, smooth spline joins. Bond radius sets the narrow waist.").changed();
-                ui.end_row();
-                ui.label("Bond color blend");
-                changed |= ui.add(egui::Slider::new(bond_color_blend, 0.0..=1.0))
-                    .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
-                ui.end_row();
-            }
-            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
-                ui.label("Coil radius (nm)");
-                changed |= ui.add(egui::Slider::new(coil_radius, 0.02..=0.08)).changed();
-                ui.end_row();
-                ui.label("Ribbon width (nm)");
-                changed |= ui.add(egui::Slider::new(ribbon_width, 0.05..=0.35)).changed();
-                ui.end_row();
-                ui.label("Ribbon thickness (nm)");
-                changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
-                ui.end_row();
-                ui.label("Bevel height (nm)")
-                    .on_hover_text("Height of edge ridges above the ribbon surface; 0 disables them");
-                changed |= ui.add(egui::Slider::new(bevel_height, 0.0..=0.05)
-                    .max_decimals(3)).changed();
-                ui.end_row();
-            }
-            RepParams::Surface { probe, quality, smoothing } => {
-                ui.label("Probe radius (nm)");
-                changed |= ui.add(egui::Slider::new(probe, 0.0..=0.3)).changed();
-                ui.end_row();
-                ui.label("Quality");
-                changed |= ui.add(egui::Slider::new(quality, 0..=4)).changed();
-                ui.end_row();
-                ui.label("Smoothing");
-                changed |= ui.add(egui::Slider::new(smoothing, 0..=5)).changed();
-                ui.end_row();
-            }
-            // Interactions params are edited in a separate dialog (Partner row +
-            // Settings button drawn by the caller), so nothing inline here.
-            RepParams::Interactions { .. } => {}
-        });
+    let mut changed = draw_style_options(ui, &mut rep.params);
 
     // Secondary-structure algorithm — used by the Cartoon shape and the
     // "Structure" color scheme; offer the two sensible choices.
@@ -1173,7 +1097,7 @@ impl App {
                         {
                             rep.params_open = !rep.params_open;
                         }
-                        if let Some(clone) = style_picker(ui, rep) {
+                        if let Some(clone) = style_picker(ui, rep, &self.rep_defaults) {
                             // Switched to Interactions → keep the old-style rep (below).
                             action = Some(RepAction::CloneForInteractions {
                                 at: j,
@@ -1218,7 +1142,7 @@ impl App {
                             }
                         } else {
                             color_picker(ui, rep);
-                            material_picker(ui, rep);
+                            material_picker(ui, rep, &self.rep_defaults);
                         }
                     });
                 })
@@ -1918,9 +1842,9 @@ mod picker_panel_fit_tests {
                                     ui.horizontal(|ui| {
                                         let _ = ui.selectable_label(false, icon::CARET_RIGHT);
                                         let mut rep = Representation::new(RepKind::Vdw);
-                                        style_picker(ui, &mut rep);
+                                        style_picker(ui, &mut rep, &RepDefaults::default());
                                         color_picker(ui, &mut rep);
-                                        material_picker(ui, &mut rep);
+                                        material_picker(ui, &mut rep, &RepDefaults::default());
                                     });
                                 });
                             });
@@ -1930,6 +1854,130 @@ mod picker_panel_fit_tests {
             }
             assert!(allocated_right <= painted_right + 0.5,
                 "{theme:?}: picker labels create an unpainted panel gutter: {allocated_right} > {painted_right}");
+        }
+    }
+}
+
+/// Shared geometry controls for representation edits and persisted style defaults.
+pub(super) fn draw_style_options(ui: &mut egui::Ui, params: &mut RepParams) -> bool {
+    let mut changed = false;
+    egui::Grid::new("rep_params")
+        .num_columns(2)
+        .spacing(egui::vec2(8.0, 4.0))
+        .show(ui, |ui| match params {
+            RepParams::Vdw { scale } => {
+                ui.label("Sphere scale");
+                changed |= ui.scope(|ui| {
+                    // Leave room for the numeric value at larger UI font sizes.
+                    ui.spacing_mut().slider_width = ui.spacing().slider_width.min(90.0);
+                    ui.add(egui::Slider::new(scale, 0.1..=2.0))
+                        .on_hover_text("Multiplier of each atom’s van der Waals radius")
+                        .changed()
+                }).inner;
+                ui.end_row();
+            }
+            RepParams::Lines { width, bond_color_blend } => {
+                ui.label("Line width (px)");
+                changed |= ui.add(egui::Slider::new(width, 1.0..=10.0)).changed();
+                ui.end_row();
+                ui.label("Bond color blend");
+                changed |= ui.add(egui::Slider::new(bond_color_blend, 0.0..=1.0))
+                    .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
+                ui.end_row();
+            }
+            RepParams::Licorice { bond_radius, bond_color_blend } => {
+                ui.label("Bond radius (nm)");
+                changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.10)).changed();
+                ui.end_row();
+                ui.label("Bond color blend");
+                changed |= ui.add(egui::Slider::new(bond_color_blend, 0.0..=1.0))
+                    .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
+                ui.end_row();
+            }
+            RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing, bond_color_blend } => {
+                ui.label("Sphere scale");
+                changed |= ui.add(egui::Slider::new(sphere_scale, 0.05..=0.6)).changed();
+                ui.end_row();
+                ui.label("Bond radius (nm)");
+                changed |= ui.add(egui::Slider::new(bond_radius, 0.005..=0.05)).changed();
+                ui.end_row();
+                ui.label("Fluid bonds");
+                changed |= ui.add(egui::Slider::new(bond_smoothing, 0.0..=1.0))
+                    .on_hover_text("0: straight bonds. Low values: short, sharp tangent joins. 1: broad, smooth spline joins. Bond radius sets the narrow waist.").changed();
+                ui.end_row();
+                ui.label("Bond color blend");
+                changed |= ui.add(egui::Slider::new(bond_color_blend, 0.0..=1.0))
+                    .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
+                ui.end_row();
+            }
+            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
+                ui.label("Coil radius (nm)");
+                changed |= ui.add(egui::Slider::new(coil_radius, 0.02..=0.08)).changed();
+                ui.end_row();
+                ui.label("Ribbon width (nm)");
+                changed |= ui.add(egui::Slider::new(ribbon_width, 0.05..=0.35)).changed();
+                ui.end_row();
+                ui.label("Ribbon thickness (nm)");
+                changed |= ui.add(egui::Slider::new(ribbon_thickness, 0.02..=0.10)).changed();
+                ui.end_row();
+                ui.label("Bevel height (nm)")
+                    .on_hover_text("Height of edge ridges above the ribbon surface; 0 disables them");
+                changed |= ui.add(egui::Slider::new(bevel_height, 0.0..=0.05)
+                    .max_decimals(3)).changed();
+                ui.end_row();
+            }
+            RepParams::Surface { probe, quality, smoothing } => {
+                ui.label("Probe radius (nm)");
+                changed |= ui.add(egui::Slider::new(probe, 0.0..=0.3)).changed();
+                ui.end_row();
+                ui.label("Quality");
+                changed |= ui.add(egui::Slider::new(quality, 0..=4)).changed();
+                ui.end_row();
+                ui.label("Smoothing");
+                changed |= ui.add(egui::Slider::new(smoothing, 0..=5)).changed();
+                ui.end_row();
+            }
+            // Interactions params are edited in a separate dialog (Partner row +
+            // Settings button drawn by the caller), so nothing inline here.
+            RepParams::Interactions { .. } => {}
+        });
+
+    changed
+}
+
+#[cfg(test)]
+mod vdw_control_layout_tests {
+    use super::*;
+
+    #[test]
+    fn vdw_controls_stay_stable_at_constrained_widths() {
+        for font_scale in [1.0, 1.15, 1.25, 1.5] {
+            for width in (320..=420).step_by(4) {
+                let ctx = egui::Context::default();
+                let mut appearance = crate::settings::AppearanceSettings::default();
+                appearance.font_scale = font_scale;
+                crate::theme::apply(&ctx, &appearance);
+                let mut params = RepParams::Vdw { scale: 1.0 };
+                let mut stable = None;
+                for frame in 0..16 {
+                    let _ = ctx.run_ui(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, 480.0))),
+                        ..Default::default()
+                    }, |ui| {
+                        ui.set_width(width as f32);
+                        ui.spacing_mut().slider_width = 100.0;
+                        draw_style_options(ui, &mut params);
+                        if frame >= 8 {
+                            let size = ui.min_rect().size();
+                            assert!(size.x <= width as f32 + 0.5, "VDW controls expand their column: width {width}, font scale {font_scale}, actual {}", size.x);
+                            if let Some(old) = stable {
+                                assert_eq!(size, old, "VDW controls bounce at width {width}, font scale {font_scale}");
+                            }
+                            stable = Some(size);
+                        }
+                    });
+                }
+            }
         }
     }
 }

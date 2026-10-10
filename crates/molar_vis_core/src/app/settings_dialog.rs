@@ -47,7 +47,7 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
         .num_columns(2)
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
-            ui.label("Anti-aliasing");
+            ui.label("Anti-aliasing").on_hover_text("Supersampling smooths the image at a cost proportional to this factor squared. Applies immediately.");
             egui::ComboBox::from_id_salt("set_ssaa")
                 .selected_text(ssaa_label(r.ssaa))
                 .show_ui(ui, |ui| {
@@ -57,7 +57,7 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
                 });
             ui.end_row();
 
-            ui.label("Shadow-map resolution");
+            ui.label("Shadow-map resolution").on_hover_text("Higher resolutions improve cast-shadow detail. Used when cast shadows are enabled; applies immediately.");
             egui::ComboBox::from_id_salt("set_shadow_res")
                 .selected_text(format!("{}²", r.shadow_res))
                 .show_ui(ui, |ui| {
@@ -68,8 +68,7 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
         });
     ui.add_space(4.0);
-    ui.weak("Supersampling smooths everything but costs ~ssaa² more fragments. The");
-    ui.weak("shadow map only matters when cast shadows are on. Both apply immediately.");
+
 }
 
 /// Shared view-style controls for current-session edits and saved defaults.
@@ -111,7 +110,7 @@ pub(super) fn settings_page_view(
                     ui.end_row();
 
                     ui.label("Frame fill").on_hover_text(
-                    "Used the next time you frame a molecule or representation. Does not change the current zoom.",
+                    "Fraction of the viewport occupied after framing: 0.9 means 90%. Applies on the next zoom-to or Unobstructed View action; does not change the current zoom.",
                 );
                     slider_with_edit(ui, &mut v.fill, 0.5..=1.0, true);
                     ui.end_row();
@@ -183,18 +182,14 @@ pub(super) fn settings_page_view(
                 });
             });
             ui.separator();
-            ui.label("Ray tracing");
+            ui.label("Ray tracing").on_hover_text(if ray_supported { "Press R in the viewport to ray-trace the view." } else { "Ray tracing is unavailable on this device." });
             ui.add_enabled_ui(ray_supported, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Global illumination");
                     slider_with_edit(ui, &mut v.gi, 0.0..=1.0, true);
                 });
             });
-            ui.weak(if ray_supported {
-                "Press R in the viewport to ray-trace the view."
-            } else {
-                "Ray tracing is unavailable on this device."
-            });
+
         }
         ViewPage::Scene => {
             ui.separator();
@@ -251,17 +246,8 @@ pub(super) fn settings_page_reps(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
 
             ui.label("Material");
-            egui::ComboBox::from_id_salt("set_rep_material")
-                .selected_text(r.material.label())
-                .show_ui(ui, |ui| {
-                    for m in Material::ALL {
-                        ui.selectable_value(&mut r.material, m, m.label());
-                    }
-                });
-            ui.end_row();
-
-            ui.label("Surface quality");
-            ui.add(egui::DragValue::new(&mut r.surface_quality).range(0..=4));
+            let defaults = r.clone();
+            super::pickers::material_selector(ui, &mut r.material, &defaults);
             ui.end_row();
 
             ui.label("Selection");
@@ -528,26 +514,25 @@ impl App {
             for rep in &mut mol.reps {
                 if force || previous.reps.kind != next.reps.kind {
                     rep.kind = next.reps.kind;
-                    rep.params = RepParams::for_kind(rep.kind);
+                    rep.params = next.reps.style_params(rep.kind);
                 }
                 if force || previous.reps.color != next.reps.color {
                     rep.color = next.reps.color;
                 }
                 if force || previous.reps.material != next.reps.material {
-                    rep.material = next.reps.material;
+                    rep.material = next.reps.material_for(next.reps.material);
                 }
+                if force || previous.reps.style_params(rep.kind) != next.reps.style_params(rep.kind) {
+                    rep.params = next.reps.style_params(rep.kind);
+                }
+                if previous.reps.materials != next.reps.materials {
+                    rep.material = next.reps.material_for(rep.material.preset());
+                }
+                if force || previous.reps.ss_algo != next.reps.ss_algo { rep.ss_algo = next.reps.ss_algo; }
                 if force || previous.reps.selection != next.reps.selection {
                     rep.sel_text = next.reps.selection.clone();
                     rep.expr = None;
                     rep.sel_dirty = true;
-                }
-                if force
-                    || previous.reps.surface_quality != next.reps.surface_quality
-                    || previous.reps.kind != next.reps.kind
-                {
-                    if let RepParams::Surface { quality, .. } = &mut rep.params {
-                        *quality = next.reps.surface_quality;
-                    }
                 }
                 if reps_changed
                     || previous.behavior.dashed_pbc_bonds != next.behavior.dashed_pbc_bonds
@@ -603,11 +588,16 @@ impl App {
                 .pivot(egui::Align2::CENTER_TOP)
                 .default_pos(egui::pos2(screen.center().x, screen.top() + 48.0));
         }
+        if !popup && dialog.preview.is_none() && matches!(dialog.tab, SettingsPage::Styles | SettingsPage::Materials) {
+            if let Some(rs) = frame.wgpu_render_state() {
+                dialog.preview = Some(SettingsPreview::new(rs.clone()));
+            }
+        }
         let inner = window.show(ctx, |ui| {
             if popup {
                 ui.set_width(300.0);
             } else {
-                ui.set_width(560.0);
+                ui.set_width(640.0);
             }
             if !popup {
                 tab_bar(
@@ -615,9 +605,11 @@ impl App {
                     &mut dialog.tab,
                     &[
                         (SettingsPage::Appearance, "Appearance"),
-                        (SettingsPage::Rendering, "Render quality"),
+                        (SettingsPage::Rendering, "Render"),
                         (SettingsPage::View, "View"),
                         (SettingsPage::Representations, "Representations"),
+                        (SettingsPage::Styles, "Styles"),
+                        (SettingsPage::Materials, "Materials"),
                         (SettingsPage::Behavior, "Behavior"),
                     ],
                 );
@@ -637,6 +629,8 @@ impl App {
                         Some(self.renderer.texture_id()),
                     ),
                     SettingsPage::Representations => settings_page_reps(ui, &mut current),
+                    SettingsPage::Styles => settings_page_styles(ui, &mut current, &mut dialog.style_page, dialog.preview.as_mut()),
+                    SettingsPage::Materials => settings_page_materials(ui, &mut current, &mut dialog.material_page, dialog.preview.as_mut()),
                     SettingsPage::Behavior => settings_page_behavior(ui, &mut current),
                 });
             ui.separator();
@@ -668,8 +662,7 @@ impl App {
                     save = true;
                 }
             });
-            #[cfg(target_arch = "wasm32")]
-            ui.weak("Browser defaults remain in memory for this run.");
+
         });
         close |= !window_open;
         if popup {
@@ -712,7 +705,6 @@ impl App {
             ctx.request_repaint();
         }
         if save {
-            #[cfg(not(target_arch = "wasm32"))]
             match self.current_settings().save() {
                 Ok(()) => {
                     dialog.save_error = None;
@@ -724,11 +716,7 @@ impl App {
                     self.status = error;
                 }
             }
-            #[cfg(target_arch = "wasm32")]
-            {
-                dialog.save_error = None;
-                self.status = "Defaults applied for this browser run".to_string();
-            }
+
         }
         if !popup {
             self.last_settings_page = dialog.tab;
@@ -741,6 +729,8 @@ impl App {
 
 impl SettingsDialog {
     fn capture(current: Settings, scene: &Scene, tab: SettingsPage) -> Self {
+        let style_page = current.reps.kind;
+        let material_page = current.reps.material.preset();
         Self {
             original: current,
             original_reps: scene
@@ -768,6 +758,9 @@ impl SettingsDialog {
             playback_changed: false,
             tab,
             view_page: ViewPage::default(),
+            style_page,
+            material_page,
+            preview: None,
             popup: false,
             anchor: egui::Rect::NOTHING,
             last_rect: None,
@@ -793,6 +786,7 @@ impl SettingsDialog {
                         rep.params = original.params;
                         rep.color = original.color;
                         rep.material = original.material;
+                        rep.ss_algo = original.ss_algo;
                         rep.sel_text = original.sel_text.clone();
                         rep.expr = None;
                         rep.sel_dirty = true;
@@ -915,5 +909,821 @@ mod live_settings_tests {
             scene.molecules[0].bonds.len(),
             scene.molecules[0].detect_bonds(&tight).unwrap().len()
         );
+    }
+}
+
+/// Geometry defaults for one style; choosing a style here does not switch the scene.
+pub(super) fn settings_page_styles(
+    ui: &mut egui::Ui,
+    s: &mut Settings,
+    selected: &mut RepKind,
+    preview: Option<&mut SettingsPreview>,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Style").on_hover_text("Edit matching representations. Save keeps these options for new representations and sessions.");
+        egui::ComboBox::from_id_salt("settings_style").selected_text(selected.label()).show_ui(ui, |ui| {
+            for kind in RepKind::ALL { ui.selectable_value(selected, kind, kind.label()); }
+        });
+    });
+    ui.separator();
+    let mut params = s.reps.style_params(*selected);
+    let before = params;
+    let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(320.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        ui.vertical(|ui| {
+            ui.set_width(controls_width);
+            ui.spacing_mut().slider_width = 100.0;
+            super::rep_panel::draw_style_options(ui, &mut params);
+            if let RepParams::Interactions { settings } = &mut params {
+                settings_interaction_options(ui, settings);
+            }
+            if *selected == RepKind::Cartoon {
+                ui.horizontal(|ui| {
+                    ui.label("SS algorithm").on_hover_text(
+                        "Algorithm used to assign the helix, sheet, and coil geometry.",
+                    );
+                    egui::ComboBox::from_id_salt("settings_ss")
+                        .selected_text(match s.reps.ss_algo {
+                            SsAlgorithm::Dssp => "DSSP",
+                            SsAlgorithm::DsspGmx => "DSSP (gmx)",
+                            SsAlgorithm::Dss => "dss (PyMOL)",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (algorithm, label) in [
+                                (SsAlgorithm::Dssp, "DSSP"),
+                                (SsAlgorithm::DsspGmx, "DSSP (gmx)"),
+                                (SsAlgorithm::Dss, "dss (PyMOL)"),
+                            ] {
+                                ui.selectable_value(&mut s.reps.ss_algo, algorithm, label);
+                            }
+                        });
+                });
+            }
+            if ui
+                .button("Reset style")
+                .on_hover_text("Restore this style's factory options")
+                .clicked()
+            {
+                params = RepParams::for_kind(*selected);
+                if *selected == RepKind::Cartoon {
+                    s.reps.ss_algo = SsAlgorithm::default();
+                }
+            }
+        });
+        if let Some(preview) = preview {
+            preview.show(
+                ui,
+                params,
+                s.reps.material_for(s.reps.material),
+                s.reps.ss_algo,
+            );
+        } else {
+            preview_rectangle(ui);
+        }
+    });
+    if params != before {
+        s.reps.styles.retain(|p| p.kind() != *selected);
+        s.reps.styles.push(params);
+    }
+}
+
+pub(super) fn settings_page_materials(
+    ui: &mut egui::Ui,
+    s: &mut Settings,
+    selected: &mut Material,
+    preview: Option<&mut SettingsPreview>,
+) {
+    ui.horizontal(|ui| {
+        ui.label("Material").on_hover_text(
+            "Edit matching representations. Save keeps the shader options for new sessions.",
+        );
+        super::pickers::material_selector(ui, selected, &s.reps);
+    });
+    ui.separator();
+    let mut options = s.reps.material_for(*selected).options();
+    let before = options;
+    let mut reset = false;
+    let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(320.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 16.0;
+        ui.vertical(|ui| {
+            ui.set_width(controls_width);
+            egui::Grid::new("material_options")
+                .num_columns(2)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("Opacity")
+                        .on_hover_text("0 is invisible; 1 is fully opaque.");
+                    slider_with_edit(ui, &mut options.opacity, 0.0..=1.0, true);
+                    ui.end_row();
+                    if *selected == Material::FlatOutline {
+                        ui.label("Contour width");
+                        slider_with_edit(ui, &mut options.outline_width, 0.05..=1.0, true);
+                        ui.end_row();
+                        ui.label("Contour strength");
+                        slider_with_edit(ui, &mut options.outline, 0.0..=1.0, true);
+                        ui.end_row();
+                    } else {
+                        ui.label("Ambient")
+                            .on_hover_text("Unlit fill contribution.");
+                        slider_with_edit(ui, &mut options.ambient, 0.0..=1.0, true);
+                        ui.end_row();
+                        ui.label("Diffuse")
+                            .on_hover_text("Strength of the light falling on the surface.");
+                        slider_with_edit(ui, &mut options.diffuse, 0.0..=1.0, true);
+                        ui.end_row();
+                        ui.label("Specular")
+                            .on_hover_text("Strength of surface highlights.");
+                        slider_with_edit(ui, &mut options.specular, 0.0..=1.0, true);
+                        ui.end_row();
+                        ui.label(if *selected == Material::MolecularNodes {
+                            "Roughness"
+                        } else {
+                            "Shininess"
+                        });
+                        slider_with_edit(ui, &mut options.shininess, 0.0..=1.0, true);
+                        ui.end_row();
+                        if *selected == Material::AoEdgy {
+                            ui.label("Outline");
+                            let mut outline = options.outline > 0.5;
+                            if ui.checkbox(&mut outline, "").changed() {
+                                options.outline = if outline { 0.7 } else { 0.0 };
+                            }
+                            ui.end_row();
+                        }
+                    }
+                });
+            reset = ui
+                .button("Reset material")
+                .on_hover_text("Restore this material's factory shader options")
+                .clicked();
+        });
+        ui.vertical(|ui| {
+            let material = if reset {
+                *selected
+            } else {
+                selected.with_options(options)
+            };
+            if let Some(preview) = preview {
+                preview.show(ui, RepParams::Vdw { scale: 1.0 }, material, s.reps.ss_algo);
+            } else {
+                preview_rectangle(ui);
+            }
+        });
+    });
+    if reset {
+        s.reps.materials.retain(|m| m.preset() != *selected);
+    } else if options != before {
+        s.reps.materials.retain(|m| m.preset() != *selected);
+        s.reps.materials.push(selected.with_options(options));
+    }
+}
+
+fn settings_interaction_options(
+    ui: &mut egui::Ui,
+    s: &mut crate::interactions::InteractionSettings,
+) {
+    egui::Grid::new("style_interactions")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Line width (px)");
+            slider_with_edit(ui, &mut s.line_width, 1.0..=10.0, true);
+            ui.end_row();
+            for (label, enabled) in [
+                ("Hydrogen bonds", &mut s.hbonds),
+                ("Hydrophobic", &mut s.hydrophobic),
+                ("Salt bridges", &mut s.salt_bridges),
+                ("π stacking", &mut s.pi_stacking),
+                ("π cation", &mut s.pi_cation),
+                ("Halogen bonds", &mut s.halogen),
+            ] {
+                ui.label(label);
+                ui.checkbox(enabled, "");
+                ui.end_row();
+            }
+            for (label, value, range) in [
+                ("H-bond distance (nm)", &mut s.hbond_dist, 0.25..=0.5),
+                ("H-bond with H (nm)", &mut s.hbond_dist_h, 0.25..=0.5),
+                ("H-bond angle (°)", &mut s.hbond_angle, 90.0..=180.0),
+                (
+                    "Hydrophobic dist. (nm)",
+                    &mut s.hydrophobic_dist,
+                    0.3..=0.55,
+                ),
+                ("Salt bridge dist. (nm)", &mut s.salt_bridge_dist, 0.3..=0.6),
+                ("π stacking dist. (nm)", &mut s.pi_stacking_dist, 0.3..=0.8),
+                ("π stacking angle (°)", &mut s.pi_stacking_angle, 0.0..=90.0),
+                (
+                    "π stacking offset (nm)",
+                    &mut s.pi_stacking_offset,
+                    0.0..=0.5,
+                ),
+                ("π cation distance (nm)", &mut s.pi_cation_dist, 0.3..=0.8),
+                ("π cation offset (nm)", &mut s.pi_cation_offset, 0.0..=0.5),
+                ("Halogen distance (nm)", &mut s.halogen_dist, 0.25..=0.5),
+                ("Halogen angle (°)", &mut s.halogen_angle, 90.0..=180.0),
+            ] {
+                ui.label(label);
+                slider_with_edit(ui, value, range, true);
+                ui.end_row();
+            }
+        });
+}
+
+const PREVIEW_SIZE: f32 = 232.0;
+
+fn preview_rectangle(ui: &mut egui::Ui) -> egui::Response {
+    ui.allocate_exact_size(egui::Vec2::splat(PREVIEW_SIZE), egui::Sense::drag())
+        .1
+}
+
+/// Neutral glycine, including explicit hydrogens and its carbonyl double bond.
+fn small_molecule_preview_scene() -> Scene {
+    use super::draw::Element;
+    use crate::minimize::BondOrder;
+    use glam::vec3;
+    let atoms = [
+        (Element::N, vec3(-0.145, 0.03, 0.0)),
+        (Element::C, vec3(0.0, 0.0, 0.0)),
+        (Element::C, vec3(0.13, 0.065, 0.0)),
+        (Element::O, vec3(0.15, 0.185, 0.0)),
+        (Element::O, vec3(0.225, -0.025, 0.0)),
+        (Element::H, vec3(-0.19, 0.015, 0.085)),
+        (Element::H, vec3(-0.185, 0.045, -0.087)),
+        (Element::H, vec3(0.005, -0.055, 0.093)),
+        (Element::H, vec3(-0.025, -0.067, -0.08)),
+        (Element::H, vec3(0.31, 0.015, 0.0)),
+    ];
+    let raw = data::RawMolecule::single_atom("glycine", atoms[0].0.make_atom(), atoms[0].1)
+        .expect("valid preview molecule");
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mol = &mut scene.molecules[0];
+    for &(element, pos) in &atoms[1..] {
+        mol.add_atom(&element.make_atom(), pos);
+    }
+    for (a, b) in [
+        (0, 1),
+        (1, 2),
+        (2, 4),
+        (0, 5),
+        (0, 6),
+        (1, 7),
+        (1, 8),
+        (4, 9),
+    ] {
+        mol.add_bond(a, b, BondOrder::Single);
+    }
+    mol.add_bond(2, 3, BondOrder::Double);
+    mol.refresh_bbox();
+    mol.reps[0].color = ColorMethod::Element;
+    mol.reps[0].sel = Some(mol.data.select_all());
+    scene
+}
+
+/// Bounds include actual sphere/cap radii, multiple-bond offsets and mesh vertices.
+fn preview_bounds(geom: &geometry::GeometryData) -> Vec<(glam::Vec3, f32)> {
+    use glam::Vec3;
+    let mut bounds = Vec::new();
+    bounds.extend(
+        geom.spheres
+            .iter()
+            .map(|s| (Vec3::from_array(s.center), s.radius)),
+    );
+    for c in &geom.cylinders {
+        let a = Vec3::from_array(c.p0);
+        let b = Vec3::from_array(c.p1);
+        let r0 = c.profile[0].hypot(c.profile[1]);
+        let r1 = (a.distance(b) - c.profile[2]).hypot(c.profile[3]);
+        let flare = if c.profile[1] > 0.0 {
+            r0.max(r1) + c.smoothing * r0.min(r1) / 3.0
+        } else {
+            0.0
+        };
+        let radius = c.radius.max(flare) + (c.offset[0] * c.offset[1]).abs();
+        bounds.extend([(a, radius), (b, radius)]);
+    }
+    bounds.extend(
+        geom.mesh
+            .vertices
+            .iter()
+            .map(|v| (Vec3::from_array(v.pos), 0.0)),
+    );
+    bounds.extend(geom.lines.iter().map(|v| (Vec3::from_array(v.pos), 0.0)));
+    bounds
+}
+
+fn fit_preview_camera(
+    bounds: &[(glam::Vec3, f32)],
+    orientation: glam::Quat,
+) -> crate::camera::Camera {
+    use glam::Vec3;
+    let (mut min, mut max) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for &(center, radius) in bounds {
+        min = min.min(center - Vec3::splat(radius));
+        max = max.max(center + Vec3::splat(radius));
+    }
+    if bounds.is_empty() {
+        min = Vec3::splat(-0.3);
+        max = -min;
+    }
+    let mut camera = crate::camera::Camera::frame_bbox(min, max, 0.9);
+    camera.orientation = orientation;
+    let mut radius = 0.01_f32;
+    for &(center, bead_radius) in bounds {
+        radius = radius.max(center.distance(camera.target) + bead_radius);
+    }
+    // Fit a rotation-invariant envelope so dragging never changes zoom or clips caps.
+    camera.scene_radius = radius;
+    camera.distance = radius / (0.9 * (camera.fov_y * 0.5).tan());
+    camera.background.color = [1.0; 4];
+    camera
+}
+
+/// A separate offscreen viewport keeps Settings previews on the production shaders.
+pub(super) struct SettingsPreview {
+    rs: eframe::egui_wgpu::RenderState,
+    renderer: SceneRenderer,
+    scene: Scene,
+    protein: Scene,
+    last: Option<(RepParams, Material, SsAlgorithm)>,
+    camera: crate::camera::Camera,
+    bounds: Vec<(glam::Vec3, f32)>,
+    render_size: [u32; 2],
+}
+
+impl SettingsPreview {
+    fn new(rs: eframe::egui_wgpu::RenderState) -> Self {
+        let scene = small_molecule_preview_scene();
+        let renderer = SceneRenderer::new(
+            &rs,
+            &crate::settings::RenderingSettings {
+                ssaa: 2,
+                shadow_res: 256,
+            },
+        );
+        let raw = data::load_from_bytes(
+            "cartoon-preview.pdb",
+            include_bytes!("../../assets/cartoon-preview.pdb").to_vec(),
+            &crate::data::BondParams::default(),
+        )
+        .expect("valid bundled crambin protein");
+        let mut protein = Scene::default();
+        protein.add(raw, &crate::settings::RepDefaults::default());
+        protein.molecules[0].reps[0].color = ColorMethod::SecStruct;
+        protein.molecules[0].reps[0].sel = Some(protein.molecules[0].data.select_all());
+        let mut camera = crate::camera::Camera::default();
+        camera.orientation = glam::Quat::from_rotation_x(0.45) * glam::Quat::from_rotation_y(-0.3);
+        Self {
+            rs,
+            renderer,
+            scene,
+            protein,
+            last: None,
+            camera,
+            bounds: Vec::new(),
+            render_size: [0; 2],
+        }
+    }
+
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        params: RepParams,
+        material: Material,
+        ss_algo: SsAlgorithm,
+    ) -> egui::Response {
+        let response = preview_rectangle(ui)
+            .on_hover_text("Drag to rotate")
+            .on_hover_cursor(egui::CursorIcon::Grab);
+        let rotating = response.dragged_by(egui::PointerButton::Primary);
+        if rotating {
+            let delta = response.drag_delta();
+            self.camera.orbit(delta.x, delta.y, 1.0);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+        let size = (PREVIEW_SIZE * ui.ctx().pixels_per_point())
+            .round()
+            .max(1.0) as u32;
+        let render_size = [size; 2];
+        let key = (params, material, ss_algo);
+        let changed = self.last != Some(key);
+        let geometry_changed = self
+            .last
+            .is_none_or(|(old_params, _, old_ss)| old_params != params || old_ss != ss_algo);
+        if changed {
+            let scene = if matches!(params.kind(), RepKind::Cartoon | RepKind::Surface) {
+                &mut self.protein
+            } else {
+                &mut self.scene
+            };
+            let mol = &mut scene.molecules[0];
+            mol.reps[0].color = if params.kind() == RepKind::Cartoon {
+                ColorMethod::SecStruct
+            } else {
+                ColorMethod::Element
+            };
+            let geom = {
+                let rep = &mol.reps[0];
+                let bound = mol
+                    .data
+                    .bind_with_state(rep.sel.as_ref().unwrap(), mol.render_state());
+                let ss =
+                    geometry::needs_ss(&params, rep.color).then(|| SsMap::compute(&bound, ss_algo));
+                geometry::build(
+                    &bound,
+                    mol.n_atoms,
+                    &mol.bonds,
+                    &params,
+                    rep.color_spec(),
+                    material,
+                    ss.as_ref(),
+                    false,
+                )
+            };
+            self.bounds = preview_bounds(&geom);
+            let rep = &mut mol.reps[0];
+            rep.kind = params.kind();
+            rep.params = params;
+            rep.material = material;
+            rep.gpu = self.renderer.upload(&self.rs, &geom);
+            self.last = Some(key);
+        }
+        if geometry_changed {
+            self.camera = fit_preview_camera(&self.bounds, self.camera.orientation);
+        }
+        if changed || rotating || self.render_size != render_size {
+            let camera = &self.camera;
+            let scene = if matches!(params.kind(), RepKind::Cartoon | RepKind::Surface) {
+                &self.protein
+            } else {
+                &self.scene
+            };
+            self.renderer.render_scene(
+                &self.rs,
+                render_size,
+                camera.view(),
+                camera.proj(1.0),
+                false,
+                camera.cue_uniform(),
+                camera.ao_uniform(),
+                camera.shadow_uniform(),
+                camera.background,
+                camera.eye_depth_range(),
+                0.0,
+                scene,
+            );
+            self.render_size = render_size;
+        }
+        ui.painter().image(
+            self.renderer.texture_id(),
+            response.rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        response
+    }
+}
+
+impl Drop for SettingsPreview {
+    fn drop(&mut self) {
+        self.rs
+            .renderer
+            .write()
+            .free_texture(&self.renderer.texture_id());
+    }
+}
+
+#[cfg(test)]
+mod material_preview_tests {
+    use super::*;
+
+    #[test]
+    fn small_molecule_contains_all_four_elements_and_fits_after_rotation() {
+        let scene = small_molecule_preview_scene();
+        let mol = &scene.molecules[0];
+        let bound = mol
+            .data
+            .bind_with_state(mol.reps[0].sel.as_ref().unwrap(), mol.render_state());
+        let elements: std::collections::BTreeSet<_> =
+            bound.iter_atoms().map(|a| a.get_atomic_number()).collect();
+        assert_eq!(elements, [1, 6, 7, 8].into_iter().collect());
+        for kind in [
+            RepKind::Vdw,
+            RepKind::Licorice,
+            RepKind::BallAndStick,
+            RepKind::Lines,
+            RepKind::Surface,
+        ] {
+            let geom = geometry::build(
+                &bound,
+                mol.n_atoms,
+                &mol.bonds,
+                &RepParams::for_kind(kind),
+                mol.reps[0].color_spec(),
+                Material::Opaque,
+                None,
+                false,
+            );
+            let bounds = preview_bounds(&geom);
+            assert!(!bounds.is_empty(), "empty {kind:?} preview");
+            let initial = fit_preview_camera(&bounds, glam::Quat::IDENTITY);
+            for angle in [0.0, 0.8, 1.6, 2.4] {
+                let camera = fit_preview_camera(&bounds, glam::Quat::from_rotation_y(angle));
+                assert_eq!(
+                    camera.distance, initial.distance,
+                    "rotation changes preview zoom"
+                );
+                let half = camera.distance * (camera.fov_y * 0.5).tan();
+                let mut extent = 0.0_f32;
+                for &(center, radius) in &bounds {
+                    let p = camera.orientation.conjugate() * (center - camera.target);
+                    extent = extent.max(p.x.abs().max(p.y.abs()) + radius);
+                    assert!(
+                        p.x.abs() + radius < half && p.y.abs() + radius < half,
+                        "{kind:?} clipped"
+                    );
+                }
+                assert!(
+                    angle != 0.0 || extent / half > 0.7,
+                    "{kind:?} preview does not fill the image"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GPU; verifies stable preview layout and mouse rotation with actual rendering"]
+    fn preview_layout_stays_fixed_and_mouse_drag_changes_render() {
+        let rs = crate::render::test_gpu();
+        let mut preview = SettingsPreview::new(rs);
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let mut settings = Settings::default();
+        let mut selected = RepKind::Vdw;
+        let mut elapsed_frames = 0;
+        for height in [480.0, 600.0, 900.0] {
+            let mut stable = None;
+            for frame in 0..24 {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, height),
+                        )),
+                        time: Some(elapsed_frames as f64 / 60.0),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let ctx = ui.ctx();
+                        let window =
+                            egui::Window::new("Settings")
+                                .resizable(false)
+                                .show(ctx, |ui| {
+                                    ui.set_width(640.0);
+                                    egui::ScrollArea::vertical()
+                                        .max_height(440.0)
+                                        .auto_shrink([false, true])
+                                        .show(ui, |ui| {
+                                            settings_page_styles(
+                                                ui,
+                                                &mut settings,
+                                                &mut selected,
+                                                Some(&mut preview),
+                                            );
+                                        });
+                                });
+                        let Some(window) = window else {
+                            return;
+                        };
+                        if frame >= 8 {
+                            let size = window.response.rect.size();
+                            if let Some(old) = stable {
+                                assert_eq!(size, old, "VDW preview layout oscillates");
+                            }
+                            stable = Some(size);
+                        }
+                    },
+                );
+                elapsed_frames += 1;
+            }
+            assert!(stable.is_some(), "Settings window never became visible");
+        }
+        let ctx = egui::Context::default();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 480.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let params = RepParams::Vdw { scale: 1.0 };
+        let mut rect = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let _ = ctx.run_ui(input(vec![]), |ui| {
+                rect = preview
+                    .show(ui, params, Material::Opaque, SsAlgorithm::default())
+                    .rect;
+            });
+        }
+        let capture = |preview: &mut SettingsPreview| {
+            let camera = &preview.camera;
+            let cap = preview.renderer.capture_begin(
+                &preview.rs,
+                232,
+                232,
+                camera.view(),
+                camera.proj(1.0),
+                false,
+                camera.cue_uniform(),
+                camera.ao_uniform(),
+                camera.shadow_uniform(),
+                camera.background,
+                camera.eye_depth_range(),
+                &preview.scene,
+            );
+            preview
+                .rs
+                .device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            cap.read()
+        };
+        let before = capture(&mut preview);
+        let orientation = preview.camera.orientation;
+        let distance = preview.camera.distance;
+        let target = preview.camera.target;
+        let start = rect.center();
+        let _ = ctx.run_ui(
+            input(vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]),
+            |ui| {
+                preview.show(ui, params, Material::Opaque, SsAlgorithm::default());
+            },
+        );
+        let finish = start + egui::vec2(65.0, 30.0);
+        let _ = ctx.run_ui(input(vec![egui::Event::PointerMoved(finish)]), |ui| {
+            let response = preview.show(ui, params, Material::Opaque, SsAlgorithm::default());
+            assert!(response.dragged_by(egui::PointerButton::Primary));
+            assert_eq!(response.rect.size(), egui::Vec2::splat(PREVIEW_SIZE));
+        });
+        assert_ne!(preview.camera.orientation, orientation);
+        assert_eq!(preview.camera.distance, distance, "drag changed zoom");
+        assert_eq!(
+            preview.camera.target, target,
+            "drag moved the preview centre"
+        );
+        let after = capture(&mut preview);
+        let changed = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(changed > 1000, "drag did not change the rendered molecule");
+        before.save("/tmp/settings-glycine-preview.png").unwrap();
+        after
+            .save("/tmp/settings-glycine-preview-rotated.png")
+            .unwrap();
+        let rotated = preview.camera.orientation;
+        let _ = ctx.run_ui(
+            input(vec![egui::Event::PointerButton {
+                pos: finish,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]),
+            |ui| {
+                preview.show(ui, params, Material::Transparent, SsAlgorithm::default());
+            },
+        );
+        assert_eq!(
+            preview.camera.orientation, rotated,
+            "slider edits reset rotation"
+        );
+        assert_eq!(
+            preview.camera.distance, distance,
+            "material edits changed zoom"
+        );
+        let _ = ctx.run_ui(input(vec![]), |ui| {
+            preview.show(
+                ui,
+                RepParams::for_kind(RepKind::Surface),
+                Material::Opaque,
+                SsAlgorithm::default(),
+            );
+        });
+        assert_eq!(preview.protein.molecules[0].reps[0].kind, RepKind::Surface);
+        assert!(preview.bounds.len() > 1000, "protein surface mesh is empty");
+        let camera = &preview.camera;
+        let cap = preview.renderer.capture_begin(
+            &preview.rs,
+            232,
+            232,
+            camera.view(),
+            camera.proj(1.0),
+            false,
+            camera.cue_uniform(),
+            camera.ao_uniform(),
+            camera.shadow_uniform(),
+            camera.background,
+            camera.eye_depth_range(),
+            &preview.protein,
+        );
+        preview
+            .rs
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        cap.read()
+            .save("/tmp/settings-protein-surface-preview.png")
+            .unwrap();
+    }
+
+    #[test]
+    fn bundled_protein_has_cartoon_geometry_for_each_ss_algorithm() {
+        let raw = data::load_from_bytes(
+            "cartoon-preview.pdb",
+            include_bytes!("../../assets/cartoon-preview.pdb").to_vec(),
+            &crate::data::BondParams::default(),
+        )
+        .unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let mol = &scene.molecules[0];
+        let sel = mol.data.select_all();
+        let bound = mol.data.bind_with_state(&sel, mol.render_state());
+        for algorithm in [SsAlgorithm::Dssp, SsAlgorithm::DsspGmx, SsAlgorithm::Dss] {
+            let ss = SsMap::compute(&bound, algorithm);
+            let geom = geometry::build(
+                &bound,
+                mol.n_atoms,
+                &mol.bonds,
+                &RepParams::for_kind(RepKind::Cartoon),
+                mol.reps[0].color_spec(),
+                Material::Opaque,
+                Some(&ss),
+                false,
+            );
+            assert!(
+                geom.mesh.vertices.len() > 100,
+                "empty protein preview for {algorithm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_settings_style_and_material_page_fits_the_dialog() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let mut settings = Settings::default();
+        for kind in RepKind::ALL {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut selected = kind;
+                    settings_page_styles(ui, &mut settings, &mut selected, None);
+                    assert!(
+                        ui.min_rect().width() <= 640.5,
+                        "style page overhangs: {kind:?}, width {}",
+                        ui.min_rect().width()
+                    );
+                },
+            );
+        }
+        for material in Material::ALL {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut selected = material;
+                    settings_page_materials(ui, &mut settings, &mut selected, None);
+                    assert!(
+                        ui.min_rect().width() <= 640.5,
+                        "material page overhangs: {material:?}"
+                    );
+                },
+            );
+        }
     }
 }

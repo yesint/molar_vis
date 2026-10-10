@@ -1,7 +1,20 @@
+// Edited presets use four 7-bit coefficients plus a four-bit shader tag.
+// Factory words retain their original encoding and exact appearance.
+fn material_kind(m: u32) -> u32 {
+    if (m == MATERIAL_FLAT_OUTLINE || m == MATERIAL_MOLECULAR_NODES) { return m; }
+    if ((m >> 28u) == 0xau) { return MATERIAL_FLAT_OUTLINE; }
+    if ((m >> 28u) == 0xbu) { return MATERIAL_MOLECULAR_NODES; }
+    return m;
+}
+fn custom_coefficients(m: u32) -> vec4<f32> {
+    return vec4<f32>(f32(m & 127u), f32((m >> 7u) & 127u),
+        f32((m >> 14u) & 127u), f32((m >> 21u) & 127u)) / 127.0;
+}
 // Reserved words select specialized shading without changing classic materials.
 fn unpack_material(m: u32) -> vec4<f32> {
     if (m == MATERIAL_FLAT_OUTLINE) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }
     if (m == MATERIAL_MOLECULAR_NODES) { return vec4<f32>(0.34, 0.62, 0.3, 0.4); }
+    if ((m >> 28u) >= 0xau) { return custom_coefficients(m); }
     return vec4<f32>(f32(m & 0xffu) / 255.0, f32((m >> 8u) & 0xffu) / 255.0,
         f32((m >> 16u) & 0xffu) / 255.0, f32((m >> 24u) & 0x7fu) / 127.0);
 }
@@ -9,39 +22,40 @@ fn unpack_material(m: u32) -> vec4<f32> {
 // Normal-buffer alpha carries the deferred-effects policy per pixel.
 // 0: flat outline (no AO/shadows); 1: classic; 2: Molecular Nodes contact AO.
 fn material_effects(m: u32) -> f32 {
-    if (m == MATERIAL_FLAT_OUTLINE) { return 0.0; }
-    if (m == MATERIAL_MOLECULAR_NODES) { return 2.0; }
+    if (material_kind(m) == MATERIAL_FLAT_OUTLINE) { return 0.0; }
+    if (material_kind(m) == MATERIAL_MOLECULAR_NODES) { return 2.0; }
     return 1.0;
 }
 
 // Dielectric GGX highlight with broad studio fill. Roughness 0.4 and F0 0.04
 // approximate a neutral plastic Principled BSDF; no metallic tint or hard rim.
-fn molecular_studio_light(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> vec3<f32> {
+fn molecular_studio_light(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, mat: vec4<f32>) -> vec3<f32> {
     let nl = max(dot(n, l), 0.0);
     let nv = max(dot(n, v), 0.001);
     let h = normalize(v + l);
     let nh = max(dot(n, h), 0.0);
     let vh = max(dot(v, h), 0.0);
-    let alpha2 = 0.0256;
+    let roughness = clamp(mat.w, 0.05, 1.0);
+    let alpha2 = pow(roughness, 4.0);
     let d = alpha2 / (3.14159265 * pow(nh * nh * (alpha2 - 1.0) + 1.0, 2.0));
-    let k = 0.245;
+    let k = pow(roughness + 1.0, 2.0) / 8.0;
     let g = nv / (nv * (1.0 - k) + k) * nl / (nl * (1.0 - k) + k);
     let f = 0.04 + 0.96 * pow(1.0 - vh, 5.0);
     let spec = d * g * f / max(4.0 * nv, 0.001);
-    return base * (1.0 - f) * nl + vec3<f32>(spec);
+    return base * (1.0 - f) * nl + vec3<f32>(spec * mat.z / 0.3);
 }
 
-fn shade_molecular_nodes(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
-    return base * 0.34
-        + molecular_studio_light(base, n, v, normalize(vec3<f32>(-0.45, 0.65, 1.0))) * 0.62
-        + molecular_studio_light(base, n, v, normalize(vec3<f32>(0.7, -0.2, 0.9))) * 0.28;
+fn shade_molecular_nodes(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: vec4<f32>) -> vec3<f32> {
+    return base * mat.x
+        + molecular_studio_light(base, n, v, normalize(vec3<f32>(-0.45, 0.65, 1.0)), mat) * mat.y
+        + molecular_studio_light(base, n, v, normalize(vec3<f32>(0.7, -0.2, 0.9)), mat) * (mat.y * (0.28 / 0.62));
 }
 
 // Shared view-space lighting for raster and ray-traced surfaces. Mesh ribbons use
 // a wider fill than analytic spheres/capsules, as in the live renderer.
 fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: vec4<f32>, mesh: bool, packed: u32) -> vec3<f32> {
-    if (packed == MATERIAL_FLAT_OUTLINE) { return base; }
-    if (packed == MATERIAL_MOLECULAR_NODES) { return shade_molecular_nodes(base, normal, view_dir); }
+    if (material_kind(packed) == MATERIAL_FLAT_OUTLINE) { return base; }
+    if (material_kind(packed) == MATERIAL_MOLECULAR_NODES) { return shade_molecular_nodes(base, normal, view_dir, mat); }
     let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
     let ndotl = max(dot(normal, light_dir), 0.0);
     let half = normalize(light_dir + view_dir);
@@ -52,17 +66,23 @@ fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: 
         fill = max(dot(normal, normalize(vec3<f32>(-0.5, -0.3, 0.6))), 0.0)
             * (1.0 - ndotl) * (1.0 - ndotl) * 0.6;
     }
-    return base * (mat.x + mat.y * (ndotl + fill)) + vec3<f32>(spec);
+    return base * (mat.x + mat.y * (ndotl + fill)) + vec3<f32>(spec * mat.z / 0.3);
 }
 
 fn apply_outline(color: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, m: u32) -> vec3<f32> {
-    if (m == MATERIAL_FLAT_OUTLINE) {
+    if (material_kind(m) == MATERIAL_FLAT_OUTLINE) {
+        var width = 0.5;
+        var strength = 1.0;
+        if (m != MATERIAL_FLAT_OUTLINE) {
+            let coeff = custom_coefficients(m); width = coeff.x; strength = coeff.y;
+        }
         let facing = abs(dot(normal, view_dir));
-        let ink = 1.0 - smoothstep(0.35, 0.5, facing);
-        return mix(color, vec3<f32>(0.045), ink);
+        let ink = 1.0 - smoothstep(width * 0.7, max(width, 0.001), facing);
+        return mix(color, vec3<f32>(0.045), ink * strength);
     }
-    if (m == MATERIAL_MOLECULAR_NODES) { return color; }
-    let on = f32((m >> 31u) & 1u);
+    if (material_kind(m) == MATERIAL_MOLECULAR_NODES) { return color; }
+    var on = f32((m >> 31u) & 1u);
+    if ((m >> 28u) >= 0xau) { on = select(0.0, 1.0, (m >> 28u) == 0xdu); }
     let edge = pow(1.0 - abs(dot(normal, view_dir)), 2.0);
     return color * (1.0 - on * 0.9 * edge);
 }

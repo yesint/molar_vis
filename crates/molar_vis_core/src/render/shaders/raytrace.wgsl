@@ -593,7 +593,7 @@ fn camera_hit(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit {
 // and can hit cavities or blockers absent from the camera's depth buffer. Keep
 // the user's radius in nm and strength linear; no scene scaling or contrast boost.
 fn ambient_visibility(s: Surf, sample_index: u32) -> f32 {
-    let local_ao = s.mat_raw == MATERIAL_MOLECULAR_NODES && U.ao.w <= 0.5;
+    let local_ao = material_kind(s.mat_raw) == MATERIAL_MOLECULAR_NODES && U.ao.w <= 0.5;
     if (!local_ao && (U.ao.w <= 0.5 || U.ao.z <= 0.0)) { return 1.0; }
     let radius = select(U.ao.x, 0.16, local_ao);
     let strength = select(U.ao.z, 0.35, local_ao);
@@ -618,7 +618,7 @@ fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, sample_ind
     shaded = apply_outline(shaded, s.nrm, view_dir, s.mat_raw);
     // Raster AO/shadows act on opaque geometry, before transparent compositing.
     var visibility = 1.0;
-    if (s.opacity >= 0.999 && s.mat_raw != MATERIAL_FLAT_OUTLINE) {
+    if (s.opacity >= 0.999 && material_kind(s.mat_raw) != MATERIAL_FLAT_OUTLINE) {
         var shadow = 0.0;
         let count = select(SHADOW_RAYS, 1u, U.shadow.w <= 0.0 || U.shadow.z <= 0.5);
         for (var i = 0u; i < count; i = i + 1u) {
@@ -669,14 +669,14 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
 
 fn shade_surface(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, axis: vec3<f32>, sample_index: u32, seed: ptr<function, u32>) -> vec3<f32> {
     let direct = shade_tier1(s, rd, persp, light, sample_index);
-    if (s.mat_raw == MATERIAL_FLAT_OUTLINE) { return direct.xyz; }
+    if (material_kind(s.mat_raw) == MATERIAL_FLAT_OUTLINE) { return direct.xyz; }
     var tier1 = apply_fog(direct.xyz, s.p, axis);
     if (s.opacity >= 0.999) {
         // Opaque color is stored in a normalized target before deferred effects.
         tier1 = clamp(tier1, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     tier1 = tier1 * direct.w;
-    if (U.bg.w > 0.001 && s.mat_raw != MATERIAL_FLAT_OUTLINE) {
+    if (U.bg.w > 0.001 && material_kind(s.mat_raw) != MATERIAL_FLAT_OUTLINE) {
         let gi = shade_gi(s, persp, light, GI_BOUNCES, seed);
         return mix(tier1, apply_fog(aces(gi), s.p, axis), U.bg.w);
     }

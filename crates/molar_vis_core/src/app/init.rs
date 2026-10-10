@@ -13,7 +13,7 @@ impl App {
         // Program settings: load from the platform config dir (created with defaults
         // on first launch). `MOLAR_VIS_DEBUG_DEFAULTS=1` forces built-in defaults
         // (no file IO) so headless verification is reproducible and never depends on
-        // the dev's saved config. WASM has no filesystem, so it always uses defaults.
+        // the dev's saved config. WASM restores saved browser-local defaults.
         let settings = {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -25,7 +25,7 @@ impl App {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                Settings::default()
+                Settings::load_or_create()
             }
         };
 
@@ -925,13 +925,19 @@ impl App {
         // reproducible regardless of the saved config.
         if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_SETTINGS") {
             app.open_settings(match tab.to_ascii_lowercase().as_str() {
-                "rendering" => SettingsPage::Rendering,
+                "render" | "rendering" => SettingsPage::Rendering,
+                "styles" => SettingsPage::Styles,
+                "materials" => SettingsPage::Materials,
                 "view" | "view-defaults" | "view-lighting" | "view-scene" => SettingsPage::View,
                 "reps" | "representations" => SettingsPage::Representations,
                 "behavior" => SettingsPage::Behavior,
                 _ => SettingsPage::Appearance,
             });
             if let Some(d) = &mut app.settings_dialog {
+                if let Some(rep) = app.scene.molecules.first().and_then(|mol| mol.reps.first()) {
+                    d.style_page = rep.kind;
+                    d.material_page = rep.material.preset();
+                }
                 d.view_page = match tab.as_str() {
                     "view-lighting" => ViewPage::Lighting,
                     "view-scene" => ViewPage::Scene,

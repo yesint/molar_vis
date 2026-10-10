@@ -87,7 +87,7 @@ fn shade(in: VsOut) -> vec4<f32> {
     }
     var lit = shade_material(in.color.rgb, n, view_dir, unpack_mat(in.mat), true, in.mat);
     lit = apply_outline(lit, n, view_dir, in.mat);
-    return vec4<f32>(select(apply_fog(lit, in.view_pos.z), lit, in.mat == MATERIAL_FLAT_OUTLINE), in.color.a);
+    return vec4<f32>(select(apply_fog(lit, in.view_pos.z), lit, material_kind(in.mat) == MATERIAL_FLAT_OUTLINE), in.color.a);
 }
 
 struct OpaqueOut {

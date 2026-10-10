@@ -138,7 +138,17 @@ centre pick and Click selection work on a ribbon / surface of any structure (all
 **View-settings hamburger** (`LIST`, right-aligned) opens a compact popup anchored
 under the button, with Camera / Lighting / Scene tabs. It contains only the **View**
 page. **Edit → Settings** opens the full movable settings window and reopens its
-last-used section. Both presentations use the same `settings_page_view` controls.
+last-used section. Its sections are Appearance, Render, View, Representations, Styles,
+Materials, and Behavior. Styles edits geometry defaults for every style (including
+interaction detection), while Materials uses the same preview-asset picker as the
+representation row. Relevant shader sliders sit beside a live glycine VdW preview colored by element.
+Styles also shows a live preview using the viewport renderer: glycine (C, N, O, H) for atom/bond
+styles and the small crambin protein (PDB 1CRN) for Cartoon and Surface. Drag either preview
+to rotate at fixed zoom; its camera fits a rotation-invariant envelope of the
+rendered spheres, bonds and mesh.
+Choosing a style/material in these editors does not switch the scene's representation
+styles/materials; changing its options updates matching representations.
+Both presentations use the same `settings_page_view` controls.
 The popup closes on an outside click, except when a child dropdown/color picker
 owns that click; the full window closes with its X button or Escape.
 
@@ -148,7 +158,7 @@ The shared footer contains exactly **Default / Revert / Save** on every tab:
 - **Revert** restores the settings captured when the dialog opened, including distinct
   per-representation and playback values and previously detected bonds. Save does not
   move this baseline. Camera position, orientation, and zoom are not reset.
-- **Save** persists all current settings as defaults for future sessions, while keeping
+- **Save** persists all current settings as defaults for future sessions (native config file or browser localStorage), while keeping
   the editor open. Closing keeps live changes and does not save them as defaults.
 
 View controls include projection, frame fill (used on the next framing action), fog,

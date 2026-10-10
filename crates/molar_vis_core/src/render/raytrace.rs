@@ -327,7 +327,7 @@ impl RtScene {
                 };
 
                 for &off in &offsets {
-                    let envelope_group = if geom.cylinders.iter().any(|c| c.color >> 24 < 255) {
+                    let envelope_group = if super::envelope::needed_primitives(geom.spheres, geom.cylinders) {
                         let group = next_envelope_group;
                         next_envelope_group += 1;
                         group
@@ -1581,8 +1581,8 @@ mod tests {
         scene.add(raw, &crate::settings::RepDefaults::default());
         let mol = &mut scene.molecules[0];
         mol.reps.clear();
-        for material in [Material::Transparent, Material::Glass, Material::Opaque] {
-            let mut rep = Representation::new(RepKind::BallAndStick);
+        for (kind, material) in [(RepKind::BallAndStick, Material::Transparent), (RepKind::BallAndStick, Material::Glass), (RepKind::BallAndStick, Material::Opaque), (RepKind::Vdw, Material::Transparent)] {
+            let mut rep = Representation::new(kind);
             rep.material = material;
             rep.sel = Some(mol.data.select_all());
             mol.reps.push(rep);
@@ -1591,8 +1591,8 @@ mod tests {
         let data = RtScene::gather(&scene, view, false);
         let sphere_groups: std::collections::BTreeSet<_> = data.spheres.iter().map(|s| s.m[2]).collect();
         let bond_groups: std::collections::BTreeSet<_> = data.cylinders.iter().map(|c| c.m[3] >> 1).collect();
-        assert_eq!(sphere_groups, [0, 1, 2].into_iter().collect());
-        assert_eq!(bond_groups, sphere_groups);
+        assert_eq!(sphere_groups, [0, 1, 2, 3].into_iter().collect());
+        assert_eq!(bond_groups, [0, 1, 2].into_iter().collect());
         assert!(data.cylinders.iter().all(|c| c.m[3] & 1 == 0));
     }
 

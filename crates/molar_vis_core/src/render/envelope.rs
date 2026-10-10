@@ -157,7 +157,11 @@ pub(super) fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 pub(super) fn needed(geom: &GeometryData) -> bool {
-    geom.cylinders.iter().any(|c| c.color >> 24 < 255)
+    needed_primitives(&geom.spheres, &geom.cylinders)
+}
+pub(super) fn needed_primitives(spheres: &[super::SphereInstance], cylinders: &[super::CylinderInstance]) -> bool {
+    spheres.iter().any(|s| s.color >> 24 < 255)
+        || cylinders.iter().any(|c| c.color >> 24 < 255 || c.color1 >> 24 < 255)
 }
 /// Keep oversized reps on the existing transparency path instead of exceeding a
 /// device's storage binding limit (particularly the smaller WebGPU limits).
@@ -401,6 +405,17 @@ mod tests {
                     ([0.0, 0.0, 0.2], 0, false, false),
                 ],
             );
+            let mut spheres = geometry();
+            spheres.cylinders.clear();
+            let mut inner = spheres.spheres[0];
+            inner.radius = 0.1;
+            inner.center = [0.0, 0.0, 0.025];
+            spheres.spheres.push(inner);
+            assert!(needed(&spheres));
+            run_cases(&rs, &spheres, view, &[
+                ([0.0, 0.0, 0.125], 1, false, true),
+                ([0.0, 0.0, 0.2], 0, false, false),
+            ]);
             let mut shifted = geometry();
             shifted.cylinders.truncate(1);
             shifted.cylinders[0].radius = 0.05;

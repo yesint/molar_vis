@@ -19,4 +19,5 @@ pub use loader::{load_records, load_with, RawMolecule};
 #[cfg(test)]
 pub use loader::load;
 #[cfg(target_arch = "wasm32")]
-pub use loader::{load_from_bytes, load_records_from_bytes};
+pub use loader::load_records_from_bytes;
+pub use loader::load_from_bytes;

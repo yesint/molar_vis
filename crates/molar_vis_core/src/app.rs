@@ -265,6 +265,8 @@ enum SettingsPage {
     Rendering,
     View,
     Representations,
+    Styles,
+    Materials,
     Behavior,
 }
 
@@ -372,6 +374,9 @@ struct SettingsDialog {
     playback_changed: bool,
     tab: SettingsPage,
     view_page: ViewPage,
+    style_page: RepKind,
+    material_page: Material,
+    preview: Option<settings_dialog::SettingsPreview>,
     popup: bool,
     anchor: egui::Rect,
     last_rect: Option<egui::Rect>,

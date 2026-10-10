@@ -10,7 +10,7 @@
 //! reproduces the old behavior, and older/newer files still load (missing fields
 //! default, unknown fields are ignored). The native file IO (`load_or_create` /
 //! `save`, using the platform config dir) is the only `#[cfg(not(wasm))]` part;
-//! the browser build keeps settings in memory.
+//! the browser build stores saved settings in localStorage.
 //!
 //! The settings editor applies all changes to the running app immediately. Save
 //! explicitly writes startup defaults; Revert restores the opening snapshot.
@@ -183,6 +183,12 @@ pub struct RepDefaults {
     pub selection: String,
     /// Default Surface grid-quality level (applied when `kind == Surface`).
     pub surface_quality: u32,
+    /// Geometry defaults for individually edited styles; omitted styles use factory values.
+    pub styles: Vec<crate::geometry::RepParams>,
+    /// Shader defaults for individually edited material presets.
+    pub materials: Vec<Material>,
+    #[serde(with = "crate::history::SsAlgorithmDef")]
+    pub ss_algo: molar::prelude::SsAlgorithm,
 }
 
 impl Default for RepDefaults {
@@ -193,7 +199,25 @@ impl Default for RepDefaults {
             material: Material::Opaque,
             selection: "all".to_string(),
             surface_quality: 2,
+            styles: Vec::new(),
+            materials: Vec::new(),
+            ss_algo: molar::prelude::SsAlgorithm::default(),
         }
+    }
+}
+
+impl RepDefaults {
+    pub fn style_params(&self, kind: RepKind) -> crate::geometry::RepParams {
+        self.styles.iter().find(|p| p.kind() == kind).copied().unwrap_or_else(|| {
+            let mut params = crate::geometry::RepParams::for_kind(kind);
+            if let crate::geometry::RepParams::Surface { quality, .. } = &mut params {
+                *quality = self.surface_quality;
+            }
+            params
+        })
+    }
+    pub fn material_for(&self, preset: Material) -> Material {
+        self.materials.iter().find(|m| m.preset() == preset.preset()).copied().unwrap_or(preset)
     }
 }
 
@@ -303,7 +327,7 @@ impl Default for Settings {
     }
 }
 
-// --- Native file IO (the platform config dir). WASM keeps settings in memory. ---
+// --- Native file IO (the platform config dir); browser localStorage is below. ---
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Settings {
@@ -460,5 +484,71 @@ mod tests {
         assert_eq!(s.rendering.shadow_res, 2048); // untouched → default
         assert_eq!(s.behavior.traj_fps, 30.0);
         assert_eq!(s.behavior.bond_factor, BondParams::default().factor); // default
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Settings {
+    pub fn load_or_create() -> Self {
+        let loaded = (|| {
+            let storage = web_sys::window()?.local_storage().ok()??;
+            let text = storage.get_item("molar_vis.settings").ok()??;
+            serde_json::from_str(&text).ok()
+        })();
+        loaded.unwrap_or_default()
+    }
+    pub fn save(&self) -> std::io::Result<()> {
+        let error = |message: String| std::io::Error::other(message);
+        let storage = web_sys::window().ok_or_else(|| error("Browser window unavailable".into()))?
+            .local_storage().map_err(|e| error(format!("{e:?}")))?
+            .ok_or_else(|| error("Browser storage unavailable".into()))?;
+        let text = serde_json::to_string_pretty(self).map_err(|e| error(e.to_string()))?;
+        storage.set_item("molar_vis.settings", &text).map_err(|e| error(format!("{e:?}")))
+    }
+}
+
+#[cfg(test)]
+mod shader_style_persistence_tests {
+    use super::*;
+    use crate::{geometry::RepParams, history::RepState, scene::Representation};
+
+    #[test]
+    fn edited_defaults_survive_settings_and_session_round_trips() {
+        let mut settings = Settings::default();
+        settings.reps.styles = RepKind::ALL.iter().map(|&kind| RepParams::for_kind(kind)).collect();
+        settings.reps.styles.retain(|p| p.kind() != RepKind::Licorice);
+        settings.reps.styles.push(RepParams::Licorice { bond_radius: 0.08, bond_color_blend: 0.65 });
+        settings.reps.ss_algo = molar::prelude::SsAlgorithm::Dss;
+        for material in Material::ALL {
+            let mut options = material.options();
+            options.opacity = 0.42;
+            options.specular = 0.72;
+            options.shininess = 0.82;
+            options.outline_width = 0.75;
+            settings.reps.materials.push(material.with_options(options));
+        }
+        let restored: Settings = serde_json::from_str(&serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+        assert_eq!(settings, restored);
+        for kind in RepKind::ALL {
+            for material in Material::ALL {
+                let defaults = RepDefaults { kind, material, ..restored.reps.clone() };
+                let rep = Representation::from_defaults(&defaults);
+                assert_eq!(rep.params, restored.reps.style_params(kind));
+                assert_eq!(rep.material.options().opacity, 0.42);
+                assert_eq!(rep.material.options().specular, 0.72);
+                assert_eq!(rep.ss_algo, molar::prelude::SsAlgorithm::Dss);
+                let snapshot = RepState::capture(&rep);
+                let saved: RepState = serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+                let loaded = saved.to_representation();
+                assert_eq!(loaded.params, rep.params);
+                assert_eq!(loaded.material, rep.material);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_surface_quality_remains_a_default_until_style_is_edited() {
+        let restored: Settings = serde_json::from_str(r#"{"reps":{"surface_quality":4}}"#).unwrap();
+        assert!(matches!(restored.reps.style_params(RepKind::Surface), RepParams::Surface { quality: 4, .. }));
     }
 }
