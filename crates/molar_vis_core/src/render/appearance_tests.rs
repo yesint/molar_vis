@@ -984,6 +984,7 @@ fn transparent_envelope_renders_duplicate_primitives_once() {
         offset: [0.0; 2],
                     profile: [0.0; 4],
                     smoothing: 0.0,
+                    color_blend: 0.0,
     };
     let mut geom = GeometryData {
         cylinders: vec![capsule],
@@ -1722,4 +1723,126 @@ fn shadow_maps_reuse_only_matching_casters_and_light_inputs() {
     scene.molecules.clear();
     capture(&mut renderer, &scene, &camera);
     assert_eq!(renderer.shadow_draw_count, 12);
+}
+
+#[test]
+#[ignore = "requires GPU; compares bond color blends and touching strands in raster and trace"]
+fn bond_color_blends_match_between_raster_and_trace() {
+    use crate::{geometry::RepKind, material::Material, scene::Representation};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mut camera = Camera::frame_bbox(Vec3::new(-0.6, -0.5, -0.15), Vec3::new(0.6, 0.5, 0.15), 0.8);
+    camera.orientation = glam::Quat::IDENTITY;
+    camera.projection = Projection::Orthographic;
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    camera.background = crate::camera::Background::for_theme(false);
+    let mut mixed_counts = Vec::new();
+    for blend in [0.0, 0.5, 1.0] {
+        let mut geom = GeometryData::default();
+        for count in 1..=3 {
+            let radius = 0.08 / count as f32;
+            for strand in 0..count {
+                geom.cylinders.push(CylinderInstance {
+                    p0: [-0.4, (count as f32 - 2.0) * 0.3, 0.0],
+                    p1: [0.4, (count as f32 - 2.0) * 0.3, 0.0],
+                    radius,
+                    color: 0xff0000ff,
+                    color1: 0xffff0000,
+                    mat: Material::AoChalky.pack_lighting(),
+                    offset: [strand as f32 - (count - 1) as f32 * 0.5, 2.0 * radius],
+                    profile: [0.0; 4],
+                    smoothing: 0.0,
+                    color_blend: blend,
+                });
+            }
+        }
+        let mol = &mut scene.molecules[0];
+        let mut rep = Representation::new(RepKind::Licorice);
+        rep.material = Material::AoChalky;
+        rep.sel = Some(mol.data.select_all());
+        rep.gpu = renderer.upload(&rs, &geom);
+        rep.cache_geometry(geom, mol.n_atoms, true, false);
+        rep.sel_dirty = false;
+        rep.geom_dirty = false;
+        rep.coords_dirty = false;
+        mol.reps = vec![rep];
+        let (raster, trace) = raster_and_trace(&mut renderer, &rs, &scene, &camera);
+        let error: f64 = raster.pixels().zip(trace.pixels()).map(|(r, t)|
+            (0..3).map(|i| r[i].abs_diff(t[i]) as f64).sum::<f64>()).sum();
+        let mae = error / (raster.width() * raster.height() * 3) as f64;
+        assert!(mae < 2.0, "bond blend {blend}: raster/trace MAE {mae}");
+        mixed_counts.push(raster.pixels().filter(|p| p[0] > 30 && p[2] > 30 && p[1] < 10).count());
+        if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+            let dir = std::path::Path::new(&dir);
+            std::fs::create_dir_all(dir).unwrap();
+            raster.save(dir.join(format!("bonds_blend_{blend}_raster.png"))).unwrap();
+            trace.save(dir.join(format!("bonds_blend_{blend}_trace.png"))).unwrap();
+        }
+    }
+    assert!(mixed_counts[0] < mixed_counts[1] && mixed_counts[1] < mixed_counts[2],
+        "increasing blend must increase the visible transition: {mixed_counts:?}");
+}
+
+#[test]
+#[ignore = "requires GPU; renders actual Ball-and-Stick multiple bonds across radius settings"]
+fn ball_and_stick_multiple_bond_radius_preview() {
+    use crate::{geometry::{self, RepKind, RepParams}, material::Material, scene::Representation};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load_records(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/ligands20.sdf")), &Default::default()).unwrap().remove(0);
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mut camera = Camera::default();
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    camera.background = crate::camera::Background::for_theme(false);
+    let mut areas = Vec::new();
+    for radius in [0.05, 0.025, 0.01] {
+        let mol = &mut scene.molecules[0];
+        let mut rep = Representation::new(RepKind::BallAndStick);
+        rep.params = RepParams::BallAndStick {
+            sphere_scale: 0.25, bond_radius: radius, bond_smoothing: 0.0, bond_color_blend: 0.0,
+        };
+        let sel = mol.data.select_all();
+        let bound = mol.data.bind_with_state(&sel, mol.render_state());
+        let geom = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params,
+            rep.color_spec(), Material::Opaque, None, true);
+        assert!(mol.bonds.iter().any(|b| b.order == molar::prelude::BondOrder::Double));
+        if radius == 0.05 {
+            let atoms: Vec<_> = geom.spheres.iter().map(|s| (Vec3::from_array(s.center), s.radius / 0.25)).collect();
+            let direction = crate::unobstructed::best_unobstructed_direction(&atoms, &[], 256);
+            camera.orientation = crate::unobstructed::look_along_quat(direction);
+            let mut bounds: Vec<_> = geom.spheres.iter().map(|s| (Vec3::from_array(s.center), s.radius)).collect();
+            for c in &geom.cylinders {
+                let extent = c.radius + (c.offset[0] * c.offset[1]).abs();
+                bounds.push((Vec3::from_array(c.p0), extent));
+                bounds.push((Vec3::from_array(c.p1), extent));
+            }
+            camera.focus_visual_bounds(&bounds, 585.0 / 687.0, 1.0);
+        }
+        rep.gpu = renderer.upload(&rs, &geom);
+        rep.sel = Some(sel);
+        rep.cache_geometry(geom, mol.n_atoms, true, false);
+        rep.sel_dirty = false; rep.geom_dirty = false; rep.coords_dirty = false;
+        mol.reps = vec![rep];
+        let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 585, 687);
+        let error: f64 = raster.pixels().zip(trace.pixels()).map(|(r, t)|
+            (0..3).map(|i| r[i].abs_diff(t[i]) as f64).sum::<f64>()).sum();
+        assert!(error / ((585 * 687 * 3) as f64) < 3.0, "radius {radius}: raster/trace mismatch");
+        areas.push(raster.pixels().filter(|p| p[0] < 240 || p[1] < 240 || p[2] < 240).count());
+        if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+            let dir = std::path::Path::new(&dir);
+            std::fs::create_dir_all(dir).unwrap();
+            raster.save(dir.join(format!("ballstick_radius_{radius}_raster.png"))).unwrap();
+            trace.save(dir.join(format!("ballstick_radius_{radius}_trace.png"))).unwrap();
+        }
+    }
+    assert!(areas[0] > areas[1] && areas[1] > areas[2], "radius must change visible bond area: {areas:?}");
 }

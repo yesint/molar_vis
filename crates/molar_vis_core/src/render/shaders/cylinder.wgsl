@@ -28,6 +28,7 @@ fn apply_fog(color: vec3<f32>, eye_z: f32) -> vec3<f32> {
 struct Instance {
     @location(7) profile: vec4<f32>,
     @location(8) smoothing: f32,
+    @location(9) color_blend: f32,
     @location(0) p0: vec3<f32>,
     @location(1) radius: f32,
     @location(2) p1: vec3<f32>,
@@ -45,6 +46,7 @@ struct VsOut {
     @location(9) @interpolate(flat) profile: vec4<f32>,
     @location(10) @interpolate(flat) shift: vec3<f32>,
     @location(11) @interpolate(flat) smoothing: f32,
+    @location(12) @interpolate(flat) color_blend: f32,
     @location(8) @interpolate(flat) instance: u32,
     @builtin(position) clip: vec4<f32>,
     @location(0) view_pos: vec3<f32>,
@@ -152,6 +154,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     out.instance = instance;
     out.profile = inst.profile;
     out.smoothing = inst.smoothing;
+    out.color_blend = inst.color_blend;
     out.shift = lane_shift;
     out.clip = camera.proj * vec4<f32>(pos, 1.0);
     // Conservative near-depth for `@early_depth_test(greater_equal)`. Keep clip.xy /
@@ -304,7 +307,11 @@ fn compute_hit(in: VsOut) -> Hit {
     let hit = ro + best_t * rd;
     // Two-tone (VMD half-bond) color: the p0 half up to the midpoint, then p1.
     let h_final = dot(hit - in.base, ua);
-    let base_color = select(in.color, in.color1, h_final >= in.seg_len * 0.5);
+    var t = select(0.0, 1.0, h_final >= in.seg_len * 0.5);
+    if (in.color_blend > 0.0) {
+        t = clamp((h_final / max(in.seg_len, 1e-9) - 0.5) / in.color_blend + 0.5, 0.0, 1.0);
+    }
+    let base_color = mix(in.color, in.color1, t);
     let clip = camera.proj * vec4<f32>(hit, 1.0);
 
     // Per-material Blinn-Phong (view dir to eye: origin for perspective, +z ortho).

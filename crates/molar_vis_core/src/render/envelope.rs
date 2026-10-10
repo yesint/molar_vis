@@ -292,6 +292,7 @@ mod tests {
                     offset: [0.0; 2],
                     profile: [0.0; 4],
                     smoothing: 0.0,
+                    color_blend: 0.0,
                 },
                 CylinderInstance {
                     p0: [0.0; 3],
@@ -303,6 +304,7 @@ mod tests {
                     offset: [0.0; 2],
                     profile: [0.0; 4],
                     smoothing: 0.0,
+                    color_blend: 0.0,
                 },
             ],
             ..Default::default()

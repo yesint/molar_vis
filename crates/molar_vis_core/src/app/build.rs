@@ -22,7 +22,9 @@ pub(super) fn build_hover_detail(
         return geometry::GeometryData::default();
     };
     let bound = data.bind_with_state(&sel, state);
-    let params = RepParams::BallAndStick { sphere_scale: 0.25, bond_radius: 0.04, bond_smoothing: 0.0 };
+    let params = RepParams::BallAndStick {
+        sphere_scale: 0.25, bond_radius: 0.04, bond_smoothing: 0.0, bond_color_blend: 0.0,
+    };
     let mut geom = geometry::build(
         &bound,
         n_atoms,
@@ -684,8 +686,7 @@ pub(super) fn refresh_selection(data: &crate::moldata::MolData, rep: &mut Repres
 pub(super) struct UnobstructedAtoms {
     pub target: Vec<(glam::Vec3, f32)>,
     pub occluders: Vec<(glam::Vec3, f32)>,
-    pub min: glam::Vec3,
-    pub max: glam::Vec3,
+    pub visual_bounds: Vec<(glam::Vec3, f32)>,
 }
 
 /// Gather each atom once, refreshing only selections relevant to this view.
@@ -723,25 +724,34 @@ pub(super) fn gather_unobstructed_atoms(
     let mut out = UnobstructedAtoms {
         target: Vec::new(),
         occluders: Vec::new(),
-        min: glam::Vec3::splat(f32::INFINITY),
-        max: glam::Vec3::splat(f32::NEG_INFINITY),
+        visual_bounds: Vec::new(),
     };
     let mut seen = std::collections::HashSet::new();
     for &(mi, ri) in targets {
         let mol = &scene.molecules[mi];
-        let sel = mol.reps[ri]
+        let rep = &mol.reps[ri];
+        let sel = rep
             .sel
             .as_ref()
             .ok_or("target rep has no evaluated selection")?;
-        let bound = mol.data.bind_with_state(sel, mol.render_state());
+        let smoothed = (rep.smooth_window > 1)
+            .then(|| mol.trajectory.smoothed_state(rep.smooth_window)).flatten();
+        let bound = mol.data.bind_with_state(sel, smoothed.as_ref().unwrap_or(mol.render_state()));
         for p in bound.iter_particle() {
-            if !seen.insert((mi, p.id)) {
-                continue;
-            }
             let pos = glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z);
-            out.target.push((pos, p.atom.vdw()));
-            out.min = out.min.min(pos);
-            out.max = out.max.max(pos);
+            // Bounds belong to representations: overlapping selections may render the
+            // same atom at different sizes. Deduplicate only the visibility search.
+            let radius = rep.params.visual_radius(p.atom.vdw());
+            out.visual_bounds.push((pos, radius));
+            if seen.insert((mi, p.id)) {
+                out.target.push((pos, p.atom.vdw()));
+            }
+        }
+        if let Some(geom) = rep.cached_geometry(false) {
+            for vertex in &geom.mesh.vertices {
+                let pos = glam::Vec3::from_array(vertex.pos);
+                out.visual_bounds.push((pos, 0.0));
+            }
         }
     }
     if out.target.is_empty() {
@@ -1286,6 +1296,30 @@ mod unobstructed_tests {
     }
 
     #[test]
+    fn framing_includes_visual_radii_for_overlapping_targets() {
+        let mut scene = fixture_scene();
+        scene.molecules[0].reps = vec![rep("index 0"), rep("index 0")];
+        scene.molecules[0].reps[0].params = RepParams::Licorice {
+            bond_radius: 0.03, bond_color_blend: 0.0,
+        };
+        scene.molecules[0].reps[1].params = RepParams::Vdw { scale: 2.0 };
+        let small = gather_unobstructed_atoms(&mut scene, &[(0, 0)]).unwrap();
+        let bounds = |atoms: &UnobstructedAtoms| atoms.visual_bounds.iter().fold(
+            (glam::Vec3::splat(f32::INFINITY), glam::Vec3::splat(f32::NEG_INFINITY)),
+            |(min, max), &(p, r)| (min.min(p - glam::Vec3::splat(r)), max.max(p + glam::Vec3::splat(r))));
+        let (min, max) = bounds(&small);
+        assert!((max - min - glam::Vec3::splat(0.06)).length() < 1e-5);
+        let both = gather_unobstructed_atoms(&mut scene, &[(0, 0), (0, 1)]).unwrap();
+        assert_eq!(both.target.len(), 1);
+        let (pos, vdw) = both.target[0];
+        let (min, max) = bounds(&both);
+        assert!((min - (pos - glam::Vec3::splat(vdw * 2.0))).length() < 1e-5);
+        assert!((max - (pos + glam::Vec3::splat(vdw * 2.0))).length() < 1e-5);
+        let reverse = gather_unobstructed_atoms(&mut scene, &[(0, 1), (0, 0)]).unwrap();
+        assert_eq!(bounds(&both), bounds(&reverse));
+    }
+
+    #[test]
     fn skips_hidden_molecules_reps_and_interactions() {
         let mut scene = fixture_scene();
         let mut hidden = rep("index 3");
@@ -1378,5 +1412,86 @@ mod geometry_job_tests {
         rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
         assert!(scene.molecules[0].reps[0].gpu.has_geometry());
         assert!(scene.molecules[0].reps[0].mesh_cache.is_none());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod unobstructed_render_tests {
+    use super::*;
+    use crate::camera::{Camera, Projection};
+    use glam::Vec3;
+
+    fn bounds(spheres: &[(Vec3, f32)]) -> (Vec3, Vec3) {
+        spheres.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(min, max), &(p, r)| (min.min(p - Vec3::splat(r)), max.max(p + Vec3::splat(r))))
+    }
+
+    #[test]
+    #[ignore = "requires GPU; renders the actual unobstructed ligand fit at several viewport shapes"]
+    fn unobstructed_ligand_fits_rendered_viewport() {
+        let rs = crate::render::test_gpu();
+        let settings = Settings::default();
+        let mut renderer = SceneRenderer::new(&rs, &settings.rendering);
+        let raw = crate::data::load_records(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/ligands20.sdf")), &Default::default()).unwrap().remove(0);
+        let mut scene = Scene::default();
+        scene.add(raw, &crate::settings::RepDefaults::default());
+        let capture = |renderer: &mut SceneRenderer, scene: &Scene, camera: &Camera, w, h| {
+            let cap = renderer.capture_begin(&rs, w, h, camera.view(), camera.proj(w as f32 / h as f32),
+                camera.is_perspective(), camera.cue_uniform(), camera.ao_uniform(),
+                camera.shadow_uniform(), camera.background, camera.eye_depth_range(), scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            cap.read()
+        };
+        for kind in [RepKind::Licorice, RepKind::Vdw, RepKind::BallAndStick] {
+            let mut rep = Representation::new(kind);
+            rep.sel_text = "all".into();
+            scene.molecules[0].reps = vec![rep];
+            rebuild_dirty(&mut scene, &renderer, &settings, true, &rs, None, false);
+            let atoms = gather_unobstructed_atoms(&mut scene, &[(0, 0)]).unwrap();
+            let dir = crate::unobstructed::best_unobstructed_direction(&atoms.target, &atoms.occluders, 256);
+            let (min, max) = bounds(&atoms.visual_bounds);
+            let mut camera = Camera::frame_bbox(min, max, 0.9);
+            camera.orientation = crate::unobstructed::look_along_quat(dir);
+            camera.depth_cue.enabled = false;
+            camera.ao.enabled = false;
+            camera.shadow.enabled = false;
+            camera.background = crate::camera::Background::for_theme(false);
+            for projection in [Projection::Orthographic, Projection::Perspective] {
+                camera.projection = projection;
+                for (w, h) in [(585, 687), (320, 320), (800, 400)] {
+                    if kind == RepKind::Licorice && projection == Projection::Orthographic && w == 585 {
+                        camera.focus_bbox(min, max);
+                        let before = capture(&mut renderer, &scene, &camera, w, h);
+                        if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                            std::fs::create_dir_all(&dir).unwrap();
+                            before.save(std::path::Path::new(&dir).join("unobstructed_before.png")).unwrap();
+                        }
+                    }
+                    camera.focus_visual_bounds(&atoms.visual_bounds, w as f32 / h as f32, 1.0);
+                    let image = capture(&mut renderer, &scene, &camera, w, h);
+                    let background = image.get_pixel(0, 0).0;
+                    let is_background = |x, y| (0..3).all(|i| image.get_pixel(x, y)[i].abs_diff(background[i]) <= 1);
+                    assert!((0..w).all(|x| is_background(x, 0) && is_background(x, h - 1))
+                        && (0..h).all(|y| is_background(0, y) && is_background(w - 1, y)),
+                        "clipped image: {kind:?}/{projection:?}/{w}x{h}");
+                    let mut min_px = [w, h];
+                    let mut max_px = [0, 0];
+                    for (x, y, _) in image.enumerate_pixels() {
+                        if !is_background(x, y) {
+                            min_px[0] = min_px[0].min(x); min_px[1] = min_px[1].min(y);
+                            max_px[0] = max_px[0].max(x); max_px[1] = max_px[1].max(y);
+                        }
+                    }
+                    let fill = ((max_px[0] - min_px[0]) as f32 / w as f32)
+                        .max((max_px[1] - min_px[1]) as f32 / h as f32);
+                    assert!(fill > 0.7 && fill < 0.92, "not a tight visual fit: {kind:?}/{projection:?}/{w}x{h}: {fill}");
+                    if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                        std::fs::create_dir_all(&dir).unwrap();
+                        image.save(std::path::Path::new(&dir).join(format!("unobstructed_{kind:?}_{projection:?}_{w}x{h}.png"))).unwrap();
+                    }
+                }
+            }
+        }
     }
 }

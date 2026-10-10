@@ -32,6 +32,8 @@ pub struct CylinderInstance {
     /// Cubic spline join positions/radii; all zero for a straight capsule.
     pub profile: [f32; 4],
     pub smoothing: f32,
+    /// Fraction of bond length occupied by the color transition.
+    pub color_blend: f32,
 }
 
 impl CylinderInstance {
@@ -39,6 +41,7 @@ impl CylinderInstance {
         array_stride: std::mem::size_of::<CylinderInstance>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
+            wgpu::VertexAttribute { offset: 68, shader_location: 9, format: wgpu::VertexFormat::Float32 },
             wgpu::VertexAttribute { offset: 64, shader_location: 8, format: wgpu::VertexFormat::Float32 },
             wgpu::VertexAttribute {
                 offset: 48,

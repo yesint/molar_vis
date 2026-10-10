@@ -338,7 +338,7 @@ impl Scene {
         let mol = &mut self.molecules[mi];
         if let Some(rep) = mol.reps.first_mut() {
             rep.kind = RepKind::Lines;
-            rep.params = RepParams::Lines { width: DOCKING_LINE_WIDTH };
+            rep.params = RepParams::Lines { width: DOCKING_LINE_WIDTH, bond_color_blend: 0.0 };
             rep.sel_text = HEAVY_ATOMS.to_string();
             rep.sel_dirty = true;
         }

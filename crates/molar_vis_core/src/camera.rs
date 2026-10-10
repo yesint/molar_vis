@@ -354,6 +354,47 @@ impl Camera {
         self.distance = fit_distance(half, self.fov_y, self.fill);
     }
 
+    /// Fit rendered extents in the current camera basis and actual viewport aspect.
+    /// Each sphere bounds an atom's visual geometry, including caps and strand offsets.
+    pub(crate) fn focus_visual_bounds(&mut self, spheres: &[(Vec3, f32)], aspect: f32, zoom_out: f32) {
+        if spheres.is_empty() { return; }
+        let rotation = self.orientation.conjugate();
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for &(position, radius) in spheres {
+            let p = rotation * position;
+            min = min.min(p - Vec3::splat(radius));
+            max = max.max(p + Vec3::splat(radius));
+        }
+        let center = (min + max) * 0.5;
+        self.recenter(self.orientation * center);
+        let padding = zoom_out.max(1e-3);
+        let tan_y = (self.fov_y * 0.5).tan() * self.fill.clamp(0.1, 1.0);
+        let tan_x = tan_y * aspect.max(1e-3);
+        let mut distance = 1e-3_f32;
+        let mut scene_radius = 1e-3_f32;
+        let mut front = 0.0_f32;
+        for &(position, radius) in spheres {
+            let p = (rotation * position - center) * padding;
+            let r = radius * padding;
+            scene_radius = scene_radius.max(p.length() + r);
+            front = front.max(p.z + r);
+            let required = match self.projection {
+                Projection::Orthographic => ((p.x.abs() + r) / tan_x).max((p.y.abs() + r) / tan_y),
+                // A sphere fits behind a frustum plane when its perpendicular
+                // distance to that plane is at least its radius. This includes
+                // perspective enlargement toward the eye, including rounded caps.
+                Projection::Perspective => p.z +
+                    ((p.x.abs() + r * (1.0 + tan_x * tan_x).sqrt()) / tan_x)
+                    .max((p.y.abs() + r * (1.0 + tan_y * tan_y).sqrt()) / tan_y),
+            };
+            distance = distance.max(required);
+        }
+        self.scene_radius = scene_radius;
+        // Keep the entire target behind the near plane, even for end-on views.
+        self.distance = distance.max(front + scene_radius * 0.02);
+    }
+
     /// Make `p` the centre of rotation (VMD's `c` pick). The view does not move; later
     /// rotations turn about `p` (see [`pivot`](Self::pivot)).
     pub fn set_center(&mut self, p: Vec3) {
@@ -584,6 +625,41 @@ impl Camera {
 mod tests {
     use super::*;
     use glam::Vec4Swizzles;
+
+    #[test]
+    fn visual_fit_contains_sphere_surfaces_after_rotation_at_every_aspect() {
+        let spheres = [
+            (Vec3::new(-0.5, 0.0, 1.0), 0.12),
+            (Vec3::new(0.9, 0.4, -0.6), 0.25),
+            (Vec3::new(-0.2, -0.5, -1.5), 0.06),
+        ];
+        for orientation in [Quat::IDENTITY, Quat::from_rotation_y(0.8) * Quat::from_rotation_z(0.7)] {
+            for projection in [Projection::Orthographic, Projection::Perspective] {
+                for aspect in [0.4, 0.85, 1.0, 2.0] {
+                    for zoom_out in [1.0, 2.5] {
+                        let mut camera = Camera::default();
+                        camera.orientation = orientation;
+                        camera.projection = projection;
+                        camera.focus_visual_bounds(&spheres, aspect, zoom_out);
+                        let matrix = camera.proj(aspect) * camera.view();
+                        for &(p, r) in &spheres {
+                            for i in 0..512 {
+                                let z = 1.0 - 2.0 * (i as f32 + 0.5) / 512.0;
+                                let angle = i as f32 * 2.399963;
+                                let xy = (1.0 - z * z).sqrt();
+                                let sample = p + r * Vec3::new(xy * angle.cos(), xy * angle.sin(), z);
+                                let clip = matrix * sample.extend(1.0);
+                                let ndc = clip.truncate() / clip.w;
+                                assert!(ndc.x.abs().max(ndc.y.abs()) <= camera.fill + 1e-4
+                                    && ndc.z >= 0.0 && ndc.z <= 1.0,
+                                    "sphere clipped: {projection:?}, aspect {aspect}, zoom {zoom_out}: {ndc:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn legacy_zero_shadow_softness_uses_filtered_minimum() {

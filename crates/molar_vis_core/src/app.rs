@@ -575,7 +575,7 @@ impl App {
     }
 
     /// Set representation `(mol, rep)`'s line width in pixels. Supported by the **Lines**
-    /// style (`RepParams::Lines { width }`) and the **Interactions** style (dashed-line
+    /// style (`RepParams::Lines { width, bond_color_blend }`) and the **Interactions** style (dashed-line
     /// width, `InteractionSettings::line_width`); every other style has no line width and
     /// returns an error. Line width is screen-space (constant at any zoom, VMD-style).
     pub fn set_rep_width(&mut self, mol: usize, rep: usize, width: f32) -> Result<(), String> {
@@ -589,7 +589,7 @@ impl App {
             .get_mut(rep)
             .ok_or_else(|| format!("no rep {rep} on molecule {mol}"))?;
         match &mut r.params {
-            RepParams::Lines { width: w } => *w = width.max(1.0),
+            RepParams::Lines { width: w, .. } => *w = width.max(1.0),
             RepParams::Interactions { settings } => settings.line_width = width.max(1.0),
             _ => return Err("this representation style has no line width".to_string()),
         }
@@ -815,11 +815,10 @@ impl App {
         let build::UnobstructedAtoms {
             target,
             occluders,
-            min,
-            max,
+            visual_bounds,
         } = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
 
-        // Best direction, then orient and frame the combined target box.
+        // Best direction, then fit visual extents in that camera basis.
         #[cfg(not(target_arch = "wasm32"))]
         let gpu_dir = self.render_state.as_ref().and_then(|rs| {
             self.renderer.try_unobstructed_direction(rs, &target, &occluders, resolution)
@@ -838,12 +837,9 @@ impl App {
             started.elapsed().as_secs_f64() * 1000.0,
         );
         self.camera.orientation = crate::unobstructed::look_along_quat(dir);
-        // `zoom_out` enlarges the framed box about its centre: 1 = tight, >1 shows more
-        // of the surroundings (lateral fit and depth slab both grow, so context in front
-        // of / behind the target stays unclipped).
-        let center = (min + max) * 0.5;
-        let half = (max - min) * 0.5 * zoom_out.max(1e-3);
-        self.camera.focus_bbox(center - half, center + half);
+        let [width, height] = self.last_size;
+        self.camera.focus_visual_bounds(&visual_bounds,
+            width.max(1) as f32 / height.max(1) as f32, zoom_out);
         self.view_dirty = true;
         Ok(())
     }
@@ -924,7 +920,7 @@ impl eframe::App for App {
             self.draw_view_toolbar(ui);
             self.draw_viewport(ui, frame);
             self.draw_unobstructed_progress(&ctx);
-            self.rt.service_debug_ui_capture(&ctx);
+            // Verification screenshots must show the completed view, not the search.
             return;
         }
 

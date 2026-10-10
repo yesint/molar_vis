@@ -187,7 +187,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   come from the selected atoms; each bond is **one two-tone capsule** (`cylinders`: `p0→p1`,
   `color`=atom-a / `color1`=atom-b, split at the midpoint in the shader) — the cylinder impostor
   ray-casts a capped capsule (see the *Impostors* note), so Licorice draws atom balls only for
-  **bondless** atoms (`spheres_where`/`bonded_mask`). Computes a
+  **bondless** atoms (`spheres_where`/`bonded_mask`). `bond_color_blend` widens the color
+  transition about the midpoint (0 = sharp, 1 = full-length gradient), consistently in
+  raster and ray-traced cylinders. Lines use constant-color end segments plus an
+  interpolated middle segment. Licorice double/triple bonds divide the full tube width
+  into touching rounded strands; Ball-and-Stick scales strand thickness with its
+  bond-radius setting while keeping the distance between strand axes fixed.
+  Unobstructed-view framing projects each representation's visual radii into the chosen
+  camera basis and fits both viewport dimensions using the current aspect ratio. Perspective
+  fits include the spheres' extent toward the eye. Overlapping targets contribute each rep's size.
+  Computes a
   `SsMap` once when the rep is Cartoon or colored by SecStruct. **PBC dashed half-bonds** (gated by
   `build`'s `dashed_pbc` arg — the *Dashed wrap-around bonds* setting; when off, `pbox = None` and
   all bonds draw as plain solid half-bonds): the box is read from the bound (`BoxProvider::get_box`).

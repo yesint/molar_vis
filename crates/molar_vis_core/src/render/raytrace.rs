@@ -47,7 +47,7 @@ pub struct GpuSphere {
 }
 
 /// A **capsule** primitive (cylinder wall + a hemispherical cap at each end, like the
-/// rasterizer's bonds): `c0 = (p0.xyz, radius)`, `c1 = (p1.xyz, _)`,
+/// rasterizer's bonds): `c0 = (p0.xyz, radius)`, `c1 = (p1.xyz, color_blend)`,
 /// The high bits of `flags` store the envelope group (0 disables clipping).
 /// `m = (color_p0, mat, color_p1, flags)` — two-tone, split at the midpoint.
 /// `flags & FLAG_FLAT_ENDS` drops the caps (for stand-ins for flat-ended line quads).
@@ -363,7 +363,7 @@ impl RtScene {
                             profile: cy.profile,
                             lane: [shift.x, shift.y, shift.z, cy.smoothing],
                             c0: [p0[0], p0[1], p0[2], cy.radius],
-                            c1: [p1[0], p1[1], p1[2], 0.0],
+                            c1: [p1[0], p1[1], p1[2], cy.color_blend],
                             m: [cy.color, cy.mat, cy.color1, envelope_group << 1],
                         };
                         aabbs.push(cylinder_aabb(&gc));
@@ -1715,7 +1715,7 @@ mod tests {
         let mol = &mut scene.molecules[0];
         let mut rep = crate::scene::Representation::new(crate::geometry::RepKind::BallAndStick);
         rep.params = crate::geometry::RepParams::BallAndStick {
-            sphere_scale: 0.3, bond_radius: 0.02, bond_smoothing: 0.7,
+            sphere_scale: 0.3, bond_radius: 0.02, bond_smoothing: 0.7, bond_color_blend: 0.0,
         };
         rep.sel = Some(mol.data.select_all());
         rep.material = crate::material::Material::Transparent;

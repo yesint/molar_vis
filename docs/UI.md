@@ -192,7 +192,10 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   distinctly). The expanded settings
   panel (`draw_rep_params`) is **tabbed** — **[Style]** (per-style geometry params: VDW
   *Sphere scale*, Lines *Line width (px)*, Licorice/Ball-and-Stick radii, Cartoon ribbon
-  dims, Surface probe/quality/smoothing + SS-algorithm + Defaults; every style now has at
+  dims, Surface probe/quality/smoothing + SS-algorithm + Defaults; Lines, Licorice, and
+  Ball-and-Stick also have *Bond color blend* (0 = sharp midpoint split, 1 = gradient
+  along the full bond, intermediate values widen the transition about the midpoint).
+  The blend is saved with each rep and defaults to 0 for older sessions. Every style has at
   least one tunable so Defaults is always shown), **[Traj]** (`draw_traj_tab`: *Update every
   frame* = `rep.dynamic`; *Recompute SS every frame* = `ss_per_frame` for Cartoon/SecStruct;
   *Smooth window* = `rep.smooth_window` — odd (1=off, 3,5,7…; a half-width `DragValue` shown as the

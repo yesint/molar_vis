@@ -497,6 +497,11 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         base = unpack_color(packed);
         mat_raw = cy.m.y;
         opacity = unpack_opacity(packed);
+        if (cy.c1.w > 0.0) {
+            let t = clamp((h / max(seg, 1e-9) - 0.5) / cy.c1.w + 0.5, 0.0, 1.0);
+            base = mix(unpack_color(cy.m.x), unpack_color(cy.m.z), t);
+            opacity = mix(unpack_opacity(cy.m.x), unpack_opacity(cy.m.z), t);
+        }
         // Screen-space line quads interpolate endpoint colors continuously.
         if ((cy.m.w & 1u) != 0u) {
             let t = clamp(h / max(seg, 1e-9), 0.0, 1.0);

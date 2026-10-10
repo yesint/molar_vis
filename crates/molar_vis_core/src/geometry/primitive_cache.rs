@@ -42,7 +42,7 @@ impl PrimitiveCache {
             ids.push(p.id);
             colors.push(colorizer.color(p.atom, p.id));
             radii.push(match *params {
-                RepParams::Licorice { bond_radius } => bond_radius,
+                RepParams::Licorice { bond_radius, .. } => bond_radius,
                 _ => p.atom.vdw() * scale,
             });
         }
@@ -134,20 +134,21 @@ impl PrimitiveCache {
                 .collect();
         }
         match self.params {
-            RepParams::Licorice { bond_radius } => {
-                data.cylinders = cylinders(&lut, &self.bonds, bond_radius, pbox, None, 0.0);
+            RepParams::Licorice { bond_radius, bond_color_blend } => {
+                data.cylinders = cylinders(&lut, &self.bonds, bond_radius, pbox, None, 0.0, bond_color_blend, true);
             }
             RepParams::BallAndStick {
                 bond_radius,
                 bond_smoothing,
+                bond_color_blend,
                 ..
             } => {
                 let radii = (bond_smoothing > 0.0).then_some(self.radii.as_slice());
                 data.cylinders =
-                    cylinders(&lut, &self.bonds, bond_radius, pbox, radii, bond_smoothing);
+                    cylinders(&lut, &self.bonds, bond_radius, pbox, radii, bond_smoothing, bond_color_blend, false);
             }
-            RepParams::Lines { width } => {
-                data.lines = lines(&lut, &self.bonds, width, pbox);
+            RepParams::Lines { width, bond_color_blend } => {
+                data.lines = lines(&lut, &self.bonds, width, pbox, bond_color_blend);
                 for (i, entry) in lut.iter().enumerate() {
                     if self.bonded[i] {
                         continue;
@@ -269,18 +270,20 @@ mod tests {
         let ss = SsMap::compute(&bound, Default::default());
         for params in [
             RepParams::Vdw { scale: 0.9 },
-            RepParams::Licorice { bond_radius: 0.035 },
+            RepParams::Licorice { bond_radius: 0.035, bond_color_blend: 0.6 },
             RepParams::BallAndStick {
                 sphere_scale: 0.3,
                 bond_radius: 0.025,
                 bond_smoothing: 0.0,
+                bond_color_blend: 0.0,
             },
             RepParams::BallAndStick {
                 sphere_scale: 0.4,
                 bond_radius: 0.025,
                 bond_smoothing: 0.7,
+                bond_color_blend: 0.4,
             },
-            RepParams::Lines { width: 1.7 },
+            RepParams::Lines { width: 1.7, bond_color_blend: 0.35 },
         ] {
             for color in ColorMethod::ALL {
                 let cache = PrimitiveCache::new(

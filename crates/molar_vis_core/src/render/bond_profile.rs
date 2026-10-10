@@ -94,6 +94,7 @@ mod tests {
             sphere_scale: 0.25,
             bond_radius: 0.015,
             bond_smoothing: 0.35,
+            bond_color_blend: 0.0,
         };
         let restored: RepParams =
             serde_json::from_str(&serde_json::to_string(&enabled).unwrap()).unwrap();

@@ -98,10 +98,16 @@ pub enum RepParams {
         scale: f32,
     },
     Licorice {
+        /// Width of the color transition: 0 = sharp halves, 1 = full gradient.
+        #[serde(default)]
+        bond_color_blend: f32,
         /// Cylinder + cap radius.
         bond_radius: f32,
     },
     BallAndStick {
+        /// Width of the color transition: 0 = sharp halves, 1 = full gradient.
+        #[serde(default)]
+        bond_color_blend: f32,
         /// VDW radius multiplier for the balls.
         sphere_scale: f32,
         /// Stick radius (waist radius with smooth joins enabled).
@@ -111,6 +117,9 @@ pub enum RepParams {
         bond_smoothing: f32,
     },
     Lines {
+        /// Width of the color transition: 0 = sharp halves, 1 = full gradient.
+        #[serde(default)]
+        bond_color_blend: f32,
         /// Line width in pixels (screen-space, constant at any zoom — like VMD's
         /// line thickness).
         width: f32,
@@ -174,16 +183,37 @@ impl RepKind {
 }
 
 impl RepParams {
+    /// Conservative extent around an atom for framing before geometry is built.
+    /// Mesh caches can additionally supply their exact vertex bounds.
+    pub(crate) fn visual_radius(&self, vdw: f32) -> f32 {
+        match *self {
+            Self::Vdw { scale } => vdw * scale,
+            Self::Licorice { bond_radius, .. } => bond_radius,
+            Self::BallAndStick { sphere_scale, bond_radius, bond_smoothing, .. } => {
+                let ball = vdw * sphere_scale;
+                let strand = bond_radius * MULTI_SIZE_SCALE;
+                ball.max(bond_radius).max(strand + BALLSTICK_STRAND_GAP)
+                    + bond_smoothing.clamp(0.0, 1.0) * ball / 3.0
+            }
+            Self::Lines { .. } => LINES_CROSS_HALF_LEN,
+            Self::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } =>
+                coil_radius.max(ribbon_width.hypot(ribbon_thickness + bevel_height)),
+            Self::Surface { probe, .. } => vdw + probe,
+            Self::Interactions { .. } => 0.0,
+        }.max(0.0)
+    }
+
     pub fn for_kind(kind: RepKind) -> Self {
         match kind {
             RepKind::Vdw => RepParams::Vdw { scale: 1.0 },
-            RepKind::Licorice => RepParams::Licorice { bond_radius: 0.03 },
+            RepKind::Licorice => RepParams::Licorice { bond_radius: 0.03, bond_color_blend: 0.0 },
             RepKind::BallAndStick => RepParams::BallAndStick {
                 sphere_scale: 0.25,
                 bond_radius: 0.015,
                 bond_smoothing: 0.0,
+                bond_color_blend: 0.0,
             },
-            RepKind::Lines => RepParams::Lines { width: 1.0 },
+            RepKind::Lines => RepParams::Lines { width: 1.0, bond_color_blend: 0.0 },
             RepKind::Cartoon => RepParams::Cartoon {
                 coil_radius: 0.03,
                 ribbon_width: 0.15,
@@ -310,18 +340,18 @@ pub fn build(
             spheres: spheres(bound, &colorizer, |a| a.vdw() * scale),
             ..Default::default()
         },
-        RepParams::Licorice { bond_radius } => {
+        RepParams::Licorice { bond_radius, bond_color_blend } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
             // Bonds are drawn as capsules (rounded atom ends), which round every bonded
             // atom; only bondless atoms (ions, lone atoms) still need a ball.
             let bonded = bonded_mask(bonds, &lut);
             GeometryData {
                 spheres: spheres_where(bound, &colorizer, |_| bond_radius, |i| !bonded[i]),
-                cylinders: cylinders(&lut, bonds, bond_radius, pbox, None, 0.0),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox, None, 0.0, bond_color_blend, true),
                 ..Default::default()
             }
         }
-        RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing } => {
+        RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing, bond_color_blend } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
             let radii = (bond_smoothing > 0.0).then(|| {
                 let mut radii = vec![0.0; n_atoms];
@@ -332,13 +362,13 @@ pub fn build(
             });
             GeometryData {
                 spheres: spheres(bound, &colorizer, |a| a.vdw() * sphere_scale),
-                cylinders: cylinders(&lut, bonds, bond_radius, pbox, radii.as_deref(), bond_smoothing),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox, radii.as_deref(), bond_smoothing, bond_color_blend, false),
                 ..Default::default()
             }
         }
-        RepParams::Lines { width } => {
+        RepParams::Lines { width, bond_color_blend } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
-            let mut lines = lines(&lut, bonds, width, pbox);
+            let mut lines = lines(&lut, bonds, width, pbox, bond_color_blend);
             // Lines only draws bonds, so a selected atom with no drawn bond (an ion,
             // a lone water, …) would otherwise be invisible. VMD marks such atoms
             // with a tiny cross — emit one per bondless atom, at the same width.
@@ -654,21 +684,10 @@ const DASH_GAP: f32 = 0.015;
 /// full size).
 const MULTI_SIZE_SCALE: f32 = 0.5;
 
-/// Upper bound on a multi-order strand's tube radius (nm), = Ball-and-Stick's default
-/// stick radius × [`MULTI_SIZE_SCALE`].
-///
-/// Without it the bundle scales with the rep's own bond radius, and Licorice's fat sticks
-/// (0.03 nm, twice Ball-and-Stick's) make a double bond twice as thick **and** twice as
-/// splayed — it stops reading as one bond and just looks like two fat tubes. A double bond
-/// is a chemical annotation, so it wants a legible fixed size rather than one proportional
-/// to however thick the sticks are: capping here makes Licorice's double bonds look exactly
-/// like Ball-and-Stick's, and leaves Ball-and-Stick itself untouched.
-const MULTI_MAX_STRAND_RADIUS: f32 = 0.015 * MULTI_SIZE_SCALE;
-
-/// Cylinder strand gap (nm). The shader shifts strand `slot` by `slot * gap` along
-/// the screen-perpendicular. A double bond uses slots −1/+1, so the two tube centers
-/// sit `2·gap` apart; sized to ~2.3× the reduced tube radius is barely separated.
-const CYL_STRAND_GAP_FACTOR: f32 = 2.3;
+/// Fixed Ball-and-Stick lane spacing (nm), matching its default-radius spacing.
+/// The bond-radius slider changes tube thickness without moving the strand axes.
+/// Double bonds use slots −1/+1; triple bonds use −1/0/+1.
+const BALLSTICK_STRAND_GAP: f32 = 0.015 * MULTI_SIZE_SCALE * 2.3;
 
 /// Line strand gap in **pixels** (the line shader works in screen-px). Slots −1/+1 →
 /// the two lines are `2·gap` px apart; tuned to read as a clear double/triple.
@@ -767,6 +786,8 @@ fn cylinders(
     pbox: Option<&PeriodicBox>,
     sphere_radii: Option<&[f32]>,
     smoothing: f32,
+    color_blend: f32,
+    touching_strands: bool,
 ) -> Vec<CylinderInstance> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
@@ -778,10 +799,10 @@ fn cylinders(
     let mut push = |p0, p1, color, color1, rad: f32, offset: [f32; 2], dashed: bool, profile: [f32; 4]| {
         if dashed {
             for (s, e) in dashes(p0, p1) {
-                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, color1, mat: 0, offset, profile, smoothing });
+                v.push(CylinderInstance { p0: s, radius: rad, p1: e, color, color1, mat: 0, offset, profile, smoothing, color_blend: color_blend.clamp(0.0, 1.0) });
             }
         } else {
-            v.push(CylinderInstance { p0, radius: rad, p1, color, color1, mat: 0, offset, profile, smoothing });
+            v.push(CylinderInstance { p0, radius: rad, p1, color, color1, mat: 0, offset, profile, smoothing, color_blend: color_blend.clamp(0.0, 1.0) });
         }
     };
     for bond in bonds {
@@ -799,11 +820,15 @@ fn cylinders(
             let slots = strand_slots(bond.order);
             let multi = slots.len() > 1;
             let rad = if multi {
-                (radius * MULTI_SIZE_SCALE).min(MULTI_MAX_STRAND_RADIUS)
+                if touching_strands { radius / slots.len() as f32 }
+                else { radius * MULTI_SIZE_SCALE }
             } else {
                 radius
             };
-            let gap = if multi { rad * CYL_STRAND_GAP_FACTOR } else { 0.0 };
+            let gap = if multi {
+                if touching_strands { rad * (slots.len() - 1) as f32 }
+                else { BALLSTICK_STRAND_GAP }
+            } else { 0.0 };
             for &(slot, dash) in slots {
                 let profile = sphere_radii.filter(|_| !dash).map_or([0.0; 4], |radii| {
                     let length = glam::Vec3::from_array(pa).distance(glam::Vec3::from_array(pb));
@@ -821,13 +846,14 @@ fn lines(
     bonds: &[Bond],
     width: f32,
     pbox: Option<&PeriodicBox>,
+    color_blend: f32,
 ) -> Vec<LineVertex> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
     // Emit one half-bond segment (solid or PBC-dashed) at a screen-px offset lane.
     // `offset_px` shifts the line sideways along the segment's screen perpendicular
     // (computed per-frame in the shader). `0.0` = the single-bond center.
-    let mut push = |p0: [f32; 3], p1: [f32; 3], color, offset_px: f32, dashed: bool| {
+    let mut push = |p0: [f32; 3], p1: [f32; 3], color, color1, offset_px: f32, dashed: bool| {
         if dashed {
             for (s, e) in dashes(p0, p1) {
                 v.push(LineVertex { pos: s, color, width, offset_px });
@@ -835,7 +861,7 @@ fn lines(
             }
         } else {
             v.push(LineVertex { pos: p0, color, width, offset_px });
-            v.push(LineVertex { pos: p1, color, width, offset_px });
+            v.push(LineVertex { pos: p1, color: color1, width, offset_px });
         }
     };
     for bond in bonds {
@@ -845,14 +871,30 @@ fn lines(
             // PBC-wrapping bond → the single dashed PBC half-bonds (the rare PBC +
             // multi-order combo falls back to one strand). Otherwise split by order.
             if wrapped {
-                push(pa, a_end, ca, 0.0, true);
-                push(pb, b_end, cb, 0.0, true);
+                push(pa, a_end, ca, ca, 0.0, true);
+                push(pb, b_end, cb, cb, 0.0, true);
                 continue;
             }
             for &(slot, dash) in strand_slots(bond.order) {
                 let off = slot * LINE_STRAND_GAP_PX;
-                push(pa, a_end, ca, off, dash);
-                push(pb, b_end, cb, off, dash);
+                let blend = color_blend.clamp(0.0, 1.0);
+                if blend <= 0.0 {
+                    // Keep the same direction for both halves so their screen offsets agree.
+                    push(pa, a_end, ca, ca, off, dash);
+                    push(b_end, pb, cb, cb, off, dash);
+                } else {
+                    let a = glam::Vec3::from_array(pa);
+                    let b = glam::Vec3::from_array(pb);
+                    let lo = a.lerp(b, (1.0 - blend) * 0.5).to_array();
+                    let hi = a.lerp(b, (1.0 + blend) * 0.5).to_array();
+                    if blend < 1.0 {
+                        push(pa, lo, ca, ca, off, dash);
+                    }
+                    push(lo, hi, ca, cb, off, dash);
+                    if blend < 1.0 {
+                        push(hi, pb, cb, cb, off, dash);
+                    }
+                }
             }
         }
     }
@@ -894,6 +936,101 @@ mod material_tests {
                 }
                 assert!(data.spheres.iter().all(|s| s.color >> 24 == alpha));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bond_display_tests {
+    use super::*;
+
+    fn endpoints() -> Vec<Option<([f32; 3], u32)>> {
+        vec![Some(([0.0, 0.0, 0.0], 0xff0000ff)), Some(([1.0, 0.0, 0.0], 0xffff0000))]
+    }
+
+    #[test]
+    fn licorice_multiple_bonds_preserve_full_width_and_touch() {
+        for radius in [0.005, 0.03, 0.1] {
+            for order in [BondOrder::Double, BondOrder::Triple] {
+                let tubes = cylinders(&endpoints(), &[Bond::with_order(0, 1, order)],
+                    radius, None, None, 0.0, 0.4, true);
+                let extent = tubes.iter().map(|c| c.offset[0].abs() * c.offset[1] + c.radius)
+                    .fold(0.0_f32, f32::max);
+                assert!((extent - radius).abs() < 1e-7);
+                for pair in tubes.windows(2) {
+                    let separation = (pair[1].offset[0] - pair[0].offset[0]) * pair[0].offset[1];
+                    assert!((separation - pair[0].radius - pair[1].radius).abs() < 1e-7);
+                }
+                assert!(tubes.iter().all(|c| c.color_blend == 0.4));
+            }
+        }
+    }
+
+    #[test]
+    fn ball_and_stick_multiple_bonds_scale_thickness_without_moving_strands() {
+        for order in [BondOrder::Double, BondOrder::Triple] {
+            let mut previous_extent = 0.0;
+            let mut previous_lanes = None;
+            for radius in [0.005, 0.015, 0.025, 0.05] {
+                let tubes = cylinders(&endpoints(), &[Bond::with_order(0, 1, order)],
+                    radius, None, None, 0.0, 0.0, false);
+                let extent = tubes.iter().map(|c| c.offset[0].abs() * c.offset[1] + c.radius)
+                    .fold(0.0_f32, f32::max);
+                assert!(extent > previous_extent);
+                for tube in &tubes {
+                    assert!((tube.radius / radius - MULTI_SIZE_SCALE).abs() < 1e-6);
+                }
+                let lanes: Vec<_> = tubes.iter().map(|c| c.offset[0] * c.offset[1]).collect();
+                if let Some(previous) = &previous_lanes {
+                    assert_eq!(&lanes, previous, "bond radius must not move the strand axes");
+                }
+                previous_lanes = Some(lanes);
+                let params = RepParams::BallAndStick {
+                    sphere_scale: 0.25, bond_radius: radius, bond_smoothing: 0.0, bond_color_blend: 0.0,
+                };
+                assert!(params.visual_radius(0.17) >= extent);
+                previous_extent = extent;
+            }
+        }
+    }
+
+    #[test]
+    fn line_color_transition_covers_requested_fraction_without_gaps() {
+        for blend in [0.0, 0.25, 0.5, 1.0] {
+            let vertices = lines(&endpoints(), &[Bond::new(0, 1)], 2.0, None, blend);
+            let pieces: Vec<_> = vertices.chunks_exact(2).collect();
+            assert_eq!(pieces.first().unwrap()[0].pos[0], 0.0);
+            assert_eq!(pieces.last().unwrap()[1].pos[0], 1.0);
+            for pair in pieces.windows(2) {
+                assert_eq!(pair[0][1].pos, pair[1][0].pos);
+            }
+            let transitions: Vec<_> = pieces.iter().filter(|p| p[0].color != p[1].color).collect();
+            if blend == 0.0 {
+                assert!(transitions.is_empty());
+                assert_eq!(pieces[0][1].pos[0], 0.5);
+            } else {
+                assert_eq!(transitions.len(), 1);
+                assert_eq!(transitions[0][1].pos[0] - transitions[0][0].pos[0], blend);
+            }
+        }
+    }
+
+    #[test]
+    fn old_sessions_default_to_sharp_bonds_and_blend_round_trips() {
+        for json in [r#"{"Licorice":{"bond_radius":0.03}}"#,
+            r#"{"Lines":{"width":1.0}}"#,
+            r#"{"BallAndStick":{"sphere_scale":0.25,"bond_radius":0.015}}"#] {
+            let mut params: RepParams = serde_json::from_str(json).unwrap();
+            let blend = match &mut params {
+                RepParams::Licorice { bond_color_blend, .. }
+                | RepParams::BallAndStick { bond_color_blend, .. }
+                | RepParams::Lines { bond_color_blend, .. } => bond_color_blend,
+                _ => unreachable!(),
+            };
+            assert_eq!(*blend, 0.0);
+            *blend = 0.65;
+            let restored: RepParams = serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
+            assert_eq!(params, restored);
         }
     }
 }

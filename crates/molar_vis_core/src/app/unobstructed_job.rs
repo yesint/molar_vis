@@ -11,8 +11,7 @@ pub(super) struct ViewJob {
     started: Instant,
     cancelled: Arc<AtomicBool>,
     result: mpsc::Receiver<Result<Vec3, String>>,
-    min: Vec3,
-    max: Vec3,
+    visual_bounds: Vec<(Vec3, f32)>,
 }
 
 enum JobPoll {
@@ -55,10 +54,9 @@ impl App {
         ctx: &egui::Context,
     ) -> Result<(), String> {
         let started = Instant::now();
-        let atoms = build::gather_unobstructed_atoms(&mut self.scene, &[(mol, rep)])?;
+        let mut atoms = build::gather_unobstructed_atoms(&mut self.scene, &[(mol, rep)])?;
         self.view_dirty = true;
-        let min = atoms.min;
-        let max = atoms.max;
+        let visual_bounds = std::mem::take(&mut atoms.visual_bounds);
         let rs = self.render_state.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = cancelled.clone();
@@ -128,8 +126,7 @@ impl App {
             started,
             cancelled,
             result,
-            min,
-            max,
+            visual_bounds,
         });
         ctx.request_repaint();
         Ok(())
@@ -140,6 +137,12 @@ impl App {
         let Some(job) = self.unobstructed_job.as_ref() else {
             return false;
         };
+        // Startup searches can finish before the first viewport has been laid out.
+        // Render that first frame before using its aspect ratio to apply the fit.
+        if self.last_size.iter().any(|&size| size <= 1) {
+            ctx.request_repaint();
+            return true;
+        }
         match job.poll(ctx) {
             JobPoll::Cancelled => {
                 self.unobstructed_job = None;
@@ -151,7 +154,9 @@ impl App {
                 match result {
                     Ok(dir) => {
                         self.camera.orientation = crate::unobstructed::look_along_quat(dir);
-                        self.camera.focus_bbox(job.min, job.max);
+                        let [width, height] = self.last_size;
+                        self.camera.focus_visual_bounds(&job.visual_bounds,
+                            width.max(1) as f32 / height.max(1) as f32, 1.0);
                         self.view_dirty = true;
                     }
                     Err(e) => {
@@ -198,8 +203,7 @@ mod tests {
             started: Instant::now(),
             cancelled: cancelled.clone(),
             result,
-            min: Vec3::ZERO,
-            max: Vec3::ONE,
+            visual_bounds: vec![(Vec3::ZERO, 1.0)],
         };
         ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
@@ -227,8 +231,7 @@ mod tests {
             started: Instant::now(),
             cancelled: cancelled.clone(),
             result,
-            min: Vec3::ZERO,
-            max: Vec3::ONE,
+            visual_bounds: vec![(Vec3::ZERO, 1.0)],
         };
         assert!(!job.feedback_due());
         job.started = Instant::now() - Duration::from_millis(501);
