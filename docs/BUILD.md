@@ -218,7 +218,7 @@ built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 **Installable** — all release dependencies come from crates.io. The three Molar
 packages are pinned to `2.3.0` so Python and core molecular types match. `Cargo.lock`
 pins the full dependency graph. Install the viewer with
-`cargo install molar_vis --version 0.2.0 --locked`.
+`cargo install molar_vis --version 0.2.1 --locked`.
 For local development, use temporary `[patch.crates-io]` entries pointing to
 `../molar/molar`, `../molar/molar_ff`, `../molar/molar_python`, or
 `../egui-stylesheet`; do not commit those overrides. Publish dependency changes

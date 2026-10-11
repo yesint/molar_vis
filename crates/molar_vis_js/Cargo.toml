@@ -24,7 +24,7 @@ crate-type = ["cdylib"]
 scripting = ["molar_vis_core/scripting"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-molar_vis_core = { version = "0.2.0", path = "../molar_vis_core" }
+molar_vis_core = { version = "0.2.1", path = "../molar_vis_core" }
 # Same molar as the workspace (rev-pinned, default-features => Float = f32) so the
 # molar types unify with molar_vis_core's across the graph.
 molar = { workspace = true }

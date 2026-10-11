@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "env_logger",
  "molar_vis_core",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
@@ -2272,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_js"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -2288,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_py"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "log",
  "molar",
@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_web"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "molar_vis_core",
 ]
