@@ -30,6 +30,7 @@ pub(super) enum GroupAction {
     ShowMember(usize),
     /// Append an own rep to member `mid`.
     AddMemberRep(MolId),
+    LoadMesh(MolId),
     /// Delete the whole group — escalated (see [`GroupOutcome::escalate`]).
     DeleteGroup(GroupId),
     /// Delete one member — escalated.
@@ -434,6 +435,7 @@ impl App {
         let mut view_dirty = false;
         let mut delete: Option<usize> = None;
         let mut open_load: Option<MolId> = None;
+        let mut load_mesh = None;
         // Deferred actions from the per-molecule menu, applied after the loop so
         // they don't conflict with the `&mut` molecule borrow.
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
@@ -504,6 +506,10 @@ impl App {
                         // Per-molecule menu (replaces the lone delete button): save,
                         // periodic-box toggle, delete frames, delete molecule.
                         ui.menu_button(icon::LIST, |ui| {
+                            if ui.button(format!("{}  Load mesh…", icon::CUBE_TRANSPARENT)).clicked() {
+                                load_mesh = Some(mol.id);
+                                ui.close();
+                            }
                             #[cfg(not(target_arch = "wasm32"))]
                             if ui
                                 .button(format!("{}  Save molecule…", icon::FLOPPY_DISK))
@@ -610,15 +616,19 @@ impl App {
             // `draw_reps_for` also draws any pending selection, so "has content" is either —
             // and an empty indent would leave a dangling guide line (see `draw_group_entry`).
             let has_rows =
-                !self.scene.molecules[i].reps.is_empty() || self.scene.molecules[i].pending.is_some();
+                !self.scene.molecules[i].reps.is_empty() || self.scene.molecules[i].pending.is_some()
+                    || !self.scene.molecules[i].meshes.is_empty();
             if open && has_rows {
                 let len = self.scene.molecules[i].reps.len();
                 ui.indent(egui::Id::new(("reps", i)), |ui| {
                     view_dirty |= self.draw_reps_for(ui, i, 0, len, false);
+                    view_dirty |= self.draw_meshes_for(ui, i);
                 });
             }
             ui.add_space(4.0);
         }
+
+        if let Some(id) = load_mesh { self.load_mesh(id, ui.ctx()); }
 
         // Delete a whole group: move every member to the trash and the group to the
         // group trash (so undo can restore it), then drop the group.
@@ -854,6 +864,10 @@ impl App {
                                         |ui| {
                                             compact_actions(ui);
                                             ui.menu_button(icon::LIST, |ui| {
+                                                if ui.button(format!("{}  Load mesh…", icon::CUBE_TRANSPARENT)).clicked() {
+                                                    action = Some(GroupAction::LoadMesh(mid));
+                                                    ui.close();
+                                                }
                                                 if ui
                                                     .button(format!(
                                                         "{}  Delete molecule",
@@ -943,9 +957,10 @@ impl App {
                                 ui.indent(egui::Id::new(("ownreps", mid)), |ui| {
                                     if start < end || pending {
                                         view_dirty |= self.draw_reps_for(ui, mmi, start, end, false);
-                                    } else {
+                                    } else if self.scene.molecules[mmi].meshes.is_empty() {
                                         ui.weak("(no own representations)");
                                     }
+                                    view_dirty |= self.draw_meshes_for(ui, mmi);
                                 });
                             }
                         }
@@ -1023,6 +1038,7 @@ impl App {
                     view_dirty = true;
                 }
             }
+            Some(GroupAction::LoadMesh(mid)) => self.load_mesh(mid, ui.ctx()),
             Some(GroupAction::DeleteGroup(id)) => escalate = Some(GroupEscalation::Group(id)),
             Some(GroupAction::DeleteMember(id)) => escalate = Some(GroupEscalation::Member(id)),
         }

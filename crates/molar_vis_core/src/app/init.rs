@@ -529,6 +529,8 @@ impl App {
         let (file_tx, file_rx) = std::sync::mpsc::channel::<(String, Vec<u8>)>();
         #[cfg(target_arch = "wasm32")]
         let (traj_tx, traj_rx) = std::sync::mpsc::channel::<(MolId, String, Vec<u8>)>();
+        #[cfg(target_arch = "wasm32")]
+        let (mesh_tx, mesh_rx) = std::sync::mpsc::channel::<(MolId, String, Vec<u8>)>();
 
         // Compute these before the struct init moves `settings` in.
         let pick_mode = if std::env::var("MOLAR_VIS_DEBUG_PICK").is_ok() {
@@ -588,6 +590,10 @@ impl App {
             traj_tx,
             #[cfg(target_arch = "wasm32")]
             traj_rx,
+            #[cfg(target_arch = "wasm32")]
+            mesh_tx,
+            #[cfg(target_arch = "wasm32")]
+            mesh_rx,
             draw: None,
             last_gray_active: None,
             #[cfg(feature = "scripting")]

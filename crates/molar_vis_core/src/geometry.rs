@@ -248,6 +248,7 @@ pub struct GeometryData {
     pub spheres: Vec<SphereInstance>,
     pub cylinders: Vec<CylinderInstance>,
     pub lines: Vec<LineVertex>,
+    pub points: Vec<crate::render::PointInstance>,
     pub mesh: MeshData,
 }
 
@@ -256,12 +257,13 @@ pub(crate) struct GeometryRef<'a> {
     pub spheres: &'a [SphereInstance],
     pub cylinders: &'a [CylinderInstance],
     pub lines: &'a [LineVertex],
+    pub points: &'a [crate::render::PointInstance],
     pub mesh: &'a MeshData,
 }
 
 impl GeometryData {
     pub(crate) fn as_ref(&self) -> GeometryRef<'_> {
-        GeometryRef { spheres: &self.spheres, cylinders: &self.cylinders, lines: &self.lines, mesh: &self.mesh }
+        GeometryRef { spheres: &self.spheres, cylinders: &self.cylinders, lines: &self.lines, points: &self.points, mesh: &self.mesh }
     }
 
     /// Concatenate another geometry into this one (mesh indices are offset by the
@@ -272,6 +274,7 @@ impl GeometryData {
         self.spheres.append(&mut other.spheres);
         self.cylinders.append(&mut other.cylinders);
         self.lines.append(&mut other.lines);
+        self.points.append(&mut other.points);
         self.mesh.vertices.append(&mut other.mesh.vertices);
         self.mesh.vert_res.append(&mut other.mesh.vert_res);
         self.mesh.vert_atom.append(&mut other.mesh.vert_atom);

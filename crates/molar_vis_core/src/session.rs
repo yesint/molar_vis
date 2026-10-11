@@ -96,6 +96,8 @@ pub struct MemberSession {
     /// This member's own reps only (the shared ones live on the group).
     #[serde(default)]
     pub reps: Vec<RepState>,
+    #[serde(default)]
+    pub meshes: Vec<crate::mesh::MeshState>,
 }
 
 /// One molecule's saved state: where it came from, the full representation
@@ -113,6 +115,8 @@ pub struct MolSession {
     /// features serialize for free (see [`RepState`]).
     #[serde(default)]
     pub reps: Vec<RepState>,
+    #[serde(default)]
+    pub meshes: Vec<crate::mesh::MeshState>,
     /// Trajectory files to replay, in load order.
     #[serde(default)]
     pub traj_loads: Vec<TrajLoad>,
@@ -151,6 +155,7 @@ impl MolSession {
             visible: mol.visible,
             show_box: mol.show_box,
             reps: mol.reps.iter().map(RepState::capture).collect(),
+            meshes: mol.meshes.iter().map(|m| m.state.clone()).collect(),
             traj_loads: mol.traj_loads.clone(),
             current_frame: mol.trajectory.current,
         }
@@ -189,6 +194,7 @@ impl GroupSession {
                     record_index,
                     name: m.name.clone(),
                     reps: m.reps[ns..].iter().map(RepState::capture).collect(),
+                    meshes: m.meshes.iter().map(|m| m.state.clone()).collect(),
                 })
             })
             .collect();
@@ -244,6 +250,10 @@ impl Session {
                 "session was written by a newer build (v{} > v{VERSION}); loading best-effort",
                 session.version
             );
+        }
+        for mesh in session.molecules.iter().flat_map(|m| &m.meshes)
+            .chain(session.groups.iter().flat_map(|g| &g.members).flat_map(|m| &m.meshes)) {
+            mesh.source.validate().map_err(|e| format!("invalid mesh {} in session: {e}", mesh.name))?;
         }
         Ok(session)
     }

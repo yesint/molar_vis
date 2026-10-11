@@ -18,6 +18,7 @@ mod cylinder;
 mod envelope;
 mod line;
 mod mesh;
+mod point;
 mod raytrace;
 mod sphere;
 mod ssao;
@@ -27,6 +28,7 @@ pub(crate) mod unobstructed;
 pub use cylinder::CylinderInstance;
 pub use line::LineVertex;
 pub use mesh::MeshVertex;
+pub use point::PointInstance;
 #[cfg(not(target_arch = "wasm32"))]
 pub use mesh::PickVertex;
 pub use sphere::SphereInstance;
@@ -458,6 +460,7 @@ pub struct RepGpu {
     spheres: Option<DrawBuffer>,   // 4 verts/instance
     cylinders: Option<DrawBuffer>, // 4 verts/instance
     lines: Option<DrawBuffer>,     // vertex count (LineList)
+    points: Option<DrawBuffer>,
     mesh: Option<MeshBuffers>,     // indexed triangles (cartoon)
     envelope: Option<envelope::Gpu>,
 }
@@ -469,6 +472,7 @@ impl RepGpu {
             || self.cylinders.is_some()
             || self.lines.is_some()
             || self.mesh.is_some()
+            || self.points.is_some()
     }
 }
 
@@ -622,7 +626,7 @@ fn build_composite_pipeline(
 #[derive(Clone, PartialEq, Eq)]
 struct ShadowKey {
     camera: Vec<u8>,
-    casters: Vec<(crate::scene::MolId, usize, u64)>,
+    casters: Vec<(crate::scene::MolId, bool, usize, u64)>,
 }
 
 impl ShadowKey {
@@ -641,7 +645,12 @@ impl ShadowKey {
                 {
                     return None;
                 }
-                casters.push((mol.id, index, rep.geometry_revision));
+                casters.push((mol.id, false, index, rep.geometry_revision));
+            }
+            for (index, mesh) in mol.meshes.iter().enumerate() {
+                if !mesh.state.visible || mesh.transparent() || mesh.state.style != crate::mesh::MeshStyle::Surface { continue; }
+                if mesh.dirty { return None; }
+                casters.push((mol.id, true, index, mesh.revision));
             }
         }
         Some(Self {
@@ -689,10 +698,12 @@ pub struct SceneRenderer {
     sphere_pipeline: [wgpu::RenderPipeline; 3],
     cylinder_pipeline: [wgpu::RenderPipeline; 3],
     line_pipeline: [wgpu::RenderPipeline; 3],
+    point_pipeline: [wgpu::RenderPipeline; 3],
     mesh_pipeline: [wgpu::RenderPipeline; 3],
     sphere_shadow_pipeline: wgpu::RenderPipeline,
     cylinder_shadow_pipeline: wgpu::RenderPipeline,
     mesh_shadow_pipeline: wgpu::RenderPipeline,
+    open_mesh_shadow_pipeline: wgpu::RenderPipeline,
     oit_bgl: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
     /// SSAO: a fullscreen pass (after opaque) that reads the scene depth and
@@ -916,6 +927,9 @@ impl SceneRenderer {
         let line_pipeline = triple(&|t, dw, dc, fs| {
             line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
         });
+        let point_pipeline = triple(&|t, dw, dc, fs| {
+            point::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        });
         let mesh_pipeline = triple(&|t, dw, dc, fs| {
             mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
         });
@@ -929,6 +943,10 @@ impl SceneRenderer {
         );
         let mesh_shadow_pipeline = mesh::build_pipeline(
             device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow",
+        );
+
+        let open_mesh_shadow_pipeline = mesh::build_pipeline(
+            device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow_open",
         );
 
         // OIT resolve: a fullscreen pass that reads the accum + reveal targets
@@ -1072,10 +1090,12 @@ impl SceneRenderer {
             sphere_pipeline,
             cylinder_pipeline,
             line_pipeline,
+            point_pipeline,
             mesh_pipeline,
             sphere_shadow_pipeline,
             cylinder_shadow_pipeline,
             mesh_shadow_pipeline,
+            open_mesh_shadow_pipeline,
             oit_bgl,
             composite_pipeline,
             ssao_bgl,
@@ -1333,6 +1353,7 @@ impl SceneRenderer {
             spheres: upload_buf(device, &geom.spheres, "spheres"),
             cylinders: upload_buf(device, &geom.cylinders, "cylinders"),
             lines: upload_buf(device, &geom.lines, "lines"),
+            points: upload_buf(device, &geom.points, "points"),
             mesh: upload_mesh(device, &geom.mesh),
             envelope: self.envelope_bgl.as_ref().filter(|_| envelope::needed(geom) && envelope::fits(device, geom))
                 .map(|layout| envelope::Gpu::new(device, layout, geom)),
@@ -1355,6 +1376,7 @@ impl SceneRenderer {
         update_buf(device, queue, &mut gpu.spheres, &geom.spheres, "spheres");
         update_buf(device, queue, &mut gpu.cylinders, &geom.cylinders, "cylinders");
         update_buf(device, queue, &mut gpu.lines, &geom.lines, "lines");
+        update_buf(device, queue, &mut gpu.points, &geom.points, "points");
         update_indexed(device, queue, &mut gpu.mesh, &geom.mesh.vertices, &geom.mesh.indices);
         if let Some(layout) = self.envelope_bgl.as_ref().filter(|_| envelope::needed(geom) && envelope::fits(device, geom)) {
             match &mut gpu.envelope {
@@ -1566,10 +1588,8 @@ impl SceneRenderer {
         // device can't do OIT (WebGL2), transparent reps are drawn in the opaque pass
         // with plain alpha blending instead, so the dedicated OIT pass never runs.
         let has_transparent = scene.molecules.iter().any(|m| {
-            m.visible
-                && m.reps
-                    .iter()
-                    .any(|r| r.visible && r.material.is_transparent())
+            m.visible && (m.reps.iter().any(|r| r.visible && r.material.is_transparent())
+                || m.meshes.iter().any(|s| s.state.visible && s.transparent()))
         });
         let use_oit = has_transparent && self.oit_enabled;
 
@@ -1668,8 +1688,10 @@ impl SceneRenderer {
         // both AO and shadows are off and no material supplies intrinsic AO.
         // AO with strength 0 (when disabled) is a no-op
         // so the pass can run for shadows alone.
-        let material_ao = scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter()
-            .any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes));
+        let material_ao = scene.molecules.iter().any(|mol| mol.visible && (
+            mol.reps.iter().any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes)
+            || mol.meshes.iter().any(|m| m.state.visible && m.state.material.preset() == crate::material::Material::MolecularNodes)
+        ));
         if ao[3] > 0.5 || shadow_on || material_ao {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
             let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };
@@ -2302,6 +2324,15 @@ impl SceneRenderer {
             if !mol.visible {
                 continue;
             }
+            for mesh in &mol.meshes {
+                if !mesh.state.visible || mesh.transparent() || mesh.state.style != crate::mesh::MeshStyle::Surface { continue; }
+                if let Some(m) = &mesh.gpu.mesh {
+                    pass.set_pipeline(if mesh.closed { &self.mesh_shadow_pipeline } else { &self.open_mesh_shadow_pipeline });
+                    pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                }
+            }
             for rep in &mol.reps {
                 if !rep.visible || rep.material.is_transparent() {
                     continue;
@@ -2352,6 +2383,11 @@ impl SceneRenderer {
     /// already set by the caller).
     fn draw_glow_geom(&self, pass: &mut wgpu::RenderPass, g: &RepGpu) {
         self.bind_envelope(pass, None);
+        if let Some(p) = &g.points {
+            pass.set_pipeline(&self.point_pipeline[GLOW]);
+            pass.set_vertex_buffer(0, p.buffer.slice(..));
+            pass.draw(0..4, 0..p.count);
+        }
         if let Some(s) = &g.spheres {
             pass.set_pipeline(&self.sphere_pipeline[GLOW]);
             pass.set_vertex_buffer(0, s.buffer.slice(..));
@@ -2441,6 +2477,11 @@ impl SceneRenderer {
                 for &cam in &images[mi][j] {
                     pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
                     self.bind_envelope(pass, rep.gpu.envelope.as_ref());
+                    if let Some(p) = &rep.gpu.points {
+                        pass.set_pipeline(&self.point_pipeline[i]);
+                        pass.set_vertex_buffer(0, p.buffer.slice(..));
+                        pass.draw(0..4, 0..p.count);
+                    }
                     if let Some(s) = &rep.gpu.spheres {
                         pass.set_pipeline(&self.sphere_pipeline[i]);
                         pass.set_vertex_buffer(0, s.buffer.slice(..));
@@ -2463,6 +2504,27 @@ impl SceneRenderer {
                         pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..m.index_count, 0, 0..1);
                     }
+                }
+            }
+            pass.set_bind_group(0, &self.camera_bind_group, &[0]);
+            self.bind_envelope(pass, None);
+            for mesh in &mol.meshes {
+                if !mesh.state.visible || mesh.transparent() != transparent { continue; }
+                if let Some(points) = &mesh.gpu.points {
+                    pass.set_pipeline(&self.point_pipeline[i]);
+                    pass.set_vertex_buffer(0, points.buffer.slice(..));
+                    pass.draw(0..4, 0..points.count);
+                }
+                if let Some(lines) = &mesh.gpu.lines {
+                    pass.set_pipeline(&self.line_pipeline[i]);
+                    pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                    pass.draw(0..4, 0..lines.count / 2);
+                }
+                if let Some(m) = &mesh.gpu.mesh {
+                    pass.set_pipeline(&self.mesh_pipeline[i]);
+                    pass.set_vertex_buffer(0, m.vertices.slice(..));
+                    pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
                 }
             }
             // Periodic-box wireframe (opaque grey): the molecule-level box at the

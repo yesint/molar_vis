@@ -23,6 +23,7 @@ mod history;
 mod interactions;
 mod launch;
 mod material;
+mod mesh;
 mod minimize;
 mod moldata;
 mod pick;

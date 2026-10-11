@@ -418,6 +418,7 @@ impl App {
             mol.show_box = ms.show_box;
             mol.box_dirty = true;
             mol.reps = ms.build_reps(self.rep_defaults.kind);
+            mol.meshes = ms.meshes.iter().cloned().map(crate::mesh::Mesh::from_state).collect();
             mol.selected_rep = (!mol.reps.is_empty()).then_some(0);
 
             // Replay trajectory loads (synchronous: a session load is a discrete
@@ -484,6 +485,7 @@ impl App {
                 mol.visible = false;
                 mol.n_shared = 0;
                 mol.reps = ms.reps.iter().map(|r| r.to_representation()).collect();
+                mol.meshes = ms.meshes.iter().cloned().map(crate::mesh::Mesh::from_state).collect();
                 mol.selected_rep = (!mol.reps.is_empty()).then_some(0);
                 members.push(id);
                 loaded += 1;

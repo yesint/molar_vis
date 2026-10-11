@@ -179,6 +179,7 @@ pub struct MolState {
     pub id: MolId,
     pub visible: bool,
     pub reps: Vec<RepState>,
+    pub meshes: Vec<crate::mesh::MeshState>,
 }
 
 /// A reversible structural change to one molecule, undone/redone in place (the delta
@@ -299,6 +300,7 @@ impl EditState {
                     id: m.id,
                     visible: if m.group.is_some() { true } else { m.visible },
                     reps: m.reps[ns..].iter().map(RepState::capture).collect(),
+                    meshes: m.meshes.iter().map(|s| s.state.clone()).collect(),
                 }
             })
             .collect();
@@ -328,6 +330,9 @@ impl EditState {
                 continue;
             };
             mol.visible = ms.visible;
+            if mol.meshes.len() != ms.meshes.len() || mol.meshes.iter().zip(&ms.meshes).any(|(m, s)| m.state != *s) {
+                mol.meshes = ms.meshes.iter().cloned().map(crate::mesh::Mesh::from_state).collect();
+            }
             // Strip any group-shared prefix and reconcile this member's OWN reps only
             // (`ms.reps`); the shared reps are re-materialized from the group state
             // below. Clear the group tag — it's re-set when groups are reconciled.
@@ -510,6 +515,18 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
         };
         if om.visible != nm.visible {
             return "toggle molecule".into();
+        }
+        match nm.meshes.len().cmp(&om.meshes.len()) {
+            Greater => return "add mesh".into(),
+            Less => return "delete mesh".into(),
+            Equal => {}
+        }
+        for (o, n) in om.meshes.iter().zip(&nm.meshes) {
+            if o.visible != n.visible { return "toggle mesh".into(); }
+            if o.material != n.material { return "change mesh material".into(); }
+            if o.style != n.style { return "change mesh style".into(); }
+            if o.point_size != n.point_size || o.line_width != n.line_width { return "change mesh size".into(); }
+            if o.smoothing != n.smoothing { return "smooth mesh".into(); }
         }
         // (Structure edits — atom/bond/coordinate — are `StructEdit` steps with their
         // own labels; the document diff no longer sees them.)

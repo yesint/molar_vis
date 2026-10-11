@@ -81,6 +81,21 @@ with **Surface Nets** for a watertight, smooth mesh — no fragile analytic patc
 Per-rep **probe radius**, **grid resolution** and **smoothing** controls; scales to 100k+
 atoms. (molar's PowerSASA backend also exposes exact SASA areas + analytic SAS/SES meshes.)
 
+**Custom meshes** — use a molecule's menu → **Load mesh…** to attach a PLY mesh.
+Meshes appear below its selections with a mesh icon, a visibility toggle, a material
+selector, and a menu to **Save…** or **Delete**. Choose **Points**, **Wireframe**, or
+**Surface**: point diameter and wireframe width are adjustable from 1–10 pixels,
+independent of zoom; Surface has a 0–5 smoothing slider. Smoothing preserves colors,
+keeps open boundaries fixed, and does not change the saved source mesh.
+The importer accepts ASCII and binary
+PLY (either byte order), vertex RGB/RGBA colors, and vertex normals; it triangulates
+polygon faces and computes normals when omitted. Missing colors default to white.
+Coordinates use **nanometers**, matching the molecule's world coordinates. Meshes are
+static across trajectory frames and follow their owning molecule's visibility. They
+render in both the viewport and ray-traced images, support undo/redo, and are embedded
+in saved sessions. Saving writes binary PLY with the mesh's original colors, independent
+of the selected display material. Import and mesh downloads also work in the browser.
+
 **Materials** — eleven VMD-style presets (Opaque, Transparent, Glass, Translucent, Ghost,
 Glossy, Diffuse, Metal, and the ambient-occlusion trio AOChalky / AOShiny / AOEdgy): per-rep
 ambient / diffuse / specular / shininess (Blinn-Phong) plus **opacity** and a silhouette
@@ -256,8 +271,9 @@ The browser crate (`crates/molar_vis_web`) renders through `eframe`'s `WebRunner
 reads files in memory via molar's `FileHandler::from_reader` — no server needed, so it
 hosts on any static site. It's deployed to GitHub Pages from `.github/workflows/pages.yml`
 on every push to `main`. molar's parallelism (rayon) runs serially on wasm; trajectories load too —
-the picked file's frames stream into the viewer incrementally (no threads). File **export** and the
-on-disk **settings/session** files are native-only (the browser has no filesystem).
+the picked file's frames stream into the viewer incrementally (no threads). Molecular file **export**
+and on-disk **settings/session** files are native-only; images and PLY meshes can be downloaded
+in the browser.
 
 The browser build is also **scriptable from JavaScript** — a small API (`crates/molar_vis_js`, built
 with `wasm-pack`) that mirrors the Python module almost line-for-line, so a surrounding web page can

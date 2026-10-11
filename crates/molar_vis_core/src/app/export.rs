@@ -232,7 +232,7 @@ impl App {
 /// Wasm: hand `bytes` to the browser as a download named `name` (Blob → object URL → a
 /// synthetic `<a download>` click).
 #[cfg(target_arch = "wasm32")]
-fn trigger_download(name: &str, bytes: &[u8]) {
+pub(super) fn trigger_download(name: &str, bytes: &[u8]) {
     use wasm_bindgen::JsCast as _;
 
     let array = js_sys::Uint8Array::from(bytes);

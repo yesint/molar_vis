@@ -154,3 +154,11 @@ edges at and around the lower limit:
 WGPU_BACKEND=vulkan MOLAR_VIS_SHADOW_SWEEP=1 MOLAR_VIS_TEST_IMAGES=/tmp/shadow-check \
   cargo test -p molar_vis_core --lib smooth_surface_secondary_rays_do_not_create_triangle_patches -- --ignored --nocapture
 ```
+
+- `export_4677470_10902_4.sdf` and `export_4677470_10902_4_surface_mesh.ply` —
+  matched molecule and colored COSMO surface supplied for custom mesh tests. The
+  SDF has 72 atoms; the PLY has 2,285 vertices with normals and colors, additional
+  scientific properties, and 4,566 faces. Used for import, coordinate alignment,
+  Points/Wireframe/Surface rendering, size controls, smoothing, sessions, and undo.
+  Run the GPU regression with `cargo test -p molar_vis_core cosmo_mesh_styles_render_sizes_and_smoothing -- --ignored`;
+  raster and ray-traced images are written to `/tmp/cosmo_mesh_*.png`.

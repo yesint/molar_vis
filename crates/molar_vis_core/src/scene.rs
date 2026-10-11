@@ -578,6 +578,8 @@ pub struct Molecule {
     pub bbox_max: Vec3,
     pub visible: bool,
     pub reps: Vec<Representation>,
+    /// Static custom meshes belonging to this molecule, in world coordinates (nm).
+    pub meshes: Vec<crate::mesh::Mesh>,
     /// If this molecule is a member of a [`MolGroup`], its group id (else `None`).
     /// The flat scene treats grouped molecules like any other; only the panel and
     /// the group machinery consult this. Transient runtime state (groups are
@@ -760,6 +762,7 @@ impl Molecule {
             bbox_max,
             visible: true,
             reps: vec![Representation::from_defaults(rep_defaults)],
+            meshes: Vec::new(),
             group: None,
             n_shared: 0,
             selected_rep: Some(0),

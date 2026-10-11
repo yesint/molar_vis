@@ -283,6 +283,14 @@ pub(super) fn build_pick(
             }
         }
     }
+    for mesh in mol.meshes.iter().filter(|m| m.state.visible && !m.transparent() && m.state.style == crate::mesh::MeshStyle::Surface) {
+        let base = out.vertices.len() as u32;
+        let source = mesh.surface_source();
+        out.vertices.extend(source.vertices.iter().map(|v| crate::render::PickVertex {
+            pos: v.position, pick: [0, 0],
+        }));
+        out.indices.extend(mesh.state.source.indices.iter().map(|i| i + base));
+    }
     out
 }
 
@@ -877,6 +885,14 @@ background: bool,
     // molecule changed (its own or the partner's coords/selection).
     let mut mol_changed = vec![false; scene.molecules.len()];
     for (mi, mol) in scene.molecules.iter_mut().enumerate() {
+        for mesh in &mut mol.meshes {
+            if mesh.dirty {
+                let geom = mesh.draw_geometry();
+                renderer.update(rs, &mut mesh.gpu, &geom);
+                mesh.uploaded();
+                changed = true;
+            }
+        }
         // Only visible molecules are drawn into the pick id-buffer, so don't build
         // pick geometry for hidden ones (e.g. the N−1 unshown members of a group).
         // A hidden molecule made visible later sets `view_dirty`, re-marking it.

@@ -27,7 +27,7 @@ log.workspace = true
 molar = { workspace = true }
 rhai = { workspace = true, optional = true }
 egui-phosphor = "0.12.0"
-serde = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 egui-stylesheet = { workspace = true }
 # Pure-Rust PNG encode for "Save image" (offscreen render → file/download). Lean

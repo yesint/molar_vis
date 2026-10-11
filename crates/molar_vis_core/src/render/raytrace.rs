@@ -346,6 +346,12 @@ impl RtScene {
                         tags.push(tag(TAG_SPHERE, self.spheres.len()));
                         self.spheres.push(gs);
                     }
+                    for point in geom.points {
+                        let sphere = point_sphere(point, off, view);
+                        aabbs.push(sphere_aabb(&sphere));
+                        tags.push(tag(TAG_SPHERE, self.spheres.len()));
+                        self.spheres.push(sphere);
+                    }
                     for cy in geom.cylinders {
                         // Multi-order bonds' parallel strands are shifted by the *rasterizer's
                         // vertex shader*, from the camera, so they stay side-by-side at any angle
@@ -409,6 +415,35 @@ impl RtScene {
                             i: [i0, i1, i2, closed],
                         });
                     }
+                }
+            }
+            for mesh in mol.meshes.iter().filter(|m| m.state.visible) {
+                let geom = mesh.draw_geometry();
+                for point in &geom.points {
+                    let sphere = point_sphere(point, Vec3::ZERO, view);
+                    aabbs.push(sphere_aabb(&sphere));
+                    tags.push(tag(TAG_SPHERE, self.spheres.len()));
+                    self.spheres.push(sphere);
+                }
+                for line in geom.lines.chunks_exact(2) {
+                    if let Some(cylinder) = line_capsule(&line[0], &line[1], view) {
+                        aabbs.push(cylinder_aabb(&cylinder));
+                        tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
+                        self.cylinders.push(cylinder);
+                    }
+                }
+                let base = self.mesh_verts.len() as u32;
+                for v in &geom.mesh.vertices {
+                    self.mesh_verts.push(GpuMeshVertex {
+                        p: [v.pos[0], v.pos[1], v.pos[2], f32::from_bits(v.color)],
+                        n: [v.normal[0], v.normal[1], v.normal[2], f32::from_bits(v.mat)],
+                    });
+                }
+                for t in geom.mesh.indices.chunks_exact(3) {
+                    let (i0, i1, i2) = (base + t[0], base + t[1], base + t[2]);
+                    aabbs.push(triangle_aabb(&self.mesh_verts, i0, i1, i2));
+                    tags.push(tag(TAG_TRIANGLE, self.triangles.len()));
+                    self.triangles.push(GpuTriangle { i: [i0, i1, i2, u32::from(mesh.closed)] });
                 }
             }
             // Periodic-box wireframe: the molecule-level box (central) iff `mol.show_box`,
@@ -515,6 +550,13 @@ impl RtView {
         let clip = self.proj * self.view * p.extend(1.0);
         2.0 * clip.w.abs().max(1e-6) / (self.proj.y_axis.y.abs().max(1e-6) * self.viewport_h.max(1.0))
     }
+}
+
+/// Match the point disc's pixel diameter using a flat-shaded sphere in the tracer.
+fn point_sphere(point: &crate::render::PointInstance, offset: Vec3, view: RtView) -> GpuSphere {
+    let p = Vec3::from(point.pos) + offset;
+    let radius = (0.5 * point.size * view.world_per_px(p)).max(1e-5);
+    GpuSphere { c: [p.x, p.y, p.z, radius], m: [point.color, 0xff, 0, 0] }
 }
 
 /// One line segment as a thin capsule: the pixel width becomes a world radius at the traced
@@ -905,6 +947,7 @@ struct PreparedMolecule {
     show_box: bool,
     box_matrix: Option<[u32; 9]>,
     reps: Vec<(usize, u64, crate::scene::PeriodicParams)>,
+    meshes: Vec<(usize, u64)>,
 }
 impl PreparedKey {
     fn new(scene: &Scene, view: RtView, dashed: bool) -> Option<Self> {
@@ -927,7 +970,13 @@ impl PreparedKey {
                 reps.push((index, rep.geometry_revision, rep.periodic));
             }
             view_dependent |= box_matrix.is_some() && mol.show_box;
-            molecules.push(PreparedMolecule { id: mol.id, show_box: mol.show_box, box_matrix, reps });
+            let mut meshes = Vec::new();
+            for (index, mesh) in mol.meshes.iter().enumerate().filter(|(_, m)| m.state.visible) {
+                if mesh.dirty { return None; }
+                view_dependent |= mesh.state.style != crate::mesh::MeshStyle::Surface;
+                meshes.push((index, mesh.revision));
+            }
+            molecules.push(PreparedMolecule { id: mol.id, show_box: mol.show_box, box_matrix, reps, meshes });
         }
         Some(Self { molecules, view: view_dependent.then_some(view) })
     }
@@ -2051,4 +2100,59 @@ fn test_traversal(@builtin(global_invocation_id) id: vec3<u32>) {
         assert!(a.max.y - a.min.y >= 0.19 && a.max.z - a.min.z >= 0.19);
         assert!(a.min.x <= -0.1 && a.max.x >= 1.1);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn raytracing_respects_mesh_and_molecule_visibility() {
+        use crate::mesh::tests::{scene, triangle};
+        let mut scene = scene();
+        scene.molecules[0].meshes.push(triangle());
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h: 100.0 };
+        let gathered = RtScene::gather(&scene, view, false);
+        assert_eq!(gathered.triangles.len(), 1);
+        assert_eq!(gathered.mesh_verts.len(), 3);
+        scene.molecules[0].meshes[0].state.visible = false;
+        assert!(RtScene::gather(&scene, view, false).is_empty());
+        scene.molecules[0].meshes[0].state.visible = true;
+        scene.molecules[0].visible = false;
+        assert!(RtScene::gather(&scene, view, false).is_empty());
+    }
+    #[test]
+    fn supplied_mesh_styles_trace_the_displayed_geometry_and_track_camera_size() {
+        use crate::mesh::{tests::{scene, fixture_mesh}, MeshStyle};
+        let mut scene = scene();
+        scene.molecules[0].meshes.push(fixture_mesh());
+        let view = RtView { view: glam::Mat4::IDENTITY, proj: glam::Mat4::IDENTITY, viewport_h: 400.0 };
+        let moved = RtView { viewport_h: 800.0, ..view };
+        for style in MeshStyle::ALL {
+            let mesh = &mut scene.molecules[0].meshes[0];
+            mesh.state.style = style;
+            mesh.state.smoothing = 3;
+            mesh.uploaded();
+            let key = PreparedKey::new(&scene, view, false).unwrap();
+            let moved_key = PreparedKey::new(&scene, moved, false).unwrap();
+            assert_eq!(key == moved_key, style == MeshStyle::Surface);
+            let traced = RtScene::gather(&scene, view, false);
+            match style {
+                MeshStyle::Points => {
+                    assert_eq!(traced.spheres.len(), 2285);
+                    assert!(traced.triangles.is_empty() && traced.cylinders.is_empty());
+                    let resized = RtScene::gather(&scene, moved, false);
+                    assert!((traced.spheres[0].c[3] - 2.0 * resized.spheres[0].c[3]).abs() < 1e-6);
+                }
+                MeshStyle::Wireframe => {
+                    assert!(!traced.cylinders.is_empty());
+                    assert!(traced.triangles.is_empty() && traced.spheres.is_empty());
+                    let resized = RtScene::gather(&scene, moved, false);
+                    assert!((traced.cylinders[0].c0[3] - 2.0 * resized.cylinders[0].c0[3]).abs() < 1e-6);
+                }
+                MeshStyle::Surface => {
+                    assert_eq!(traced.triangles.len(), 4566);
+                    assert!(traced.spheres.is_empty() && traced.cylinders.is_empty());
+                    let source = scene.molecules[0].meshes[0].surface_source();
+                    assert_eq!(&traced.mesh_verts[0].p[..3], &source.vertices[0].position);
+                }
+            }
+        }
+    }
+
 }

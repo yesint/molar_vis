@@ -9,6 +9,7 @@ fn shared_shaders_validate_without_a_gpu() {
         ("cylinder", include_str!("shaders/cylinder.wgsl")),
         ("mesh", include_str!("shaders/mesh.wgsl")),
         ("line", include_str!("shaders/line.wgsl")),
+        ("point", include_str!("shaders/point.wgsl")),
         ("ssao", include_str!("shaders/ssao.wgsl")),
         ("raytrace", include_str!("shaders/raytrace.wgsl")),
     ] {
@@ -1940,4 +1941,105 @@ fn transparent_vdw_hides_enclosed_sphere_surfaces() {
         assert!(actual.pixels().any(|p| p[0] < 230), "{label}: molecule is invisible");
         actual.save(format!("/tmp/transparent_vdw_{label}.png")).unwrap();
     }
+}
+
+#[test]
+#[ignore = "requires native GPU; verifies custom mesh raster and ray-traced output"]
+fn custom_mesh_renders_colors_transparency_and_visibility() {
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = crate::mesh::tests::scene();
+    let mut mesh = crate::mesh::tests::triangle();
+    for v in &mut std::sync::Arc::make_mut(&mut mesh.state.source).vertices {
+        v.color = [255, 0, 0, 255];
+    }
+    scene.molecules[0].meshes.push(mesh);
+    let upload = |scene: &mut Scene| {
+        let mesh = &mut scene.molecules[0].meshes[0];
+        let geom = mesh.draw_geometry();
+        mesh.gpu = renderer.upload(&rs, &geom);
+        mesh.uploaded();
+    };
+    upload(&mut scene);
+    let mut camera = Camera::frame_bbox(Vec3::new(-1.0, -1.0, -0.1), Vec3::new(1.0, 1.0, 0.1), 0.8);
+    camera.projection = Projection::Orthographic;
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    camera.background = crate::camera::Background::for_theme(false);
+    let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 96, 96);
+    let red_pixels = |img: &image::RgbaImage| img.pixels().filter(|p| p[0] > 50 && p[0] > p[1].saturating_add(30) && p[0] > p[2].saturating_add(30)).count();
+    assert!(red_pixels(&raster) > 100);
+    assert!(red_pixels(&trace) > 100);
+    let opaque_pixel = *raster.get_pixel(48, 48);
+    let mesh = &mut scene.molecules[0].meshes[0];
+    mesh.state.material = crate::material::Material::Transparent;
+    mesh.dirty = true;
+    let geom = mesh.draw_geometry();
+    renderer.update(&rs, &mut mesh.gpu, &geom);
+    mesh.uploaded();
+    let (transparent, _) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 96, 96);
+    assert_ne!(*transparent.get_pixel(48, 48), opaque_pixel);
+    scene.molecules[0].meshes[0].state.visible = false;
+    let capture = |renderer: &mut SceneRenderer, scene: &Scene| {
+        let cap = renderer.capture_begin(&rs, 96, 96, camera.view(), camera.proj(1.0), camera.is_perspective(),
+            camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+            camera.eye_depth_range(), scene);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        cap.read()
+    };
+    let hidden = capture(&mut renderer, &scene);
+    assert_eq!(red_pixels(&hidden), 0);
+    scene.molecules[0].meshes[0].state.visible = true;
+    scene.molecules[0].visible = false;
+    let hidden_mol = capture(&mut renderer, &scene);
+    assert_eq!(red_pixels(&hidden_mol), 0);
+}
+
+#[test]
+#[ignore = "requires native GPU; renders the supplied COSMO SDF/PLY fixtures"]
+fn cosmo_mesh_styles_render_sizes_and_smoothing() {
+    use crate::mesh::{tests::{scene, fixture_mesh}, MeshStyle};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = scene();
+    scene.molecules[0].meshes.push(fixture_mesh());
+    let source = &scene.molecules[0].meshes[0].state.source;
+    let (min, max) = source.vertices.iter().fold((Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)), |(min, max), v| {
+        let p = Vec3::from(v.position);
+        (min.min(p), max.max(p))
+    });
+    let mut camera = Camera::frame_bbox(min, max, 0.8);
+    camera.projection = Projection::Orthographic;
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    camera.background.kind = BgKind::Solid;
+    camera.background.top = [0.0, 0.0, 0.0, 1.0];
+    camera.background.bottom = [0.0, 0.0, 0.0, 1.0];
+    let mut images = Vec::new();
+    for (style, value) in [(MeshStyle::Points, 1), (MeshStyle::Points, 6),
+        (MeshStyle::Wireframe, 1), (MeshStyle::Wireframe, 6),
+        (MeshStyle::Surface, 0), (MeshStyle::Surface, 5)] {
+        let mesh = &mut scene.molecules[0].meshes[0];
+        mesh.state.style = style;
+        mesh.state.point_size = value.max(1) as f32;
+        mesh.state.line_width = value.max(1) as f32;
+        mesh.state.smoothing = value;
+        let geom = mesh.draw_geometry();
+        renderer.update(&rs, &mut mesh.gpu, &geom);
+        mesh.uploaded();
+        let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 256, 256);
+        let visible = |img: &image::RgbaImage| img.pixels().filter(|p| p[0].max(p[1]).max(p[2]) > 20).count();
+        assert!(visible(&raster) > 100, "{} {value}: raster is empty", style.label());
+        assert!(visible(&trace) > 100, "{} {value}: ray trace is empty", style.label());
+        raster.save(format!("/tmp/cosmo_mesh_{}_{value}_raster.png", style.label().to_lowercase())).unwrap();
+        trace.save(format!("/tmp/cosmo_mesh_{}_{value}_trace.png", style.label().to_lowercase())).unwrap();
+        images.push((raster, trace));
+    }
+    let visible = |img: &image::RgbaImage| img.pixels().filter(|p| p[0].max(p[1]).max(p[2]) > 20).count();
+    for first in [0, 2] {
+        assert!(visible(&images[first + 1].0) > visible(&images[first].0), "size slider must increase raster coverage");
+        assert!(visible(&images[first + 1].1) > visible(&images[first].1), "size slider must increase ray-traced coverage");
+    }
+    assert!(images[4].0.pixels().zip(images[5].0.pixels()).filter(|(a,b)| a != b).count() > 100,
+        "surface smoothing must change the rendered mesh");
 }

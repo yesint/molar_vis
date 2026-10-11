@@ -103,6 +103,10 @@ fn fs_shadow(in: VsOut) {
     if (in.normal_eye.z >= 0.0) { discard; }
 }
 
+// Arbitrary imported surfaces may be open; both sides cast shadows.
+@fragment
+fn fs_shadow_open(in: VsOut) {}
+
 @fragment
 fn fs_main(in: VsOut) -> OpaqueOut {
     let nlen = length(in.normal_eye);

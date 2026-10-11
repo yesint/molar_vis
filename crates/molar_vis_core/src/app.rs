@@ -48,6 +48,7 @@ mod draw_input;
 mod export;
 mod init;
 mod loaders;
+mod meshes;
 mod overlay;
 mod panels;
 mod pickers;
@@ -200,6 +201,10 @@ pub struct App {
     traj_tx: std::sync::mpsc::Sender<(MolId, String, Vec<u8>)>,
     #[cfg(target_arch = "wasm32")]
     traj_rx: std::sync::mpsc::Receiver<(MolId, String, Vec<u8>)>,
+    #[cfg(target_arch = "wasm32")]
+    mesh_tx: std::sync::mpsc::Sender<(MolId, String, Vec<u8>)>,
+    #[cfg(target_arch = "wasm32")]
+    mesh_rx: std::sync::mpsc::Receiver<(MolId, String, Vec<u8>)>,
     /// Active interactive-drawing session (Draw mode), or `None` when off. Mutually
     /// exclusive with the pick modes (`pick_mode`): turning Draw on forces `pick_mode
     /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
@@ -970,6 +975,11 @@ impl eframe::App for App {
             if let Ok(json) = serde_json::to_string(&self.camera) {
                 let _ = std::fs::write(&path, json);
             }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        while let Ok((id, name, bytes)) = self.mesh_rx.try_recv() {
+            self.add_mesh_bytes(id, name, &bytes);
         }
 
         // Browser file picker results: load each (filename, bytes) the async picker
