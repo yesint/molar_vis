@@ -30,7 +30,7 @@ work in it:
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the rendering pipeline and cross-cutting
   design: Strategy-A offscreen render, GPU impostors, SSAA, depth cueing, SSAO, cast shadows,
   background, the scene graph, and the dirty-flag render-skip that keeps idle at 0 GPU.
-- **[docs/MOLAR.md](docs/MOLAR.md)** — the pinned molar 2.2 API and SoA integration and molar-integration
+- **[docs/MOLAR.md](docs/MOLAR.md)** — the pinned molar 2.3 API and SoA integration and molar-integration
   details: selections, disjoint binds, trajectories, bond resolution, and the per-frame rebuild
   paths.
 - **[docs/UI.md](docs/UI.md)** — the egui UI layout: left panel, menu bar, top view toolbar,

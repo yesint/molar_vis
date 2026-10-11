@@ -4,10 +4,10 @@
 
 ## molar integration notes
 
-### Pinned molar 2.2 API
+### Pinned molar 2.3 API
 
-The workspace pins molar, molar_python, and molar_ff to the same revision (`cc225ee`)
-in `Cargo.toml`. Molar 2.2 retains the **struct-of-arrays** storage introduced in
+The workspace pins the crates.io packages molar, molar_python, and molar_ff to
+version `2.3.0` in `Cargo.toml`. Molar 2.3 retains the **struct-of-arrays** storage introduced in
 2.0/2.1. `molar_ff` now supplies a fixed Espaloma charge kernel without a general ONNX
 runtime or an `espaloma` feature flag. The viewer still gates charge computation to
 native builds. The storage API details that matter here:

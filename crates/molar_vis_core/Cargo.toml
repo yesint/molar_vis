@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["molecular", "visualization", "chemistry", "wgpu"]
+categories = ["science", "visualization"]
+description = "Molecular visualization engine with GPU rendering and scene controls"
 
 [lib]
 name = "molar_vis_core"
@@ -46,8 +51,7 @@ rfd = "0.15"
 rayon = "1"
 directories = "5"
 # espaloma partial charges (the `Charge` coloring's [Compute charges] button). Native only:
-# it bundles a ~600 kB ONNX model and pulls `tract`, neither of which belongs in the wasm
-# bundle — and the browser build has no way to obtain charges anyway. Charge *coloring*
+# the fixed Espaloma kernel runs on native builds. Charge *coloring*
 # itself is platform-independent and lives in `color.rs`.
 molar_ff = { workspace = true }
 

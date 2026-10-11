@@ -2167,8 +2167,9 @@ dependencies = [
 
 [[package]]
 name = "molar"
-version = "2.2.0"
-source = "git+https://github.com/yesint/molar.git?rev=cc225ee#cc225ee1cce77079695717e8e53da8ad2e951832"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ca8131b16b1897fcec7a97f1f974897f9708cee200f7ceaf851d41fce5a0965"
 dependencies = [
  "anyhow",
  "clap",
@@ -2193,8 +2194,9 @@ dependencies = [
 
 [[package]]
 name = "molar_ff"
-version = "2.2.0"
-source = "git+https://github.com/yesint/molar.git?rev=cc225ee#cc225ee1cce77079695717e8e53da8ad2e951832"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fb80736eed418ff9ee21c1301a84d4192660bf0e4682bbc605ff93dc09e6e70"
 dependencies = [
  "matrixmultiply",
  "molar",
@@ -2204,8 +2206,9 @@ dependencies = [
 
 [[package]]
 name = "molar_gromacs"
-version = "2.1.0"
-source = "git+https://github.com/yesint/molar.git?rev=cc225ee#cc225ee1cce77079695717e8e53da8ad2e951832"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43f77f446d637a46d0da651d6f96497733447b85b76826e6c709f7c82682a76"
 dependencies = [
  "cc",
  "libloading",
@@ -2213,8 +2216,9 @@ dependencies = [
 
 [[package]]
 name = "molar_python"
-version = "2.2.0"
-source = "git+https://github.com/yesint/molar.git?rev=cc225ee#cc225ee1cce77079695717e8e53da8ad2e951832"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d631b4480c56b36a63cd813bbd70346bbaead0f3f0fe1b35bce44eb7906dbbbc"
 dependencies = [
  "env_logger",
  "log",
@@ -2228,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "env_logger",
  "molar_vis_core",
@@ -2236,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
@@ -2268,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_js"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "console_log",
@@ -2284,7 +2288,7 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "molar",
@@ -2296,15 +2300,16 @@ dependencies = [
 
 [[package]]
 name = "molar_vis_web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "molar_vis_core",
 ]
 
 [[package]]
 name = "molly"
-version = "0.6.1"
-source = "git+https://github.com/ma3ke/molly.git#9f2fd6bcff4cdad8c4ab509a519192f89d843774"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75dccedc345e14623ecc79262729c65fb6a7262751e1ad7e4230664475c7957b"
 
 [[package]]
 name = "moxcms"
@@ -3094,7 +3099,8 @@ dependencies = [
 [[package]]
 name = "powersasa"
 version = "0.3.1"
-source = "git+https://github.com/yesint/powersasa-llm.git#2b9465029fe9da4432b4a0cf64a2d9a86621da3c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a1073b929b2cd79502edb9ed1e64aa5dd859466b696dbfe3c0fbf33eb1f4111"
 dependencies = [
  "nalgebra",
  "thiserror 2.0.19",

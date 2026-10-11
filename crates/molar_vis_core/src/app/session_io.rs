@@ -563,7 +563,7 @@ impl App {
     /// the binary); the native app starts empty and loads via the Open button.
     #[cfg(target_arch = "wasm32")]
     pub fn load_demo(&mut self) {
-        const DEMO_PDB: &[u8] = include_bytes!("../../../../tests/2lao.pdb");
+        const DEMO_PDB: &[u8] = include_bytes!("../../assets/2lao.pdb");
         match data::load_from_bytes(
             "2lao.pdb",
             DEMO_PDB.to_vec(),

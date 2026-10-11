@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["molecular", "visualization", "chemistry", "wgpu"]
+categories = ["science", "visualization"]
+description = "Interactive molecular viewer with GPU rendering, PLY meshes, and editable colors"
 
 [[bin]]
 name = "molar_vis"
@@ -15,5 +20,5 @@ path = "src/main.rs"
 scripting = ["molar_vis_core/scripting"]
 
 [dependencies]
-molar_vis_core = { path = "../molar_vis_core" }
+molar_vis_core = { version = "0.2.0", path = "../molar_vis_core" }
 env_logger = "0.11"

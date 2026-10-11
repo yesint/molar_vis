@@ -247,8 +247,13 @@ input. The impostor pipeline scales to hundreds of thousands of atoms.
 
 ## Building
 
-With a [Rust toolchain](https://rustup.rs) installed — `molar` and its `powersasa`
-dependency are pulled directly from GitHub, so no sibling checkouts are needed:
+Install the published viewer with a [Rust toolchain](https://rustup.rs):
+
+```sh
+cargo install molar_vis --version 0.2.0 --locked
+```
+
+To build from source, all dependencies come from crates.io; no sibling checkouts are needed:
 
 ```sh
 git clone https://github.com/yesint/molar_vis

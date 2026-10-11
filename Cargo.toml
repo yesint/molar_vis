@@ -3,7 +3,7 @@ members = ["crates/molar_vis_core", "crates/molar_vis", "crates/molar_vis_web", 
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Artistic-2.0"
 authors = ["Semen Yesylevskyy"]
@@ -32,19 +32,11 @@ serde_json = "1"
 #   egui-stylesheet = { path = "../egui-stylesheet" }
 # and don't commit it.
 egui-stylesheet = "0.1"
-# molar (default features => Float = f32), from GitHub so the crate is installable
-# without a local sibling checkout. molar pulls its own powersasa git dependency.
-# Pinned to Molar 2.2 revision cc225ee. This revision supplies the columnar atom and
-# bond stores, fallible distance searches, chemistry perception, the Python bindings,
-# and the fixed Espaloma charge kernel used by the viewer.
-molar = { git = "https://github.com/yesint/molar.git", rev = "cc225ee", default-features = false }
-# pymolar (PyO3 bindings), as an rlib, for the native molar_vis Python module only.
-# Same git rev as `molar` above so the molar types unify across the dependency graph.
-molar_python = { git = "https://github.com/yesint/molar.git", rev = "cc225ee" }
-# GAFF/GAFF2 atom typing + always-available Espaloma partial charges. The fixed
-# Espaloma kernel does not pull a general ONNX run time. Drives the "Compute charges"
-# button behind the `Charge` coloring scheme. Same git rev as `molar`.
-molar_ff = { git = "https://github.com/yesint/molar.git", rev = "cc225ee", default-features = false }
+# Published Molar packages use the same release so Rust and Python types unify.
+# The default coordinate precision is f32; the fixed Espaloma kernel needs no ONNX runtime.
+molar = { version = "=2.3.0", default-features = false }
+molar_python = { version = "=2.3.0" }
+molar_ff = { version = "=2.3.0", default-features = false }
 # Pure-Rust embedded scripting language for the in-app command console (native + wasm).
 # default-features=false + "std" == Rhai's own default; single-threaded (no "sync"), no time deps.
 rhai = { version = "1", default-features = false, features = ["std"] }

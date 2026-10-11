@@ -203,11 +203,10 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **2.2** (**git dep** `git = "https://github.com/yesint/molar.git"`,
-`default-features=false` → `Float=f32`; pulls `powersasa` transitively from git; **edition 2024,
-MSRV 1.85** — see [molar integration](MOLAR.md)), molar_ff **2.2** (same pinned git
-revision, `cc225ee` — GAFF/GAFF2 typing and a fixed Espaloma charge kernel without
-`tract` or a general ONNX runtime; the viewer uses it as a **native-only dependency**),
+molar **2.3.0** (crates.io, pinned with `=2.3.0`, `default-features=false` →
+`Float=f32`; **edition 2024, MSRV 1.85** — see [molar integration](MOLAR.md)),
+molar_ff **2.3.0** (same registry release — GAFF/GAFF2 typing and a fixed Espaloma
+charge kernel without `tract` or a general ONNX runtime; native-only in this viewer),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
 `../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature),
 rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
@@ -216,19 +215,14 @@ features=["std"]` — pure-Rust embedded scripting language for the console; bui
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
-**Installable** — molar and powersasa come from GitHub (no sibling checkouts, no
-`[patch]`). `Cargo.lock` pins the resolved git revisions. **`egui-stylesheet`** is a plain
-**crates.io** dep (`"0.1"`) — it's published, repo `github.com/yesint/egui-stylesheet`, local
-checkout at `../egui-stylesheet`. To develop it alongside molar_vis, temporarily add a
-`[patch.crates-io] egui-stylesheet = { path = "../egui-stylesheet" }` — but don't commit it; release
-a new version and bump the requirement here instead. To develop molar/powersasa
-locally, temporarily add a `[patch."…powersasa-llm.git"] powersasa = { path = "…" }`
-and/or point `molar` at a local path — but don't commit those. **The user's local molar
-checkout is at `../molar`** (i.e. `/home/semen/work/Projects/molar`; a git clone of
-`github.com/yesint/molar` on `master`) — edit it there, `cargo build`/commit/push it,
-then bump molar_vis's `rev` in the root `Cargo.toml` + `Cargo.lock`. The `molar` crate is
-`../molar/molar`, the PyO3 bindings `../molar/molar_python`; the local dev `[patch]` points
-at those two paths.
+**Installable** — all release dependencies come from crates.io. The three Molar
+packages are pinned to `2.3.0` so Python and core molecular types match. `Cargo.lock`
+pins the full dependency graph. Install the viewer with
+`cargo install molar_vis --version 0.2.0 --locked`.
+For local development, use temporary `[patch.crates-io]` entries pointing to
+`../molar/molar`, `../molar/molar_ff`, `../molar/molar_python`, or
+`../egui-stylesheet`; do not commit those overrides. Publish dependency changes
+first, then update the workspace's registry version requirements and lockfile.
 
 
 - Selection reference: `crates/molar_vis_js/web/selection-language.html` is included in the
