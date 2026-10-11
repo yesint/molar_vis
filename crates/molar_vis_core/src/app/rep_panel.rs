@@ -254,7 +254,7 @@ pub(super) fn draw_rep_params(
         tabs.push((SettingsTab::Color, "Color"));
     }
     tab_bar(ui, &mut rep.settings_tab, &tabs);
-    ui.separator();
+    ui.add_space(8.0);
     match rep.settings_tab {
         SettingsTab::Traj => {
             draw_traj_tab(ui, rep);

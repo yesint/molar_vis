@@ -436,8 +436,15 @@ pub(super) fn settings_page_appearance(ui: &mut egui::Ui, s: &mut Settings) {
             slider_with_edit(ui, &mut a.font_scale, 0.7..=1.6, true);
             ui.end_row();
 
-            ui.label("Accent color");
-            color_submenu(ui, "set_accent", &mut a.accent);
+            let accent_enabled = match a.theme {
+                ThemeMode::Dark => true,
+                ThemeMode::Light => false,
+                ThemeMode::System => ui.ctx().system_theme().unwrap_or(ui.ctx().theme()) == egui::Theme::Dark,
+            };
+            ui.add_enabled(accent_enabled, egui::Label::new("Accent color"));
+            ui.add_enabled_ui(accent_enabled, |ui| {
+                color_submenu(ui, "set_accent", &mut a.accent);
+            });
             ui.end_row();
         });
     ui.add_space(4.0);
@@ -532,7 +539,7 @@ pub(super) fn settings_page_view(
                     ui.end_row();
                 });
 
-            ui.separator();
+            ui.add_space(8.0);
             ui.checkbox(&mut v.depth_cue.enabled, bold_name(ui, "Depth cue (fog)"));
             let cue_on = v.depth_cue.enabled;
             egui::Grid::new("set_cue")
@@ -559,7 +566,6 @@ pub(super) fn settings_page_view(
                 });
         }
         ViewPage::Lighting => {
-            ui.separator();
             ui.checkbox(&mut v.ao.enabled, bold_name(ui, "Ambient occlusion"));
             let ao_on = v.ao.enabled;
             egui::Grid::new("set_ao")
@@ -574,7 +580,7 @@ pub(super) fn settings_page_view(
                     ui.end_row();
                 });
 
-            ui.separator();
+            ui.add_space(8.0);
             ui.checkbox(&mut v.shadow.enabled, bold_name(ui, "Cast shadows"));
             let sh_on = v.shadow.enabled;
             egui::Grid::new("set_shadow")
@@ -597,7 +603,7 @@ pub(super) fn settings_page_view(
                     );
                 });
             });
-            ui.separator();
+            ui.add_space(8.0);
             ui.label(bold_name(ui, "Ray tracing")).on_hover_text(if ray_supported { "Press R in the viewport to ray-trace the view." } else { "Ray tracing is unavailable on this device." });
             ui.add_enabled_ui(ray_supported, |ui| {
                 ui.horizontal(|ui| {
@@ -608,7 +614,6 @@ pub(super) fn settings_page_view(
 
         }
         ViewPage::Scene => {
-            ui.separator();
             ui.horizontal(|ui| {
                 ui.label(bold_name(ui, "Background"));
                 ui.radio_value(&mut v.background.kind, BgKind::Solid, "Solid");
@@ -627,7 +632,7 @@ pub(super) fn settings_page_view(
                 }
             });
 
-            ui.separator();
+            ui.add_space(8.0);
             ui.label(bold_name(ui, "Orientation axes"));
             draw_axes_widget(ui, &mut v.axes_on, &mut v.axes_corner, scene_tex);
         }
@@ -690,7 +695,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
         });
 
-    ui.separator();
+    ui.add_space(8.0);
     ui.label(bold_name(ui, "Picking"));
     egui::Grid::new("set_behavior_pick")
         .num_columns(2)
@@ -719,7 +724,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
                 });
             ui.end_row();
         });
-    ui.separator();
+    ui.add_space(8.0);
     ui.label(bold_name(ui, "Interaction aids"));
     ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
         .on_hover_text(
@@ -733,7 +738,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
              zooms to fit the selection at the current orientation.",
         );
 
-    ui.separator();
+    ui.add_space(8.0);
     ui.label(bold_name(ui, "Trajectory playback"));
     egui::Grid::new("set_behavior_traj")
         .num_columns(2)
@@ -750,7 +755,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
         });
 
-    ui.separator();
+    ui.add_space(8.0);
     ui.label(bold_name(ui, "Bond detection"));
     egui::Grid::new("set_behavior_bonds")
         .num_columns(2)
@@ -1044,7 +1049,7 @@ impl App {
                         (SettingsPage::Behavior, "Behavior"),
                     ],
                 );
-                ui.separator();
+                ui.add_space(8.0);
             }
             egui::ScrollArea::vertical()
                 .max_height(if popup { 380.0 } else { 440.0 })
@@ -1065,7 +1070,7 @@ impl App {
                     SettingsPage::Colors => settings_page_colors(ui, &mut current),
                     SettingsPage::Behavior => settings_page_behavior(ui, &mut current),
                 });
-            ui.separator();
+            ui.add_space(8.0);
             if let Some(error) = &dialog.save_error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
@@ -1357,7 +1362,7 @@ pub(super) fn settings_page_styles(
             for kind in RepKind::ALL { ui.selectable_value(selected, kind, kind.label()); }
         });
     });
-    ui.separator();
+    ui.add_space(8.0);
     let mut params = s.reps.style_params(*selected);
     let before = params;
     let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(320.0);
@@ -1432,7 +1437,7 @@ pub(super) fn settings_page_materials(
         );
         super::pickers::material_selector(ui, selected, &s.reps);
     });
-    ui.separator();
+    ui.add_space(8.0);
     let mut options = s.reps.material_for(*selected).options();
     let before = options;
     let mut reset = false;

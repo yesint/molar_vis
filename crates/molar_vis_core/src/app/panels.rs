@@ -70,7 +70,7 @@ impl App {
 
                 // FPS pinned to the panel bottom; the molecule/group list scrolls in
                 // the space above it.
-                egui::Panel::bottom("controls_fps").show_inside(ui, |ui| {
+                egui::Panel::bottom("controls_fps").show_separator_line(false).show_inside(ui, |ui| {
                     ui.add_space(4.0);
                     let dt = ui.ctx().input(|i| i.stable_dt);
                     let fps = if dt > 0.0 { 1.0 / dt } else { 0.0 };
@@ -110,6 +110,7 @@ impl App {
     /// ink-centered glyph); dropdowns/popups hang off `egui::Popup::menu`.
     pub(super) fn draw_view_toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("view_toolbar")
+            .show_separator_line(false)
             .frame(
                 egui::Frame::default()
                     .fill(ui.visuals().panel_fill)
