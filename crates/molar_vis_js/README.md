@@ -76,6 +76,12 @@ vis.set_continuous_gradient(new Uint8Array([
 ]), 0.4);
 ```
 
+Use `vis.set_color_preset(name)` to apply **Default**, **VMD**, **PyMOL**,
+**Discovery Studio**, **MOE** or **Mol\*** element, secondary-structure and continuous
+colors together. It retains the discrete palette. `await vis.color_preset()` reads
+the active preset name, or `Custom` after editing its colors. Preset colors are saved
+with the normal color preferences.
+
 Color methods use RGBA8 (`Uint8Array(4)`); the gradient takes three concatenated
 colors (`Uint8Array(12)`) and a midpoint from 0.01 to 0.99.
 `vis.reset_element_color(number)` removes an override.

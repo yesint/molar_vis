@@ -116,7 +116,7 @@ fn gradient_editor(
 ) {
     ui.push_id(id, |ui| {
         if !title.is_empty() {
-            ui.label(egui::RichText::new(title).strong());
+            ui.label(bold_name(ui, title));
         }
         let width = 400.0_f32.min(ui.available_width());
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 36.0), egui::Sense::hover());
@@ -218,18 +218,11 @@ fn gradient_editor(
     });
 }
 
-struct PropertyRanges {
-    beta: [f32; 2],
-    charge: [f32; 2],
-}
-
-fn settings_page_colors(
-    ui: &mut egui::Ui,
-    settings: &mut Settings,
-    ranges: Option<&PropertyRanges>,
-) {
+fn settings_page_colors(ui: &mut egui::Ui, settings: &mut Settings) {
     let colors = &mut settings.colors;
-    ui.label(egui::RichText::new("Elements").strong());
+    color_preset_selector(ui, colors);
+    ui.add_space(10.0);
+    ui.label(bold_name(ui, "Elements"));
     ui.horizontal_wrapped(|ui| {
         for (number, symbol) in [
             (1, "H"),
@@ -267,7 +260,7 @@ fn settings_page_colors(
         .show(ui.ctx(), |ui| periodic_table(ui, colors));
     ui.ctx().data_mut(|data| data.insert_temp(window_id, open));
     ui.add_space(10.0);
-    ui.label(egui::RichText::new("Secondary structure").strong());
+    ui.label(bold_name(ui, "Secondary structure"));
     const LABELS: [&str; 9] = [
         "α helix",
         "3₁₀ helix",
@@ -293,7 +286,7 @@ fn settings_page_colors(
             }
         });
     ui.add_space(10.0);
-    ui.label(egui::RichText::new("Continuous palette").strong());
+    ui.label(bold_name(ui, "Continuous palette"));
     gradient_editor(
         ui,
         "continuous_palette",
@@ -301,19 +294,6 @@ fn settings_page_colors(
         ["0", "Midpoint", "1"],
         &mut colors.continuous,
     );
-    if let Some(ranges) = ranges {
-        egui::Grid::new("property_endpoints")
-            .spacing([18.0, 4.0])
-            .show(ui, |ui| {
-                for (label, [low, high]) in [("B-factor", ranges.beta), ("Charge", ranges.charge)] {
-                    ui.label(label);
-                    ui.label(format!("{low:.3}"));
-                    ui.label("to");
-                    ui.label(format!("{high:.3}"));
-                    ui.end_row();
-                }
-            });
-    }
     ui.add_space(10.0);
     categorical_editor(ui, &mut colors.categorical);
     ui.add_space(8.0);
@@ -322,8 +302,32 @@ fn settings_page_colors(
     }
 }
 
+fn color_preset_selector(ui: &mut egui::Ui, colors: &mut crate::color::ColorPreferences) {
+    use crate::ColorPreset;
+    let current = colors.preset();
+    let mut selected = current;
+    ui.horizontal(|ui| {
+        ui.label(bold_name(ui, "Preset"));
+        egui::ComboBox::from_id_salt("color_preset")
+            .width(180.0)
+            .selected_text(current.map_or("Custom", ColorPreset::name))
+            .show_ui(ui, |ui| {
+                for preset in ColorPreset::ALL {
+                    ui.selectable_value(&mut selected, Some(preset), preset.name());
+                }
+            })
+            .response
+            .on_hover_text("Apply atom, secondary-structure and continuous colors");
+    });
+    if selected != current {
+        if let Some(preset) = selected {
+            preset.apply(colors);
+        }
+    }
+}
+
 fn categorical_editor(ui: &mut egui::Ui, palette: &mut Vec<[u8; 4]>) {
-    ui.label(egui::RichText::new("Discrete palette").strong());
+    ui.label(bold_name(ui, "Discrete palette"));
     let removable = palette.len() > 1;
     let mut remove = None;
     egui::Grid::new("categorical_palette_colors")
@@ -439,7 +443,7 @@ pub(super) fn settings_page_appearance(ui: &mut egui::Ui, s: &mut Settings) {
     ui.add_space(4.0);
 }
 
-/// Rendering tab: anti-aliasing (SSAA) and shadow-map resolution.
+/// Rendering tab: anti-aliasing (SSAA), shadow-map resolution, and periodic bonds.
 pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
     let r = &mut s.rendering;
     let ssaa_label = |n: u32| match n {
@@ -474,7 +478,12 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
         });
     ui.add_space(4.0);
-
+    ui.checkbox(&mut s.behavior.dashed_pbc_bonds, "Dashed wrap-around bonds")
+        .on_hover_text(
+            "Draw bonds that span a box face as dashed minimum-image half-bonds (and split \
+             cartoon ribbons at the boundary). Off draws them as plain solid bonds. Applies to \
+             the current scene.",
+        );
 }
 
 /// Shared view-style controls for current-session edits and saved defaults.
@@ -497,6 +506,7 @@ pub(super) fn settings_page_view(
     ui.add_space(8.0);
     match page {
         ViewPage::Camera => {
+            ui.label(bold_name(ui, "Projection and framing"));
             let proj_label = |p: Projection| match p {
                 Projection::Perspective => "Perspective",
                 Projection::Orthographic => "Orthographic",
@@ -523,7 +533,7 @@ pub(super) fn settings_page_view(
                 });
 
             ui.separator();
-            ui.checkbox(&mut v.depth_cue.enabled, "Depth cue (fog)");
+            ui.checkbox(&mut v.depth_cue.enabled, bold_name(ui, "Depth cue (fog)"));
             let cue_on = v.depth_cue.enabled;
             egui::Grid::new("set_cue")
                 .num_columns(2)
@@ -550,7 +560,7 @@ pub(super) fn settings_page_view(
         }
         ViewPage::Lighting => {
             ui.separator();
-            ui.checkbox(&mut v.ao.enabled, "Ambient occlusion");
+            ui.checkbox(&mut v.ao.enabled, bold_name(ui, "Ambient occlusion"));
             let ao_on = v.ao.enabled;
             egui::Grid::new("set_ao")
                 .num_columns(2)
@@ -565,7 +575,7 @@ pub(super) fn settings_page_view(
                 });
 
             ui.separator();
-            ui.checkbox(&mut v.shadow.enabled, "Cast shadows");
+            ui.checkbox(&mut v.shadow.enabled, bold_name(ui, "Cast shadows"));
             let sh_on = v.shadow.enabled;
             egui::Grid::new("set_shadow")
                 .num_columns(2)
@@ -588,7 +598,7 @@ pub(super) fn settings_page_view(
                 });
             });
             ui.separator();
-            ui.label("Ray tracing").on_hover_text(if ray_supported { "Press R in the viewport to ray-trace the view." } else { "Ray tracing is unavailable on this device." });
+            ui.label(bold_name(ui, "Ray tracing")).on_hover_text(if ray_supported { "Press R in the viewport to ray-trace the view." } else { "Ray tracing is unavailable on this device." });
             ui.add_enabled_ui(ray_supported, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Global illumination");
@@ -600,7 +610,7 @@ pub(super) fn settings_page_view(
         ViewPage::Scene => {
             ui.separator();
             ui.horizontal(|ui| {
-                ui.label("Background");
+                ui.label(bold_name(ui, "Background"));
                 ui.radio_value(&mut v.background.kind, BgKind::Solid, "Solid");
                 ui.radio_value(&mut v.background.kind, BgKind::Gradient, "Gradient");
             });
@@ -618,7 +628,7 @@ pub(super) fn settings_page_view(
             });
 
             ui.separator();
-            ui.label("Orientation axes");
+            ui.label(bold_name(ui, "Orientation axes"));
             draw_axes_widget(ui, &mut v.axes_on, &mut v.axes_corner, scene_tex);
         }
     }
@@ -667,6 +677,7 @@ pub(super) fn settings_page_reps(ui: &mut egui::Ui, s: &mut Settings) {
 /// playback, and bond-guessing thresholds.
 pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
     let b = &mut s.behavior;
+    ui.label(bold_name(ui, "Mouse"));
     egui::Grid::new("set_behavior_mouse")
         .num_columns(2)
         .spacing([16.0, 8.0])
@@ -680,7 +691,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
         });
 
     ui.separator();
-    ui.label("Picking");
+    ui.label(bold_name(ui, "Picking"));
     egui::Grid::new("set_behavior_pick")
         .num_columns(2)
         .spacing([16.0, 8.0])
@@ -709,7 +720,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
         });
     ui.separator();
-    ui.label("Interaction aids");
+    ui.label(bold_name(ui, "Interaction aids"));
     ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
         .on_hover_text(
             "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
@@ -723,7 +734,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
         );
 
     ui.separator();
-    ui.label("Trajectory playback");
+    ui.label(bold_name(ui, "Trajectory playback"));
     egui::Grid::new("set_behavior_traj")
         .num_columns(2)
         .spacing([16.0, 8.0])
@@ -740,7 +751,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
         });
 
     ui.separator();
-    ui.label("Bond detection");
+    ui.label(bold_name(ui, "Bond detection"));
     egui::Grid::new("set_behavior_bonds")
         .num_columns(2)
         .spacing([16.0, 8.0])
@@ -761,14 +772,7 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
              wrapped structure. Off (default) is much faster for large structures.",
         );
 
-    ui.separator();
-    ui.label("Periodic rendering (current scene)");
-    ui.checkbox(&mut b.dashed_pbc_bonds, "Dashed wrap-around bonds")
-        .on_hover_text(
-            "Draw bonds that span a box face as dashed minimum-image half-bonds (and split \
-             cartoon ribbons at the boundary). Off draws them as plain solid bonds. Applies to \
-             the current scene.",
-        );
+
 }
 
 /// The orientation-axes "screen" widget: a monitor-like rectangle showing a mini
@@ -1019,15 +1023,6 @@ impl App {
                 }
             }
         }
-        let color_ranges = if dialog.tab == SettingsPage::Colors { self.scene.selected_mol.and_then(|mi| self.scene.molecules.get(mi)).and_then(|mol| {
-            let rep = mol.reps.get(mol.selected_rep.unwrap_or(0))?;
-            let sel = rep.sel.as_ref()?;
-            let bound = mol.data.bind_with_state(sel, mol.render_state());
-            Some(PropertyRanges {
-                beta: crate::color::continuous_range(ColorMethod::Beta, rep.charge_kind, &bound, mol.n_atoms)?,
-                charge: crate::color::continuous_range(ColorMethod::Charge, rep.charge_kind, &bound, mol.n_atoms)?,
-            })
-        }) } else { None };
         let inner = window.show(ctx, |ui| {
             if popup {
                 ui.set_width(300.0);
@@ -1042,7 +1037,7 @@ impl App {
                         (SettingsPage::Appearance, "Appearance"),
                         (SettingsPage::Rendering, "Render"),
                         (SettingsPage::View, "View"),
-                        (SettingsPage::Representations, "Representations"),
+                        (SettingsPage::Representations, "Reps"),
                         (SettingsPage::Styles, "Styles"),
                         (SettingsPage::Materials, "Materials"),
                         (SettingsPage::Colors, "Colors"),
@@ -1067,7 +1062,7 @@ impl App {
                     SettingsPage::Representations => settings_page_reps(ui, &mut current),
                     SettingsPage::Styles => settings_page_styles(ui, &mut current, &mut dialog.style_page, dialog.preview.as_mut()),
                     SettingsPage::Materials => settings_page_materials(ui, &mut current, &mut dialog.material_page, dialog.preview.as_mut()),
-                    SettingsPage::Colors => settings_page_colors(ui, &mut current, color_ranges.as_ref()),
+                    SettingsPage::Colors => settings_page_colors(ui, &mut current),
                     SettingsPage::Behavior => settings_page_behavior(ui, &mut current),
                 });
             ui.separator();
@@ -1949,6 +1944,7 @@ mod material_preview_tests {
             assert!(stable.is_some(), "Settings window never became visible");
         }
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let input = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -2170,8 +2166,62 @@ mod colors_ui_tests {
     use super::*;
 
     #[test]
+    fn preset_dropdown_applies_colors_and_reports_custom_edits() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let mut colors = crate::ColorPreferences::default();
+        colors.categorical = vec![[10, 20, 30, 255]];
+        let palette = colors.categorical.clone();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO, egui::vec2(680.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let text_position = |output: &egui::FullOutput, label: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label =>
+                    Some(text.pos + text.galley.size() * 0.5),
+                _ => None,
+            }).unwrap_or_else(|| panic!("missing label {label}"))
+        };
+        let click = |pos| [true, false].map(|pressed| input(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]));
+        for preset in [crate::ColorPreset::Vmd, crate::ColorPreset::Molstar, crate::ColorPreset::Default] {
+            let mut output = ctx.run_ui(input(vec![]), |ui| color_preset_selector(ui, &mut colors));
+            for _ in 0..2 {
+                output = ctx.run_ui(input(vec![]), |ui| color_preset_selector(ui, &mut colors));
+            }
+            let current = colors.preset().unwrap().name();
+            for event in click(text_position(&output, current)) {
+                let _ = ctx.run_ui(event, |ui| color_preset_selector(ui, &mut colors));
+            }
+            for _ in 0..3 {
+                output = ctx.run_ui(input(vec![]), |ui| color_preset_selector(ui, &mut colors));
+            }
+            for event in click(text_position(&output, preset.name())) {
+                let _ = ctx.run_ui(event, |ui| color_preset_selector(ui, &mut colors));
+            }
+            assert_eq!(colors.preset(), Some(preset));
+            assert_eq!(colors.categorical, palette);
+        }
+        colors.continuous.midpoint = 0.3;
+        let output = ctx.run_ui(input(vec![]), |ui| color_preset_selector(ui, &mut colors));
+        text_position(&output, "Custom");
+    }
+
+    #[test]
     fn categorical_palette_fits_the_settings_window() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut palette = crate::color::ColorPreferences::default().categorical;
         for _ in 0..3 {
             let output = ctx.run_ui(egui::RawInput {
@@ -2191,6 +2241,7 @@ mod colors_ui_tests {
     #[test]
     fn categorical_palette_controls_add_remove_and_open_color_picker() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut palette = crate::color::ColorPreferences::default().categorical;
         let input = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2259,6 +2310,7 @@ mod colors_ui_tests {
     #[test]
     fn dragging_gradient_midpoint_moves_the_color_stop() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut ramp = crate::color::ColorPreferences::default().continuous;
         let input = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2335,6 +2387,7 @@ mod colors_ui_tests {
     #[test]
     fn ss_icon_opens_its_picker_and_uses_a_contrasting_glyph() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut color = [255, 255, 255, 255];
         let input = |events| egui::RawInput {
             events,
@@ -2375,6 +2428,7 @@ mod colors_ui_tests {
     #[test]
     fn other_elements_button_opens_the_full_periodic_table_window() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut settings = Settings::default();
         let input = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2387,7 +2441,7 @@ mod colors_ui_tests {
         let mut position = None;
         for _ in 0..3 {
             let output = ctx.run_ui(input(vec![]), |ui| {
-                settings_page_colors(ui, &mut settings, None)
+                settings_page_colors(ui, &mut settings)
             });
             assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Xe")));
             position = output.shapes.iter().find_map(|shape| match &shape.shape {
@@ -2409,13 +2463,13 @@ mod colors_ui_tests {
                         modifiers: egui::Modifiers::NONE,
                     },
                 ]),
-                |ui| settings_page_colors(ui, &mut settings, None),
+                |ui| settings_page_colors(ui, &mut settings),
             );
         }
         let mut labels = Vec::new();
         for _ in 0..4 {
             let output = ctx.run_ui(input(vec![]), |ui| {
-                settings_page_colors(ui, &mut settings, None)
+                settings_page_colors(ui, &mut settings)
             });
             labels = output
                 .shapes
@@ -2434,6 +2488,7 @@ mod colors_ui_tests {
     #[test]
     fn periodic_table_cells_have_equal_sizes_for_single_and_double_symbols() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut colors = crate::color::ColorPreferences::default();
         let mut output = None;
         for _ in 0..3 {
@@ -2491,6 +2546,7 @@ mod colors_ui_tests {
     #[test]
     fn clicking_an_element_opens_its_color_picker() {
         let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut settings = Settings::default();
         let input = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2503,7 +2559,7 @@ mod colors_ui_tests {
         let mut center = None;
         for _ in 0..3 {
             let output = ctx.run_ui(input(vec![]), |ui| {
-                settings_page_colors(ui, &mut settings, None)
+                settings_page_colors(ui, &mut settings)
             });
             center = output.shapes.iter().find_map(|s| match &s.shape {
                 egui::Shape::Text(t) if t.galley.job.text == "H" => {
@@ -2524,7 +2580,7 @@ mod colors_ui_tests {
                         modifiers: egui::Modifiers::NONE,
                     },
                 ]),
-                |ui| settings_page_colors(ui, &mut settings, None),
+                |ui| settings_page_colors(ui, &mut settings),
             );
         }
         assert!(egui::Popup::is_any_open(&ctx));
@@ -2540,10 +2596,6 @@ mod colors_ui_tests {
         crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
         let mut settings = Settings::default();
         let before = settings.colors.clone();
-        let ranges = PropertyRanges {
-            beta: [10.0, 30.0],
-            charge: [-0.4, 0.4],
-        };
         let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -2552,7 +2604,7 @@ mod colors_ui_tests {
                 )),
                 ..Default::default()
             },
-            |ui| settings_page_colors(ui, &mut settings, Some(&ranges)),
+            |ui| settings_page_colors(ui, &mut settings),
         );
         assert_eq!(settings.colors, before);
         let text: Vec<_> = output
@@ -2573,12 +2625,6 @@ mod colors_ui_tests {
             "α helix",
             "β sheet",
             "Coil",
-            "B-factor",
-            "Charge",
-            "10.000",
-            "30.000",
-            "-0.400",
-            "0.400",
             "0",
             "1",
             "Discrete palette",

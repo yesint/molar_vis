@@ -11,6 +11,7 @@ mod camera;
 #[cfg(not(target_arch = "wasm32"))]
 mod charges;
 mod color;
+mod color_presets;
 mod data;
 /// Loading a docking result (receptor + ligand poses) — see the module docs. Native-only,
 /// like the dialog that drives it (`app::docking_dialog`): reading several files from disk.
@@ -42,6 +43,7 @@ mod unobstructed;
 
 pub use app::{App, AppJob};
 pub use color::{ColorPreferences, Gradient};
+pub use color_presets::ColorPreset;
 pub use mesh::{MeshState, MeshStyle, import_ply, reserve_mesh_id};
 pub use camera::Corner;
 // View-setting enums the external hosts parse (projection / depth-cue mode / axes

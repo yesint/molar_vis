@@ -157,6 +157,21 @@ impl Visualizer {
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer closed"))?
             .map_err(PyValueError::new_err)
     }
+    /// Apply atom, secondary-structure and gradient colors from a viewer preset.
+    fn set_color_preset(&self, name: &str) -> PyResult<()> {
+        let preset = molar_vis_core::ColorPreset::parse(name).map_err(PyValueError::new_err)?;
+        send_job(&self.jobs, Box::new(move |app| {
+            if let Err(e) = app.set_color_preset(preset) {
+                log::error!("color preset: {e}");
+            }
+        }))
+    }
+
+    /// The current preset name, or Custom after manual edits.
+    fn color_preset(&self, py: Python<'_>) -> PyResult<String> {
+        query_job(&self.jobs, py, |app| Ok(app.color_preset_name().to_string()))
+    }
+
     fn set_palette(&self, colors: Vec<(u8, u8, u8, u8)>) -> PyResult<()> {
         if colors.is_empty() {
             return Err(PyValueError::new_err(

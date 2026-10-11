@@ -148,8 +148,13 @@ centre pick and Click selection work on a ribbon / surface of any structure (all
 **View-settings hamburger** (`LIST`, right-aligned) opens a compact popup anchored
 under the button, with Camera / Lighting / Scene tabs. It contains only the **View**
 page. **Edit → Settings** opens the full movable settings window and reopens its
-last-used section. Its sections are Appearance, Render, View, Representations, Styles,
-Materials, Colors, and Behavior. Styles edits geometry defaults for every style (including
+last-used section. Its sections are Appearance, Render, View, Reps, Styles,
+Materials, Colors, and Behavior. Render includes the dashed wrap-around bond option;
+Behavior contains periodic bond-search controls. The Colors page has one preset dropdown for Default, VMD,
+PyMOL, Discovery Studio, MOE and Mol*. It changes element, secondary-structure and
+continuous colors together while preserving the discrete palette. Individual edits
+show Custom; sessions and saved startup settings retain the chosen colors.
+Styles edits geometry defaults for every style (including
 interaction detection), while Materials uses the same preview-asset picker as the
 representation row. Relevant shader sliders sit beside a live glycine VdW preview colored by element.
 Styles also shows a live preview using the viewport renderer: glycine (C, N, O, H) for atom/bond

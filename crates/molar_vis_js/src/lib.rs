@@ -230,6 +230,26 @@ impl Visualizer {
             .map_err(|_| JsError::new("viewer closed"))?
             .map_err(|e| JsError::new(&e))
     }
+    /// Apply atom, secondary-structure and gradient colors from a viewer preset.
+    pub fn set_color_preset(&self, name: &str) -> Result<(), JsError> {
+        let preset = molar_vis_core::ColorPreset::parse(name).map_err(|e| JsError::new(&e))?;
+        send(&self.jobs, Box::new(move |app| {
+            if let Err(e) = app.set_color_preset(preset) {
+                log::error!("color preset: {e}");
+            }
+        }));
+        Ok(())
+    }
+
+    /// The current preset name, or Custom after manual edits.
+    pub async fn color_preset(&self) -> Result<String, JsError> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        send(&self.jobs, Box::new(move |app| {
+            let _ = tx.send(app.color_preset_name().to_string());
+        }));
+        rx.await.map_err(|_| JsError::new("viewer closed"))
+    }
+
     /// Replace the discrete palette with consecutive RGBA8 colors.
     pub fn set_palette(&self, colors: &[u8]) -> Result<(), JsError> {
         if colors.is_empty() || colors.len() % 4 != 0 {

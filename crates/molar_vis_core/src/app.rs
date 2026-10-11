@@ -503,6 +503,14 @@ mod external_color_api_tests {
         invalid.categorical.clear();
         assert!(apply_color_preferences(&mut scene, &mut settings, &mut defaults, invalid).is_err());
         assert_eq!(settings.colors, previous);
+        for preset in crate::ColorPreset::ALL {
+            let mut colors = settings.colors.clone();
+            preset.apply(&mut colors);
+            apply_color_preferences(&mut scene, &mut settings, &mut defaults, colors.clone()).unwrap();
+            assert_eq!(scene.molecules[0].reps[0].color_spec().preferences.preset(), Some(preset));
+            assert_eq!(*crate::scene::Representation::from_defaults(&defaults).color_spec().preferences, colors);
+            assert!(scene.molecules[0].reps[0].geom_dirty);
+        }
     }
 }
 
@@ -581,6 +589,17 @@ impl App {
 
     pub fn color_preferences_json(&self) -> Result<String, String> {
         serde_json::to_string(&self.settings.colors).map_err(|e| e.to_string())
+    }
+
+    /// Apply a viewer color preset while retaining the discrete palette.
+    pub fn set_color_preset(&mut self, preset: crate::ColorPreset) -> Result<(), String> {
+        let mut colors = self.color_preferences();
+        preset.apply(&mut colors);
+        self.set_color_preferences(colors)
+    }
+
+    pub fn color_preset_name(&self) -> &'static str {
+        self.settings.colors.preset().map_or("Custom", crate::ColorPreset::name)
     }
 
     /// Apply editable colors to all representations and new-representation defaults.

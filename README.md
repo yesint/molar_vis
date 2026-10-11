@@ -121,7 +121,12 @@ can be adjusted for each interaction type.
 Color molecules by element, chain, residue, atom index, secondary structure,
 B-factor or charge, or choose a single color for a representation. In
 **Edit → Settings → Colors**, edit element and secondary-structure colors, the
-shared continuous gradient and the discrete palette. The continuous gradient has
+shared continuous gradient and the discrete palette. A single preset dropdown
+switches element colors, secondary-structure colors and the continuous gradient
+together: **Default**, **VMD**, **PyMOL**, **Discovery Studio**, **MOE** or **Mol\***.
+Colors remain editable after choosing a preset; manual changes are shown as
+**Custom**. Presets leave the discrete palette unchanged. Preset colors are retained
+in sessions and can be saved as startup defaults. The continuous gradient has
 editable endpoints and a movable midpoint; the default runs from blue through
 white to red, with positive charges shown in red. The discrete palette starts with
 18 colors and allows adding, removing and editing entries. Color-picker presets

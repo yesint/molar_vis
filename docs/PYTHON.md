@@ -88,6 +88,7 @@ DSSP, geometric selections, …), so you analyze and visualize in one session.
 | `mesh.style`, `mesh.material`, `mesh.visible` | control mesh display |
 | `mesh.point_size`, `mesh.line_width`, `mesh.smoothing` | pixel size/width (1–10), or Surface smoothing (0–5) |
 | `mesh.ply_bytes()` / `mesh.save(path)` / `mesh.delete()` | export source PLY data or remove the mesh |
+| `vis.set_color_preset(name)` / `vis.color_preset()` | apply or identify a viewer color preset; manual edits report `Custom` |
 | `vis.set_element_color(number, rgba)` | override an element color with RGBA8 |
 | `vis.set_secondary_color(index, rgba)` | edit a secondary-structure color (indices 0–8) |
 | `vis.set_continuous_gradient(stops, midpoint)` | set three RGBA8 stops and midpoint (0.01–0.99) |
