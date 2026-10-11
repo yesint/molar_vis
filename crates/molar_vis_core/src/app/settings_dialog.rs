@@ -2182,7 +2182,7 @@ mod colors_ui_tests {
                 categorical_editor(ui, &mut palette);
                 assert!(ui.min_rect().width() <= 640.0);
             });
-            for index in 1..=16 {
+            for index in 1..=palette.len() {
                 assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == index.to_string())));
             }
         }
@@ -2200,7 +2200,7 @@ mod colors_ui_tests {
             events,
             ..Default::default()
         };
-        for (label, expected_len) in [("Add color", 17), ("×", 16)] {
+        for (label, expected_len) in [("Add color", 19), ("×", 18)] {
             let mut center = None;
             for _ in 0..3 {
                 let output = ctx.run_ui(input(vec![]), |ui| categorical_editor(ui, &mut palette));

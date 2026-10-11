@@ -153,7 +153,6 @@ pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation, defaults
 pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method: ColorMethod, ink: egui::Color32) {
     use crate::color;
     use egui::{pos2, Color32, Stroke};
-    let rgb3 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let rgb4 = |c: [u8; 4]| Color32::from_rgb(c[0], c[1], c[2]);
     // A hairline in the panel's own ink, faint enough to read as an edge and not as a drawn
     // outline. `gamma_multiply` fades toward transparent, so it blends with whatever is behind.
@@ -197,7 +196,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             let step = (rect.width() - r * 2.0) / (cols.len() as f32 - 1.0).max(1.0);
             for (i, c) in cols.iter().enumerate() {
                 let x = rect.left() + r + step * i as f32;
-                painter.circle_stroke(pos2(x, y), r, Stroke::new(2.0_f32, rgb3(*c)));
+                painter.circle_stroke(pos2(x, y), r, Stroke::new(2.0_f32, rgb4(*c)));
             }
         }
         ColorMethod::ResId => {
@@ -212,12 +211,12 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             let x1 = rect.left() + rect.width() * 0.33;
             let top = rect.top() + 2.5;
             painter.line_segment([pos2(x1, mid), pos2(x1, top)], line);
-            painter.circle_filled(pos2(x1, top), 2.6, rgb3(color::PALETTE[0]));
+            painter.circle_filled(pos2(x1, top), 2.6, rgb4(color::PALETTE[0]));
             outline_circle(pos2(x1, top), 2.6);
             let x2 = rect.left() + rect.width() * 0.67;
             let bot = rect.bottom() - 2.5;
             painter.line_segment([pos2(x2, mid), pos2(x2, bot)], line);
-            painter.circle_filled(pos2(x2, bot), 2.6, rgb3(color::PALETTE[3]));
+            painter.circle_filled(pos2(x2, bot), 2.6, rgb4(color::PALETTE[3]));
             outline_circle(pos2(x2, bot), 2.6);
         }
         ColorMethod::ResName => {
@@ -355,28 +354,6 @@ pub(super) fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: boo
     resp
 }
 
-/// Predefined color swatches for the `Solid` color submenu (6 per row).
-pub(super) const SOLID_SWATCHES: [[u8; 4]; 18] = [
-    [230, 50, 50, 255],   // red
-    [255, 140, 0, 255],   // orange
-    [240, 220, 40, 255],  // yellow
-    [60, 200, 80, 255],   // green
-    [60, 200, 210, 255],  // cyan
-    [60, 110, 240, 255],  // blue
-    [150, 80, 220, 255],  // purple
-    [220, 60, 200, 255],  // magenta
-    [240, 130, 180, 255], // pink
-    [30, 150, 150, 255],  // teal
-    [170, 220, 40, 255],  // lime
-    [40, 60, 150, 255],   // navy
-    [245, 245, 245, 255], // white
-    [200, 200, 200, 255], // light grey
-    [140, 140, 140, 255], // grey
-    [80, 80, 80, 255],    // dark grey
-    [25, 25, 25, 255],    // near-black
-    [150, 90, 50, 255],   // brown
-];
-
 /// A small clickable color swatch in the `Solid` submenu grid. Highlights on
 /// hover and rings the currently-selected color.
 pub(super) fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bool {
@@ -394,6 +371,24 @@ pub(super) fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bo
         .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
     resp.on_hover_text(format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))
         .clicked()
+}
+
+fn solid_presets(ui: &mut egui::Ui, palette: &[[u8; 4]], current: &mut [u8; 4]) -> bool {
+    let mut changed = false;
+    egui::Grid::new("solid_presets")
+        .spacing(egui::vec2(3.0, 3.0))
+        .show(ui, |ui| {
+            for (index, &color) in palette.iter().enumerate() {
+                if swatch_button(ui, color, color == *current) {
+                    *current = color;
+                    changed = true;
+                }
+                if (index + 1) % 6 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    changed
 }
 
 /// The current solid color, or the default if the rep isn't colored by Solid.
@@ -438,19 +433,7 @@ pub(super) fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
                 let mut cur = current_solid(rep.color);
                 let mut changed = false;
                 ui.label(egui::RichText::new("Presets").weak().small());
-                egui::Grid::new("solid_presets")
-                    .spacing(egui::vec2(3.0, 3.0))
-                    .show(ui, |ui| {
-                        for (i, &c) in SOLID_SWATCHES.iter().enumerate() {
-                            if swatch_button(ui, c, c == cur) {
-                                cur = c;
-                                changed = true;
-                            }
-                            if (i + 1) % 6 == 0 {
-                                ui.end_row();
-                            }
-                        }
-                    });
+                changed |= solid_presets(ui, rep.color_preferences.discrete_palette(), &mut cur);
                 ui.separator();
                 let mut col = egui::Color32::from_rgb(cur[0], cur[1], cur[2]);
                 if egui::color_picker::color_picker_color32(
@@ -756,4 +739,82 @@ pub(super) fn material_selector(ui: &mut egui::Ui, selected: &mut Material, defa
             });
     });
     changed
+}
+
+#[cfg(test)]
+mod discrete_preset_tests {
+    use super::*;
+
+    #[test]
+    fn preset_swatches_follow_palette_edits_and_select_the_edited_color() {
+        let ctx = egui::Context::default();
+        let mut preferences = crate::color::ColorPreferences::default();
+        let mut current = crate::color::DEFAULT_SOLID;
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680.0, 500.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let swatches = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.rect.size() == egui::vec2(20.0, 20.0) && rect.fill.a() > 0 =>
+                    {
+                        Some((rect.rect.center(), rect.fill.to_array()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(vec![]), |ui| {
+                solid_presets(ui, preferences.discrete_palette(), &mut current);
+            });
+            assert_eq!(
+                swatches(&output)
+                    .iter()
+                    .map(|(_, color)| *color)
+                    .collect::<Vec<_>>(),
+                preferences.categorical
+            );
+        }
+        let edited = [12, 145, 92, 255];
+        preferences.categorical[0] = edited;
+        preferences.categorical.remove(1);
+        preferences.categorical.push([42, 70, 190, 255]);
+        let output = ctx.run_ui(input(vec![]), |ui| {
+            solid_presets(ui, preferences.discrete_palette(), &mut current);
+        });
+        let drawn = swatches(&output);
+        assert_eq!(
+            drawn.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
+            preferences.categorical
+        );
+        let position = drawn[0].0;
+        let mut changed = false;
+        for pressed in [true, false] {
+            let _ = ctx.run_ui(
+                input(vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ui| {
+                    changed |= solid_presets(ui, preferences.discrete_palette(), &mut current);
+                },
+            );
+        }
+        assert!(changed);
+        assert_eq!(current, edited);
+    }
 }

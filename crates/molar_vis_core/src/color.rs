@@ -41,7 +41,7 @@ impl Default for ColorPreferences {
             elements: Default::default(),
             secondary: SS_TYPES.map(ss_color),
             continuous: Gradient::default(),
-            categorical: PALETTE.map(|c| [c[0], c[1], c[2], 255]).to_vec(),
+            categorical: PALETTE.to_vec(),
         }
     }
 }
@@ -54,12 +54,17 @@ impl ColorPreferences {
             .unwrap_or_else(|| element_color(number))
     }
 
-    pub fn categorical(&self, key: usize) -> [u8; 4] {
+    pub fn discrete_palette(&self) -> &[[u8; 4]] {
         if self.categorical.is_empty() {
-            categorical(key)
+            &PALETTE
         } else {
-            self.categorical[key % self.categorical.len()]
+            &self.categorical
         }
+    }
+
+    pub fn categorical(&self, key: usize) -> [u8; 4] {
+        let palette = self.discrete_palette();
+        palette[key % palette.len()]
     }
 
     pub fn secondary(&self, ss: SS) -> [u8; 4] {
@@ -181,30 +186,31 @@ pub fn pack_rgba8(c: [u8; 4]) -> u32 {
     (c[0] as u32) | ((c[1] as u32) << 8) | ((c[2] as u32) << 16) | ((c[3] as u32) << 24)
 }
 
-/// Distinct categorical palette (tab20-style) for chain/resid/resname coloring.
-pub const PALETTE: [[u8; 3]; 16] = [
-    [31, 119, 180],
-    [255, 127, 14],
-    [44, 160, 44],
-    [214, 39, 40],
-    [148, 103, 189],
-    [140, 86, 75],
-    [227, 119, 194],
-    [188, 189, 34],
-    [23, 190, 207],
-    [255, 152, 150],
-    [197, 176, 213],
-    [152, 223, 138],
-    [17, 63, 120],
-    [140, 100, 170],
-    [230, 190, 40],
-    [40, 150, 140],
+/// Default discrete colors, also used by solid-color picker presets.
+pub const PALETTE: [[u8; 4]; 18] = [
+    [230, 50, 50, 255],   // red
+    [255, 140, 0, 255],   // orange
+    [240, 220, 40, 255],  // yellow
+    [60, 200, 80, 255],   // green
+    [60, 200, 210, 255],  // cyan
+    [60, 110, 240, 255],  // blue
+    [150, 80, 220, 255],  // purple
+    [220, 60, 200, 255],  // magenta
+    [240, 130, 180, 255], // pink
+    [30, 150, 150, 255],  // teal
+    [170, 220, 40, 255],  // lime
+    [40, 60, 150, 255],   // navy
+    [245, 245, 245, 255], // white
+    [200, 200, 200, 255], // light grey
+    [140, 140, 140, 255], // grey
+    [80, 80, 80, 255],    // dark grey
+    [25, 25, 25, 255],    // near-black
+    [150, 90, 50, 255],   // brown
 ];
 
 /// Pick a categorical color by key.
 pub fn categorical(key: usize) -> [u8; 4] {
-    let c = PALETTE[key % PALETTE.len()];
-    [c[0], c[1], c[2], 255]
+    PALETTE[key % PALETTE.len()]
 }
 
 fn hash_str(s: &str) -> usize {
@@ -679,14 +685,14 @@ mod preference_tests {
         let red = [180, 30, 60, 255];
         let green = [20, 180, 40, 255];
         let mut prefs = ColorPreferences::default();
-        assert_eq!(prefs.categorical.len(), 16);
+        assert_eq!(prefs.categorical.len(), 18);
         assert_eq!(
             prefs
                 .categorical
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            16
+            18
         );
         prefs.categorical = vec![red, green];
         for (method, expected) in [
@@ -726,7 +732,7 @@ mod preference_tests {
         let prefs: ColorPreferences = serde_json::from_str(previous).unwrap();
         assert_eq!(prefs.continuous.midpoint, 0.25);
         assert_eq!(prefs.continuous.stops[0], [10, 20, 30, 255]);
-        assert_eq!(prefs.categorical.len(), 16);
+        assert_eq!(prefs.categorical.len(), 18);
         let saved = serde_json::to_value(&prefs).unwrap();
         assert!(saved.get("continuous").is_some());
         assert!(saved.get("beta").is_none() && saved.get("charge").is_none());
