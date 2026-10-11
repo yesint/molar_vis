@@ -3,7 +3,7 @@ members = ["crates/molar_vis_core", "crates/molar_vis", "crates/molar_vis_web", 
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "Artistic-2.0"
 authors = ["Semen Yesylevskyy"]

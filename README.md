@@ -28,7 +28,7 @@ Python bindings combine the desktop viewer with MolAR's analysis tools, allowing
 changes to molecular coordinates to appear directly in the viewer. A JavaScript
 API provides programmatic control of the browser viewer.
 
-![molar_vis](docs/screenshot.png)
+![molar_vis](https://raw.githubusercontent.com/yesint/molar_vis/main/docs/screenshot.png)
 
 ## Features
 
@@ -171,7 +171,7 @@ files are desktop features.
 Install the published desktop viewer with a [Rust toolchain](https://rustup.rs):
 
 ```sh
-cargo install molar_vis --version 0.2.1 --locked
+cargo install molar_vis --version 0.2.2 --locked
 molar_vis protein.pdb
 ```
 
@@ -195,7 +195,7 @@ Dependencies come from crates.io; no sibling repository checkouts are required.
 Supported molecular formats are provided by MolAR, including PDB, GRO, XYZ,
 SDF/MOL and trajectory formats such as XTC, TRR and DCD. Availability of some
 formats depends on the platform and enabled MolAR features.
-See the [build and development reference](docs/BUILD.md) for further details.
+See the [build and development reference](https://github.com/yesint/molar_vis/blob/main/docs/BUILD.md) for further details.
 
 ### WebAssembly — run it in the browser
 
@@ -213,7 +213,7 @@ trunk serve
 ```
 
 To embed a viewer in a web page and control it from JavaScript, use the separate
-[JavaScript module](crates/molar_vis_js/README.md).
+[JavaScript module](https://github.com/yesint/molar_vis/blob/main/crates/molar_vis_js/README.md).
 
 ## Scripting it from Python
 
@@ -236,9 +236,9 @@ This example is intended for an interactive Python or Jupyter session. In a plai
 script, keep the process alive while using the viewer. The Python viewer currently
 supports Linux and Windows; macOS support is pending.
 
-See the [Python guide](docs/PYTHON.md) for installation, examples and the API
+See the [Python guide](https://github.com/yesint/molar_vis/blob/main/docs/PYTHON.md) for installation, examples and the API
 reference, including meshes, colors and camera controls. The
-[JavaScript API](crates/molar_vis_js/README.md) exposes browser viewer controls;
+[JavaScript API](https://github.com/yesint/molar_vis/blob/main/crates/molar_vis_js/README.md) exposes browser viewer controls;
 it does not expose MolAR's full analysis API or live coordinate editing.
 
 An optional in-app [Rhai](https://rhai.rs) console is available when building with
@@ -284,8 +284,8 @@ and GPU ray tracing.
 
 The workspace contains the core library, desktop and browser applications, and
 Python and JavaScript bindings. For implementation details, see the
-[architecture](docs/ARCHITECTURE.md), [module overview](docs/MODULES.md) and
-[build reference](docs/BUILD.md). For molecular analysis in Rust or Python,
+[architecture](https://github.com/yesint/molar_vis/blob/main/docs/ARCHITECTURE.md), [module overview](https://github.com/yesint/molar_vis/blob/main/docs/MODULES.md) and
+[build reference](https://github.com/yesint/molar_vis/blob/main/docs/BUILD.md). For molecular analysis in Rust or Python,
 see [MolAR](https://github.com/yesint/molar).
 
 ## License

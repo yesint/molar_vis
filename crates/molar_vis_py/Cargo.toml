@@ -27,7 +27,7 @@ molar_python = { workspace = true }
 # Same molar (rev-pinned via the workspace) so Topology/State/Sel unify across the
 # graph (molar_vis_core ← here → molar_python all see one molar).
 molar = { workspace = true }
-molar_vis_core = { version = "0.2.1", path = "../molar_vis_core" }
+molar_vis_core = { version = "0.2.2", path = "../molar_vis_core" }
 # eframe is used via `molar_vis_core::eframe` (same instance). winit (matching
 # eframe's 0.30) is needed directly for `with_any_thread`, to run the viewer's event
 # loop on a background thread so the Python REPL stays responsive.
