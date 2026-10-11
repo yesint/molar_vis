@@ -813,3 +813,20 @@
   - **TODO:** more pick modes in the dropdown. Picking/lasso is O(visible atoms × images) — fine for
     small/medium systems; a spatial grid / GPU id-buffer is the optimization for huge ones.
 
+
+## Custom meshes and editable palettes
+
+- **Molecule-owned PLY meshes** — import ASCII or binary PLY (either byte order),
+  vertex RGB/RGBA and normals, with polygon triangulation and generated normals when
+  absent. Molecule rows expose Load mesh; mesh rows expose visibility, material,
+  Points/Wireframe/Surface, pixel size/width, surface smoothing, Save, and Delete.
+  Meshes use nm, stay static across frames, render in the viewport and ray tracer,
+  and participate in undo/redo. Sessions embed mesh sources and display state,
+  including group-member meshes. Export retains source geometry and colors.
+- **Editable Colors settings** — common element tiles and a full periodic table,
+  nine secondary-structure colors, a shared continuous gradient for Index/B-factor/
+  Charge with a movable midpoint, and a discrete palette for Chain/ResID/ResName.
+  The discrete palette starts with 18 entries and supports edit/add/remove; color
+  pickers use its entries as presets. These controls replace the fixed scheme ramps
+  and Solid swatch grid described in earlier milestones. Changes apply live, settings
+  Save persists them on native and browser builds, and sessions retain the active colors.

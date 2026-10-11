@@ -15,7 +15,7 @@ cargo build -p molar_vis_py                                     # native Python 
 wasm-pack build crates/molar_vis_js --target web --out-dir web/pkg   # browser JS API (M27)
 
 cargo run -p molar_vis --features scripting          # + the in-app Rhai console (M31)
-cargo test -p molar_vis_core --features scripting    # 96 tests (92 without)
+cargo test -p molar_vis_core --features scripting    # include optional console tests
 ```
 
 **Feature flags.** The one feature is **`scripting`** (M31, **off by default**): the in-app Rhai
@@ -26,8 +26,7 @@ dependency graph entirely (`cargo tree -p molar_vis | grep rhai` → nothing).
 
 **Native Python module** (`crates/molar_vis_py`, M26): `import molar_vis` to drive the viewer
 from Python/Jupyter (see that crate + the *Native Python module* notes below). Build/install with
-maturin into an active venv (pyo3 0.27 builds for CPython up to 3.14 via
-`PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`):
+maturin into an active venv (the extension uses pyo3 0.27):
 
 ```sh
 python -m venv .venv && source .venv/bin/activate && pip install maturin numpy
@@ -136,7 +135,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   AO/shadows, or `MOLAR_VIS_DEBUG_GI=1` for the path-traced global-illumination tier) +
   `MOLAR_VIS_DEBUG_DELFRAMES=1` (open the delete-frames dialog for mol 0 — pair with
   `MOLAR_VIS_DEBUG_TRAJ`) +
-  `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|view-lighting|view-scene|reps|behavior]` (open the program-settings
+  `MOLAR_VIS_DEBUG_SETTINGS=[appearance|rendering|view|view-lighting|view-scene|reps|styles|materials|colors|behavior]` (open the program-settings
   modal at that tab — `=1`/empty = Appearance — so each tab can be screenshot; the dialog can't be
   mouse-driven headlessly) +
   `MOLAR_VIS_DEBUG_DEFAULTS=1` (use built-in `Settings::default()` and skip the config-file
@@ -204,11 +203,11 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **2.1** (**git dep** `git = "https://github.com/yesint/molar.git"`,
+molar **2.2** (**git dep** `git = "https://github.com/yesint/molar.git"`,
 `default-features=false` → `Float=f32`; pulls `powersasa` transitively from git; **edition 2024,
-MSRV 1.85** — see the *molar 2.1 API* notes below), molar_ff **2.1** (same git dep, feature
-`espaloma` — GAFF/GAFF2 typing + espaloma partial charges; **native-only dependency**, it bundles a
-~600 kB ONNX model and pulls `tract`),
+MSRV 1.85** — see [molar integration](MOLAR.md)), molar_ff **2.2** (same pinned git
+revision, `cc225ee` — GAFF/GAFF2 typing and a fixed Espaloma charge kernel without
+`tract` or a general ONNX runtime; the viewer uses it as a **native-only dependency**),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
 `../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature),
 rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,

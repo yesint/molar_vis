@@ -1,9 +1,164 @@
 //! Mesh import/export and the molecule's mesh rows, below its selections.
 use super::widgets::*;
 use super::*;
-use crate::mesh::{export_ply, import_ply, Mesh, MeshStyle};
+use crate::mesh::{Mesh, MeshStyle, export_ply, import_ply};
 
 impl App {
+    pub fn mesh_ids(&self, mol: usize) -> Result<Vec<u64>, String> {
+        Ok(self
+            .scene
+            .molecules
+            .get(mol)
+            .ok_or_else(|| format!("no molecule {mol}"))?
+            .meshes
+            .iter()
+            .map(|mesh| mesh.id)
+            .collect())
+    }
+
+    pub fn mesh_state(&self, mol: usize, id: u64) -> Result<crate::mesh::MeshState, String> {
+        self.scene
+            .molecules
+            .iter()
+            .flat_map(|m| &m.meshes)
+            .find(|m| m.id == id)
+            .map(|m| m.state.clone())
+            .ok_or_else(|| format!("no mesh {id} on molecule {mol}"))
+    }
+
+    pub fn mesh_details_json(&self, mol: usize, id: u64) -> Result<String, String> {
+        let s = self.mesh_state(mol, id)?;
+        Ok(serde_json::json!({
+            "name": s.name, "visible": s.visible,
+            "material": s.material.label(),
+            "style": s.style.label().to_ascii_lowercase(),
+            "point_size": s.point_size, "line_width": s.line_width,
+            "smoothing": s.smoothing,
+            "vertices": s.source.vertices.len(), "triangles": s.source.indices.len() / 3
+        })
+        .to_string())
+    }
+    /// Import a PLY mesh into a molecule. `id` is reserved by the external host so
+    /// handles remain valid when other meshes are removed.
+    pub fn add_mesh_ply(
+        &mut self,
+        mol: usize,
+        id: u64,
+        name: String,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let source = import_ply(bytes)?;
+        if self
+            .scene
+            .molecules
+            .iter()
+            .any(|m| m.meshes.iter().any(|mesh| mesh.id == id))
+        {
+            return Err(format!("mesh ID {id} already exists"));
+        }
+        let m = self
+            .scene
+            .molecules
+            .get_mut(mol)
+            .ok_or_else(|| format!("no molecule {mol}"))?;
+        let mut mesh = Mesh::new(name, source);
+        mesh.id = id;
+        m.meshes.push(mesh);
+        m.reps_open = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    fn external_mesh(&mut self, mol: usize, id: u64) -> Result<&mut Mesh, String> {
+        self.scene
+            .molecules
+            .iter_mut()
+            .flat_map(|m| &mut m.meshes)
+            .find(|m| m.id == id)
+            .ok_or_else(|| format!("no mesh {id} on molecule {mol}"))
+    }
+
+    pub fn set_mesh_visible(&mut self, mol: usize, id: u64, visible: bool) -> Result<(), String> {
+        self.external_mesh(mol, id)?.state.visible = visible;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn set_mesh_material(&mut self, mol: usize, id: u64, name: &str) -> Result<(), String> {
+        let preset = crate::script::command::parse_material(name)
+            .ok_or_else(|| format!("unknown material: {name}"))?;
+        let material = self.rep_defaults.material_for(preset);
+        let mesh = self.external_mesh(mol, id)?;
+        mesh.state.material = material;
+        mesh.dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn set_mesh_style(&mut self, mol: usize, id: u64, name: &str) -> Result<(), String> {
+        let style = match name.to_ascii_lowercase().as_str() {
+            "points" => MeshStyle::Points,
+            "wireframe" => MeshStyle::Wireframe,
+            "surface" => MeshStyle::Surface,
+            _ => return Err(format!("unknown mesh style: {name}")),
+        };
+        let mesh = self.external_mesh(mol, id)?;
+        mesh.state.style = style;
+        mesh.dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn set_mesh_point_size(&mut self, mol: usize, id: u64, size: f32) -> Result<(), String> {
+        if !size.is_finite() || !(1.0..=10.0).contains(&size) {
+            return Err("point size must be 1..=10 pixels".into());
+        }
+        let mesh = self.external_mesh(mol, id)?;
+        mesh.state.point_size = size;
+        mesh.dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn set_mesh_line_width(&mut self, mol: usize, id: u64, width: f32) -> Result<(), String> {
+        if !width.is_finite() || !(1.0..=10.0).contains(&width) {
+            return Err("line width must be 1..=10 pixels".into());
+        }
+        let mesh = self.external_mesh(mol, id)?;
+        mesh.state.line_width = width;
+        mesh.dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn set_mesh_smoothing(&mut self, mol: usize, id: u64, steps: u32) -> Result<(), String> {
+        if steps > 5 {
+            return Err("smoothing must be 0..=5".into());
+        }
+        let mesh = self.external_mesh(mol, id)?;
+        mesh.state.smoothing = steps;
+        mesh.dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn mesh_ply(&mut self, mol: usize, id: u64) -> Result<Vec<u8>, String> {
+        Ok(export_ply(&self.external_mesh(mol, id)?.state.source))
+    }
+
+    pub fn delete_mesh(&mut self, mol: usize, id: u64) -> Result<(), String> {
+        let meshes = &mut self
+            .scene
+            .molecules
+            .iter_mut()
+            .find(|m| m.meshes.iter().any(|mesh| mesh.id == id))
+            .ok_or_else(|| format!("no mesh {id} on molecule {mol}"))?
+            .meshes;
+        let index = meshes.iter().position(|m| m.id == id).unwrap();
+        meshes.remove(index);
+        self.view_dirty = true;
+        Ok(())
+    }
     pub(super) fn add_mesh_bytes(&mut self, id: MolId, name: String, bytes: &[u8]) {
         let Some(mi) = self.scene.mol_index(id) else {
             return;

@@ -4,9 +4,13 @@
 
 ## molar integration notes
 
-### molar 2.1 API (the SoA migration, M31)
+### Pinned molar 2.2 API
 
-molar 2.0/2.1 flipped `Topology` to **struct-of-arrays** storage. The consequences that matter here:
+The workspace pins molar, molar_python, and molar_ff to the same revision (`cc225ee`)
+in `Cargo.toml`. Molar 2.2 retains the **struct-of-arrays** storage introduced in
+2.0/2.1. `molar_ff` now supplies a fixed Espaloma charge kernel without a general ONNX
+runtime or an `espaloma` feature flag. The viewer still gates charge computation to
+native builds. The storage API details that matter here:
 
 - **There is no `&Atom` or `&Bond` to borrow.** `iter_atoms`/`get_atom` hand out **`AtomRef` /
   `AtomRefMut`** column proxies (a `Copy` two-word `{storage, index}` handle) and bonds come back as

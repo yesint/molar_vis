@@ -41,6 +41,8 @@ mod trajectory;
 mod unobstructed;
 
 pub use app::{App, AppJob};
+pub use color::{ColorPreferences, Gradient};
+pub use mesh::{MeshState, MeshStyle, import_ply, reserve_mesh_id};
 pub use camera::Corner;
 // View-setting enums the external hosts parse (projection / depth-cue mode / axes
 // corner) when driving the camera + scene.
@@ -55,6 +57,7 @@ pub use script::command::{parse_corner, parse_cue_mode, parse_projection};
 // run a selection against an owned `System`.
 pub use moldata::{MolData, SharedSource};
 pub use scene::{evaluate, EvalError};
+pub use scene::{reserve_mol_id, reserve_rep_id};
 pub use launch::{parse_file_args, AppLaunch};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::{early_z_wgpu_options, run};

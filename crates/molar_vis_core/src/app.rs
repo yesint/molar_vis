@@ -448,12 +448,155 @@ impl Scene {
     }
 }
 
+fn apply_color_preferences(
+    scene: &mut Scene,
+    settings: &mut Settings,
+    defaults: &mut RepDefaults,
+    colors: crate::color::ColorPreferences,
+) -> Result<(), String> {
+    if !colors.continuous.midpoint.is_finite()
+        || !(0.01..=0.99).contains(&colors.continuous.midpoint)
+        || colors.categorical.is_empty()
+        || colors.elements.keys().any(|&n| n > 118)
+    {
+        return Err("invalid color preferences: midpoint must be 0.01..=0.99, palette must be nonempty, elements must be 0..=118".into());
+    }
+    settings.colors = colors.clone();
+    let preferences = std::sync::Arc::new(colors);
+    defaults.colors = preferences.clone();
+    for mol in &mut scene.molecules {
+        mol.hover_detail_dirty = true;
+        for rep in &mut mol.reps {
+            rep.color_preferences = preferences.clone();
+            rep.geom_dirty = true;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod external_color_api_tests {
+    use super::*;
+
+    #[test]
+    fn palette_edits_reach_existing_and_future_representations() {
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/export_4677470_10902_4.sdf"
+        ))).unwrap();
+        let mut scene = Scene::default();
+        let mut settings = Settings::default();
+        let mut defaults = App::effective_rep_defaults(&settings);
+        scene.add(raw, &defaults);
+        for count in [1, 19] {
+            let mut colors = settings.colors.clone();
+            colors.categorical = vec![[count as u8, 42, 93, 255]; count];
+            colors.continuous.midpoint = 0.34;
+            apply_color_preferences(&mut scene, &mut settings, &mut defaults, colors.clone()).unwrap();
+            assert_eq!(settings.colors, colors);
+            assert_eq!(scene.molecules[0].reps[0].color_spec().preferences.categorical.len(), count);
+            assert!(scene.molecules[0].reps[0].geom_dirty);
+            let new_rep = crate::scene::Representation::from_defaults(&defaults);
+            assert_eq!(new_rep.color_spec().preferences.categorical.len(), count);
+        }
+        let previous = settings.colors.clone();
+        let mut invalid = previous.clone();
+        invalid.categorical.clear();
+        assert!(apply_color_preferences(&mut scene, &mut settings, &mut defaults, invalid).is_err());
+        assert_eq!(settings.colors, previous);
+    }
+}
+
 impl App {
+    pub fn molecule_ids(&self) -> Vec<u64> {
+        self.scene.molecules.iter().map(|m| m.id.0).collect()
+    }
+
+    pub fn rep_ids(&self, mol_id: u64) -> Result<Vec<u64>, String> {
+        let index = self.resolve_molecule(mol_id)?;
+        Ok(self.scene.molecules[index].reps.iter().map(|r| r.id.0).collect())
+    }
+
+    pub fn resolve_molecule(&self, id: u64) -> Result<usize, String> {
+        self.scene.mol_index(crate::scene::MolId(id))
+            .ok_or_else(|| format!("stale molecule handle {id}"))
+    }
+
+    pub fn resolve_rep(&self, mol_id: u64, rep_id: u64) -> Result<(usize, usize), String> {
+        let mi = self.resolve_molecule(mol_id)?;
+        let ri = self.scene.molecules[mi].reps.iter().position(|r| r.id.0 == rep_id)
+            .ok_or_else(|| format!("stale representation handle {rep_id} on molecule {mol_id}"))?;
+        Ok((mi, ri))
+    }
+
+    pub fn add_shared_molecule_with_id(
+        &mut self,
+        id: u64,
+        source: Box<dyn crate::moldata::SharedSource>,
+        name: String,
+    ) -> Result<(), String> {
+        let was_empty = self.scene.molecules.is_empty();
+        let bond_params = self.settings.behavior.bond_params();
+        self.scene.add_shared_with_id(crate::scene::MolId(id), name, source, &bond_params, &self.rep_defaults)?;
+        let index = self.resolve_molecule(id)?;
+        self.scene.selected_mol = Some(index);
+        let mol = &mut self.scene.molecules[index];
+        mol.trajectory.speed_fps = self.settings.behavior.traj_fps;
+        mol.trajectory.loop_mode = self.settings.behavior.loop_mode;
+        if was_empty {
+            if let Some((min, max)) = self.scene.bbox() { self.reframe_camera(min, max); }
+        }
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn add_rep_default_with_id(&mut self, mol_id: u64, rep_id: u64) -> Result<(), String> {
+        let mi = self.resolve_molecule(mol_id)?;
+        let ri = self.add_rep_default(mi)?;
+        self.scene.molecules[mi].reps[ri].id = crate::scene::RepId(rep_id);
+        Ok(())
+    }
+
+    pub fn add_interactions_rep_with_id(&mut self, mol_id: u64, rep_id: u64, partner_mol_id: u64, partner_rep_id: u64) -> Result<(), String> {
+        let mi = self.resolve_molecule(mol_id)?;
+        let (pm, pr) = self.resolve_rep(partner_mol_id, partner_rep_id)?;
+        let ri = self.add_interactions_rep(mi, pm, pr)?;
+        self.scene.molecules[mi].reps[ri].id = crate::scene::RepId(rep_id);
+        Ok(())
+    }
+    /// Set the orbit pivot in viewer nanometers.
+    pub fn set_rotation_center_xyz(&mut self, point: [f32; 3]) {
+        self.set_rotation_center(glam::Vec3::from_array(point));
+    }
     /// Install the external job channel (native Python module). Jobs sent on the
     /// paired `Sender` are run on the UI thread each frame; while connected, the
     /// viewport polls for them so commands from Python apply within a frame or two.
     pub fn set_jobs(&mut self, rx: std::sync::mpsc::Receiver<AppJob>) {
         self.jobs_rx = Some(rx);
+    }
+
+    /// Current shared color preferences, including any persisted edits.
+    pub fn color_preferences(&self) -> crate::color::ColorPreferences {
+        self.settings.colors.clone()
+    }
+
+    pub fn color_preferences_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.settings.colors).map_err(|e| e.to_string())
+    }
+
+    /// Apply editable colors to all representations and new-representation defaults.
+    pub fn set_color_preferences(
+        &mut self,
+        colors: crate::color::ColorPreferences,
+    ) -> Result<(), String> {
+        apply_color_preferences(&mut self.scene, &mut self.settings, &mut self.rep_defaults, colors)?;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn save_settings(&self) -> Result<(), String> {
+        self.settings
+            .save()
+            .map_err(|e| format!("could not save settings: {e}"))
     }
 
     /// Drain + run any jobs queued by the Python thread (native module). Collected

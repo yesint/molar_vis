@@ -29,7 +29,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
@@ -40,8 +40,8 @@ use molar::prelude::{
 };
 use molar_vis_core::eframe;
 use molar_vis_core::{
-    parse_corner, parse_cue_mode, parse_projection, App, AppJob, AppLaunch, CueMode, EvalError,
-    SharedSource,
+    App, AppJob, AppLaunch, CueMode, EvalError, SharedSource, parse_corner, parse_cue_mode,
+    parse_projection,
 };
 
 // At most one viewer per page for v1 (single-threaded wasm + one global job channel).
@@ -62,6 +62,12 @@ fn eval_error_msg(e: &EvalError) -> String {
         EvalError::Empty => "selection matched no atoms".to_string(),
         EvalError::Invalid { message, .. } => message.clone(),
     }
+}
+
+fn rgba(bytes: &[u8]) -> Result<[u8; 4], JsError> {
+    bytes
+        .try_into()
+        .map_err(|_| JsError::new("expected exactly four RGBA8 bytes"))
 }
 
 /// A [`SharedSource`] backed by an `Rc<System>` owned jointly with the JS [`System`]
@@ -119,8 +125,8 @@ impl System {
             .read()
             .map_err(|e| JsError::new(&format!("failed to parse {name}: {e}")))?;
         let n_atoms = top.atoms.len();
-        let system =
-            MSystem::new(top, st).map_err(|e| JsError::new(&format!("invalid structure in {name}: {e}")))?;
+        let system = MSystem::new(top, st)
+            .map_err(|e| JsError::new(&format!("invalid structure in {name}: {e}")))?;
         Ok(System {
             system: Rc::new(system),
             version: Rc::new(Cell::new(0)),
@@ -132,9 +138,11 @@ impl System {
     /// Evaluate a VMD-like selection string against this structure, returning a `Sel`
     /// (its atom indices). Throws on a syntax error or an empty match.
     pub fn select(&self, text: &str) -> Result<Sel, JsError> {
-        let (_expr, sel) =
-            molar_vis_core::evaluate(&self.system, text).map_err(|e| JsError::new(&eval_error_msg(&e)))?;
-        Ok(Sel { indices: sel.get_index_slice().to_vec() })
+        let (_expr, sel) = molar_vis_core::evaluate(&self.system, text)
+            .map_err(|e| JsError::new(&eval_error_msg(&e)))?;
+        Ok(Sel {
+            indices: sel.get_index_slice().to_vec(),
+        })
     }
 
     #[wasm_bindgen(getter)]
@@ -163,52 +171,253 @@ impl Sel {
     }
 }
 
-/// Per-molecule representation counts, shared between the [`Visualizer`] and its handles
-/// (the single-threaded analog of the Python module's `Arc<Mutex<Vec<usize>>>`).
-/// Molecules/reps are added only from JS (append-only), so this mirrors the scene's
-/// structure without a query channel back from the viewer. Index `i` = molecule `i`'s
-/// current rep count.
-type VisState = Rc<RefCell<Vec<usize>>>;
+async fn query_job<R: 'static>(jobs: &Sender<AppJob>, f: impl FnOnce(&mut App) -> Result<R, String> + 'static) -> Result<R, JsError> {
+    let (tx, rx) = futures_channel::oneshot::channel();
+    send(jobs, Box::new(move |app| { let _ = tx.send(f(app)); }));
+    rx.await.map_err(|_| JsError::new("viewer closed"))?.map_err(|e| JsError::new(&e))
+}
 
 /// A live handle to the running viewer. Returned by [`start`]; queues jobs to the
 /// viewer, which applies them on the next frame. All methods apply live.
 #[wasm_bindgen]
 pub struct Visualizer {
     jobs: Sender<AppJob>,
-    state: VisState,
 }
 
 #[wasm_bindgen]
 impl Visualizer {
+    /// Set the camera orbit pivot (x, y, z) in nanometers.
+    pub fn rotation_center(&self, x: f32, y: f32, z: f32) -> Result<(), JsError> {
+        if ![x, y, z].iter().all(|v| v.is_finite()) { return Err(JsError::new("rotation center must be finite")); }
+        send(&self.jobs, Box::new(move |app| app.set_rotation_center_xyz([x, y, z]))); Ok(())
+    }
+    pub fn focus(&self, mol: &MolHandle, sel: &Sel) {
+        let m = mol.mol; let indices = sel.indices.clone();
+        send(&self.jobs, Box::new(move |app| { if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.focus_selection(mi, &indices)) { log::error!("focus: {e}"); } }));
+    }
+    pub fn unobstructed_view(&self, rep: &RepHandle, zoom_out: f32, resolution: usize) {
+        let (m, r) = (rep.mol, rep.rep);
+        send(&self.jobs, Box::new(move |app| { if let Err(e) = app.resolve_rep(m, r).and_then(|(mi,ri)| app.unobstructed_view(mi, ri, zoom_out, resolution)) { log::error!("unobstructed view: {e}"); } }));
+    }
+    pub fn unobstructed_view_multi(&self, reps: &js_sys::Array, zoom_out: f32, resolution: usize) -> Result<(), JsError> {
+        if reps.length() == 0 { return Err(JsError::new("reps must not be empty")); }
+        let targets: Vec<_> = reps.iter().map(|value| {
+            let read = |name: &str| -> Result<u64, JsError> {
+                let n = js_sys::Reflect::get(&value, &JsValue::from_str(name))
+                    .map_err(|_| JsError::new("could not read representation handle"))?
+                    .as_f64().ok_or_else(|| JsError::new("reps must contain RepHandle objects"))?;
+                if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 9_007_199_254_740_991.0 { return Err(JsError::new("invalid representation ID")); }
+                Ok(n as u64)
+            };
+            Ok((read("molId")?, read("repId")?))
+        }).collect::<Result<_, JsError>>()?;
+        send(&self.jobs, Box::new(move |app| {
+            let result = targets.iter().map(|&(m,r)| app.resolve_rep(m,r)).collect::<Result<Vec<_>,_>>()
+                .and_then(|pairs| app.unobstructed_view_multi(&pairs, zoom_out, resolution));
+            if let Err(e) = result { log::error!("unobstructed view multi: {e}"); }
+        })); Ok(())
+    }
+    /// JSON snapshot of current colors, including viewer UI/session edits.
+    pub async fn colors_json(&self) -> Result<String, JsError> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.color_preferences_json());
+            }),
+        );
+        rx.await
+            .map_err(|_| JsError::new("viewer closed"))?
+            .map_err(|e| JsError::new(&e))
+    }
+    /// Replace the discrete palette with consecutive RGBA8 colors.
+    pub fn set_palette(&self, colors: &[u8]) -> Result<(), JsError> {
+        if colors.is_empty() || colors.len() % 4 != 0 {
+            return Err(JsError::new("palette requires one or more RGBA8 colors"));
+        }
+        let palette: Vec<[u8; 4]> = colors
+            .chunks_exact(4)
+            .map(|c| c.try_into().unwrap())
+            .collect();
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.categorical = palette;
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("palette: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    pub fn reset_colors(&self) {
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) =
+                    app.set_color_preferences(molar_vis_core::ColorPreferences::default())
+                {
+                    log::error!("reset colors: {e}");
+                }
+            }),
+        );
+    }
+    /// Persist current program settings, including color edits.
+    pub async fn save_settings(&self) -> Result<(), JsError> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.save_settings());
+            }),
+        );
+        rx.await
+            .map_err(|_| JsError::new("viewer closed"))?
+            .map_err(|e| JsError::new(&e))
+    }
+    pub fn set_element_color(&self, number: u8, color: &[u8]) -> Result<(), JsError> {
+        if number > 118 {
+            return Err(JsError::new("atomic number must be 0..=118"));
+        }
+        let color = rgba(color)?;
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.elements.insert(number, color);
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("element color: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    pub fn reset_element_color(&self, number: u8) {
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.elements.remove(&number);
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("element color: {e}");
+                }
+            }),
+        );
+    }
+    pub fn set_secondary_color(&self, index: usize, color: &[u8]) -> Result<(), JsError> {
+        if index >= 9 {
+            return Err(JsError::new("secondary index must be 0..=8"));
+        }
+        let color = rgba(color)?;
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.secondary[index] = color;
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("secondary color: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    /// `stops` contains three consecutive RGBA8 colors (12 bytes total).
+    pub fn set_continuous_gradient(&self, stops: &[u8], midpoint: f32) -> Result<(), JsError> {
+        if stops.len() != 12 || !midpoint.is_finite() || !(0.01..=0.99).contains(&midpoint) {
+            return Err(JsError::new(
+                "expected 12 stop bytes and midpoint 0.01..=0.99",
+            ));
+        }
+        let stops = [
+            rgba(&stops[0..4])?,
+            rgba(&stops[4..8])?,
+            rgba(&stops[8..12])?,
+        ];
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.continuous = molar_vis_core::Gradient { stops, midpoint };
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("continuous gradient: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    pub fn set_palette_color(&self, index: usize, color: &[u8]) -> Result<(), JsError> {
+        let color = rgba(color)?;
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                if let Some(slot) = c.categorical.get_mut(index) {
+                    *slot = color;
+                    if let Err(e) = app.set_color_preferences(c) {
+                        log::error!("palette color: {e}");
+                    }
+                } else {
+                    log::error!("palette index {index} out of range");
+                }
+            }),
+        );
+        Ok(())
+    }
+    pub fn add_palette_color(&self, color: &[u8]) -> Result<(), JsError> {
+        let color = rgba(color)?;
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.categorical.push(color);
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("palette: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    pub fn remove_palette_color(&self, index: usize) {
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                if c.categorical.len() > 1 && index < c.categorical.len() {
+                    c.categorical.remove(index);
+                    if let Err(e) = app.set_color_preferences(c) {
+                        log::error!("palette: {e}");
+                    }
+                } else {
+                    log::error!("cannot remove palette index {index}");
+                }
+            }),
+        );
+    }
     /// Add a molecule, rendering **directly** from the parsed `System` (by reference);
     /// returns a handle.
     pub fn add_mol(&self, sys: &System) -> MolHandle {
-        let mol = {
-            let mut s = self.state.borrow_mut();
-            let idx = s.len();
-            s.push(1); // a new molecule comes with one default representation
-            idx
-        };
+        let mol = molar_vis_core::reserve_mol_id().0;
         let name = format!("mol {mol}");
-        let src = WebSystemSource { system: sys.system.clone(), version: sys.version.clone() };
+        let src = WebSystemSource {
+            system: sys.system.clone(),
+            version: sys.version.clone(),
+        };
         send(
             &self.jobs,
             Box::new(move |app: &mut App| {
-                if let Err(e) = app.add_shared_molecule(Box::new(src), name) {
+                if let Err(e) = app.add_shared_molecule_with_id(mol, Box::new(src), name) {
                     log::error!("add_mol failed: {e}");
                 }
             }),
         );
-        MolHandle { mol, jobs: self.jobs.clone(), state: self.state.clone() }
+        MolHandle { mol, jobs: self.jobs.clone() }
     }
 
     /// The molecules currently in the scene, as handles.
-    #[wasm_bindgen(getter)]
-    pub fn mols(&self) -> Vec<MolHandle> {
-        let n = self.state.borrow().len();
-        (0..n)
-            .map(|mol| MolHandle { mol, jobs: self.jobs.clone(), state: self.state.clone() })
-            .collect()
+    pub async fn mols(&self) -> Result<Vec<MolHandle>, JsError> {
+        let ids = query_job(&self.jobs, |app| Ok(app.molecule_ids())).await?;
+        Ok(ids.into_iter().map(|mol| MolHandle { mol, jobs: self.jobs.clone() }).collect())
     }
 
     // --- View controls (mirror the view-settings UI + the Python module). ---
@@ -247,7 +456,10 @@ impl Visualizer {
 
     /// Flat background color, RGB in 0–1.
     pub fn background(&self, r: f32, g: f32, b: f32) {
-        send(&self.jobs, Box::new(move |app| app.set_background_solid([r, g, b])));
+        send(
+            &self.jobs,
+            Box::new(move |app| app.set_background_solid([r, g, b])),
+        );
     }
 
     /// Vertical gradient background; `top`/`bottom` are `[r, g, b]` in 0–1.
@@ -256,7 +468,10 @@ impl Visualizer {
             return Err(JsError::new("background_gradient expects [r, g, b] arrays"));
         }
         let (t, b) = ([top[0], top[1], top[2]], [bottom[0], bottom[1], bottom[2]]);
-        send(&self.jobs, Box::new(move |app| app.set_background_gradient(t, b)));
+        send(
+            &self.jobs,
+            Box::new(move |app| app.set_background_gradient(t, b)),
+        );
         Ok(())
     }
 
@@ -281,36 +496,105 @@ impl Visualizer {
 
     /// Depth cueing (fog): `mode` is `"linear"`/`"exp"`/`"exp2"` (or `"none"`/`"off"` to
     /// disable); `strength` = opacity at the back, `start` = where it begins (0–1).
-    pub fn depth_cue(&self, enabled: bool, mode: &str, strength: f32, start: f32) -> Result<(), JsError> {
+    pub fn depth_cue(
+        &self,
+        enabled: bool,
+        mode: &str,
+        strength: f32,
+        start: f32,
+    ) -> Result<(), JsError> {
         let (enabled, mode) = match mode.to_ascii_lowercase().as_str() {
             "none" | "off" => (false, CueMode::Linear),
-            other => (enabled, parse_cue_mode(other).map_err(|e| JsError::new(&e))?),
+            other => (
+                enabled,
+                parse_cue_mode(other).map_err(|e| JsError::new(&e))?,
+            ),
         };
-        send(&self.jobs, Box::new(move |app| app.set_depth_cue(enabled, mode, strength, start)));
+        send(
+            &self.jobs,
+            Box::new(move |app| app.set_depth_cue(enabled, mode, strength, start)),
+        );
         Ok(())
     }
 
     /// Screen-space ambient occlusion: `strength` darkening, `radius` in nm.
     pub fn ambient_occlusion(&self, enabled: bool, strength: f32, radius: f32) {
-        send(&self.jobs, Box::new(move |app| app.set_ambient_occlusion(enabled, strength, radius)));
+        send(
+            &self.jobs,
+            Box::new(move |app| app.set_ambient_occlusion(enabled, strength, radius)),
+        );
     }
 
     /// Real-time cast shadows: `strength` scales how dark shadowed areas get.
     pub fn shadows(&self, enabled: bool, strength: f32) {
-        send(&self.jobs, Box::new(move |app| app.set_shadows(enabled, strength)));
+        send(
+            &self.jobs,
+            Box::new(move |app| app.set_shadows(enabled, strength)),
+        );
     }
 }
 
 /// Handle to a molecule in the viewer.
 #[wasm_bindgen]
 pub struct MolHandle {
-    mol: usize,
+    mol: u64,
     jobs: Sender<AppJob>,
-    state: VisState,
 }
 
 #[wasm_bindgen]
 impl MolHandle {
+    /// Add an interactions representation against a partner representation.
+    pub fn add_interactions(&self, partner: &RepHandle) -> RepHandle {
+        let rep = molar_vis_core::reserve_rep_id().0;
+        let (m, pm, pr) = (self.mol, partner.mol, partner.rep);
+        send(&self.jobs, Box::new(move |app| { if let Err(e) = app.add_interactions_rep_with_id(m, rep, pm, pr) { log::error!("add interactions: {e}"); } }));
+        RepHandle { mol: m, rep, jobs: self.jobs.clone() }
+    }
+    /// Import molecule-owned PLY bytes (positions are nanometers).
+    pub fn add_mesh_ply(&self, name: String, bytes: &[u8]) -> Result<MeshHandle, JsError> {
+        molar_vis_core::import_ply(bytes).map_err(|e| JsError::new(&e))?;
+        let id = molar_vis_core::reserve_mesh_id();
+        let queued = bytes.to_vec();
+        let mol = self.mol;
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(mol).and_then(|mi| app.add_mesh_ply(mi, id, name, &queued)) {
+                    log::error!("add mesh: {e}");
+                }
+            }),
+        );
+        Ok(MeshHandle {
+            mol,
+            id,
+            jobs: self.jobs.clone(),
+        })
+    }
+
+    /// Includes meshes created by the viewer UI or restored from a session.
+    pub async fn meshes(&self) -> Result<Vec<MeshHandle>, JsError> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let mol = self.mol;
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.resolve_molecule(mol).and_then(|mi| app.mesh_ids(mi)));
+            }),
+        );
+        let ids = rx
+            .await
+            .map_err(|_| JsError::new("viewer closed"))?
+            .map_err(|e| JsError::new(&e))?;
+        Ok(ids
+            .into_iter()
+            .map(|id| MeshHandle {
+                mol,
+                id,
+                jobs: self.jobs.clone(),
+            })
+            .collect())
+    }
+
     /// Add a representation. `sel` (a `Sel`, consumed) sets the selection;
     /// `style`/`color`/`material` are names like `"cartoon"`/`"ss"`/`"Transparent"`.
     /// Any argument may be omitted. Returns a handle.
@@ -320,107 +604,267 @@ impl MolHandle {
         style: Option<String>,
         color: Option<String>,
         material: Option<String>,
+        width: Option<f32>,
     ) -> RepHandle {
-        let rep = {
-            let mut s = self.state.borrow_mut();
-            let cnt = s.get_mut(self.mol).expect("stale molecule handle");
-            let idx = *cnt;
-            *cnt += 1;
-            idx
-        };
+        let rep = molar_vis_core::reserve_rep_id().0;
         let indices = sel.map(|s| s.indices);
         let mol = self.mol;
         send(
             &self.jobs,
             Box::new(move |app: &mut App| {
-                if let Err(e) = app.add_rep_default(mol) {
+                if let Err(e) = app.add_rep_default_with_id(mol, rep) {
                     log::error!("add_rep failed: {e}");
                     return;
                 }
+                let (mi, ri) = match app.resolve_rep(mol, rep) { Ok(pair) => pair, Err(e) => { log::error!("add_rep resolve: {e}"); return; } };
                 if let Some(idx) = &indices {
-                    if let Err(e) = app.set_rep_selection(mol, rep, idx) {
+                    if let Err(e) = app.set_rep_selection(mi, ri, idx) {
                         log::error!("add_rep select failed: {e}");
                     }
                 }
                 if let Some(st) = &style {
-                    if let Err(e) = app.set_rep_style(mol, rep, st) {
+                    if let Err(e) = app.set_rep_style(mi, ri, st) {
                         log::error!("add_rep style failed: {e}");
                     }
                 }
                 if let Some(c) = &color {
-                    if let Err(e) = app.set_rep_color(mol, rep, c) {
+                    if let Err(e) = app.set_rep_color(mi, ri, c) {
                         log::error!("add_rep color failed: {e}");
                     }
                 }
                 if let Some(m) = &material {
-                    if let Err(e) = app.set_rep_material(mol, rep, m) {
+                    if let Err(e) = app.set_rep_material(mi, ri, m) {
                         log::error!("add_rep material failed: {e}");
+                    }
+                }
+                if let Some(w) = width {
+                    if let Err(e) = app.set_rep_width(mi, ri, w) {
+                        log::error!("add_rep width failed: {e}");
                     }
                 }
             }),
         );
-        RepHandle { mol, rep, jobs: self.jobs.clone() }
+        RepHandle {
+            mol,
+            rep,
+            jobs: self.jobs.clone(),
+        }
     }
 
     /// This molecule's representations, as handles.
-    #[wasm_bindgen(getter)]
-    pub fn reps(&self) -> Vec<RepHandle> {
-        let cnt = self.state.borrow().get(self.mol).copied().unwrap_or(0);
-        (0..cnt)
-            .map(|rep| RepHandle { mol: self.mol, rep, jobs: self.jobs.clone() })
-            .collect()
+    pub async fn reps(&self) -> Result<Vec<RepHandle>, JsError> {
+        let mol = self.mol;
+        let ids = query_job(&self.jobs, move |app| app.rep_ids(mol)).await?;
+        Ok(ids.into_iter().map(|rep| RepHandle { mol, rep, jobs: self.jobs.clone() }).collect())
+    }
+}
+
+/// Stable handle to a molecule-owned PLY mesh.
+#[wasm_bindgen]
+pub struct MeshHandle {
+    mol: u64,
+    id: u64,
+    jobs: Sender<AppJob>,
+}
+
+#[wasm_bindgen]
+impl MeshHandle {
+    /// JSON snapshot of name, visibility, material, style, sizes, smoothing, and counts.
+    pub async fn details_json(&self) -> Result<String, JsError> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.resolve_molecule(m).and_then(|mi| app.mesh_details_json(mi, id)));
+            }),
+        );
+        rx.await
+            .map_err(|_| JsError::new("viewer closed"))?
+            .map_err(|e| JsError::new(&e))
+    }
+    #[wasm_bindgen(setter)]
+    pub fn set_visible(&self, value: bool) {
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.set_mesh_visible(mi, id, value)) {
+                    log::error!("mesh visible: {e}");
+                }
+            }),
+        );
+    }
+    #[wasm_bindgen(setter)]
+    pub fn set_material(&self, value: String) {
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.set_mesh_material(mi, id, &value)) {
+                    log::error!("mesh material: {e}");
+                }
+            }),
+        );
+    }
+    #[wasm_bindgen(setter)]
+    pub fn set_style(&self, value: String) {
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.set_mesh_style(mi, id, &value)) {
+                    log::error!("mesh style: {e}");
+                }
+            }),
+        );
+    }
+    #[wasm_bindgen(setter)]
+    pub fn set_point_size(&self, value: f32) -> Result<(), JsError> {
+        if !value.is_finite() || !(1.0..=10.0).contains(&value) {
+            return Err(JsError::new("point_size must be 1..=10"));
+        }
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.set_mesh_point_size(mi, id, value)) {
+                    log::error!("mesh point size: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    #[wasm_bindgen(setter)]
+    pub fn set_line_width(&self, value: f32) -> Result<(), JsError> {
+        if !value.is_finite() || !(1.0..=10.0).contains(&value) {
+            return Err(JsError::new("line_width must be 1..=10"));
+        }
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.set_mesh_line_width(mi, id, value)) {
+                    log::error!("mesh line width: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    #[wasm_bindgen(setter)]
+    pub fn set_smoothing(&self, value: u32) -> Result<(), JsError> {
+        if value > 5 {
+            return Err(JsError::new("smoothing must be 0..=5"));
+        }
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.set_mesh_smoothing(mi, id, value)) {
+                    log::error!("mesh smoothing: {e}");
+                }
+            }),
+        );
+        Ok(())
+    }
+    /// Export original PLY bytes. Display smoothing does not modify the source.
+    pub async fn ply_bytes(&self) -> Result<Vec<u8>, JsError> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.resolve_molecule(m).and_then(|mi| app.mesh_ply(mi, id)));
+            }),
+        );
+        rx.await
+            .map_err(|_| JsError::new("viewer closed"))?
+            .map_err(|e| JsError::new(&e))
+    }
+    pub fn delete(&self) {
+        let (m, id) = (self.mol, self.id);
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.delete_mesh(mi, id)) {
+                    log::error!("delete mesh: {e}");
+                }
+            }),
+        );
     }
 }
 
 /// Handle to a representation. Property setters (`rep.style = "lines"`, …) apply live.
 #[wasm_bindgen]
 pub struct RepHandle {
-    mol: usize,
-    rep: usize,
+    mol: u64,
+    rep: u64,
     jobs: Sender<AppJob>,
 }
 
 #[wasm_bindgen]
 impl RepHandle {
+    #[wasm_bindgen(getter, js_name = molId)]
+    pub fn mol_id(&self) -> f64 { self.mol as f64 }
+    #[wasm_bindgen(getter, js_name = repId)]
+    pub fn rep_id(&self) -> f64 { self.rep as f64 }
+    #[wasm_bindgen(setter)]
+    pub fn set_width(&self, value: f32) -> Result<(), JsError> {
+        if !value.is_finite() || value < 1.0 { return Err(JsError::new("width must be at least 1 pixel")); }
+        let (m, r) = (self.mol, self.rep);
+        send(&self.jobs, Box::new(move |app| { if let Err(e) = app.resolve_rep(m, r).and_then(|(mi,ri)| app.set_rep_width(mi, ri, value)) { log::error!("rep width: {e}"); } })); Ok(())
+    }
     #[wasm_bindgen(setter)]
     pub fn set_style(&self, value: String) {
         let (mol, rep) = (self.mol, self.rep);
-        send(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_style(mol, rep, &value) {
-                log::error!("set style: {e}");
-            }
-        }));
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_rep(mol, rep).and_then(|(mi,ri)| app.set_rep_style(mi, ri, &value)) {
+                    log::error!("set style: {e}");
+                }
+            }),
+        );
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_color(&self, value: String) {
         let (mol, rep) = (self.mol, self.rep);
-        send(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_color(mol, rep, &value) {
-                log::error!("set color: {e}");
-            }
-        }));
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_rep(mol, rep).and_then(|(mi,ri)| app.set_rep_color(mi, ri, &value)) {
+                    log::error!("set color: {e}");
+                }
+            }),
+        );
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_material(&self, value: String) {
         let (mol, rep) = (self.mol, self.rep);
-        send(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_material(mol, rep, &value) {
-                log::error!("set material: {e}");
-            }
-        }));
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_rep(mol, rep).and_then(|(mi,ri)| app.set_rep_material(mi, ri, &value)) {
+                    log::error!("set material: {e}");
+                }
+            }),
+        );
     }
 
     /// Set the selection from a `Sel`'s atoms.
     pub fn select(&self, sel: &Sel) {
         let (mol, rep) = (self.mol, self.rep);
         let indices = sel.indices.clone();
-        send(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_selection(mol, rep, &indices) {
-                log::error!("select: {e}");
-            }
-        }));
+        send(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) = app.resolve_rep(mol, rep).and_then(|(mi,ri)| app.set_rep_selection(mi, ri, &indices)) {
+                    log::error!("select: {e}");
+                }
+            }),
+        );
     }
 }
 
@@ -437,7 +881,9 @@ pub fn start(canvas_id: &str) -> Result<Visualizer, JsError> {
     let _ = console_log::init_with_level(log::Level::Info);
 
     if VIEWER_STARTED.with(|f| f.replace(true)) {
-        return Err(JsError::new("a molar_vis viewer is already running on this page"));
+        return Err(JsError::new(
+            "a molar_vis viewer is already running on this page",
+        ));
     }
 
     let document = web_sys::window()
@@ -468,5 +914,5 @@ pub fn start(canvas_id: &str) -> Result<Visualizer, JsError> {
         }
     });
 
-    Ok(Visualizer { jobs: tx, state: Rc::new(RefCell::new(Vec::new())) })
+    Ok(Visualizer { jobs: tx })
 }

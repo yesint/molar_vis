@@ -60,7 +60,7 @@ reimplementation of every VMD feature.
 
 | Style | Rendering | Notes |
 |---|---|---|
-| **Lines** | 1‑px GL lines | the lightweight default, VMD-authentic |
+| **Lines** | screen-space line quads | adjustable pixel width |
 | **Licorice** | cylinder + sphere impostors | uniform bond radius |
 | **Ball and Stick** | sphere + cylinder impostors | scaled VDW balls + thin sticks |
 | **VDW** | sphere impostors | space-filling, true van der Waals radii |
@@ -118,9 +118,19 @@ Frame changes are zero-copy (rendered by reference) with incremental GPU updates
 trimmed or decimated.
 
 **Coloring schemes** — Element (CPK), Chain, ResID, ResName, Index, B-factor,
-Secondary structure, **Charge** (a diverging red–white–blue ramp over the partial or formal charge —
+Secondary structure, **Charge** (the shared continuous gradient over the partial or formal charge —
 partial charges can be assigned on the fly with **espaloma**), and **Solid** (a custom color you
 pick), each with a drawn descriptive icon in the picker.
+
+**Editable colors** — **Edit ▸ Settings ▸ Colors** controls the colors used by all
+representations. Edit common elements directly or open **Other elements…** for the
+full periodic table. Set colors for nine secondary-structure classes. **Index**,
+**B-factor**, and **Charge** share a three-color continuous gradient (blue–white–red
+by default), with an adjustable midpoint. **Chain**, **ResID**, and **ResName** use
+a discrete palette with 18 default colors; edit, add, or remove its entries. The same
+palette supplies color-picker presets, including **Solid**. Changes apply live.
+**Save** stores startup defaults, and sessions retain their own palette. Imported
+mesh vertex colors remain part of the mesh and are not changed by these palettes.
 
 **Selections** — molar's VMD/Pteros-style selection language: `protein`, `backbone`,
 `water`, `name CA`, `resid 1:50`, `chain A`, `within 5.0 of ...`, and much more.
@@ -207,16 +217,19 @@ back to a high-resolution capture of the realtime view).
 - Full **undo/redo** with named history (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y).
 
 **Settings, sessions & files**
-- **Program settings** — **Edit ▸ Settings** opens a tabbed window
-  (*Appearance / Rendering / View / Representations / Behavior*) for everything that used to be baked
-  in at launch: UI theme + font scale + accent color, anti-aliasing and shadow-map quality, the
-  default projection / background / lighting / representation / coloring for *new* scenes, mouse
-  sensitivity, trajectory playback defaults, and bond detection (thresholds, **periodic search**,
-  and the dashed wrap-around-bond toggle). App-wide tweaks (theme,
-  anti-aliasing) apply live; the rest seed the next scene you open. Everything **persists to a JSON
-  file** in your platform's config directory, written with sensible defaults on first launch.
-- **Sessions** — save and reload the whole visualization state (molecules by source path, every
-  representation, the camera and all view settings) as a single JSON session.
+- **Program settings** — **Edit ▸ Settings** opens a window with
+  *Appearance / Render / View / Representations / Styles / Materials / Colors / Behavior*.
+  These sections control the theme, rendering, camera, representation defaults, geometry,
+  material options, palettes, picking, playback, and bond detection. Changes apply to the
+  running session immediately. **Default** applies factory settings; **Revert** restores
+  the values from when the editor opened; **Save** stores all current settings for future
+  sessions and keeps the editor open. Native settings use a JSON file in the platform's
+  config directory; browser settings use localStorage. Closing retains live changes
+  without saving startup defaults.
+- **Sessions** (native) — save and reload the visualization as a JSON session, including
+  molecule source references, representations, camera and view settings, color preferences,
+  and embedded custom meshes with their display options. Source structure and trajectory
+  files must remain available when reloading.
 - **Export** (native) — write a molecule, or just one representation's selection, back out to
   PDB / GRO / XYZ at the displayed frame.
 
@@ -270,10 +283,10 @@ trunk serve                      # then open the printed http://127.0.0.1:8080
 The browser crate (`crates/molar_vis_web`) renders through `eframe`'s `WebRunner` and
 reads files in memory via molar's `FileHandler::from_reader` — no server needed, so it
 hosts on any static site. It's deployed to GitHub Pages from `.github/workflows/pages.yml`
-on every push to `main`. molar's parallelism (rayon) runs serially on wasm; trajectories load too —
+on version tags or a manual workflow run. molar's parallelism (rayon) runs serially on wasm; trajectories load too —
 the picked file's frames stream into the viewer incrementally (no threads). Molecular file **export**
 and on-disk **settings/session** files are native-only; images and PLY meshes can be downloaded
-in the browser.
+in the browser. Saved browser preferences use localStorage.
 
 The browser build is also **scriptable from JavaScript** — a small API (`crates/molar_vis_js`, built
 with `wasm-pack`) that mirrors the Python module almost line-for-line, so a surrounding web page can
@@ -299,10 +312,6 @@ cd ../..
 
 A Rust toolchain is required (maturin invokes `cargo`). Re-run `maturin develop` after
 pulling code changes.
-
-> **Python 3.14+:** pyo3 0.27 is tested up to CPython 3.13, so on a newer interpreter
-> prefix the build with `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` (e.g.
-> `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release`).
 
 The module **re-exports [pymolar](https://github.com/yesint/molar)** (molar's Python
 bindings), so a single `import molar_vis` gives you both molar's full analysis API *and*
@@ -361,11 +370,53 @@ DSSP, geometric selections, …), so you analyze and visualize in one session.
 | `mv.System(path)`, `s("protein")`, `rmsd(a, b)`, … | the re-exported **pymolar** API (analysis) |
 | `mv.spawn() -> Visualizer` | open a viewer window (non-blocking) |
 | `vis.add_mol(system) -> MolHandle` | render a molecule, zero-copy |
-| `vis.mols` | the molecules in the scene, as handles |
+| `vis.mols` | all live molecules, including those opened in the UI or restored from sessions |
 | `mol.add_rep(sel=None, style=…, color=…, material=…) -> RepHandle` | add a representation |
-| `mol.reps` | that molecule's representations, as handles |
+| `mol.reps` | all live representations belonging to that molecule |
 | `rep.style = …` · `rep.color = …` · `rep.material = …` | live property setters |
 | `rep.select(sel)` | set a representation's selection from a pymolar `Sel` |
+| `rep.width = pixels` | set Lines or Interactions width (at least 1 pixel) |
+| `mol.add_interactions(partner)` | add contacts against a representation, or a molecule's first representation |
+| `vis.focus(mol, sel)` | frame a selection |
+| `vis.unobstructed_view(rep, zoom_out=1.0, resolution=256)` | search for a view that exposes the most target atoms |
+| `vis.unobstructed_view_multi(reps, zoom_out=1.0, resolution=256)` | search with a nonempty list of representations as one target |
+| `vis.rotation_center(x, y, z)` | set the orbit pivot in nm without moving the view |
+| `mol.load_mesh(path)` / `mol.add_mesh_ply(name, bytes)` | attach a PLY mesh in nm; return a mesh handle |
+| `mol.meshes` | the molecule's mesh handles |
+| `mesh.style`, `mesh.material`, `mesh.visible` | control mesh display |
+| `mesh.point_size`, `mesh.line_width`, `mesh.smoothing` | pixel size/width (1–10), or Surface smoothing (0–5) |
+| `mesh.ply_bytes()` / `mesh.save(path)` / `mesh.delete()` | export source PLY data or remove the mesh |
+| `vis.set_element_color(number, rgba)` | override an element color with RGBA8 |
+| `vis.set_secondary_color(index, rgba)` | edit a secondary-structure color (indices 0–8) |
+| `vis.set_continuous_gradient(stops, midpoint)` | set three RGBA8 stops and midpoint (0.01–0.99) |
+| `vis.colors_json()` | read the current color preferences as JSON |
+| `vis.set_palette(colors)` | replace the discrete palette with a nonempty list of RGBA tuples |
+| `vis.set_palette_color(index, rgba)` | edit an entry in the active discrete palette |
+| `vis.add_palette_color(rgba)` / `vis.remove_palette_color(index)` | add or remove a palette entry; retain at least one |
+| `vis.reset_colors()` | restore factory colors |
+| `vis.save_settings()` | save current startup defaults explicitly |
+
+
+Mesh and color controls use the same live state as the GUI. For example, after
+creating `vis` and `mol` above:
+
+```python
+mesh = mol.load_mesh("surface.ply")
+mesh.style = "surface"              # also "points" or "wireframe"
+mesh.smoothing = 2
+mesh.material = "Opaque"
+vis.set_element_color(6, (90, 90, 90, 255))
+vis.set_continuous_gradient(
+    [(40, 80, 230, 255), (255, 255, 255, 255), (230, 40, 40, 255)],
+    0.4,
+)
+mesh.save("surface-copy.ply")       # original geometry and vertex colors
+```
+
+Colors use byte channels (0–255). Secondary-structure indices are α helix, 3₁₀ helix,
+π helix, β sheet, β bridge, turn, bend, polyproline, and coil, in that order.
+`vis.reset_element_color(number)` removes an element override. Color edits apply live
+and are included in saved sessions; call `vis.save_settings()` to store startup defaults.
 
 `style`, `color` and `material` take the same names as the GUI pickers — e.g. `"vdw"`,
 `"licorice"`, `"ballstick"`, `"cartoon"`, `"surface"`; `"element"`, `"chain"`, `"resid"`,
@@ -379,6 +430,9 @@ vis.rotate(yaw, pitch)            # orbit, degrees   ·  vis.roll(angle)
 vis.pan(dx, dy)                   # fraction of the viewport (+x right, +y up)
 vis.zoom(1.5)                     # >1 closer, <1 farther
 vis.reset_view()                  # re-frame all molecules (zoom-to-fit)
+vis.focus(mol, s("protein"))      # frame this selection
+vis.unobstructed_view(rep)        # optimize orientation and frame the target
+vis.rotation_center(1.0, 2.0, 3.0)  # orbit pivot in nm
 
 vis.projection("orthographic")   # or "perspective"
 vis.background(0.0, 0.0, 0.05)   # solid RGB (0–1)
@@ -389,6 +443,22 @@ vis.depth_cue(mode="exp2", strength=0.6, start=0.3)   # or mode="none" to disabl
 vis.ambient_occlusion(True, strength=0.9, radius=0.4)
 vis.shadows(True, strength=0.6)
 ```
+
+Unobstructed-view searches treat other visible representations as occluders.
+`zoom_out=2.0` doubles the framed extent; `resolution` sets the coarse search's
+number of directions. The multi-target form can combine representations from
+different molecules.
+
+The [JavaScript API](crates/molar_vis_js/README.md) also exposes these camera,
+interaction, mesh, and palette controls. Browser file I/O uses byte arrays and
+asynchronous readbacks; native Python additionally provides path-based mesh I/O,
+image rendering, and session saving. JavaScript interaction partners must be
+representation handles.
+
+Molecule and representation listings query the live scene. Python uses `vis.mols`
+and `mol.reps`; JavaScript uses `await vis.mols()` and `await mol.reps()`.
+Handles identify objects independently of their order in the sidebar. Removing an
+object makes its handle stale; it cannot refer to the next object in the list.
 
 > **Note.** Live updates are change-detected via a coordinate version counter on the
 > shared state, so a *static* molecule costs nothing — the viewer only re-renders when

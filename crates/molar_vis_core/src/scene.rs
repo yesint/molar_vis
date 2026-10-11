@@ -26,6 +26,20 @@ use crate::trajectory::{LoadMsg, Trajectory};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct MolId(pub u64);
 
+static NEXT_MOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub fn reserve_mol_id() -> MolId {
+    MolId(NEXT_MOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Stable runtime identity for one representation, independent of its row index.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub struct RepId(pub u64);
+
+static NEXT_REP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+pub fn reserve_rep_id() -> RepId {
+    RepId(NEXT_REP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Stable per-group identity (parallel to [`MolId`]), so undo/redo and sessions
 /// can reference a [`MolGroup`] across reordering.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -194,6 +208,7 @@ impl MeshCache {
 
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
+    pub id: RepId,
     pub(crate) color_preferences: std::sync::Arc<crate::color::ColorPreferences>,
     pub kind: RepKind,
     pub params: RepParams,
@@ -436,6 +451,7 @@ impl Representation {
         smooth_window: u32,
     ) -> Self {
         Self {
+            id: reserve_rep_id(),
             kind,
             params,
             partner: None,
@@ -1527,15 +1543,13 @@ pub struct Scene {
     /// per frame (no threads in wasm). Pruned by the same paths.
     #[cfg(target_arch = "wasm32")]
     pub wasm_loaders: HashMap<MolId, crate::data::traj_wasm::TrajStream>,
-    next_id: u64,
     next_group_id: u64,
 }
 
 impl Scene {
     /// Load a molecule into the scene, assigning it a fresh [`MolId`].
     pub fn add(&mut self, raw: RawMolecule, rep_defaults: &crate::settings::RepDefaults) -> MolId {
-        let id = MolId(self.next_id);
-        self.next_id += 1;
+        let id = reserve_mol_id();
         self.molecules.push(Molecule::new(id, raw, rep_defaults));
         id
     }
@@ -1550,11 +1564,25 @@ impl Scene {
         bond_params: &crate::data::bonds::BondParams,
         rep_defaults: &crate::settings::RepDefaults,
     ) -> Result<MolId, String> {
-        let id = MolId(self.next_id);
+        let id = reserve_mol_id();
         let mol = Molecule::new_shared(id, name, source, bond_params, rep_defaults)?;
-        self.next_id += 1;
         self.molecules.push(mol);
         Ok(id)
+    }
+
+    pub fn add_shared_with_id(
+        &mut self,
+        id: MolId,
+        name: String,
+        source: Box<dyn crate::moldata::SharedSource>,
+        bond_params: &crate::data::bonds::BondParams,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Result<(), String> {
+        if self.molecules.iter().any(|m| m.id == id) || self.trash.contains_key(&id) {
+            return Err(format!("molecule ID {} already exists", id.0));
+        }
+        self.molecules.push(Molecule::new_shared(id, name, source, bond_params, rep_defaults)?);
+        Ok(())
     }
 
     /// Allocate the next fresh [`GroupId`].
@@ -1865,6 +1893,34 @@ mod tests {
         let mut recs = crate::data::load_records(&fixture(name), &BondParams::default())
             .expect("load records");
         Molecule::new(MolId(0), recs.remove(0), &RepDefaults::default())
+    }
+
+    #[test]
+    fn runtime_ids_follow_objects_across_scene_reorder_and_deletion() {
+        let mut scene = Scene::default();
+        let mut raw = crate::data::load_records(&fixture("ligands20.sdf"), &BondParams::default()).unwrap().into_iter();
+        let defaults = RepDefaults::default();
+        let first = scene.add(raw.next().unwrap(), &defaults);
+        let second = scene.add(raw.next().unwrap(), &defaults);
+        assert_ne!(first, second);
+        let first_rep = scene.molecules[0].reps[0].id;
+        scene.molecules[0].reps.push(Representation::new(RepKind::Vdw));
+        let second_rep = scene.molecules[0].reps[1].id;
+        assert_ne!(first_rep, second_rep);
+
+        scene.molecules.swap(0, 1);
+        let mi = scene.mol_index(first).unwrap();
+        assert_eq!(mi, 1);
+        scene.molecules[mi].reps.swap(0, 1);
+        assert_eq!(scene.molecules[mi].reps.iter().position(|r| r.id == first_rep), Some(1));
+
+        scene.molecules.remove(mi);
+        assert_eq!(scene.mol_index(first), None);
+        assert_eq!(scene.mol_index(second), Some(0));
+        let mut fresh_scene = Scene::default();
+        let third = fresh_scene.add(raw.next().unwrap(), &defaults);
+        assert_ne!(third, first);
+        assert_ne!(third, second);
     }
 
     /// The resolved bond graph reaches the topology, so molar's bond-graph selection

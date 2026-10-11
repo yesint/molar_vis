@@ -226,3 +226,32 @@
   light-camera uniform bytes and ordered visible opaque caster revisions. Unknown/dirty/pending
   geometry falls back to redraw, and map replacement clears the key. Camera-relative lighting
   is included in the key. The deferred shadow application still runs for the current view.
+
+## Custom meshes and color preferences
+
+Custom PLY meshes belong to a molecule, outside its atom representations. They use
+world coordinates in nm and stay static when trajectory frames change. Molecule
+visibility gates mesh visibility. `mesh::Mesh` retains immutable source data plus
+display state, topology caches, and GPU buffers. Surface style uses triangle geometry;
+Points uses screen-space point quads and Wireframe uses screen-space lines. The
+ray tracer gathers the corresponding visible geometry with the selected material.
+Point diameter and line width are specified in pixels, independent of zoom.
+
+Smoothing creates cached display geometry from the source. Paired Taubin passes
+limit shrinkage, preserve vertex colors, and keep open boundaries fixed. PLY export
+uses the source data, so neither smoothing nor material changes alter saved vertices
+or colors. Undo snapshots and sessions include the mesh state and source data; sessions
+therefore do not need the original PLY file to restore a mesh.
+
+`ColorPreferences` supplies one palette to all atom representations through their
+`ColorSpec`. Changes invalidate the affected geometry so viewport and ray-traced
+colors agree. Element overrides and nine secondary-structure colors are independent
+of the shared continuous gradient and discrete palette. Index, B-factor, and Charge
+normalize their values before sampling the same three-stop gradient; its middle stop
+can move. Chain, ResID, and ResName cycle through the discrete palette, which also
+supplies color-picker presets. Imported mesh colors remain in the mesh source.
+
+Settings Save persists preferences in the native configuration file or browser
+localStorage. A session stores its active colors in `ViewState.colors`; an older
+session without that field retains the active startup preferences. Color changes are
+program settings, while mesh display changes participate in scene undo/redo.

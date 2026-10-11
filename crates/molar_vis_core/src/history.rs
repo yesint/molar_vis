@@ -21,7 +21,7 @@ use crate::color::ColorMethod;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
 use crate::scene::{
-    GroupId, MolGroup, MolId, Molecule, MoleculeSource, PeriodicParams, Representation, Scene,
+    reserve_rep_id, GroupId, MolGroup, MolId, Molecule, MoleculeSource, PeriodicParams, RepId, Representation, Scene,
 };
 
 /// The editable state of a single representation — the canonical "document" unit.
@@ -33,6 +33,9 @@ use crate::scene::{
 /// carry `#[serde(default)]` so older saved sessions still load.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepState {
+    /// Runtime identity survives undo/redo but is refreshed when a session is loaded.
+    #[serde(skip, default = "reserve_rep_id")]
+    pub id: RepId,
     pub kind: RepKind,
     pub params: RepParams,
     pub color: ColorMethod,
@@ -71,6 +74,7 @@ impl RepState {
     /// Snapshot a live representation's editable fields.
     pub fn capture(r: &Representation) -> Self {
         Self {
+            id: r.id,
             kind: r.kind,
             params: r.params,
             color: r.color,
@@ -103,6 +107,7 @@ impl RepState {
             self.smooth_window,
         );
         rep.charge_kind = self.charge_kind;
+        rep.id = self.id;
         rep.partner = self.partner.clone();
         rep
     }
@@ -476,7 +481,8 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
     for (i, s) in target.iter().enumerate() {
         let needs_rebuild = {
             let cur = &mol.reps[i];
-            cur.kind != s.kind
+            cur.id != s.id
+                || cur.kind != s.kind
                 || cur.params != s.params
                 || cur.color != s.color
                 || cur.ss_algo != s.ss_algo
@@ -818,6 +824,32 @@ mod tests {
         assert_eq!(scene.molecules[0].reps.len(), 1);
         hist.redo(&mut scene);
         assert_eq!(scene.molecules[0].reps.len(), 2);
+    }
+
+    #[test]
+    fn identical_rep_reorder_restores_runtime_id_order() {
+        let mut scene = load_scene();
+        scene.molecules[0].reps.push(Representation::new(RepKind::Vdw));
+        scene.molecules[0].reps.push(Representation::new(RepKind::Vdw));
+        let before: Vec<_> = scene.molecules[0].reps.iter().map(|r| r.id).collect();
+        assert_ne!(before[1], before[2]);
+        let mut history = History::new(EditState::capture(&scene));
+        scene.molecules[0].reps.swap(1, 2);
+        history.maybe_record(EditState::capture(&scene));
+        assert!(history.can_undo());
+        history.undo(&mut scene);
+        assert_eq!(scene.molecules[0].reps.iter().map(|r| r.id).collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn rep_runtime_id_survives_snapshot_but_refreshes_on_deserialize() {
+        let rep = Representation::new(RepKind::Vdw);
+        let snapshot = RepState::capture(&rep);
+        assert_eq!(snapshot.to_representation().id, rep.id);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: RepState = serde_json::from_str(&json).unwrap();
+        assert_ne!(restored.id, rep.id);
+        assert_eq!(restored.to_representation().id, restored.id);
     }
 
     #[test]

@@ -18,20 +18,17 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 
 ## Rendering & visuals
 - ~~Different depth-cue methods~~ — **shipped** (M17; Linear/Exp/Exp² cue modes)
-- More materials and a material editor
+- ~~More materials and a material editor~~ — **shipped** (Outline and Mat. Nodes presets; Settings → Materials)
+- ~~Custom PLY meshes~~ — **shipped** (molecule-owned Points, Wireframe, Surface; see README)
+- ~~Editable color palettes~~ — **shipped** (Settings → Colors; see README)
 - On-screen labels and measurement
 - Drawing geometric primitives
-- High-quality rendering with raytracing
+- ~~High-quality rendering with raytracing~~ — **shipped** (GPU ray tracing with AO, shadows, and optional GI)
 - Movies
 - ~~Rendering of bonds over PBC as dashed "half-bonds" without artifacts across the box~~ — **shipped** (M16)
 
 ## UI
-- **Bold text is not currently possible.** egui's default fonts are Ubuntu-*Light* and Hack — there
-  is no bold face in the app — and `RichText::strong()` only swaps in a brighter colour. Rendering
-  genuinely bold text (e.g. to make molecule names stand out in the tree) requires embedding a bold
-  TTF and registering it as a font family: `DejaVuSans-Bold` (~700 kB) or `NotoSans-Bold` (~450 kB)
-  whole, or ~30 kB subset to Latin-1 with `pyftsubset` (fonttools isn't installed here). The cost is
-  a binary asset in the repo plus that much added to the wasm bundle. Needs a decision.
+- ~~Bold molecule names~~ — **shipped** (embedded Ubuntu Bold; see docs/UI.md)
 
 ## Selection & picking
 - ~~Pick modes: whole residues~~
@@ -47,8 +44,8 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
   sidesteps this by grouping per-residue BB/SC beads)
 
 ## Scripting & extensibility
-- Python bindings with exposed visualizer objects
-- Explore a possible embedded internal command language
+- ~~Python bindings with exposed visualizer objects~~ — **shipped** (M26)
+- ~~Embedded internal command language~~ — **shipped** (optional Rhai console)
 - Plugins architecture
 
 ## Drug-discovery goodies
@@ -59,11 +56,11 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
   than as its parts.
 - ~~PLIP-like interactions and their visualization~~ — **shipped** (M29; the `Interactions`
   rep style — H-bonds + hydrophobic contacts between a rep and a chosen partner rep, drawn as
-  Discovery-Studio-style dashed lines). Later: π-stacking / salt bridges / halogen bonds,
-  distance labels.
-- Reading SDF files (molar)
+  Discovery-Studio-style dashed lines). Six types now include π-stacking, π-cation,
+  salt bridges, and halogen bonds. Later: distance labels.
+- ~~Reading SDF files (molar)~~ — **shipped** (multi-record SDF/MOL groups)
 - ~~Partial-charge coloring + on-demand charge computation~~ — **shipped** (M31; the `Charge`
-  color scheme on a diverging red–white–blue ramp, partial or formal, with espaloma prediction on
+  color scheme on the shared continuous gradient, partial or formal, with espaloma prediction on
   the selection via `molar_ff` behind the **[Color]** tab's *Compute charges* button). Later:
   GAFF/GAFF2 atom typing is already in `molar_ff` and could surface the same way; computed charges
   aren't yet persisted in a session (molecules reload from disk), and espaloma needs Kekulé bond
@@ -71,13 +68,12 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 
 ## Altering structures visually
 - Deleting / Moving / rotating atoms, residues, molecules
-- Rotating bonds and dihedrals
+- ~~Rotating bonds and dihedrals~~ — **shipped** (Draw-mode dihedral tool)
 - ~~Simple UFF minimization~~ — **shipped** (M23; lightweight UFF-style cleanup FF —
   harmonic bond/angle + weak torsion + WCA repulsive vdW — with a FIRE minimizer; see
   `minimize.rs`)
 - ~~Drawing molecules with atoms/bonds palette a-la Marvin JS with on-the-fly minimization~~ —
   **shipped** (M23; Draw mode: vertical icon toolbar + viewport place-atom / drag-to-bond /
   cycle-order / erase, debounced FIRE cleanup + a "Clean up" button). **Deferred follow-ups:**
-  ring/fragment templates · automatic hydrogens · formal charges · change-element-of-existing-atom ·
-  multi-order *bond rendering* (double/triple still draw as one cylinder) · SMILES import/export ·
+  ring/fragment templates · automatic hydrogens · formal charges · change-element-of-existing-atom · SMILES import/export ·
   embedding drawn molecules in sessions

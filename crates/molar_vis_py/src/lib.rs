@@ -21,16 +21,16 @@
 //! (`spawn`) and the handle API (`add_mol`/`add_rep`/setters) are the next steps.
 
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 use molar::prelude::{Sel, SelectionDef, SelectionExpr, State, Topology};
 use molar_python::{Sel as PySel, System as PySystem};
 use molar_vis_core::eframe;
 use molar_vis_core::{
-    parse_corner, parse_cue_mode, parse_projection, App, AppJob, AppLaunch, CueMode, EvalError,
-    SharedSource,
+    App, AppJob, AppLaunch, CueMode, EvalError, SharedSource, parse_corner, parse_cue_mode,
+    parse_projection,
 };
 
 use pyo3::exceptions::PyValueError;
@@ -63,8 +63,14 @@ impl PySystemSource {
         let sp = sys.bind(py).get();
         let top = sp.r_top() as *const Topology;
         let st = sp.r_st() as *const State;
-        let version = sp.py_st().get().coords_version_atomic() as *const std::sync::atomic::AtomicU64;
-        Self { sys, top, st, version }
+        let version =
+            sp.py_st().get().coords_version_atomic() as *const std::sync::atomic::AtomicU64;
+        Self {
+            sys,
+            top,
+            st,
+            version,
+        }
     }
 }
 
@@ -90,13 +96,18 @@ impl SharedSource for PySystemSource {
         // expression to it directly (mirrors pymolar's own `__call__`).
         Python::attach(|py| {
             let sp = self.sys.bind(py).get();
-            let expr = SelectionExpr::new(text)
-                .map_err(|e| EvalError::Invalid { message: e.to_string(), span: None })?;
+            let expr = SelectionExpr::new(text).map_err(|e| EvalError::Invalid {
+                message: e.to_string(),
+                span: None,
+            })?;
             match (&expr).into_sel_index(sp, None) {
                 Ok(svec) => Sel::from_svec(svec)
                     .map(|sel| (expr, sel))
                     .map_err(|_| EvalError::Empty),
-                Err(e) => Err(EvalError::Invalid { message: e.to_string(), span: None }),
+                Err(e) => Err(EvalError::Invalid {
+                    message: e.to_string(),
+                    span: None,
+                }),
             }
         })
     }
@@ -108,22 +119,195 @@ fn send_job(jobs: &Sender<AppJob>, job: AppJob) -> PyResult<()> {
         .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer window is closed"))
 }
 
-/// Per-molecule representation counts, shared between the [`Visualizer`] and its
-/// handles. Molecules/reps are added only from Python (append-only) here, so this
-/// mirrors the scene's structure without needing a query channel back from the UI
-/// thread. Index `i` = molecule `i`'s current rep count.
-type VisState = Arc<Mutex<Vec<usize>>>;
+fn query_job<R: Send + 'static>(
+    jobs: &Sender<AppJob>, py: Python<'_>,
+    f: impl FnOnce(&mut App) -> Result<R, String> + Send + 'static,
+) -> PyResult<R> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    send_job(jobs, Box::new(move |app| { let _ = tx.send(f(app)); }))?;
+    py.detach(move || rx.recv())
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer window is closed"))?
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
 
 /// A live handle to a running viewer window. Returned by [`spawn`]; queues jobs to
 /// the viewer (UI) thread.
 #[pyclass]
 struct Visualizer {
     jobs: Sender<AppJob>,
-    state: VisState,
 }
 
 #[pymethods]
 impl Visualizer {
+    /// Set the camera orbit pivot (x, y, z) in nanometers.
+    fn rotation_center(&self, x: f32, y: f32, z: f32) -> PyResult<()> {
+        if ![x, y, z].iter().all(|v| v.is_finite()) { return Err(PyValueError::new_err("rotation center must be finite")); }
+        send_job(&self.jobs, Box::new(move |app| app.set_rotation_center_xyz([x, y, z])))
+    }
+    /// JSON snapshot of current element, secondary, gradient, and discrete colors.
+    fn colors_json(&self, py: Python<'_>) -> PyResult<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.color_preferences_json());
+            }),
+        )?;
+        py.detach(move || rx.recv())
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer closed"))?
+            .map_err(PyValueError::new_err)
+    }
+    fn set_palette(&self, colors: Vec<(u8, u8, u8, u8)>) -> PyResult<()> {
+        if colors.is_empty() {
+            return Err(PyValueError::new_err(
+                "palette must contain at least one color",
+            ));
+        }
+        let colors: Vec<[u8; 4]> = colors.into_iter().map(|c| [c.0, c.1, c.2, c.3]).collect();
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.categorical = colors;
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("palette: {e}");
+                }
+            }),
+        )
+    }
+    fn reset_colors(&self) -> PyResult<()> {
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                if let Err(e) =
+                    app.set_color_preferences(molar_vis_core::ColorPreferences::default())
+                {
+                    log::error!("reset colors: {e}");
+                }
+            }),
+        )
+    }
+    /// Override an element color (atomic number 0..=118) with RGBA8.
+    fn set_element_color(&self, number: u8, rgba: (u8, u8, u8, u8)) -> PyResult<()> {
+        if number > 118 {
+            return Err(PyValueError::new_err("atomic number must be 0..=118"));
+        }
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.elements.insert(number, [rgba.0, rgba.1, rgba.2, rgba.3]);
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("element color: {e}");
+                }
+            }),
+        )
+    }
+    /// Reset one element to its built-in color.
+    fn reset_element_color(&self, number: u8) -> PyResult<()> {
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.elements.remove(&number);
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("element color: {e}");
+                }
+            }),
+        )
+    }
+    /// Change one of nine secondary-structure colors (0..=8; alpha, 3-10, pi, sheet, bridge, turn, bend, polyproline, coil).
+    fn set_secondary_color(&self, index: usize, rgba: (u8, u8, u8, u8)) -> PyResult<()> {
+        if index >= 9 {
+            return Err(PyValueError::new_err("secondary index must be 0..=8"));
+        }
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.secondary[index] = [rgba.0, rgba.1, rgba.2, rgba.3];
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("secondary color: {e}");
+                }
+            }),
+        )
+    }
+    /// Set the three RGBA8 continuous gradient stops and midpoint (0.01..=0.99).
+    fn set_continuous_gradient(&self, stops: [(u8, u8, u8, u8); 3], midpoint: f32) -> PyResult<()> {
+        if !midpoint.is_finite() || !(0.01..=0.99).contains(&midpoint) {
+            return Err(PyValueError::new_err("midpoint must be 0.01..=0.99"));
+        }
+        let stops = stops.map(|c| [c.0, c.1, c.2, c.3]);
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.continuous = molar_vis_core::Gradient { stops, midpoint };
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("continuous gradient: {e}");
+                }
+            }),
+        )
+    }
+    /// Edit one slot in the shared 18-color discrete palette.
+    fn set_palette_color(&self, index: usize, rgba: (u8, u8, u8, u8)) -> PyResult<()> {
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                if let Some(slot) = c.categorical.get_mut(index) {
+                    *slot = [rgba.0, rgba.1, rgba.2, rgba.3];
+                    if let Err(e) = app.set_color_preferences(c) {
+                        log::error!("palette color: {e}");
+                    }
+                } else {
+                    log::error!("palette index {index} out of range");
+                }
+            }),
+        )
+    }
+    fn add_palette_color(&self, rgba: (u8, u8, u8, u8)) -> PyResult<()> {
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                c.categorical.push([rgba.0, rgba.1, rgba.2, rgba.3]);
+                if let Err(e) = app.set_color_preferences(c) {
+                    log::error!("palette color: {e}");
+                }
+            }),
+        )
+    }
+    fn remove_palette_color(&self, index: usize) -> PyResult<()> {
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let mut c = app.color_preferences();
+                if c.categorical.len() > 1 && index < c.categorical.len() {
+                    c.categorical.remove(index);
+                    if let Err(e) = app.set_color_preferences(c) {
+                        log::error!("palette color: {e}");
+                    }
+                } else {
+                    log::error!("cannot remove palette index {index}");
+                }
+            }),
+        )
+    }
+    /// Persist current program settings, including color edits.
+    fn save_settings(&self, py: Python<'_>) -> PyResult<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.save_settings());
+            }),
+        )?;
+        py.detach(move || rx.recv())
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer closed"))?
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+
     /// Add a molecule, rendering **directly** from the pymolar `System` (zero-copy);
     /// returns a handle. The window updates as soon as the UI thread picks it up.
     ///
@@ -134,21 +318,16 @@ impl Visualizer {
     /// cannot restore coordinates.
     #[pyo3(signature = (sys, source_path=None))]
     fn add_mol(&self, sys: Py<PySystem>, source_path: Option<String>) -> PyResult<MolHandle> {
-        let mol = {
-            let mut s = self.state.lock().unwrap();
-            let idx = s.len();
-            s.push(1); // a new molecule comes with one default representation
-            idx
-        };
+        let mol = molar_vis_core::reserve_mol_id().0;
         let name = format!("mol {mol}");
         send_job(
             &self.jobs,
             Box::new(move |app: &mut App| {
                 let src = Python::attach(|py| PySystemSource::new(py, sys));
-                match app.add_shared_molecule(Box::new(src), name) {
-                    Ok(idx) => {
+                match app.add_shared_molecule_with_id(mol, Box::new(src), name) {
+                    Ok(()) => {
                         if let Some(p) = &source_path {
-                            if let Err(e) = app.set_molecule_source_file(idx, p) {
+                            if let Err(e) = app.resolve_molecule(mol).and_then(|idx| app.set_molecule_source_file(idx, p)) {
                                 log::error!("add_mol set source: {e}");
                             }
                         }
@@ -157,16 +336,14 @@ impl Visualizer {
                 }
             }),
         )?;
-        Ok(MolHandle { mol, jobs: self.jobs.clone(), state: self.state.clone() })
+        Ok(MolHandle { mol, jobs: self.jobs.clone() })
     }
 
     /// The molecules currently in the scene, as handles.
     #[getter]
-    fn mols(&self) -> Vec<MolHandle> {
-        let n = self.state.lock().unwrap().len();
-        (0..n)
-            .map(|mol| MolHandle { mol, jobs: self.jobs.clone(), state: self.state.clone() })
-            .collect()
+    fn mols(&self, py: Python<'_>) -> PyResult<Vec<MolHandle>> {
+        let ids = query_job(&self.jobs, py, |app| Ok(app.molecule_ids()))?;
+        Ok(ids.into_iter().map(|mol| MolHandle { mol, jobs: self.jobs.clone() }).collect())
     }
 
     // --- View controls (mirror the view-settings UI). All apply live. ---
@@ -204,7 +381,10 @@ impl Visualizer {
 
     /// Flat background color, RGB in 0–1.
     fn background(&self, r: f32, g: f32, b: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.set_background_solid([r, g, b])))
+        send_job(
+            &self.jobs,
+            Box::new(move |app| app.set_background_solid([r, g, b])),
+        )
     }
 
     /// Vertical gradient background; `top`/`bottom` are `(r, g, b)` in 0–1.
@@ -221,7 +401,10 @@ impl Visualizer {
     /// (`"top_left"` / `"top_right"` / `"bottom_left"` / `"bottom_right"`).
     #[pyo3(signature = (show=true, corner=None))]
     fn axes(&self, show: bool, corner: Option<&str>) -> PyResult<()> {
-        let c = corner.map(parse_corner).transpose().map_err(PyValueError::new_err)?;
+        let c = corner
+            .map(parse_corner)
+            .transpose()
+            .map_err(PyValueError::new_err)?;
         send_job(
             &self.jobs,
             Box::new(move |app| {
@@ -239,21 +422,33 @@ impl Visualizer {
     fn depth_cue(&self, enabled: bool, mode: &str, strength: f32, start: f32) -> PyResult<()> {
         let (enabled, mode) = match mode.to_ascii_lowercase().as_str() {
             "none" | "off" => (false, CueMode::Linear),
-            other => (enabled, parse_cue_mode(other).map_err(PyValueError::new_err)?),
+            other => (
+                enabled,
+                parse_cue_mode(other).map_err(PyValueError::new_err)?,
+            ),
         };
-        send_job(&self.jobs, Box::new(move |app| app.set_depth_cue(enabled, mode, strength, start)))
+        send_job(
+            &self.jobs,
+            Box::new(move |app| app.set_depth_cue(enabled, mode, strength, start)),
+        )
     }
 
     /// Screen-space ambient occlusion: `strength` darkening, `radius` in nm.
     #[pyo3(signature = (enabled=true, strength=0.9, radius=0.4))]
     fn ambient_occlusion(&self, enabled: bool, strength: f32, radius: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.set_ambient_occlusion(enabled, strength, radius)))
+        send_job(
+            &self.jobs,
+            Box::new(move |app| app.set_ambient_occlusion(enabled, strength, radius)),
+        )
     }
 
     /// Real-time cast shadows: `strength` scales how dark shadowed areas get.
     #[pyo3(signature = (enabled=true, strength=0.6))]
     fn shadows(&self, enabled: bool, strength: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.set_shadows(enabled, strength)))
+        send_job(
+            &self.jobs,
+            Box::new(move |app| app.set_shadows(enabled, strength)),
+        )
     }
 
     /// Save the current scene + view as a JSON session file (molecules by path, every
@@ -268,8 +463,11 @@ impl Visualizer {
                 let _ = done_tx.send(());
             }),
         )?;
-        py.detach(move || done_rx.recv())
-            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer window closed before the session was saved"))
+        py.detach(move || done_rx.recv()).map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "viewer window closed before the session was saved",
+            )
+        })
     }
 
     /// Zoom the camera to fit `sel` (a pymolar `Sel`) of the molecule `mol`
@@ -277,14 +475,7 @@ impl Visualizer {
     fn focus(&self, py: Python<'_>, mol: &MolHandle, sel: Py<PySel>) -> PyResult<()> {
         let indices = sel.bind(py).get().index().to_vec();
         let m = mol.mol;
-        send_job(
-            &self.jobs,
-            Box::new(move |app| {
-                if let Err(e) = app.focus_selection(m, &indices) {
-                    log::error!("focus: {e}");
-                }
-            }),
-        )
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.focus_selection(mi, &indices) })
     }
 
     /// Rotate and scale the view to show `rep` (a [`RepHandle`]) with the least
@@ -299,16 +490,9 @@ impl Visualizer {
     /// number of directions in the coarse search (default 256; higher = more thorough but
     /// slower).
     #[pyo3(signature = (rep, zoom_out=1.0, resolution=256))]
-    fn unobstructed_view(&self, rep: &RepHandle, zoom_out: f32, resolution: usize) -> PyResult<()> {
+    fn unobstructed_view(&self, py: Python<'_>, rep: &RepHandle, zoom_out: f32, resolution: usize) -> PyResult<()> {
         let (mol, r) = (rep.mol, rep.rep);
-        send_job(
-            &self.jobs,
-            Box::new(move |app| {
-                if let Err(e) = app.unobstructed_view(mol, r, zoom_out, resolution) {
-                    log::error!("unobstructed_view: {e}");
-                }
-            }),
-        )
+        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, r)?; app.unobstructed_view(mi, ri, zoom_out, resolution) })
     }
 
     /// Like [`Visualizer::unobstructed_view`], but for a list of reps treated as **one**
@@ -319,6 +503,7 @@ impl Visualizer {
     #[pyo3(signature = (reps, zoom_out=1.0, resolution=256))]
     fn unobstructed_view_multi(
         &self,
+        py: Python<'_>,
         reps: Vec<PyRef<'_, RepHandle>>,
         zoom_out: f32,
         resolution: usize,
@@ -326,15 +511,11 @@ impl Visualizer {
         if reps.is_empty() {
             return Err(PyValueError::new_err("reps must not be empty"));
         }
-        let targets: Vec<(usize, usize)> = reps.iter().map(|r| (r.mol, r.rep)).collect();
-        send_job(
-            &self.jobs,
-            Box::new(move |app| {
-                if let Err(e) = app.unobstructed_view_multi(&targets, zoom_out, resolution) {
-                    log::error!("unobstructed_view_multi: {e}");
-                }
-            }),
-        )
+        let ids: Vec<(u64, u64)> = reps.iter().map(|r| (r.mol, r.rep)).collect();
+        query_job(&self.jobs, py, move |app| {
+            let targets = ids.iter().map(|&(m,r)| app.resolve_rep(m,r)).collect::<Result<Vec<_>,_>>()?;
+            app.unobstructed_view_multi(&targets, zoom_out, resolution)
+        })
     }
 
     /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
@@ -378,20 +559,63 @@ impl Visualizer {
     }
 
     fn __repr__(&self) -> String {
-        format!("<molar_vis.Visualizer: {} molecule(s)>", self.state.lock().unwrap().len())
+        "<molar_vis.Visualizer>".to_string()
     }
 }
 
 /// Handle to a molecule in the viewer.
 #[pyclass]
 struct MolHandle {
-    mol: usize,
+    mol: u64,
     jobs: Sender<AppJob>,
-    state: VisState,
 }
 
 #[pymethods]
 impl MolHandle {
+    /// Import a molecule-owned PLY mesh from memory. Coordinates are in nanometers.
+    fn add_mesh_ply(&self, py: Python<'_>, name: String, bytes: &[u8]) -> PyResult<MeshHandle> {
+        molar_vis_core::import_ply(bytes).map_err(PyValueError::new_err)?;
+        let id = molar_vis_core::reserve_mesh_id();
+        let mol = self.mol;
+        let data = bytes.to_vec();
+        query_job(&self.jobs, py, move |app| {
+            let mi = app.resolve_molecule(mol)?;
+            app.add_mesh_ply(mi, id, name, &data)
+        })?;
+        Ok(MeshHandle { mol, id, jobs: self.jobs.clone() })
+    }
+
+    /// Import a PLY file into this molecule.
+    fn load_mesh(&self, py: Python<'_>, path: String) -> PyResult<MeshHandle> {
+        let bytes = std::fs::read(&path)?;
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        self.add_mesh_ply(py, name, &bytes)
+    }
+
+    #[getter]
+    fn meshes(&self, py: Python<'_>) -> PyResult<Vec<MeshHandle>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mol = self.mol;
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.resolve_molecule(mol).and_then(|mi| app.mesh_ids(mi)));
+            }),
+        )?;
+        let ids = py
+            .detach(move || rx.recv())
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer closed"))?
+            .map_err(PyValueError::new_err)?;
+        Ok(ids
+            .into_iter()
+            .map(|id| MeshHandle { mol, id, jobs: self.jobs.clone() })
+            .collect())
+    }
+
     /// Add a representation. `sel` is a pymolar `Sel` (its atoms become the rep's
     /// selection); `style`/`color` are names like "cartoon"/"ss". Returns a handle.
     #[pyo3(signature = (sel=None, style=None, color=None, material=None, width=None))]
@@ -404,98 +628,71 @@ impl MolHandle {
         material: Option<String>,
         width: Option<f32>,
     ) -> PyResult<RepHandle> {
-        let rep = {
-            let mut s = self.state.lock().unwrap();
-            let cnt = s
-                .get_mut(self.mol)
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("stale molecule handle"))?;
-            let idx = *cnt;
-            *cnt += 1;
-            idx
-        };
+        let rep = molar_vis_core::reserve_rep_id().0;
         // Read the selection's atom indices now (we hold the GIL here).
         let indices: Option<Vec<usize>> = sel.map(|s| s.bind(py).get().index().to_vec());
         let mol = self.mol;
-        send_job(
-            &self.jobs,
-            Box::new(move |app: &mut App| {
-                if let Err(e) = app.add_rep_default(mol) {
-                    log::error!("add_rep failed: {e}");
-                    return;
-                }
+        query_job(&self.jobs, py, move |app: &mut App| {
+                app.add_rep_default_with_id(mol, rep)?;
+                let (mi, ri) = app.resolve_rep(mol, rep)?;
                 if let Some(idx) = &indices {
-                    if let Err(e) = app.set_rep_selection(mol, rep, idx) {
-                        log::error!("add_rep select failed: {e}");
-                    }
+                    app.set_rep_selection(mi, ri, idx)?;
                 }
                 if let Some(st) = &style {
-                    if let Err(e) = app.set_rep_style(mol, rep, st) {
-                        log::error!("add_rep style failed: {e}");
-                    }
+                    app.set_rep_style(mi, ri, st)?;
                 }
                 if let Some(c) = &color {
-                    if let Err(e) = app.set_rep_color(mol, rep, c) {
-                        log::error!("add_rep color failed: {e}");
-                    }
+                    app.set_rep_color(mi, ri, c)?;
                 }
                 if let Some(m) = &material {
-                    if let Err(e) = app.set_rep_material(mol, rep, m) {
-                        log::error!("add_rep material failed: {e}");
-                    }
+                    app.set_rep_material(mi, ri, m)?;
                 }
                 if let Some(w) = width {
-                    if let Err(e) = app.set_rep_width(mol, rep, w) {
-                        log::error!("add_rep width failed: {e}");
-                    }
+                    app.set_rep_width(mi, ri, w)?;
                 }
-            }),
-        )?;
-        Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
+                Ok(())
+        })?;
+        Ok(RepHandle {
+            mol,
+            rep,
+            jobs: self.jobs.clone(),
+        })
     }
 
     /// Add an **Interactions** representation to this molecule, detecting non-covalent
     /// contacts (H-bonds, hydrophobic, salt bridges, π-stacking, π-cation, halogen) against
     /// `partner` — a [`RepHandle`] (its rep) or a [`MolHandle`] (that molecule's first rep).
     /// Returns a handle to the new rep.
-    fn add_interactions(&self, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
+    fn add_interactions(&self, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
         let (partner_mol, partner_rep) = if let Ok(r) = partner.cast::<RepHandle>() {
             let r = r.borrow();
             (r.mol, r.rep)
         } else if let Ok(m) = partner.cast::<MolHandle>() {
-            (m.borrow().mol, 0usize)
+            let mol = m.borrow().mol;
+            let first = query_job(&self.jobs, py, move |app| app.rep_ids(mol))?.into_iter().next()
+                .ok_or_else(|| PyValueError::new_err("partner molecule has no representations"))?;
+            (mol, first)
         } else {
             return Err(PyValueError::new_err(
                 "partner must be a RepHandle or a MolHandle",
             ));
         };
-        let rep = {
-            let mut s = self.state.lock().unwrap();
-            let cnt = s
-                .get_mut(self.mol)
-                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("stale molecule handle"))?;
-            let idx = *cnt;
-            *cnt += 1;
-            idx
-        };
+        let rep = molar_vis_core::reserve_rep_id().0;
         let mol = self.mol;
-        send_job(
-            &self.jobs,
-            Box::new(move |app: &mut App| {
-                if let Err(e) = app.add_interactions_rep(mol, partner_mol, partner_rep) {
-                    log::error!("add_interactions failed: {e}");
-                }
-            }),
-        )?;
-        Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
+        query_job(&self.jobs, py, move |app| app.add_interactions_rep_with_id(mol, rep, partner_mol, partner_rep))?;
+        Ok(RepHandle {
+            mol,
+            rep,
+            jobs: self.jobs.clone(),
+        })
     }
 
     /// This molecule's representations, as handles (for `for rep in mol.reps: …`).
     #[getter]
-    fn reps(&self) -> Vec<RepHandle> {
-        let cnt = self.state.lock().unwrap().get(self.mol).copied().unwrap_or(0);
-        (0..cnt)
-            .map(|rep| RepHandle { mol: self.mol, rep, jobs: self.jobs.clone() })
-            .collect()
+    fn reps(&self, py: Python<'_>) -> PyResult<Vec<RepHandle>> {
+        let mol = self.mol;
+        let ids = query_job(&self.jobs, py, move |app| app.rep_ids(mol))?;
+        Ok(ids.into_iter().map(|rep| RepHandle { mol, rep, jobs: self.jobs.clone() }).collect())
     }
 
     fn __repr__(&self) -> String {
@@ -503,57 +700,162 @@ impl MolHandle {
     }
 }
 
+/// Stable handle to a molecule-owned PLY mesh.
+#[pyclass]
+struct MeshHandle {
+    mol: u64,
+    id: u64,
+    jobs: Sender<AppJob>,
+}
+
+impl MeshHandle {
+    fn export_bytes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (m, id) = (self.mol, self.id);
+        send_job(&self.jobs, Box::new(move |app| { let _ = tx.send(app.resolve_molecule(m).and_then(|mi| app.mesh_ply(mi, id))); }))?;
+        py.detach(move || rx.recv())
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer closed"))?
+            .map_err(PyValueError::new_err)
+    }
+    fn snapshot(&self, py: Python<'_>) -> PyResult<molar_vis_core::MeshState> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (m, id) = (self.mol, self.id);
+        send_job(
+            &self.jobs,
+            Box::new(move |app| {
+                let _ = tx.send(app.resolve_molecule(m).and_then(|mi| app.mesh_state(mi, id)));
+            }),
+        )?;
+        py.detach(move || rx.recv())
+            .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("viewer closed"))?
+            .map_err(PyValueError::new_err)
+    }
+}
+
+#[pymethods]
+impl MeshHandle {
+    #[getter]
+    fn name(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.snapshot(py)?.name)
+    }
+    #[getter]
+    fn visible(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.snapshot(py)?.visible)
+    }
+    #[getter]
+    fn material(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.snapshot(py)?.material.label().to_owned())
+    }
+    #[getter]
+    fn style(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.snapshot(py)?.style.label().to_ascii_lowercase())
+    }
+    #[getter]
+    fn point_size(&self, py: Python<'_>) -> PyResult<f32> {
+        Ok(self.snapshot(py)?.point_size)
+    }
+    #[getter]
+    fn line_width(&self, py: Python<'_>) -> PyResult<f32> {
+        Ok(self.snapshot(py)?.line_width)
+    }
+    #[getter]
+    fn smoothing(&self, py: Python<'_>) -> PyResult<u32> {
+        Ok(self.snapshot(py)?.smoothing)
+    }
+    #[setter]
+    fn set_visible(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.set_mesh_visible(mi, id, value) })
+    }
+    #[setter]
+    fn set_material(&self, py: Python<'_>, value: String) -> PyResult<()> {
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.set_mesh_material(mi, id, &value) })
+    }
+    #[setter]
+    fn set_style(&self, py: Python<'_>, value: String) -> PyResult<()> {
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.set_mesh_style(mi, id, &value) })
+    }
+    #[setter]
+    fn set_point_size(&self, py: Python<'_>, value: f32) -> PyResult<()> {
+        if !value.is_finite() || !(1.0..=10.0).contains(&value) {
+            return Err(PyValueError::new_err("point_size must be 1..=10"));
+        }
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.set_mesh_point_size(mi, id, value) })
+    }
+    #[setter]
+    fn set_line_width(&self, py: Python<'_>, value: f32) -> PyResult<()> {
+        if !value.is_finite() || !(1.0..=10.0).contains(&value) {
+            return Err(PyValueError::new_err("line_width must be 1..=10"));
+        }
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.set_mesh_line_width(mi, id, value) })
+    }
+    #[setter]
+    fn set_smoothing(&self, py: Python<'_>, value: u32) -> PyResult<()> {
+        if value > 5 {
+            return Err(PyValueError::new_err("smoothing must be 0..=5"));
+        }
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.set_mesh_smoothing(mi, id, value) })
+    }
+    /// Export original PLY geometry, unaffected by display smoothing.
+    fn ply_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, &self.export_bytes(py)?))
+    }
+    fn save(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        std::fs::write(path, self.export_bytes(py)?)?;
+        Ok(())
+    }
+    fn delete(&self, py: Python<'_>) -> PyResult<()> {
+        let (m, id) = (self.mol, self.id);
+        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.delete_mesh(mi, id) })
+    }
+}
+
 /// Handle to a representation. Property setters (`rep.style = "lines"`, …) apply live.
 #[pyclass]
 struct RepHandle {
-    mol: usize,
-    rep: usize,
+    mol: u64,
+    rep: u64,
     jobs: Sender<AppJob>,
 }
 
 #[pymethods]
 impl RepHandle {
     #[setter]
-    fn set_style(&self, value: &str) -> PyResult<()> {
+    fn set_style(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let (mol, rep, v) = (self.mol, self.rep, value.to_string());
-        send_job(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_style(mol, rep, &v) { log::error!("set style: {e}"); }
-        }))
+        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, rep)?; app.set_rep_style(mi, ri, &v) })
     }
 
     #[setter]
-    fn set_color(&self, value: &str) -> PyResult<()> {
+    fn set_color(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let (mol, rep, v) = (self.mol, self.rep, value.to_string());
-        send_job(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_color(mol, rep, &v) { log::error!("set color: {e}"); }
-        }))
+        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, rep)?; app.set_rep_color(mi, ri, &v) })
     }
 
     #[setter]
-    fn set_material(&self, value: &str) -> PyResult<()> {
+    fn set_material(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let (mol, rep, v) = (self.mol, self.rep, value.to_string());
-        send_job(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_material(mol, rep, &v) { log::error!("set material: {e}"); }
-        }))
+        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, rep)?; app.set_rep_material(mi, ri, &v) })
     }
 
     /// Set the line width in pixels (Lines / Interactions styles only; other styles ignore
     /// it with a logged warning).
     #[setter]
-    fn set_width(&self, value: f32) -> PyResult<()> {
+    fn set_width(&self, py: Python<'_>, value: f32) -> PyResult<()> {
         let (mol, rep) = (self.mol, self.rep);
-        send_job(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_width(mol, rep, value) { log::error!("set width: {e}"); }
-        }))
+        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, rep)?; app.set_rep_width(mi, ri, value) })
     }
 
     /// Set the selection from a pymolar `Sel`'s atoms.
     fn select(&self, py: Python<'_>, sel: Py<PySel>) -> PyResult<()> {
         let indices = sel.bind(py).get().index().to_vec();
         let (mol, rep) = (self.mol, self.rep);
-        send_job(&self.jobs, Box::new(move |app| {
-            if let Err(e) = app.set_rep_selection(mol, rep, &indices) { log::error!("select: {e}"); }
-        }))
+        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, rep)?; app.set_rep_selection(mi, ri, &indices) })
     }
 
     fn __repr__(&self) -> String {
@@ -630,7 +932,7 @@ fn spawn(visible: bool) -> PyResult<Visualizer> {
             pyo3::exceptions::PyRuntimeError::new_err(format!("failed to start viewer thread: {e}"))
         })?;
 
-    Ok(Visualizer { jobs: tx, state: Arc::new(Mutex::new(Vec::new())) })
+    Ok(Visualizer { jobs: tx })
 }
 
 /// The `molar_vis` extension module: pymolar's API + the viewer's.
@@ -642,6 +944,7 @@ fn molar_vis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Visualizer>()?;
     m.add_class::<MolHandle>()?;
     m.add_class::<RepHandle>()?;
+    m.add_class::<MeshHandle>()?;
     m.add_function(wrap_pyfunction!(spawn, m)?)?;
     Ok(())
 }

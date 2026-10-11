@@ -30,7 +30,7 @@ work in it:
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the rendering pipeline and cross-cutting
   design: Strategy-A offscreen render, GPU impostors, SSAA, depth cueing, SSAO, cast shadows,
   background, the scene graph, and the dirty-flag render-skip that keeps idle at 0 GPU.
-- **[docs/MOLAR.md](docs/MOLAR.md)** — the molar 2.1 API (the SoA migration) and molar-integration
+- **[docs/MOLAR.md](docs/MOLAR.md)** — the pinned molar 2.2 API and SoA integration and molar-integration
   details: selections, disjoint binds, trajectories, bond resolution, and the per-frame rebuild
   paths.
 - **[docs/UI.md](docs/UI.md)** — the egui UI layout: left panel, menu bar, top view toolbar,
@@ -38,7 +38,7 @@ work in it:
 - **[docs/CONVENTIONS.md](docs/CONVENTIONS.md)** — coding conventions, egui 0.34 / wgpu 29 API
   gotchas, and the theming rules (never `override_text_color`, read semantic colours from the
   style, the Wayland IME workaround, …).
-- **[docs/MILESTONES.md](docs/MILESTONES.md)** — the full milestone history (M0–M33): the
+- **[docs/MILESTONES.md](docs/MILESTONES.md)** — the milestone history and subsequent shipped features: the
   authoritative record of what shipped, and the design reasoning behind each piece.
 
 ## Build / run / test
@@ -57,7 +57,7 @@ cargo build -p molar_vis_py                                     # native Python 
 wasm-pack build crates/molar_vis_js --target web --out-dir web/pkg   # browser JS API (M27)
 
 cargo run -p molar_vis --features scripting          # + the in-app Rhai console (M31)
-cargo test -p molar_vis_core --features scripting    # 96 tests (92 without)
+cargo test -p molar_vis_core --features scripting    # include optional console tests
 ```
 
 **Feature flags.** The one feature is **`scripting`** (M31, **off by default**): the in-app Rhai
@@ -68,10 +68,7 @@ dependency graph entirely (`cargo tree -p molar_vis | grep rhai` → nothing).
 
 ## Roadmap
 
-Forward-looking feature list (deleting traj frames, save/load state, app settings, more depth-cue
-methods, background color, material editor, labels/measurement, Python bindings, embedded command
-language, geometric primitives, raytracing, movies, whole-residue pick mode, CG/Martini bonds+SS,
-plugins, selection-input improvements, drug-discovery goodies (PLIP interactions, SDF reading),
-dashed PBC half-bonds, and visual structure editing) lives in **[ROADMAP.md](ROADMAP.md)** — in no
-particular order. Move items into **[docs/MILESTONES.md](docs/MILESTONES.md)** (*Milestone status*)
-as they ship.
+Open work and shipped-status references live in **[ROADMAP.md](ROADMAP.md)**.
+Record shipped features in **[docs/MILESTONES.md](docs/MILESTONES.md)**. Current
+features include custom PLY meshes, editable color palettes, settings and sessions,
+Python/JavaScript bindings, the optional Rhai console, ray tracing, and structure editing.

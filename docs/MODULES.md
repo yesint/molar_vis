@@ -35,6 +35,7 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   - `app/panels.rs` — left panel, menu bar, molecule list, top view toolbar, unified settings entry points.
   - `app/rep_panel.rs` — rep rows: selection field, rep params, Traj/Periodic tabs, traj bar.
   - `app/settings_dialog.rs` — the unified settings window (shared view controls, compact viewer popup, live apply, opening snapshot for Revert, explicit Save, axes widget).
+  - `app/meshes.rs` — molecule-owned PLY import/export, mesh rows, style/material/size/smoothing controls, and browser file transfers.
   - `app/pickers.rs` — style/color/material pickers + their icon/preview painters.
   - `app/widgets.rs` — shared egui helpers (`tab_bar`, `slider_with_edit`, `picker_button`, …).
   - `app/overlay.rs` — viewport overlays (pick/residue info, modifier hint, axes gizmo, glow ring).
@@ -156,20 +157,30 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   near/far). Also owns the view-state knobs the top-bar menu edits: `depth_cue`/`ao`/`shadow`,
   `background` (`Background { Solid|Gradient, color/top/bottom }`) — all `serde(default)`, so
   sessions save/load them for free. `#[derive(PartialEq)]` drives render-skip.
-- `color.rs` — CPK element colors → packed RGBA8 (`u32`); `ColorMethod`, `ColorSpec`, `Colorizer`.
-  **`ColorMethod::Charge`** (M31) paints per-atom charge on a **diverging** red–white–blue ramp
-  (`charge_ramp`: negative red, positive blue, white at zero — the chemistry convention, and the
-  opposite direction from `beta_ramp`, which spans an arbitrary range rather than diverging about a
-  meaningful zero), normalized by the largest **magnitude in the selection**, so the sign and the
-  relative extremes read at any absolute scale (partial charges run to ~±0.8 e, formal ones ±1..2).
-  *Which* charge it paints is an **option of the one scheme, not a second scheme**: `ChargeKind`
-  {`Partial` (molar's always-present `charge` column), `Formal` (the optional `formal_charge` one —
-  absent on most structures, which then paint uniformly white rather than failing)} lives on the
-  representation (`Representation::charge_kind`) and is edited in the rep settings' **[Color]** tab.
-  **`ColorSpec { method, charge_kind }`** bundles a scheme with its options so `Colorizer::new` and
-  `geometry::build` take one value instead of growing a parameter per option; `Representation::color_spec()`
-  produces it, and `From<ColorMethod>` covers the internal builders (glow, hover lens) that hard-code
-  a method and never paint charges.
+- `color.rs` — packed RGBA8 colors, `ColorMethod`, `ColorSpec`, `Colorizer`, and
+  shared `ColorPreferences`. Preferences store element overrides, nine secondary-structure
+  colors, one three-stop `Gradient` with a movable midpoint, and an editable categorical
+  palette (18 factory colors). Index, Beta, and Charge use the continuous gradient;
+  Chain, ResId, and ResName cycle through the categorical palette. Solid stores its own
+  RGBA value; picker presets come from the categorical palette. `ColorSpec` carries an
+  `Arc<ColorPreferences>` along with method and charge kind. Charge normalizes against
+  the largest absolute charge in the selection, with symmetric endpoints; Beta uses
+  the selection's finite minimum/maximum and Index uses the molecule's index range.
+  `continuous_range` supplies the same ranges to the UI. The default ramp runs from blue
+  through white to red. `ChargeKind::{Partial, Formal}` selects the atom property;
+  absent formal charges act as zero. Colors persist in both settings and session view
+  state; the previous `beta` gradient field is accepted as an alias for `continuous`.
+- `mesh.rs` — molecule-owned custom mesh data and PLY I/O. `MeshSource` stores vertices
+  (position in nm, normal, RGBA) and triangle indices. Import accepts ASCII and binary
+  PLY in either byte order, triangulates polygons, and supplies missing colors/normals.
+  `MeshState` stores the shared source, name, visibility, material, style, point size,
+  line width, and smoothing. `Mesh` adds GPU buffers and caches for topology and smoothed
+  geometry. Surface smoothing uses paired Taubin passes with fixed open boundaries;
+  each setting starts from the source, so changing it is reversible. Points and Wireframe
+  use pixel-sized primitives. Export writes the source as binary PLY, before smoothing
+  or material application. Molecule/group-member session data and undo snapshots include
+  mesh state. `render/point.rs` supplies the viewport point pipeline; the ray tracer also
+  gathers visible mesh geometry.
 - `secstruct.rs` — `SsMap` (per-residue SS keyed by `resindex`), `SsClass` (helix/sheet/coil),
   VMD `ss_color`. Shared by the Cartoon rep and the SecStruct color scheme. **Coarse-grained
   (Martini) path** (`assign_cg_ss`, M22): when the residues are CG `BB` beads (no atomistic `CA`),
@@ -288,6 +299,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `data` is the single source of per-atom data, read by reference). `Molecule::new` (owned, from a
   `RawMolecule`) and `Molecule::new_shared` (from a `SharedSource` — guesses bonds/bbox from its
   topology/state) share a private `from_parts`; `Scene::add`/`Scene::add_shared` assign the `MolId`.
+  Runtime `MolId` and `RepId` identities are independent of sidebar indices. Python
+  and JavaScript query live object IDs and resolve them on the UI thread before each
+  operation. Representation identities survive undo snapshots; session deserialization
+  allocates fresh identities so old handles cannot target newly loaded objects.
   `Representation` (kind / params / `sel_text` (editable buffer) / `expr: SelectionExpr`
   (compiled) / `sel: Sel` (evaluated) / `periodic: PeriodicParams` (image counts + Self/Box,
   in `EditState`) / visible / dirty flags / `RepGpu`), `evaluate()`
@@ -336,7 +351,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   forward/back-compatible (unknown fields ignored, missing ones default), so older/newer files
   still load. Molecules are referenced **by source path** (reloaded from disk), not embedded —
   embedding atoms is the separate "save molecules to file" roadmap item. `MolSession` carries
-  source / reps (`RepState`) / visibility / show_box / `traj_loads` / `current_frame`. Pure
+  source / reps (`RepState`) / meshes (`MeshState`) / visibility / show_box / `traj_loads` / `current_frame`.
+  Mesh source data is embedded, including for group members. `ViewState.colors` stores the
+  active palette; when absent in an older session, startup color preferences are retained. Pure
   data + serde (no IO, WASM-safe); the native `Session` menu (New/Save/Load) + rfd dialogs +
   `std::fs` + scene-reload live in `app.rs`: `save_session`/`load_session` → `_to`/`_from`
   workers; `new_session` (+ shared `reset_document`) starts an empty scene; `apply_session`
@@ -346,7 +363,7 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `SsAlgorithm` (foreign, no serde) rides a `#[serde(remote)]` shim in `history.rs`; `Camera`
   derives serde via glam's `serde` feature.
 - `settings.rs` — **persistent program settings** (M21). `Settings { format, version, appearance,
-  rendering, view, reps, behavior }`, serialized to JSON in the platform config dir
+  rendering, view, reps, colors, behavior }`, serialized to JSON in the platform config dir
   (`directories::ProjectDirs::from("","","molar_vis")` → `~/.config/molar_vis/settings.json` on
   Linux). These are the launch-time defaults that used to be hardcoded: `AppearanceSettings`
   (theme mode / font scale / accent — `theme.rs`), `RenderingSettings` (SSAA / shadow-map res —
@@ -355,13 +372,12 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   style / color / material / selection / surface-quality — `Representation::from_defaults`),
   `BehaviorSettings` (mouse sensitivity, default pick/selection mode, trajectory fps/loop,
   bond-guessing thresholds + **periodic search** → `data::BondParams`, and **`dashed_pbc_bonds`** —
-  the only live render toggle here, applied live by marking all reps `geom_dirty`). Same design
+  applied live by marking affected reps dirty). Same design
   as `session.rs`: pure data + serde,
   WASM-safe, every field `#[serde(default)]` with `Default` impls reproducing the **exact** old
   constants (a fresh config = old behavior); forward/back-compatible. Native IO
   (`load_or_create`/`save`/`config_path`, `#[cfg(not(wasm))]`) creates the file with defaults on
-  first launch, and on a parse error backs the bad file up to `*.bak` and resets. The browser keeps
-  settings in memory (no filesystem). The dialog UI + apply logic live in `app/settings_dialog.rs` (cogwheel
+  first launch, and on a parse error backs the bad file up to `*.bak` and resets. The browser loads and saves settings with localStorage. The dialog UI + apply logic live in `app/settings_dialog.rs` (cogwheel
   button → `draw_settings_dialog`; `apply_settings`); the **app-global** knobs (theme, SSAA, shadow
   map) apply live. All sections edit the running session immediately; representation,
   playback, picking, and bond-detection changes also update loaded objects. A shared
@@ -707,8 +723,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   input changes, like a rep's selection feedback. Hooks: `MOLAR_VIS_DEBUG_ALIGN=<spec>` (runs it
   through the real button path) + `_ALIGN_DIALOG=[1|pick]`.
 - `charges.rs` — **espaloma partial-charge assignment** on a selection (M31), via `molar_ff`'s
-  `ApplyCharges`. **Native only** (`tract` + a ~600 kB bundled ONNX has no business in the wasm
-  bundle, and the browser has no way to obtain charges anyway; charge *coloring* works everywhere).
+  `ApplyCharges` and its fixed Espaloma kernel. The viewer enables computation on
+  **native builds only**; charge *coloring* works everywhere.
   `compute_espaloma(mol, sel)` predicts, writes the charges into the molecule, and returns a
   `ChargeEdit { atoms, before, after }` so the caller can record it as one undo step. The model needs
   **chemistry, not coordinates**: explicit Kekulé orders and a *bond-complete* scope.

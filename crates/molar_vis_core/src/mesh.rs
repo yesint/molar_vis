@@ -12,6 +12,13 @@ use std::sync::{
 };
 
 static REVISION: AtomicU64 = AtomicU64::new(1);
+static MESH_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Reserve a stable ID before queueing an external mesh addition.
+pub fn reserve_mesh_id() -> u64 {
+    MESH_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Vertex {
@@ -96,6 +103,7 @@ fn visible() -> bool {
 }
 
 pub struct Mesh {
+    pub id: u64,
     pub state: MeshState,
     pub gpu: RepGpu,
     pub dirty: bool,
@@ -147,6 +155,7 @@ impl Mesh {
             ring.sort_unstable();
         }
         Self {
+            id: reserve_mesh_id(),
             state,
             gpu: RepGpu::default(),
             dirty: true,
@@ -845,6 +854,19 @@ pub(crate) mod tests {
         assert_eq!(old.point_size, 3.0);
         assert_eq!(old.line_width, 1.0);
         assert_eq!(old.smoothing, 0);
+    }
+
+    #[test]
+    fn stable_mesh_ids_do_not_follow_vector_indices() {
+        let mut scene = scene();
+        let first = fixture_mesh();
+        let second = fixture_mesh();
+        assert_ne!(first.id, second.id);
+        let second_id = second.id;
+        scene.molecules[0].meshes.extend([first, second]);
+        scene.molecules[0].meshes.remove(0);
+        assert_eq!(scene.molecules[0].meshes[0].id, second_id);
+        assert_eq!(scene.molecules[0].meshes[0].state.name, "COSMO surface.ply");
     }
 
     #[test]

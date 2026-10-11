@@ -63,9 +63,11 @@
         vis.projection("perspective");
 
         // Console oracle for the headless smoke test (see the crate README / plan).
+        const molecules = await vis.mols();
+        const representations = await mol.reps();
         console.log(`molar_vis demo: ${sys.name} (${sys.numAtoms} atoms), ` +
                     `protein = ${sys.select("protein").numAtoms} atoms; ` +
-                    `mols=${vis.mols.length}, reps=${vis.mols[0].reps.length}`);
+                    `mols=${molecules.length}, reps=${representations.length}`);
 
         // Expose handles for interactive poking from the devtools console.
         Object.assign(window, { vis, sys, mol, rep });

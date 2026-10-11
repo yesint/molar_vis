@@ -97,6 +97,7 @@ longer shown inline — they're a **hover tooltip** on the name: `N atoms / M fr
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
 `Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old
 standalone trash/box buttons): **Save molecule…** (`FLOPPY_DISK` → `save_molecule`, native),
+**Load mesh…** (attach a PLY file to this molecule),
 **Rename…** (`PENCIL_SIMPLE` → `rename_mol` + the `draw_rename_dialog` modal; edits `mol.name`,
 persisted in sessions via `MolSession.name`), **Show periodic box** checkbox (`mol.show_box`),
 **Delete frames…** (`SCISSORS` → the delete-frames modal; enabled only with a loaded
@@ -105,6 +106,15 @@ trajectory), **Delete molecule** (`TRASH`). A **two-row trajectory bar** appears
 enabled >50 frames) · **step** = playback skip per tick; row 2: first · back · full-width scrub
 slider · forward · last); reps listed (indented) when the molecule caret is open. The
 **Load-trajectory** modal's *Last frame* is a **text field** (empty = read to EOF), not a checkbox.
+
+**Custom mesh rows** (`app/meshes.rs`) appear below the owning molecule's selections.
+Each row has a mesh icon, name, visibility toggle, and a menu with **Save…** and
+**Delete**. The style selector offers **Points**, **Wireframe**, and **Surface**,
+with the same material picker as a representation. Points has a **Point size** slider
+(1–10 pixels); Wireframe has a **Line width** slider (1–10 pixels); Surface has a
+**Smoothing** slider (0–5). These controls are undoable. A hidden molecule also hides
+its meshes. Save writes the original PLY data with vertex colors and normals; it does
+not bake in smoothing or the display material. Browser Save downloads the file.
 
 **Top view toolbar** (`draw_view_toolbar`, an `egui::Panel::top("view_toolbar")` *above*
 the viewport — a real panel, **not** a floating `Area` over the 3D image; spans the central
@@ -139,7 +149,7 @@ centre pick and Click selection work on a ribbon / surface of any structure (all
 under the button, with Camera / Lighting / Scene tabs. It contains only the **View**
 page. **Edit → Settings** opens the full movable settings window and reopens its
 last-used section. Its sections are Appearance, Render, View, Representations, Styles,
-Materials, and Behavior. Styles edits geometry defaults for every style (including
+Materials, Colors, and Behavior. Styles edits geometry defaults for every style (including
 interaction detection), while Materials uses the same preview-asset picker as the
 representation row. Relevant shader sliders sit beside a live glycine VdW preview colored by element.
 Styles also shows a live preview using the viewport renderer: glycine (C, N, O, H) for atom/bond
@@ -166,7 +176,20 @@ background, AO radius in nm, shadow softness, GI, and axes. Representation prefe
 update loaded representations and also govern new ones. Picking and playback changes
 apply live. Bond-detection settings re-evaluate loaded connectivity and govern new loads;
 recorded chemical orders and source bonds are preserved. Save failures appear in the editor.
-Native defaults persist across restarts; browser defaults remain in memory for this run.
+Saved native defaults persist across restarts; saved browser defaults use localStorage.
+
+**Colors** edits the shared `ColorPreferences`. Common element tiles open a color
+picker; **Other elements…** opens a periodic table with all 118 elements. The next
+section has nine secondary-structure colors: α, 3₁₀ and π helices, β sheet and bridge,
+turn, bend, polyproline, and coil. The **Continuous palette** has editable endpoint
+and middle colors and a movable midpoint. It controls Index, B-factor, and Charge.
+B-factor and Charge endpoint readouts use the selected representation's atom selection;
+Charge also uses its Partial/Formal setting. The **Discrete palette** starts with 18
+colors, supports **Add color** and per-entry **×** removal, and keeps at least one
+entry. Chain, ResID, ResName, and color-picker presets use this palette. **Reset colors**
+resets only this page's colors. The shared Default / Revert / Save footer retains its
+usual all-settings behavior. Sessions store the active palette independently of saved
+startup defaults; older sessions without colors keep the active startup preferences.
 
 Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered
 by ink bounds** `Galley::mesh_bounds`, not the font line-box); the **`toolbar_label`** helper draws
@@ -243,7 +266,7 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   backbone-with-residues diagram, ResName = "ALA" on rainbow, Index = "123" colored digits,
   Beta = "B" on rainbow, **Solid = a filled swatch of the chosen color**). The `Solid` row is a
   **submenu** (`egui::containers::menu::SubMenu`, ⏵): hovering opens a panel with a preset
-  swatch grid (`SOLID_SWATCHES`, `swatch_button`) + a full `color_picker_color32` (the submenu uses
+  swatch grid (the active discrete palette, `swatch_button`) + a full `color_picker_color32` (the submenu uses
   `CloseOnClickOutside` so dragging the picker doesn't dismiss it).
 
 History labels via `describe_change` ("edit selection", "change coloring",
