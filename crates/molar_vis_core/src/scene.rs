@@ -194,6 +194,7 @@ impl MeshCache {
 
 /// One representation of a molecule: a selection rendered in a given style.
 pub struct Representation {
+    pub(crate) color_preferences: std::sync::Arc<crate::color::ColorPreferences>,
     pub kind: RepKind,
     pub params: RepParams,
     /// For an **Interactions** rep only: the partner representation it detects contacts
@@ -328,7 +329,7 @@ impl Representation {
     /// This rep's color scheme together with its options — what the geometry builders
     /// need to colorize atoms (see [`crate::color::ColorSpec`]).
     pub fn color_spec(&self) -> crate::color::ColorSpec {
-        crate::color::ColorSpec { method: self.color, charge_kind: self.charge_kind }
+        crate::color::ColorSpec { method: self.color, charge_kind: self.charge_kind, preferences: self.color_preferences.clone() }
     }
 
     /// Ensure global atom `idx` is part of this rep's selection, so an atom just drawn
@@ -391,6 +392,7 @@ impl Representation {
             self.smooth_window,
         );
         r.charge_kind = self.charge_kind;
+        r.color_preferences = self.color_preferences.clone();
         r.partner = self.partner.clone();
         r
     }
@@ -400,7 +402,7 @@ impl Representation {
     /// style, color, material, and selection (and the default Surface quality).
     pub fn from_defaults(d: &crate::settings::RepDefaults) -> Self {
         let params = d.style_params(d.kind);
-        Self::restore(
+        let mut rep = Self::restore(
             d.kind,
             params,
             d.color,
@@ -412,7 +414,9 @@ impl Representation {
             d.material_for(d.material),
             PeriodicParams::default(),
             1,
-        )
+        );
+        rep.color_preferences = d.colors.clone();
+        rep
     }
 
     /// Reconstruct a representation from saved editable fields (used by undo/redo).
@@ -450,6 +454,7 @@ impl Representation {
             // that carry one (`duplicate`, `RepState::to_representation`) — `restore`'s
             // positional list is long enough already.
             charge_kind: crate::color::ChargeKind::default(),
+            color_preferences: Default::default(),
             visible,
             dynamic,
             ss_per_frame,

@@ -5,6 +5,412 @@ use super::widgets::*;
 
 // --- Program-settings dialog: one function per tab (see `App::draw_settings_dialog`). ---
 
+/// Black/white text chosen using sRGB relative luminance for maximum contrast.
+fn swatch_ink(rgb: [u8; 4]) -> egui::Color32 {
+    let linear = |c: u8| {
+        let v = c as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2]);
+    if luminance > 0.179 {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    }
+}
+
+fn color_popup(response: &egui::Response, rgba: &mut [u8; 4]) -> bool {
+    let mut color = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
+    let mut changed = false;
+    egui::Popup::menu(response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width(230.0);
+            if egui::color_picker::color_picker_color32(
+                ui,
+                &mut color,
+                egui::color_picker::Alpha::Opaque,
+            ) {
+                *rgba = color.to_array();
+                changed = true;
+            }
+        });
+    changed
+}
+
+fn swatch_button(ui: &mut egui::Ui, rgba: [u8; 4], size: egui::Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    ui.painter().rect_filled(
+        rect,
+        3.0,
+        egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]),
+    );
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            3.0,
+            egui::Stroke::new(1.5_f32, swatch_ink(rgba)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn color_cell(ui: &mut egui::Ui, label: &str, rgba: &mut [u8; 4], size: egui::Vec2) -> bool {
+    let response = swatch_button(ui, *rgba, size);
+    ui.painter().text(
+        response.rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        swatch_ink(*rgba),
+    );
+    color_popup(&response, rgba)
+}
+
+fn ss_icon(ui: &mut egui::Ui, index: usize, color: &mut [u8; 4]) {
+    let response = swatch_button(ui, *color, egui::vec2(44.0, 30.0));
+    let rect = response.rect.shrink(6.0);
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(3.0_f32, swatch_ink(*color));
+    let point = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
+    if index < 3 {
+        let points = (0..=32)
+            .map(|i| {
+                let t = i as f32 / 32.0;
+                point(t, 0.5 + 0.3 * (t * std::f32::consts::TAU * 2.0).sin())
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, stroke));
+    } else if index < 5 {
+        painter.arrow(
+            point(0.05, 0.5),
+            egui::vec2(rect.width() * 0.85, 0.0),
+            stroke,
+        );
+    } else {
+        painter.add(egui::Shape::line(
+            vec![
+                point(0.0, 0.8),
+                point(0.2, 0.3),
+                point(0.45, 0.6),
+                point(0.7, 0.2),
+                point(1.0, 0.5),
+            ],
+            stroke,
+        ));
+    }
+    color_popup(&response, color);
+}
+
+fn gradient_editor(
+    ui: &mut egui::Ui,
+    id: &str,
+    title: &str,
+    labels: [&str; 3],
+    gradient: &mut crate::color::Gradient,
+) {
+    ui.push_id(id, |ui| {
+        if !title.is_empty() {
+            ui.label(egui::RichText::new(title).strong());
+        }
+        let width = 400.0_f32.min(ui.available_width());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 36.0), egui::Sense::hover());
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let position = match i {
+                0 => 0.0,
+                1 => gradient.midpoint(),
+                _ => 1.0,
+            };
+            let center = egui::pos2(
+                rect.left() + 9.0 + (rect.width() - 18.0) * position,
+                rect.center().y,
+            );
+            let response = ui.interact(
+                egui::Rect::from_center_size(center, egui::vec2(18.0, rect.height())),
+                ui.id().with(i),
+                if i == 1 {
+                    egui::Sense::click_and_drag()
+                } else {
+                    egui::Sense::click()
+                },
+            );
+            if i == 1 && response.dragged() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    gradient.midpoint =
+                        ((pos.x - rect.left() - 9.0) / (rect.width() - 18.0)).clamp(0.01, 0.99);
+                }
+            }
+            handles.push(response);
+        }
+        for i in 0..128 {
+            let c = gradient.sample(i as f32 / 127.0);
+            let left = rect.left() + rect.width() * i as f32 / 128.0;
+            let right = rect.left() + rect.width() * (i + 1) as f32 / 128.0;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(left, rect.top()),
+                    egui::pos2(right, rect.bottom()),
+                ),
+                0.0,
+                egui::Color32::from_rgb(c[0], c[1], c[2]),
+            );
+        }
+        for (i, response) in handles.into_iter().enumerate() {
+            let position = match i {
+                0 => 0.0,
+                1 => gradient.midpoint(),
+                _ => 1.0,
+            };
+            let center = egui::pos2(
+                rect.left() + 9.0 + (rect.width() - 18.0) * position,
+                rect.center().y,
+            );
+            let c = gradient.stops[i];
+            let ink = swatch_ink(c);
+            let handle = egui::Rect::from_center_size(center, egui::vec2(14.0, rect.height()));
+            ui.painter()
+                .rect_filled(handle, 0.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+            ui.painter().rect_stroke(
+                handle,
+                0.0,
+                egui::Stroke::new(2.0_f32, ink),
+                egui::StrokeKind::Inside,
+            );
+            if i == 1 {
+                ui.painter().line_segment(
+                    [center - egui::vec2(0.0, 5.0), center + egui::vec2(0.0, 5.0)],
+                    egui::Stroke::new(1.0_f32, ink),
+                );
+            }
+            let response = response
+                .on_hover_text(if i == 1 {
+                    format!(
+                        "{} ({:.0}%). Drag to move; click to choose color.",
+                        labels[i],
+                        gradient.midpoint() * 100.0
+                    )
+                } else {
+                    format!("{}: click to choose color", labels[i])
+                })
+                .on_hover_cursor(if i == 1 {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::PointingHand
+                });
+            color_popup(&response, &mut gradient.stops[i]);
+        }
+        ui.horizontal(|ui| {
+            ui.label(labels[0]);
+            ui.allocate_ui_with_layout(
+                egui::vec2((width - 18.0).max(0.0), 18.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.label(labels[2]);
+                },
+            );
+        });
+    });
+}
+
+struct PropertyRanges {
+    beta: [f32; 2],
+    charge: [f32; 2],
+}
+
+fn settings_page_colors(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    ranges: Option<&PropertyRanges>,
+) {
+    let colors = &mut settings.colors;
+    ui.label(egui::RichText::new("Elements").strong());
+    ui.horizontal_wrapped(|ui| {
+        for (number, symbol) in [
+            (1, "H"),
+            (6, "C"),
+            (7, "N"),
+            (8, "O"),
+            (15, "P"),
+            (16, "S"),
+            (9, "F"),
+            (17, "Cl"),
+            (35, "Br"),
+            (53, "I"),
+            (5, "B"),
+            (14, "Si"),
+        ] {
+            ui.push_id(number, |ui| {
+                let mut rgba = colors.element(number);
+                if color_cell(ui, symbol, &mut rgba, egui::vec2(34.0, 30.0)) {
+                    colors.elements.insert(number, rgba);
+                }
+            });
+        }
+    });
+    let window_id = ui.make_persistent_id("other_elements_window");
+    let mut open = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(window_id).unwrap_or(false));
+    if ui.button("Other elements...").clicked() {
+        open = true;
+    }
+    egui::Window::new("Periodic table")
+        .id(window_id)
+        .open(&mut open)
+        .resizable(false)
+        .show(ui.ctx(), |ui| periodic_table(ui, colors));
+    ui.ctx().data_mut(|data| data.insert_temp(window_id, open));
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("Secondary structure").strong());
+    const LABELS: [&str; 9] = [
+        "α helix",
+        "3₁₀ helix",
+        "π helix",
+        "β sheet",
+        "β bridge",
+        "Turn",
+        "Bend",
+        "Polyproline",
+        "Coil",
+    ];
+    egui::Grid::new("secondary_colors")
+        .spacing([8.0, 6.0])
+        .show(ui, |ui| {
+            for (index, label) in LABELS.iter().enumerate() {
+                ui.push_id(index, |ui| {
+                    ss_icon(ui, index, &mut colors.secondary[index]);
+                    ui.label(*label);
+                });
+                if index % 3 == 2 {
+                    ui.end_row();
+                }
+            }
+        });
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("Continuous palette").strong());
+    gradient_editor(
+        ui,
+        "continuous_palette",
+        "",
+        ["0", "Midpoint", "1"],
+        &mut colors.continuous,
+    );
+    if let Some(ranges) = ranges {
+        egui::Grid::new("property_endpoints")
+            .spacing([18.0, 4.0])
+            .show(ui, |ui| {
+                for (label, [low, high]) in [("B-factor", ranges.beta), ("Charge", ranges.charge)] {
+                    ui.label(label);
+                    ui.label(format!("{low:.3}"));
+                    ui.label("to");
+                    ui.label(format!("{high:.3}"));
+                    ui.end_row();
+                }
+            });
+    }
+    ui.add_space(10.0);
+    categorical_editor(ui, &mut colors.categorical);
+    ui.add_space(8.0);
+    if ui.button("Reset colors").clicked() {
+        *colors = Default::default();
+    }
+}
+
+fn categorical_editor(ui: &mut egui::Ui, palette: &mut Vec<[u8; 4]>) {
+    ui.label(egui::RichText::new("Discrete palette").strong());
+    let removable = palette.len() > 1;
+    let mut remove = None;
+    egui::Grid::new("categorical_palette_colors")
+        .num_columns(16)
+        .min_col_width(0.0)
+        .spacing([4.0, 6.0])
+        .show(ui, |ui| {
+            for (index, color) in palette.iter_mut().enumerate() {
+                ui.push_id(index, |ui| {
+                    color_cell(ui, &(index + 1).to_string(), color, egui::vec2(34.0, 30.0));
+                    if ui.add_enabled(removable, egui::Button::new("×").small()).on_hover_text("Remove color").clicked() {
+                        remove = Some(index);
+                    }
+                });
+                if index % 8 == 7 { ui.end_row(); }
+            }
+        });
+    if let Some(index) = remove {
+        palette.remove(index);
+    }
+    if ui.button("Add color").clicked() {
+        palette.push(crate::color::categorical(palette.len()));
+    }
+}
+
+fn periodic_table(ui: &mut egui::Ui, colors: &mut crate::color::ColorPreferences) {
+    const SYMBOLS: [&str; 118] = [
+        "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S",
+        "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga",
+        "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd",
+        "Ag", "Cd", "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
+        "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Re", "Os",
+        "Ir", "Pt", "Au", "Hg", "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa",
+        "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg",
+        "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
+    ];
+    const PERIODS: [[u8; 18]; 9] = [
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+        [3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6, 7, 8, 9, 10],
+        [11, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16, 17, 18],
+        [
+            19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+        ],
+        [
+            37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54,
+        ],
+        [
+            55, 56, 0, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86,
+        ],
+        [
+            87, 88, 0, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118,
+        ],
+        [
+            0, 0, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 0,
+        ],
+        [
+            0, 0, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 0,
+        ],
+    ];
+    egui::Grid::new("element_colors")
+        .min_col_width(0.0)
+        .max_col_width(34.0)
+        .spacing([2.0, 2.0])
+        .show(ui, |ui| {
+            for period in PERIODS {
+                for number in period {
+                    ui.push_id(number, |ui| {
+                        if number == 0 {
+                            ui.allocate_exact_size(egui::vec2(34.0, 30.0), egui::Sense::hover());
+                        } else {
+                            let mut rgba = colors.element(number);
+                            if color_cell(
+                                ui,
+                                SYMBOLS[number as usize - 1],
+                                &mut rgba,
+                                egui::vec2(34.0, 30.0),
+                            ) {
+                                colors.elements.insert(number, rgba);
+                            }
+                        }
+                    });
+                }
+                ui.end_row();
+            }
+        });
+}
+
 /// Appearance tab: theme mode, UI font scale, accent color.
 pub(super) fn settings_page_appearance(ui: &mut egui::Ui, s: &mut Settings) {
     let a = &mut s.appearance;
@@ -437,6 +843,7 @@ impl App {
     /// settings change.
     pub(super) fn effective_rep_defaults(settings: &Settings) -> RepDefaults {
         let mut d = settings.reps.clone();
+        d.colors = std::sync::Arc::new(settings.colors.clone());
         if let Some(kind) = std::env::var("MOLAR_VIS_DEBUG_REP")
             .ok()
             .and_then(|s| RepKind::from_name(&s))
@@ -493,6 +900,7 @@ impl App {
             }
         }
         let reps_changed = force || previous.reps != next.reps;
+        let preferences = std::sync::Arc::new(next.colors.clone());
         if previous.appearance != next.appearance {
             crate::theme::apply(ctx, &next.appearance);
         }
@@ -512,6 +920,11 @@ impl App {
                 mol.trajectory.loop_mode = next.behavior.loop_mode;
             }
             for rep in &mut mol.reps {
+                if rep.color_preferences != preferences {
+                    rep.color_preferences = preferences.clone();
+                    rep.geom_dirty = true;
+                    mol.hover_detail_dirty = true;
+                }
                 if force || previous.reps.kind != next.reps.kind {
                     rep.kind = next.reps.kind;
                     rep.params = next.reps.style_params(rep.kind);
@@ -593,6 +1006,28 @@ impl App {
                 dialog.preview = Some(SettingsPreview::new(rs.clone()));
             }
         }
+        if let Some(preview) = dialog.preview.as_mut() {
+            let preferences = std::sync::Arc::new(current.colors.clone());
+            for scene in [&mut preview.scene, &mut preview.protein] {
+                for mol in &mut scene.molecules {
+                    for rep in &mut mol.reps {
+                        if rep.color_preferences != preferences {
+                            rep.color_preferences = preferences.clone();
+                            preview.last = None;
+                        }
+                    }
+                }
+            }
+        }
+        let color_ranges = if dialog.tab == SettingsPage::Colors { self.scene.selected_mol.and_then(|mi| self.scene.molecules.get(mi)).and_then(|mol| {
+            let rep = mol.reps.get(mol.selected_rep.unwrap_or(0))?;
+            let sel = rep.sel.as_ref()?;
+            let bound = mol.data.bind_with_state(sel, mol.render_state());
+            Some(PropertyRanges {
+                beta: crate::color::continuous_range(ColorMethod::Beta, rep.charge_kind, &bound, mol.n_atoms)?,
+                charge: crate::color::continuous_range(ColorMethod::Charge, rep.charge_kind, &bound, mol.n_atoms)?,
+            })
+        }) } else { None };
         let inner = window.show(ctx, |ui| {
             if popup {
                 ui.set_width(300.0);
@@ -610,6 +1045,7 @@ impl App {
                         (SettingsPage::Representations, "Representations"),
                         (SettingsPage::Styles, "Styles"),
                         (SettingsPage::Materials, "Materials"),
+                        (SettingsPage::Colors, "Colors"),
                         (SettingsPage::Behavior, "Behavior"),
                     ],
                 );
@@ -631,6 +1067,7 @@ impl App {
                     SettingsPage::Representations => settings_page_reps(ui, &mut current),
                     SettingsPage::Styles => settings_page_styles(ui, &mut current, &mut dialog.style_page, dialog.preview.as_mut()),
                     SettingsPage::Materials => settings_page_materials(ui, &mut current, &mut dialog.material_page, dialog.preview.as_mut()),
+                    SettingsPage::Colors => settings_page_colors(ui, &mut current, color_ranges.as_ref()),
                     SettingsPage::Behavior => settings_page_behavior(ui, &mut current),
                 });
             ui.separator();
@@ -1724,6 +2161,430 @@ mod material_preview_tests {
                     );
                 },
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod colors_ui_tests {
+    use super::*;
+
+    #[test]
+    fn categorical_palette_fits_the_settings_window() {
+        let ctx = egui::Context::default();
+        let mut palette = crate::color::ColorPreferences::default().categorical;
+        for _ in 0..3 {
+            let output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(680.0, 800.0))),
+                ..Default::default()
+            }, |ui| {
+                ui.set_width(640.0);
+                categorical_editor(ui, &mut palette);
+                assert!(ui.min_rect().width() <= 640.0);
+            });
+            for index in 1..=16 {
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == index.to_string())));
+            }
+        }
+    }
+
+    #[test]
+    fn categorical_palette_controls_add_remove_and_open_color_picker() {
+        let ctx = egui::Context::default();
+        let mut palette = crate::color::ColorPreferences::default().categorical;
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680.0, 700.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        for (label, expected_len) in [("Add color", 17), ("×", 16)] {
+            let mut center = None;
+            for _ in 0..3 {
+                let output = ctx.run_ui(input(vec![]), |ui| categorical_editor(ui, &mut palette));
+                center = output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                });
+            }
+            let pos = center.expect("palette control drawn");
+            for pressed in [true, false] {
+                let _ = ctx.run_ui(
+                    input(vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]),
+                    |ui| categorical_editor(ui, &mut palette),
+                );
+            }
+            assert_eq!(palette.len(), expected_len);
+        }
+        let output = ctx.run_ui(input(vec![]), |ui| categorical_editor(ui, &mut palette));
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.rect.size() == egui::vec2(34.0, 30.0) => {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            })
+            .unwrap();
+        for pressed in [true, false] {
+            let _ = ctx.run_ui(
+                input(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ui| categorical_editor(ui, &mut palette),
+            );
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+    }
+
+    #[test]
+    fn dragging_gradient_midpoint_moves_the_color_stop() {
+        let ctx = egui::Context::default();
+        let mut ramp = crate::color::ColorPreferences::default().continuous;
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680.0, 500.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut center = None;
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(vec![]), |ui| {
+                gradient_editor(
+                    ui,
+                    "test",
+                    "Test gradient",
+                    ["Low", "Midpoint", "High"],
+                    &mut ramp,
+                )
+            });
+            center = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(handle)
+                    if handle.rect.width() == 14.0
+                        && handle.rect.height() == 36.0
+                        && handle.fill == egui::Color32::WHITE =>
+                {
+                    Some(handle.rect.center())
+                }
+                _ => None,
+            });
+        }
+        let start = center.expect("midpoint handle drawn on the bar");
+        let end = start + egui::vec2(382.0 * 0.25, 0.0);
+        for events in [
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerMoved(end)],
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ] {
+            let _ = ctx.run_ui(input(events), |ui| {
+                gradient_editor(
+                    ui,
+                    "test",
+                    "Test gradient",
+                    ["Low", "Midpoint", "High"],
+                    &mut ramp,
+                )
+            });
+        }
+        assert!(
+            (ramp.midpoint - 0.75).abs() < 0.001,
+            "midpoint was {}",
+            ramp.midpoint
+        );
+        assert_eq!(ramp.sample(ramp.midpoint), ramp.stops[1]);
+        assert!(
+            !egui::Popup::is_any_open(&ctx),
+            "dragging must not open the color picker"
+        );
+    }
+
+    #[test]
+    fn ss_icon_opens_its_picker_and_uses_a_contrasting_glyph() {
+        let ctx = egui::Context::default();
+        let mut color = [255, 255, 255, 255];
+        let input = |events| egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut center = egui::Pos2::ZERO;
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(vec![]), |ui| ss_icon(ui, 0, &mut color));
+            center = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) if rect.fill == egui::Color32::WHITE => {
+                        Some(rect.rect.center())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Path(path) if path.stroke.color == egui::epaint::ColorMode::Solid(egui::Color32::BLACK))));
+        }
+        for pressed in [true, false] {
+            let _ = ctx.run_ui(
+                input(vec![
+                    egui::Event::PointerMoved(center),
+                    egui::Event::PointerButton {
+                        pos: center,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ui| ss_icon(ui, 0, &mut color),
+            );
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+    }
+
+    #[test]
+    fn other_elements_button_opens_the_full_periodic_table_window() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100.0, 850.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut position = None;
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(vec![]), |ui| {
+                settings_page_colors(ui, &mut settings, None)
+            });
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Xe")));
+            position = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Other elements..." => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            });
+        }
+        let pos = position.unwrap();
+        for pressed in [true, false] {
+            let _ = ctx.run_ui(
+                input(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ui| settings_page_colors(ui, &mut settings, None),
+            );
+        }
+        let mut labels = Vec::new();
+        for _ in 0..4 {
+            let output = ctx.run_ui(input(vec![]), |ui| {
+                settings_page_colors(ui, &mut settings, None)
+            });
+            labels = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
+        for label in ["Periodic table", "Xe", "Hg", "U", "Og"] {
+            assert!(labels.iter().any(|text| text == label), "missing {label}");
+        }
+    }
+
+    #[test]
+    fn periodic_table_cells_have_equal_sizes_for_single_and_double_symbols() {
+        let ctx = egui::Context::default();
+        let mut colors = crate::color::ColorPreferences::default();
+        let mut output = None;
+        for _ in 0..3 {
+            output = Some(ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 700.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| periodic_table(ui, &mut colors),
+            ));
+        }
+        let output = output.unwrap();
+        for number in [1, 2, 6, 17, 53, 54] {
+            let color = colors.element(number);
+            let fill = egui::Color32::from_rgb(color[0], color[1], color[2]);
+            let rectangles: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect.size()),
+                    _ => None,
+                })
+                .collect();
+            assert!(!rectangles.is_empty(), "missing element {number}");
+            assert!(
+                rectangles
+                    .iter()
+                    .all(|size| *size == egui::vec2(34.0, 30.0)),
+                "element {number}: {rectangles:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_text_has_contrast_on_light_dark_and_saturated_cells() {
+        assert_eq!(swatch_ink([255; 4]), egui::Color32::BLACK);
+        assert_eq!(swatch_ink([0, 0, 0, 255]), egui::Color32::WHITE);
+        assert_eq!(swatch_ink([0, 0, 255, 255]), egui::Color32::WHITE);
+        assert_eq!(swatch_ink([255, 220, 48, 255]), egui::Color32::BLACK);
+    }
+
+    #[test]
+    fn new_representations_and_duplicates_use_the_active_palette() {
+        let mut settings = Settings::default();
+        settings.colors.elements.insert(6, [20, 100, 200, 255]);
+        let defaults = App::effective_rep_defaults(&settings);
+        let rep = crate::scene::Representation::from_defaults(&defaults);
+        assert_eq!(*rep.color_spec().preferences, settings.colors);
+        assert_eq!(*rep.duplicate().color_spec().preferences, settings.colors);
+    }
+
+    #[test]
+    fn clicking_an_element_opens_its_color_picker() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let input = |events| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(680.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut center = None;
+        for _ in 0..3 {
+            let output = ctx.run_ui(input(vec![]), |ui| {
+                settings_page_colors(ui, &mut settings, None)
+            });
+            center = output.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.job.text == "H" => {
+                    Some(t.pos + t.galley.size() * 0.5)
+                }
+                _ => None,
+            });
+        }
+        let pos = center.expect("hydrogen cell drawn");
+        for pressed in [true, false] {
+            let _ = ctx.run_ui(
+                input(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]),
+                |ui| settings_page_colors(ui, &mut settings, None),
+            );
+        }
+        assert!(egui::Popup::is_any_open(&ctx));
+        assert!(
+            settings.colors.elements.is_empty(),
+            "opening a picker must not create an override"
+        );
+    }
+
+    #[test]
+    fn colors_page_draws_all_editors_without_changing_preferences() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let mut settings = Settings::default();
+        let before = settings.colors.clone();
+        let ranges = PropertyRanges {
+            beta: [10.0, 30.0],
+            charge: [-0.4, 0.4],
+        };
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(680.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| settings_page_colors(ui, &mut settings, Some(&ranges)),
+        );
+        assert_eq!(settings.colors, before);
+        let text: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.job.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        for label in [
+            "H",
+            "C",
+            "N",
+            "O",
+            "I",
+            "Other elements...",
+            "α helix",
+            "β sheet",
+            "Coil",
+            "B-factor",
+            "Charge",
+            "10.000",
+            "30.000",
+            "-0.400",
+            "0.400",
+            "0",
+            "1",
+            "Discrete palette",
+            "Add color",
+        ] {
+            assert!(text.contains(&label), "missing {label}");
         }
     }
 }

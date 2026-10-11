@@ -416,6 +416,37 @@ impl App {
     }
 }
 
+fn draw_property_scale(
+    ui: &mut egui::Ui,
+    gradient: &crate::color::Gradient,
+    [low, high]: [f32; 2],
+) {
+    ui.add_space(6.0);
+    let width = ui.available_width().min(240.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::hover());
+    for i in 0..64 {
+        let c = gradient.sample(i as f32 / 63.0);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left() + width * i as f32 / 64.0, rect.top()),
+                egui::pos2(rect.left() + width * (i + 1) as f32 / 64.0, rect.bottom()),
+            ),
+            0.0,
+            egui::Color32::from_rgb(c[0], c[1], c[2]),
+        );
+    }
+    ui.horizontal(|ui| {
+        ui.small(format!("{low:.3}"));
+        ui.allocate_ui_with_layout(
+            egui::vec2((width - 45.0).max(0.0), 18.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.small(format!("{high:.3}"));
+            },
+        );
+    });
+}
+
 /// The **[Color]** tab: options of the active color scheme. Shown only for `Charge`
 /// (the one scheme with any) — pick which charge to paint, and compute partial charges
 /// for selections that don't carry them. Returns whether [Compute charges] was pressed.
@@ -920,8 +951,18 @@ impl App {
         // closures (which hold `&mut mol`), applied once they have all ended.
         let mut action: Option<RepAction> = None;
 
+        let continuous_palette = self.settings.colors.continuous;
         for j in start..end {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
+            let range = {
+                let rep = &mol.reps[j];
+                if rep.params_open {
+                    rep.sel.as_ref().and_then(|sel| {
+                        let bound = mol.data.bind_with_state(sel, mol.data.state());
+                        crate::color::continuous_range(rep.color, rep.charge_kind, &bound, mol.n_atoms)
+                    })
+                } else { None }
+            };
             let rep = &mut mol.reps[j];
             // Whether the selection is valid but empty (0 atoms) — flags the field.
             let sel_empty = rep.sel_empty;
@@ -1185,6 +1226,9 @@ impl App {
                                 .filter(|(sj, _)| *sj == j)
                                 .map(|(_, m)| m.as_str());
                             let out = draw_rep_params(ui, rep, has_box, status);
+                            if let Some(range) = range {
+                                draw_property_scale(ui, &continuous_palette, range);
+                            }
                             if out.compute_charges {
                                 action = Some(RepAction::ComputeCharges(j));
                             }

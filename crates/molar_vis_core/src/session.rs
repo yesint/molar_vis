@@ -132,6 +132,9 @@ pub struct MolSession {
 /// manual plumbing the save/load framework needs.
 #[derive(Serialize, Deserialize, Default)]
 pub struct ViewState {
+    /// Absent in older sessions: retain the active startup preferences.
+    #[serde(default)]
+    pub colors: Option<crate::color::ColorPreferences>,
     /// The full camera pose (target, orientation, zoom, projection, depth cue).
     /// `None` keeps the current camera (e.g. a hand-written session that omits it).
     #[serde(default)]

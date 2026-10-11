@@ -242,13 +242,17 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
                     egui::Align2::CENTER_CENTER,
                     digits[i],
                     egui::FontId::proportional(12.0),
-                    rgb4(color::rainbow(ts[i])),
+                    rgb4(color::Gradient::default().sample(ts[i])),
                 );
             }
         }
         ColorMethod::Beta => {
-            // "B" on a rainbow background.
-            rainbow_bg();
+            let gradient = color::Gradient::default();
+            for i in 0..14 {
+                let x = rect.left() + rect.width() * i as f32 / 14.0;
+                painter.rect_filled(egui::Rect::from_min_max(pos2(x, rect.top()), pos2(x + rect.width() / 14.0 + 1.0, rect.bottom())), 0.0, rgb4(gradient.sample(i as f32 / 13.0)));
+            }
+            outline_rect(rect, 0.0);
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -280,7 +284,7 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
             ));
         }
         ColorMethod::Charge => {
-            // The diverging red-white-blue charge ramp, with its signs at the poles.
+            // The diverging blue-white-red charge ramp, with its signs at the poles.
             let bar = rect.shrink2(egui::vec2(1.0, rect.height() * 0.22));
             let n = 24;
             for i in 0..n {

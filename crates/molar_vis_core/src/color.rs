@@ -10,26 +10,167 @@ use molar::prelude::*;
 
 use crate::secstruct::{ss_color, SsMap};
 
+/// Editable colors shared by every representation and persisted in settings/sessions.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ColorPreferences {
+    /// Only overrides are stored; unmodified elements keep the built-in palette.
+    pub elements: std::collections::BTreeMap<u8, [u8; 4]>,
+    /// Alpha, 3₁₀, pi helices; sheet, bridge, turn, bend, polyproline, coil.
+    pub secondary: [[u8; 4]; 9],
+    #[serde(alias = "beta")]
+    pub continuous: Gradient,
+    pub categorical: Vec<[u8; 4]>,
+}
+
+pub const SS_TYPES: [SS; 9] = [
+    SS::AlphaHelix,
+    SS::Helix310,
+    SS::PiHelix,
+    SS::BetaSheet,
+    SS::BetaBridge,
+    SS::Turn,
+    SS::Bend,
+    SS::PolyProline,
+    SS::Coil,
+];
+
+impl Default for ColorPreferences {
+    fn default() -> Self {
+        Self {
+            elements: Default::default(),
+            secondary: SS_TYPES.map(ss_color),
+            continuous: Gradient::default(),
+            categorical: PALETTE.map(|c| [c[0], c[1], c[2], 255]).to_vec(),
+        }
+    }
+}
+
+impl ColorPreferences {
+    pub fn element(&self, number: u8) -> [u8; 4] {
+        self.elements
+            .get(&number)
+            .copied()
+            .unwrap_or_else(|| element_color(number))
+    }
+
+    pub fn categorical(&self, key: usize) -> [u8; 4] {
+        if self.categorical.is_empty() {
+            categorical(key)
+        } else {
+            self.categorical[key % self.categorical.len()]
+        }
+    }
+
+    pub fn secondary(&self, ss: SS) -> [u8; 4] {
+        let index = SS_TYPES.iter().position(|&s| s == ss).unwrap_or(8);
+        self.secondary[index]
+    }
+}
+
+/// Three color stops at the low endpoint, midpoint, and high endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Gradient {
+    #[serde(default = "default_midpoint")]
+    pub midpoint: f32,
+    pub stops: [[u8; 4]; 3],
+}
+
+fn default_midpoint() -> f32 {
+    0.5
+}
+
+impl Default for Gradient {
+    fn default() -> Self {
+        Self {
+            midpoint: 0.5,
+            stops: [beta_ramp(0.0), beta_ramp(0.5), beta_ramp(1.0)],
+        }
+    }
+}
+
+impl Gradient {
+    pub fn midpoint(&self) -> f32 {
+        if self.midpoint.is_finite() {
+            self.midpoint.clamp(0.01, 0.99)
+        } else {
+            0.5
+        }
+    }
+    pub fn sample(&self, t: f32) -> [u8; 4] {
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let mid = self.midpoint();
+        let (a, b, u) = if t < mid {
+            (self.stops[0], self.stops[1], t / mid)
+        } else {
+            (self.stops[1], self.stops[2], (t - mid) / (1.0 - mid))
+        };
+        std::array::from_fn(|i| ((1.0 - u) * a[i] as f32 + u * b[i] as f32) as u8)
+    }
+}
+
 /// CPK-style element colors as RGBA8, indexed by atomic number. Unknown elements
 /// render magenta so they stand out.
 pub fn element_color(atomic_number: u8) -> [u8; 4] {
     let rgb: [u8; 3] = match atomic_number {
         1 => [240, 240, 240],  // H  white
+        2 => [217, 255, 255],  // He
+        3 => [204, 128, 255],  // Li
+        4 => [194, 255, 0],    // Be
+        5 => [255, 181, 181],  // B
         6 => [144, 144, 144],  // C  grey
         7 => [48, 80, 248],    // N  blue
         8 => [255, 40, 40],    // O  red
         9 => [144, 224, 80],   // F  green
+        10 => [179, 227, 245], // Ne
         11 => [171, 92, 242],  // Na violet
         12 => [138, 255, 0],   // Mg
+        13 => [191, 166, 166], // Al
+        14 => [240, 200, 160], // Si
         15 => [255, 128, 0],   // P  orange
         16 => [255, 220, 48],  // S  yellow
         17 => [31, 240, 31],   // Cl green
+        18 => [128, 209, 227], // Ar
         19 => [143, 64, 212],  // K
         20 => [61, 255, 0],    // Ca
+        21 => [230, 230, 230], // Sc
+        22 => [191, 194, 199], // Ti
+        23 => [166, 166, 171], // V
+        24 => [138, 153, 199], // Cr
+        25 => [156, 122, 199], // Mn
         26 => [224, 102, 51],  // Fe
+        27 => [240, 144, 160], // Co
+        28 => [80, 208, 80],   // Ni
+        29 => [200, 128, 51],  // Cu
         30 => [125, 128, 176], // Zn
+        31 => [194, 143, 143], // Ga
+        32 => [102, 143, 143], // Ge
+        33 => [189, 128, 227], // As
+        34 => [255, 161, 0],   // Se
         35 => [166, 41, 41],   // Br
+        36 => [92, 184, 209],  // Kr
+        37 => [112, 46, 176],  // Rb
+        38 => [0, 255, 0],    // Sr
+        39 => [148, 255, 255], // Y
+        40 => [148, 224, 224], // Zr
+        41 => [115, 194, 201], // Nb
+        42 => [84, 181, 181],  // Mo
+        43 => [59, 158, 158],  // Tc
+        44 => [36, 143, 143],  // Ru
+        45 => [10, 125, 140],  // Rh
+        46 => [0, 105, 133],   // Pd
+        47 => [192, 192, 192], // Ag
+        48 => [255, 217, 143], // Cd
+        49 => [166, 117, 115], // In
+        50 => [102, 128, 128], // Sn
+        51 => [158, 99, 181],  // Sb
+        52 => [212, 122, 0],   // Te
         53 => [148, 0, 148],   // I
+        54 => [66, 158, 176],  // Xe
         _ => [255, 0, 255],    // unknown / unassigned
     };
     [rgb[0], rgb[1], rgb[2], 255]
@@ -41,7 +182,7 @@ pub fn pack_rgba8(c: [u8; 4]) -> u32 {
 }
 
 /// Distinct categorical palette (tab20-style) for chain/resid/resname coloring.
-pub const PALETTE: [[u8; 3]; 12] = [
+pub const PALETTE: [[u8; 3]; 16] = [
     [31, 119, 180],
     [255, 127, 14],
     [44, 160, 44],
@@ -54,6 +195,10 @@ pub const PALETTE: [[u8; 3]; 12] = [
     [255, 152, 150],
     [197, 176, 213],
     [152, 223, 138],
+    [17, 63, 120],
+    [140, 100, 170],
+    [230, 190, 40],
+    [40, 150, 140],
 ];
 
 /// Pick a categorical color by key.
@@ -103,19 +248,9 @@ pub fn beta_ramp(t: f32) -> [u8; 4] {
     [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
 }
 
-/// Red → white → blue ramp for a **signed** value `t` in [-1,1] (charge style): negative
-/// red (electron-rich), zero white, positive blue. The chemistry convention, and the
-/// reverse of [`beta_ramp`]'s low-to-high direction — a charge scale is diverging about a
-/// meaningful zero rather than spanning an arbitrary range.
+/// Blue → white → red for signed charges: negative blue, positive red.
 pub fn charge_ramp(t: f32) -> [u8; 4] {
-    let t = t.clamp(-1.0, 1.0);
-    let u = t.abs();
-    let (r, g, b) = if t < 0.0 {
-        (1.0, 1.0 - u, 1.0 - u) // → red
-    } else {
-        (1.0 - u, 1.0 - u, 1.0) // → blue
-    };
-    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
+    beta_ramp((t.clamp(-1.0, 1.0) + 1.0) * 0.5)
 }
 
 /// An atom's charge of the requested kind. A missing `formal_charge` column reads as 0,
@@ -162,7 +297,7 @@ pub enum ColorMethod {
     SecStruct,
     /// A single user-chosen RGBA color for the whole selection.
     Solid([u8; 4]),
-    /// Per-atom charge on a diverging red–white–blue scale, normalized by the largest
+    /// Per-atom charge on the shared continuous scale (blue–white–red by default), normalized by the largest
     /// magnitude in the selection so the sign is always readable. *Which* charge —
     /// partial or formal — is an **option** of this method, not a second method: it lives
     /// on the representation ([`crate::scene::Representation::charge_kind`]) and is edited
@@ -213,11 +348,12 @@ impl ColorMethod {
     }
 }
 
-/// A color scheme together with the options that qualify it — currently just which
-/// charge [`ColorMethod::Charge`] paints. Bundled so [`Colorizer`] and
+/// A color scheme with charge options and the shared editable palette.
+/// Bundled so [`Colorizer`] and
 /// [`crate::geometry::build`] take one value rather than growing a parameter per option.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ColorSpec {
+    pub preferences: std::sync::Arc<ColorPreferences>,
     pub method: ColorMethod,
     pub charge_kind: ChargeKind,
 }
@@ -232,13 +368,51 @@ impl From<ColorMethod> for ColorSpec {
     /// A scheme with default options — for the internal builders (glow, hover lens) that
     /// hard-code a method and never paint charges.
     fn from(method: ColorMethod) -> Self {
-        ColorSpec { method, charge_kind: ChargeKind::default() }
+        ColorSpec { method, ..Default::default() }
+    }
+}
+
+/// Numeric endpoints used by rendering and by the property scale legends.
+pub fn continuous_range(
+    method: ColorMethod,
+    kind: ChargeKind,
+    src: &impl AtomProvider,
+    n_atoms: usize,
+) -> Option<[f32; 2]> {
+    match method {
+        ColorMethod::Beta => {
+            let mut low = f32::INFINITY;
+            let mut high = f32::NEG_INFINITY;
+            for atom in src.iter_atoms() {
+                let value = atom.get_bfactor();
+                if value.is_finite() {
+                    low = low.min(value);
+                    high = high.max(value);
+                }
+            }
+            Some(if low.is_finite() {
+                [low, high]
+            } else {
+                [0.0; 2]
+            })
+        }
+        ColorMethod::Charge => {
+            let max = src
+                .iter_atoms()
+                .map(|atom| atom_charge(&atom, kind).abs())
+                .filter(|value| value.is_finite())
+                .fold(0.0_f32, f32::max);
+            Some(if max > 0.0 { [-max, max] } else { [0.0; 2] })
+        }
+        ColorMethod::Index => Some([0.0, n_atoms.saturating_sub(1) as f32]),
+        _ => None,
     }
 }
 
 /// A per-method atom colorizer. Holds any context needed (e.g. the B-factor range
 /// of the selection, the atom count for the Index gradient) computed once.
 pub struct Colorizer {
+    preferences: std::sync::Arc<ColorPreferences>,
     method: ColorMethod,
     /// Which charge `Charge` paints (ignored by every other method).
     charge_kind: ChargeKind,
@@ -262,44 +436,25 @@ impl Colorizer {
         n_atoms: usize,
         ss: Option<&SsMap>,
     ) -> Self {
-        let ColorSpec { method, charge_kind } = spec;
-        let (beta_min, beta_inv_range) = if matches!(method, ColorMethod::Beta) {
-            let mut lo = f32::INFINITY;
-            let mut hi = f32::NEG_INFINITY;
-            for a in src.iter_atoms() {
-                lo = lo.min(a.get_bfactor());
-                hi = hi.max(a.get_bfactor());
-            }
-            if lo.is_finite() {
-                (lo, 1.0 / (hi - lo).max(1e-6))
-            } else {
-                (0.0, 0.0)
-            }
-        } else {
-            (0.0, 0.0)
-        };
+        let ColorSpec { method, charge_kind, preferences } = spec;
+        let range = continuous_range(method, charge_kind, src, n_atoms).unwrap_or([0.0; 2]);
+        let beta_min = range[0];
+        let beta_inv_range = 1.0 / (range[1] - range[0]).max(1e-6);
         let ss_rgba = match (method, ss) {
             (ColorMethod::SecStruct, Some(m)) => {
-                Some(m.entries().map(|(ri, s)| (ri, ss_color(s))).collect())
+                Some(m.entries().map(|(ri, s)| (ri, preferences.secondary(s))).collect())
             }
             _ => None,
         };
         // Normalize by the largest magnitude present rather than a fixed range: partial
         // charges run to ~±0.8 e while formal ones are ±1..2, and either way the point is
         // to read the sign and the relative extremes of *this* selection.
-        let charge_inv_max = if method.is_charge() {
-            let max = src
-                .iter_atoms()
-                .map(|a| atom_charge(&a, charge_kind).abs())
-                .fold(0.0f32, f32::max);
-            if max > 1e-6 { 1.0 / max } else { 0.0 }
-        } else {
-            0.0
-        };
+        let charge_inv_max = if method.is_charge() && range[1] > 1e-6 { 1.0 / range[1] } else { 0.0 };
         Self {
+            preferences,
             method,
             charge_kind,
-            inv_n: 1.0 / (n_atoms.max(1) as f32),
+            inv_n: 1.0 / (n_atoms.saturating_sub(1).max(1) as f32),
             beta_min,
             beta_inv_range,
             ss_rgba,
@@ -312,22 +467,22 @@ impl Colorizer {
     /// not `&Atom`.
     pub fn color(&self, atom: impl AtomLike, id: usize) -> u32 {
         let rgba = match self.method {
-            ColorMethod::Element => element_color(atom.get_atomic_number()),
-            ColorMethod::Chain => categorical(atom.get_chain() as usize),
-            ColorMethod::ResId => categorical(atom.get_resid().rem_euclid(1 << 24) as usize),
-            ColorMethod::ResName => categorical(hash_str(atom.get_resname())),
-            ColorMethod::Index => rainbow(id as f32 * self.inv_n),
+            ColorMethod::Element => self.preferences.element(atom.get_atomic_number()),
+            ColorMethod::Chain => self.preferences.categorical(atom.get_chain() as usize),
+            ColorMethod::ResId => self.preferences.categorical(atom.get_resid().rem_euclid(1 << 24) as usize),
+            ColorMethod::ResName => self.preferences.categorical(hash_str(atom.get_resname())),
+            ColorMethod::Index => self.preferences.continuous.sample(id as f32 * self.inv_n),
             ColorMethod::Beta => {
-                beta_ramp((atom.get_bfactor() - self.beta_min) * self.beta_inv_range)
+                self.preferences.continuous.sample((atom.get_bfactor() - self.beta_min) * self.beta_inv_range)
             }
             ColorMethod::SecStruct => self
                 .ss_rgba
                 .as_ref()
                 .and_then(|m| m.get(&atom.get_resindex()).copied())
-                .unwrap_or([230, 230, 230, 255]),
+                .unwrap_or(self.preferences.secondary[8]),
             ColorMethod::Solid(rgba) => rgba,
             ColorMethod::Charge => {
-                charge_ramp(atom_charge(&atom, self.charge_kind) * self.charge_inv_max)
+                self.preferences.continuous.sample((atom_charge(&atom, self.charge_kind) * self.charge_inv_max + 1.0) * 0.5)
             }
         };
         pack_rgba8(rgba)
@@ -373,18 +528,17 @@ mod tests {
             .collect()
     }
 
-    /// Negative red, positive blue, zero white — diverging about a meaningful zero, the
-    /// chemistry convention.
+    /// Negative blue, positive red, and zero white by default.
     #[test]
     fn charge_ramp_signs() {
-        let red = charge_ramp(-1.0);
-        assert!(red[0] > 200 && red[1] < 40 && red[2] < 40, "negative is red: {red:?}");
-        let blue = charge_ramp(1.0);
-        assert!(blue[2] > 200 && blue[0] < 40 && blue[1] < 40, "positive is blue: {blue:?}");
+        let red = charge_ramp(1.0);
+        assert!(red[0] > 200 && red[1] < 40 && red[2] < 40, "positive is red: {red:?}");
+        let blue = charge_ramp(-1.0);
+        assert!(blue[2] > 200 && blue[0] < 40 && blue[1] < 40, "negative is blue: {blue:?}");
         assert_eq!(charge_ramp(0.0), [255, 255, 255, 255], "zero is white");
         // Saturating, not wrapping: past the poles the color holds.
-        assert_eq!(charge_ramp(-4.0), red);
-        assert_eq!(charge_ramp(4.0), blue);
+        assert_eq!(charge_ramp(4.0), red);
+        assert_eq!(charge_ramp(-4.0), blue);
     }
 
     /// The scale is normalized by the largest magnitude *in the selection*, so the extreme
@@ -393,7 +547,7 @@ mod tests {
     fn charge_coloring_normalizes_to_the_extremes() {
         let sys = charged_system([-0.4, 0.2, 0.0], None);
         let c = colors(&sys, ColorSpec { method: ColorMethod::Charge, ..Default::default() });
-        assert_eq!(c[0], charge_ramp(-1.0), "the most negative atom saturates red");
+        assert_eq!(c[0], charge_ramp(-1.0), "the most negative atom saturates blue");
         assert_eq!(c[1], charge_ramp(0.5), "half the magnitude → half the ramp");
         assert_eq!(c[2], charge_ramp(0.0), "an uncharged atom is white");
 
@@ -410,11 +564,11 @@ mod tests {
         let sys = charged_system([-0.4, 0.0, 0.0], Some([0, 0, -1]));
         let partial = colors(
             &sys,
-            ColorSpec { method: ColorMethod::Charge, charge_kind: ChargeKind::Partial },
+            ColorSpec { method: ColorMethod::Charge, charge_kind: ChargeKind::Partial, ..Default::default() },
         );
         let formal = colors(
             &sys,
-            ColorSpec { method: ColorMethod::Charge, charge_kind: ChargeKind::Formal },
+            ColorSpec { method: ColorMethod::Charge, charge_kind: ChargeKind::Formal, ..Default::default() },
         );
         assert_eq!(partial[0], charge_ramp(-1.0));
         assert_eq!(partial[2], charge_ramp(0.0));
@@ -429,8 +583,219 @@ mod tests {
         let sys = charged_system([-0.4, 0.2, 0.0], None);
         let c = colors(
             &sys,
-            ColorSpec { method: ColorMethod::Charge, charge_kind: ChargeKind::Formal },
+            ColorSpec { method: ColorMethod::Charge, charge_kind: ChargeKind::Formal, ..Default::default() },
         );
         assert!(c.iter().all(|&x| x == [255, 255, 255, 255]), "all neutral → all white");
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+
+    #[test]
+    fn custom_colors_reach_atoms_and_diverging_palettes() {
+        let mut top = Topology::default();
+        for (i, charge) in [-0.4, 0.0, 0.4].into_iter().enumerate() {
+            let mut atom = Atom::new()
+                .with_name("C")
+                .with_resname("MOL")
+                .with_resid(1)
+                .guess();
+            atom.charge = charge;
+            atom.bfactor = i as f32 * 10.0;
+            top.atoms.push(&atom);
+        }
+        top.assign_resindex();
+        let state = State {
+            coords: (0..3).map(|i| Pos::new(i as f32, 0.0, 0.0)).collect(),
+            ..Default::default()
+        };
+        let system = System::new(top, state).unwrap();
+        let bound = system.select_all_bound();
+        assert_eq!(
+            continuous_range(ColorMethod::Beta, ChargeKind::Partial, &bound, 3),
+            Some([0.0, 20.0])
+        );
+        assert_eq!(
+            continuous_range(ColorMethod::Charge, ChargeKind::Partial, &bound, 3),
+            Some([-0.4, 0.4])
+        );
+        assert_eq!(
+            continuous_range(ColorMethod::Index, ChargeKind::Partial, &bound, 3),
+            Some([0.0, 2.0])
+        );
+        let mut prefs = ColorPreferences::default();
+        let custom = [12, 180, 42, 255];
+        prefs.elements.insert(6, custom);
+        prefs.secondary[8] = custom;
+        prefs.continuous.stops = [[180, 30, 70, 255], [90, 100, 110, 255], [40, 180, 90, 255]];
+        let prefs = std::sync::Arc::new(prefs);
+        for (method, expected) in [
+            (ColorMethod::Element, [custom; 3]),
+            (ColorMethod::SecStruct, [custom; 3]),
+            (ColorMethod::Beta, prefs.continuous.stops),
+            (ColorMethod::Index, prefs.continuous.stops),
+            (ColorMethod::Charge, prefs.continuous.stops),
+        ] {
+            let colorizer = Colorizer::new(
+                ColorSpec {
+                    method,
+                    preferences: prefs.clone(),
+                    ..Default::default()
+                },
+                &bound,
+                3,
+                None,
+            );
+            let actual: Vec<_> = bound
+                .iter_particle()
+                .map(|p| colorizer.color(p.atom, p.id))
+                .collect();
+            assert_eq!(actual, expected.map(pack_rgba8), "{method:?}");
+        }
+    }
+
+    #[test]
+    fn editable_categorical_palette_colors_residues_names_and_chains() {
+        let mut top = Topology::default();
+        let mut atom = Atom::new()
+            .with_name("C")
+            .with_resname("MOL")
+            .with_resid(1)
+            .guess();
+        atom.chain = 'A';
+        top.atoms.push(&atom);
+        top.assign_resindex();
+        let system = System::new(
+            top,
+            State {
+                coords: vec![Pos::new(0.0, 0.0, 0.0)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bound = system.select_all_bound();
+        let red = [180, 30, 60, 255];
+        let green = [20, 180, 40, 255];
+        let mut prefs = ColorPreferences::default();
+        assert_eq!(prefs.categorical.len(), 16);
+        assert_eq!(
+            prefs
+                .categorical
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            16
+        );
+        prefs.categorical = vec![red, green];
+        for (method, expected) in [
+            (ColorMethod::Chain, green),
+            (ColorMethod::ResId, green),
+            (ColorMethod::ResName, red),
+        ] {
+            let colorizer = Colorizer::new(
+                ColorSpec {
+                    method,
+                    preferences: std::sync::Arc::new(prefs.clone()),
+                    ..Default::default()
+                },
+                &bound,
+                1,
+                None,
+            );
+            let particle = bound.iter_particle().next().unwrap();
+            assert_eq!(
+                colorizer.color(particle.atom, particle.id),
+                pack_rgba8(expected)
+            );
+        }
+        prefs.categorical.remove(0);
+        assert_eq!(prefs.categorical(20), green);
+        prefs.categorical.push(red);
+        prefs.categorical[0] = [10, 20, 30, 255];
+        assert_eq!(prefs.categorical(0), [10, 20, 30, 255]);
+        assert_eq!(prefs.categorical(1), red);
+        prefs.categorical.clear();
+        assert_eq!(prefs.categorical(0), categorical(0));
+    }
+
+    #[test]
+    fn previous_bfactor_palette_migrates_to_the_shared_gradient() {
+        let previous = r#"{"beta":{"midpoint":0.25,"stops":[[10,20,30,255],[40,50,60,255],[70,80,90,255]]},"charge":{"stops":[[255,0,0,255],[255,255,255,255],[0,0,255,255]]}}"#;
+        let prefs: ColorPreferences = serde_json::from_str(previous).unwrap();
+        assert_eq!(prefs.continuous.midpoint, 0.25);
+        assert_eq!(prefs.continuous.stops[0], [10, 20, 30, 255]);
+        assert_eq!(prefs.categorical.len(), 16);
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert!(saved.get("continuous").is_some());
+        assert!(saved.get("beta").is_none() && saved.get("charge").is_none());
+    }
+
+    #[test]
+    fn session_and_saved_settings_roundtrip_colors_and_accept_older_files() {
+        let mut settings = crate::settings::Settings::default();
+        settings.colors.elements.insert(8, [10, 20, 30, 255]);
+        settings.colors.secondary[0] = [40, 50, 60, 255];
+        settings.colors.continuous.stops[1] = [70, 80, 90, 255];
+        settings.colors.continuous.midpoint = 0.7;
+        settings.colors.continuous.stops[2] = [100, 110, 120, 255];
+        settings.colors.categorical[0] = [12, 34, 56, 255];
+        settings.colors.categorical.push([100, 150, 200, 255]);
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let restored: crate::settings::Settings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.colors, settings.colors);
+        let view = crate::session::ViewState {
+            colors: Some(settings.colors.clone()),
+            ..Default::default()
+        };
+        let restored: crate::session::ViewState =
+            serde_json::from_str(&serde_json::to_string(&view).unwrap()).unwrap();
+        assert_eq!(restored.colors, Some(settings.colors));
+        let old: crate::settings::Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.colors, ColorPreferences::default());
+        let old: crate::session::ViewState = serde_json::from_str("{}").unwrap();
+        assert!(old.colors.is_none());
+    }
+
+    #[test]
+    fn secondary_structure_overrides_cover_every_assignment() {
+        let mut prefs = ColorPreferences::default();
+        for (i, ss) in SS_TYPES.into_iter().enumerate() {
+            prefs.secondary[i] = [i as u8, 42, 90, 255];
+            assert_eq!(prefs.secondary(ss), prefs.secondary[i]);
+        }
+        assert_eq!(prefs.secondary(SS::Break), prefs.secondary[8]);
+    }
+
+    #[test]
+    fn movable_midpoint_affects_interpolation_and_old_palettes_default_to_center() {
+        let mut ramp = ColorPreferences::default().continuous;
+        ramp.midpoint = 0.25;
+        assert_eq!(ramp.sample(0.25), ramp.stops[1]);
+        assert_eq!(ramp.sample(0.125), [127, 127, 255, 255]);
+        assert_eq!(ramp.sample(0.625), [255, 127, 127, 255]);
+        let old: Gradient =
+            serde_json::from_str(r#"{"stops":[[0,0,255,255],[255,255,255,255],[255,0,0,255]]}"#)
+                .unwrap();
+        assert_eq!(old.midpoint, 0.5);
+        ramp.midpoint = 0.0;
+        assert_eq!(ramp.midpoint(), 0.01);
+        ramp.midpoint = f32::NAN;
+        assert_eq!(ramp.midpoint(), 0.5);
+    }
+
+    #[test]
+    fn gradient_interpolates_clamps_and_preserves_all_three_stops() {
+        let ramp = Gradient {
+            midpoint: 0.5,
+            stops: [[0, 20, 40, 255], [100, 120, 140, 255], [200, 220, 240, 255]],
+        };
+        assert_eq!(ramp.sample(-2.0), ramp.stops[0]);
+        assert_eq!(ramp.sample(0.25), [50, 70, 90, 255]);
+        assert_eq!(ramp.sample(0.5), ramp.stops[1]);
+        assert_eq!(ramp.sample(0.75), [150, 170, 190, 255]);
+        assert_eq!(ramp.sample(2.0), ramp.stops[2]);
+        assert_eq!(ramp.sample(f32::NAN), ramp.stops[1]);
     }
 }

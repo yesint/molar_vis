@@ -177,6 +177,9 @@ impl ViewDefaults {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepDefaults {
+    /// Runtime palette for newly created representations; persisted globally instead.
+    #[serde(skip)]
+    pub(crate) colors: std::sync::Arc<crate::color::ColorPreferences>,
     pub kind: RepKind,
     pub color: ColorMethod,
     pub material: Material,
@@ -194,6 +197,7 @@ pub struct RepDefaults {
 impl Default for RepDefaults {
     fn default() -> Self {
         Self {
+            colors: Default::default(),
             kind: RepKind::Lines,
             color: ColorMethod::Element,
             material: Material::Opaque,
@@ -297,6 +301,8 @@ impl BehaviorSettings {
 /// The whole persisted settings document.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub colors: crate::color::ColorPreferences,
     #[serde(default = "default_format")]
     pub format: String,
     #[serde(default = "default_version")]
@@ -318,6 +324,7 @@ impl Default for Settings {
         Self {
             format: default_format(),
             version: default_version(),
+            colors: Default::default(),
             appearance: AppearanceSettings::default(),
             rendering: RenderingSettings::default(),
             view: ViewDefaults::default(),

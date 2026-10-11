@@ -14,6 +14,7 @@ pub(super) fn build_hover_detail(
     state: &molar::prelude::State,
     n_atoms: usize,
     dashed_pbc: bool,
+    preferences: std::sync::Arc<crate::color::ColorPreferences>,
 ) -> geometry::GeometryData {
     let Some(index_str) = pick::index_selection_string(&detail.atoms) else {
         return geometry::GeometryData::default();
@@ -30,7 +31,7 @@ pub(super) fn build_hover_detail(
         n_atoms,
         bonds,
         &params,
-        ColorMethod::Element.into(),
+        crate::color::ColorSpec { method: ColorMethod::Element, preferences, ..Default::default() },
         crate::material::Material::Opaque,
         None,
         dashed_pbc,
@@ -876,6 +877,7 @@ background: bool,
     // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
     // once: the molecule loop below borrows `self.scene` mutably).
     let dashed = settings.behavior.dashed_pbc_bonds;
+    let preferences = std::sync::Arc::new(settings.colors.clone());
     // A structural change (molecule add/remove/reorder/visibility) shifts molecule
     // indices, so the GPU pick geometry's baked `mol+1` ids must be rebuilt.
     #[cfg(not(target_arch = "wasm32"))]
@@ -885,6 +887,13 @@ background: bool,
     // molecule changed (its own or the partner's coords/selection).
     let mut mol_changed = vec![false; scene.molecules.len()];
     for (mi, mol) in scene.molecules.iter_mut().enumerate() {
+        for rep in &mut mol.reps {
+            if rep.color_preferences != preferences {
+                rep.color_preferences = preferences.clone();
+                rep.geom_dirty = true;
+                mol.hover_detail_dirty = true;
+            }
+        }
         for mesh in &mut mol.meshes {
             if mesh.dirty {
                 let geom = mesh.draw_geometry();
@@ -1155,7 +1164,7 @@ background: bool,
         if mol.hover_detail_dirty {
             let geom = match &mol.hover_detail {
                 Some(d) => {
-                    build_hover_detail(&mol.data, &mol.bonds, d, render_state, n_atoms, dashed)
+                    build_hover_detail(&mol.data, &mol.bonds, d, render_state, n_atoms, dashed, preferences.clone())
                 }
                 None => geometry::GeometryData::default(),
             };
@@ -1374,6 +1383,52 @@ mod unobstructed_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod geometry_job_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires native GPU; verifies palette edits invalidate primitive, surface, and cartoon caches"]
+    fn palette_changes_rebuild_all_geometry_and_cancel_old_background_colors() {
+        let rs = crate::render::test_gpu();
+        let mut settings = Settings::default();
+        let renderer = SceneRenderer::new(&rs, &settings.rendering);
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"
+        ))).unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &settings.reps);
+        scene.molecules[0].reps = [RepKind::Vdw, RepKind::Surface, RepKind::Cartoon, RepKind::Vdw]
+            .into_iter().map(Representation::new).collect();
+        scene.molecules[0].reps[2].color = ColorMethod::SecStruct;
+        scene.molecules[0].reps[3].color = ColorMethod::ResId;
+        rebuild_dirty(&mut scene, &renderer, &settings, true, &rs, None, false);
+        let custom = [30, 210, 90, 255];
+        for number in 0..=118 { settings.colors.elements.insert(number, custom); }
+        settings.colors.secondary.fill(custom);
+        settings.colors.categorical.fill(custom);
+        // No manual dirty flags: the palette update itself must trigger rebuilding.
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, true);
+        let replacement = [180, 40, 220, 255];
+        for color in settings.colors.elements.values_mut() { *color = replacement; }
+        settings.colors.secondary.fill(replacement);
+        settings.colors.categorical.fill(replacement);
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
+        let packed = crate::color::pack_rgba8(replacement);
+        for rep in &scene.molecules[0].reps {
+            let geometry = rep.cached_geometry(settings.behavior.dashed_pbc_bonds).unwrap();
+            assert!(!rep.geometry_pending());
+            if rep.kind == RepKind::Vdw {
+                assert!(!geometry.spheres.is_empty());
+                assert!(geometry.spheres.iter().all(|v| v.color == packed));
+            } else {
+                assert!(!geometry.mesh.vertices.is_empty());
+                assert!(geometry.mesh.vertices.iter().all(|v| v.color == packed), "{:?}", rep.kind);
+            }
+        }
+        // A representation recreated by history must also acquire the current palette.
+        scene.molecules[0].reps[0] = Representation::new(RepKind::Vdw);
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
+        let geometry = scene.molecules[0].reps[0].cached_geometry(settings.behavior.dashed_pbc_bonds).unwrap();
+        assert!(geometry.spheres.iter().all(|v| v.color == packed));
+    }
 
     #[test]
     #[ignore = "requires native GPU; verifies asynchronous mesh invalidation and capture barriers"]

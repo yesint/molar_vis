@@ -272,6 +272,7 @@ enum SettingsPage {
     Representations,
     Styles,
     Materials,
+    Colors,
     Behavior,
 }
 

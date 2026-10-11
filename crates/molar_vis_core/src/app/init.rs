@@ -934,6 +934,7 @@ impl App {
                 "render" | "rendering" => SettingsPage::Rendering,
                 "styles" => SettingsPage::Styles,
                 "materials" => SettingsPage::Materials,
+                "colors" => SettingsPage::Colors,
                 "view" | "view-defaults" | "view-lighting" | "view-scene" => SettingsPage::View,
                 "reps" | "representations" => SettingsPage::Representations,
                 "behavior" => SettingsPage::Behavior,

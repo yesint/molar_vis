@@ -179,6 +179,7 @@ impl App {
     pub(super) fn view_state(&self) -> ViewState {
         ViewState {
             camera: Some(self.camera),
+            colors: Some(self.settings.colors.clone()),
             pick_mode: self.pick_mode,
             selection_mode: self.selection_mode,
             axes_on: self.camera.axes_on,
@@ -189,6 +190,20 @@ impl App {
     /// Restore the global view state captured by [`Self::view_state`].
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn apply_view_state(&mut self, view: ViewState) {
+        if let Some(colors) = view.colors {
+            self.settings.colors = colors;
+        }
+        self.rep_defaults = Self::effective_rep_defaults(&self.settings);
+        let preferences = std::sync::Arc::new(self.settings.colors.clone());
+        for mol in &mut self.scene.molecules {
+            for rep in &mut mol.reps {
+                rep.color_preferences = preferences.clone();
+                rep.geom_dirty = true;
+            }
+            mol.hover_detail_dirty = true;
+        }
+        self.last_render_camera = None;
+        self.view_dirty = true;
         if let Some(cam) = view.camera {
             self.camera = cam;
         }
