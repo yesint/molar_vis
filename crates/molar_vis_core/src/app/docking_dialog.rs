@@ -286,7 +286,7 @@ impl App {
         // The Interactions rep goes on the *group* (a shared rep, so it survives member
         // switching and applies to whichever pose is shown) and points at the receptor's
         // first rep — exactly the state the partner picker would leave behind.
-        self.scene.add_docking_interactions(gi, protein_src, 0);
+        self.scene.add_docking_interactions(gi, protein_src, 0, &self.rep_defaults);
         self.scene.style_poses(gi);
         // Flexible docking: line the receptor's frame up with the shown pose from the
         // start, and let the two step together from then on (`sync_docking_frames`).
@@ -377,13 +377,16 @@ impl Scene {
         gi: usize,
         protein_src: MoleculeSource,
         protein_rep: usize,
+        defaults: &RepDefaults,
     ) {
         let Some(&member_id) = self.groups.get(gi).and_then(|g| g.members.get(g.current))
         else {
             return;
         };
         let Some(mi) = self.mol_index(member_id) else { return };
-        let mut rep = Representation::new(RepKind::Interactions);
+        let mut rep = Representation::from_defaults(&RepDefaults {
+            kind: RepKind::Interactions, ..defaults.clone()
+        });
         rep.partner = Some((protein_src, protein_rep));
         let mol = &mut self.molecules[mi];
         // Appended to the shared prefix, so it is shared across members like the Licorice.

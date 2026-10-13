@@ -8,7 +8,7 @@
 
 use super::*;
 use super::rep_panel::spin_u32;
-use super::widgets::{bold_name, max_label_width};
+use super::widgets::{bold_name, dropdown_height, max_label_width};
 use crate::analysis;
 
 /// Which side of the dialog a picked representation fills.
@@ -584,7 +584,7 @@ fn side_row(
         // the width the caller reserved for both rows.
         let name = current.map(|(l, _)| l).unwrap_or_else(|| NO_MOLECULE.to_string());
         let resp = ui.add_sized(
-            [mols.width, 20.0],
+            [mols.width, dropdown_height(ui)],
             egui::Button::new(format!("{name}  {}", icon::CARET_DOWN)),
         );
         egui::Popup::menu(&resp).show(|ui| {

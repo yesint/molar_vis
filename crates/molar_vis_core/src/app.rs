@@ -161,10 +161,6 @@ pub struct App {
     /// button turns it on; the next click on an atom makes that atom the centre of rotation
     /// (`Camera::set_center`). Esc / empty-click cancels. Transient.
     center_pick: bool,
-    /// Open per-type **Settings** dialog of an Interactions rep, if any: which rep, plus
-    /// the active type tab. A movable `egui::Window` (`draw_interactions_dialog`) edits
-    /// the rep's `InteractionSettings`. Transient.
-    interactions_dialog: Option<InteractionsDialog>,
     /// The UI theme the viewport background was last matched to, so a theme change can be
     /// detected (`System` mode also flips at runtime when the desktop does). See
     /// `follow_theme_background`.
@@ -272,6 +268,7 @@ enum SettingsPage {
     Representations,
     Styles,
     Materials,
+    Interactions,
     Colors,
     Behavior,
 }
@@ -396,14 +393,6 @@ enum ViewPage {
     Camera,
     Lighting,
     Scene,
-}
-
-/// The per-type **Settings** dialog of an Interactions rep: which rep it edits (by molecule
-/// id, so a reorder can't retarget it) plus the active interaction-type tab.
-struct InteractionsDialog {
-    mol: MolId,
-    rep: usize,
-    tab: crate::interactions::InteractionKind,
 }
 
 /// The "rename molecule" dialog: the target molecule and the edit buffer.
@@ -737,7 +726,9 @@ impl App {
             }
             pm.source.clone()
         };
-        let mut rep = Representation::new(RepKind::Interactions);
+        let mut rep = Representation::from_defaults(&RepDefaults {
+            kind: RepKind::Interactions, ..self.rep_defaults.clone()
+        });
         rep.partner = Some((partner_src, partner_rep));
         rep.sel_dirty = true;
         rep.geom_dirty = true;
@@ -1230,7 +1221,6 @@ impl eframe::App for App {
         self.draw_rename_dialog(&ctx);
         self.draw_image_dialog(&ctx);
         self.draw_settings_dialog(&ctx, frame);
-        self.draw_interactions_dialog(&ctx);
         self.draw_align_dialog(&ctx);
 
         // Apply undo/redo after the panel so list indices stay stable during draw. Each

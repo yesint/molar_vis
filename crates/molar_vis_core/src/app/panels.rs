@@ -61,7 +61,7 @@ impl App {
         egui::Panel::left("controls_panel")
             .resizable(true)
             .default_size(300.0)
-            .size_range(egui::Rangef::new(220.0, 520.0))
+            .size_range(egui::Rangef::new(220.0, 640.0))
             .show_inside(ui, |ui| {
                 ui.add_space(8.0);
 
@@ -315,29 +315,15 @@ impl App {
             // — Edit —
             menu_buttons.push(ui.menu_button("Edit", |ui| {
                 let can_undo = self.history.can_undo();
-                let undo_label = if can_undo {
-                    format!("{}  Undo {}", icon::ARROW_COUNTER_CLOCKWISE, self.history.undo_label(0))
-                } else {
-                    format!("{}  Undo", icon::ARROW_COUNTER_CLOCKWISE)
-                };
-                if ui
-                    .add_enabled(can_undo, egui::Button::new(undo_label).shortcut_text("Ctrl+Z"))
-                    .clicked()
-                {
+                if history_menu_item(ui, can_undo, icon::ARROW_COUNTER_CLOCKWISE, "Undo", "Ctrl+Z",
+                    can_undo.then(|| self.history.undo_label(0))).clicked() {
                     self.pending_undo_n = Some(1);
                     ui.close();
                 }
 
                 let can_redo = self.history.can_redo();
-                let redo_label = if can_redo {
-                    format!("{}  Redo {}", icon::ARROW_CLOCKWISE, self.history.redo_label(0))
-                } else {
-                    format!("{}  Redo", icon::ARROW_CLOCKWISE)
-                };
-                if ui
-                    .add_enabled(can_redo, egui::Button::new(redo_label).shortcut_text("Ctrl+Shift+Z"))
-                    .clicked()
-                {
+                if history_menu_item(ui, can_redo, icon::ARROW_CLOCKWISE, "Redo", "Ctrl+Shift+Z",
+                    can_redo.then(|| self.history.redo_label(0))).clicked() {
                     self.pending_redo_n = Some(1);
                     ui.close();
                 }
@@ -407,6 +393,9 @@ impl App {
             // the bar, so it never covers a sibling button.
             let ctx = ui.ctx();
             let popup_id = |r: &egui::Response| egui::Popup::default_response_id(r);
+            if std::env::var("MOLAR_VIS_DEBUG_MENU").as_deref() == Ok("edit") {
+                egui::Popup::open_id(ctx, popup_id(&menu_buttons[3]));
+            }
             let any_open = menu_buttons
                 .iter()
                 .any(|r| egui::Popup::is_id_open(ctx, popup_id(r)));

@@ -114,6 +114,9 @@ pub struct DetectParams {
 /// through undo/redo and sessions. Convert to [`DetectParams`] with [`Self::detect`].
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InteractionSettings {
+    /// Line colors in InteractionKind order; also saved in representation/session defaults.
+    #[serde(default = "default_colors")]
+    pub colors: [[u8; 4]; 6],
     // --- Hydrogen bonds ---
     #[serde(default = "yes")]
     pub hbonds: bool,
@@ -170,6 +173,11 @@ pub struct InteractionSettings {
 }
 
 // Free fns so each field can carry a `#[serde(default)]` (older sessions load).
+fn default_colors() -> [[u8; 4]; 6] {
+    use InteractionKind as K;
+    [K::HBond, K::Hydrophobic, K::SaltBridge, K::PiStacking, K::PiCation, K::Halogen]
+        .map(crate::geometry::interaction_color)
+}
 fn yes() -> bool {
     true
 }
@@ -213,6 +221,7 @@ fn d_width() -> f32 {
 impl Default for InteractionSettings {
     fn default() -> Self {
         Self {
+            colors: default_colors(),
             hbonds: true,
             hbond_dist: d_hbond(),
             hbond_dist_h: d_hbond_h(),
@@ -237,6 +246,10 @@ impl Default for InteractionSettings {
 }
 
 impl InteractionSettings {
+    pub fn color(&self, kind: InteractionKind) -> [u8; 4] {
+        self.colors[kind as usize]
+    }
+
     /// The detection cutoffs (a direct 1:1 mapping — every threshold is user-editable).
     pub fn detect(&self) -> DetectParams {
         DetectParams {
@@ -517,6 +530,26 @@ pub fn ring_normal(points: &[Vec3]) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_colors_survive_saving_and_reach_rendered_lines() {
+        let mut settings = InteractionSettings::default();
+        settings.colors = [[11, 80, 155, 255]; 6];
+        let saved = serde_json::to_value(settings).unwrap();
+        let restored: InteractionSettings = serde_json::from_value(saved.clone()).unwrap();
+        for kind in [InteractionKind::HBond, InteractionKind::Hydrophobic, InteractionKind::SaltBridge,
+            InteractionKind::PiStacking, InteractionKind::PiCation, InteractionKind::Halogen] {
+            let lines = crate::geometry::interaction_lines(&[Interaction {
+                kind, a: Vec3::ZERO, b: Vec3::X,
+            }], &restored);
+            assert!(!lines.is_empty());
+            assert!(lines.iter().all(|line| line.color == crate::color::pack_rgba8(settings.color(kind))));
+        }
+        let mut older = saved;
+        older.as_object_mut().unwrap().remove("colors");
+        let restored: InteractionSettings = serde_json::from_value(older).unwrap();
+        assert_eq!(restored.colors, InteractionSettings::default().colors);
+    }
 
     fn atom(pos: [f32; 3], atomicnum: u8, res: u64) -> AtomInfo {
         AtomInfo {

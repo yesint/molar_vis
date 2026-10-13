@@ -525,6 +525,20 @@ mod shader_style_persistence_tests {
         settings.reps.styles = RepKind::ALL.iter().map(|&kind| RepParams::for_kind(kind)).collect();
         settings.reps.styles.retain(|p| p.kind() != RepKind::Licorice);
         settings.reps.styles.push(RepParams::Licorice { bond_radius: 0.08, bond_color_blend: 0.65 });
+        settings.reps.styles.retain(|params| params.kind() != RepKind::Interactions);
+        settings.reps.styles.push(RepParams::Interactions {
+            settings: crate::interactions::InteractionSettings {
+                colors: [[31, 72, 110, 255], [55, 122, 210, 255], [11, 44, 88, 255],
+                    [220, 42, 11, 255], [91, 222, 12, 255], [144, 71, 33, 255]],
+                hbonds: false, hbond_dist: 0.45, hbond_dist_h: 0.48, hbond_angle: 125.0,
+                hydrophobic: false, hydrophobic_dist: 0.50,
+                salt_bridges: false, salt_bridge_dist: 0.65,
+                pi_stacking: false, pi_stacking_dist: 0.70, pi_stacking_angle: 40.0,
+                pi_stacking_offset: 0.30, pi_cation: false, pi_cation_dist: 0.72,
+                pi_cation_offset: 0.35, halogen: false, halogen_dist: 0.48,
+                halogen_angle: 165.0, line_width: 5.0,
+            },
+        });
         settings.reps.ss_algo = molar::prelude::SsAlgorithm::Dss;
         for material in Material::ALL {
             let mut options = material.options();

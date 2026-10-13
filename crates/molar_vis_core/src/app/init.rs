@@ -52,6 +52,7 @@ impl App {
         // New-representation defaults come from the settings; VMD's default style is
         // Lines. MOLAR_VIS_DEBUG_REP=vdw|licorice|… still overrides the kind for
         // headless checks.
+        super::widgets::set_color_picker_palette(&cc.egui_ctx, settings.colors.discrete_palette());
         let rep_defaults = Self::effective_rep_defaults(&settings);
         let bond_params = settings.behavior.bond_params();
 
@@ -261,7 +262,9 @@ impl App {
                 }
                 (mol.source.clone(), 0usize, "resid 1:99".to_string())
             };
-            let mut rep = Representation::new(RepKind::Interactions);
+            let mut rep = Representation::from_defaults(&RepDefaults {
+                kind: RepKind::Interactions, ..rep_defaults.clone()
+            });
             rep.sel_text = self_sel;
             rep.sel_dirty = true;
             rep.partner = Some((partner_src, partner_rep));
@@ -576,7 +579,6 @@ impl App {
             align_dialog: None,
             themed_bg: None,
             charge_status: None,
-            interactions_dialog: None,
             last_lens_ndc: None,
             #[cfg(not(target_arch = "wasm32"))]
             hover_pick: None,
@@ -934,6 +936,7 @@ impl App {
                 "render" | "rendering" => SettingsPage::Rendering,
                 "styles" => SettingsPage::Styles,
                 "materials" => SettingsPage::Materials,
+                "interactions" => SettingsPage::Interactions,
                 "colors" => SettingsPage::Colors,
                 "view" | "view-defaults" | "view-lighting" | "view-scene" => SettingsPage::View,
                 "reps" | "representations" => SettingsPage::Representations,
@@ -953,32 +956,9 @@ impl App {
             }
         }
 
-        // Verification hook: MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[type] opens the
-        // Interactions settings dialog (on mol 0's Interactions rep, if any) at the
-        // given type tab, so the tabbed dialog can be screenshot headlessly. Pair with
-        // MOLAR_VIS_DEBUG_INTERACTIONS=1.
-        if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG") {
-            if let Some(mol) = app.scene.molecules.first() {
-                if let Some(ri) = mol
-                    .reps
-                    .iter()
-                    .position(|r| matches!(r.kind, RepKind::Interactions))
-                {
-                    use crate::interactions::InteractionKind as K;
-                    app.interactions_dialog = Some(InteractionsDialog {
-                        mol: mol.id,
-                        rep: ri,
-                        tab: match tab.to_ascii_lowercase().as_str() {
-                            "hydrophobic" => K::Hydrophobic,
-                            "salt" | "saltbridge" => K::SaltBridge,
-                            "pistacking" | "pi-stack" | "pistack" => K::PiStacking,
-                            "pication" | "pi-cation" => K::PiCation,
-                            "halogen" => K::Halogen,
-                            _ => K::HBond,
-                        },
-                    });
-                }
-            }
+        // Legacy screenshot hook now opens the persistent Interactions settings page.
+        if std::env::var("MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG").is_ok() {
+            app.open_settings(SettingsPage::Interactions);
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_EXPAND_COLOR=1 expands mol 0's first rep

@@ -570,7 +570,7 @@ pub(crate) fn build_interactions(
     let set_b = gather_set(pmol, pmi, sel_b, displayed_state(pmol));
     let found = crate::interactions::detect(&set_a, &set_b, &settings.detect());
     geometry::GeometryData {
-        lines: geometry::interaction_lines(&found, settings.line_width),
+        lines: geometry::interaction_lines(&found, &settings),
         ..Default::default()
     }
 }

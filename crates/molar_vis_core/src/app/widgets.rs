@@ -20,6 +20,48 @@ pub(super) fn icon_button(ui: &mut egui::Ui, glyph: &str, hover: &str) -> egui::
     ui.selectable_label(false, glyph).on_hover_text(hover)
 }
 
+/// An undo/redo menu item with its action and shortcut on top and a smaller
+/// description beneath. Both lines belong to the same clickable row.
+pub(super) fn history_menu_item(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    glyph: &str,
+    action: &str,
+    shortcut: &str,
+    description: Option<&str>,
+) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let small = egui::TextStyle::Small.resolve(ui.style());
+        let title = ui.painter().layout_no_wrap(format!("{glyph}  {action}"), font.clone(), egui::Color32::PLACEHOLDER);
+        let shortcut = ui.painter().layout_no_wrap(shortcut.to_owned(), small, egui::Color32::PLACEHOLDER);
+        let description = description.map(|text| egui::WidgetText::from(egui::RichText::new(text).small()).into_galley(
+            ui, Some(egui::TextWrapMode::Truncate), 320.0, egui::TextStyle::Small,
+        ));
+        let pad = ui.spacing().button_padding;
+        let indent = pad.x + font.size + ui.spacing().icon_spacing;
+        let width = (title.size().x + shortcut.size().x + 24.0 + pad.x * 2.0)
+            .max(description.as_ref().map_or(0.0, |text| indent + text.size().x + pad.x));
+        let height = (title.size().y + 2.0 * pad.y
+            + description.as_ref().map_or(0.0, |text| text.size().y + 3.0))
+            .max(ui.spacing().interact_size.y);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+        let visuals = ui.style().interact(&response);
+        if response.hovered() || response.has_focus() {
+            ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        }
+        let top = rect.top() + pad.y;
+        ui.painter().galley(egui::pos2(rect.left() + pad.x, top), title.clone(), visuals.text_color());
+        ui.painter().galley(egui::pos2(rect.right() - pad.x - shortcut.size().x,
+            top + (title.size().y - shortcut.size().y) * 0.5), shortcut, ui.visuals().weak_text_color());
+        if let Some(description) = description {
+            ui.painter().galley(egui::pos2(rect.left() + indent, top + title.size().y + 3.0),
+                description, ui.visuals().weak_text_color());
+        }
+        response
+    }).inner
+}
+
 /// Horizontal gap between compact action icons. Also the gap to pass an
 /// [`egui::containers::Sides`] whose sides are compact groups — `Sides` reads its default
 /// gap from the *parent* `Ui`, which hasn't been tightened, so without this the seam
@@ -48,50 +90,71 @@ pub(super) fn compact_actions(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(3.0, 1.0);
 }
 
-/// Widest of `labels` in the picker-button font. A picker button reserves this so it
-/// keeps a **constant width** as the selection changes — a wider label must not grow
-/// the button and reflow/resize the whole panel. Measured once per picker per frame.
+/// Widest option label in the themed button font, for menu rows and shared columns.
 pub(super) fn max_label_width<'a>(ui: &egui::Ui, labels: impl Iterator<Item = &'a str>) -> f32 {
     let txt = ui.visuals().text_color();
+    let font = egui::TextStyle::Button.resolve(ui.style());
     labels
         .map(|l| {
             ui.painter()
-                .layout_no_wrap(l.to_owned(), egui::FontId::proportional(14.0), txt)
+                .layout_no_wrap(l.to_owned(), font.clone(), txt)
                 .size()
                 .x
         })
         .fold(0.0_f32, f32::max)
 }
 
-/// A dropdown button showing a drawn icon + a text label + a caret. `label_w` is the
-/// width reserved for the label (pass [`max_label_width`] of all options so the button
-/// doesn't change size with the selection). `draw_icon` paints into the given rect;
-/// returns the click response (drive a `Popup` off it).
+/// The closed height of a standard egui ComboBox, including its themed padding.
+pub(super) fn dropdown_height(ui: &egui::Ui) -> f32 {
+    // Use laid-out text: its pixel rounding is the same as ComboBox's selected label.
+    let text_height = ui.painter().layout_no_wrap(
+        "Mg".to_owned(),
+        egui::TextStyle::Button.resolve(ui.style()),
+        ui.visuals().text_color(),
+    ).size().y;
+    (text_height.max(ui.spacing().icon_width)
+        + 2.0 * ui.spacing().button_padding.y)
+        .max(ui.spacing().interact_size.y)
+}
+
+fn picker_parts(ui: &egui::Ui) -> (f32, f32, f32, f32) {
+    (20.0_f32.max(ui.spacing().icon_width), ui.spacing().icon_width,
+        ui.spacing().button_padding.x, ui.spacing().icon_spacing)
+}
+
+pub(super) fn picker_width_range(ui: &egui::Ui, label_width: f32) -> (f32, f32) {
+    let (icon, caret, pad, gap) = picker_parts(ui);
+    let chrome = icon + caret + 2.0 * (pad + gap);
+    let compact = chrome + label_width.min(egui::TextStyle::Button.resolve(ui.style()).size * 4.0);
+    (compact.max(100.0), (chrome + label_width + 0.5).max(100.0))
+}
+
+/// A dropdown with an icon, selected label, and caret. Row layout can expand its
+/// stable width through `combo_width` as more space becomes available.
+/// Returns the click response (drive a `Popup` off it).
 pub(super) fn picker_button(
     ui: &mut egui::Ui,
     label: &str,
-    label_w: f32,
+    label_width: f32,
     draw_icon: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> egui::Response {
     // `PLACEHOLDER` now, real ink once the state is known (see `overlay_button`).
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        egui::FontId::proportional(14.0),
-        egui::Color32::PLACEHOLDER,
+    let (icon_w, caret_w, pad, gap) = picker_parts(ui);
+    let (compact, full) = picker_width_range(ui, label_width);
+    let w = ui.spacing().combo_width.max(compact).min(full);
+    let label_width = w - icon_w - caret_w - 2.0 * (pad + gap);
+    let galley = egui::WidgetText::from(label).into_galley(
+        ui, Some(egui::TextWrapMode::Truncate), label_width, egui::TextStyle::Button,
     );
-    let (icon_w, caret_w, pad, gap) = (26.0_f32, 11.0_f32, 5.0_f32, 5.0_f32);
-    // Reserve the widest option's label width (fixed button size); the current label is
-    // drawn left-aligned within it.
-    let w = pad + icon_w + gap + label_w.max(galley.size().x) + gap + caret_w + pad;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 20.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, dropdown_height(ui)), egui::Sense::click());
     // Painted as a **button** at rest, not just on hover: it *is* a dropdown, and against a
     // panel of the same colour there was nothing to click on until the cursor found it. The
     // fills come from the widget state, so it matches every other button in either theme.
     let vis = ui.style().interact(&resp);
-    ui.painter().rect_filled(rect, 3.0, vis.weak_bg_fill);
+    ui.painter().rect_filled(rect, vis.corner_radius, vis.weak_bg_fill);
     if vis.bg_stroke.width > 0.0 {
         ui.painter()
-            .rect_stroke(rect, 3.0, vis.bg_stroke, egui::StrokeKind::Inside);
+            .rect_stroke(rect, vis.corner_radius, vis.bg_stroke, egui::StrokeKind::Inside);
     }
     let txt = vis.text_color();
     let icon_rect = egui::Rect::from_min_size(
@@ -104,14 +167,27 @@ pub(super) fn picker_button(
         galley,
         txt,
     );
-    ui.painter().text(
+    let caret = egui::Rect::from_center_size(
         egui::pos2(rect.right() - pad - caret_w * 0.5, rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        icon::CARET_DOWN,
-        egui::FontId::proportional(10.0),
-        txt,
+        egui::vec2(caret_w * 0.7, caret_w * 0.45),
     );
-    resp
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![caret.left_top(), caret.right_top(), caret.center_bottom()],
+        txt,
+        egui::Stroke::NONE,
+    ));
+    resp.on_hover_text(label)
+}
+
+/// Reserve all option labels so selecting an item never resizes a standard dropdown.
+pub(super) fn fixed_combo<'a>(
+    ui: &egui::Ui,
+    id: impl std::hash::Hash,
+    labels: impl Iterator<Item = &'a str>,
+) -> egui::ComboBox {
+    let width = max_label_width(ui, labels) + ui.spacing().icon_width
+        + ui.spacing().icon_spacing + 2.0 * ui.spacing().button_padding.x;
+    egui::ComboBox::from_id_salt(id).width(width.max(ui.spacing().combo_width))
 }
 
 /// One control in the viewport overlay toolbar: a fixed-height framed button
@@ -122,7 +198,7 @@ pub(super) fn picker_button(
 /// ragged; ink-centering lines them up. `active` paints the selection fill
 /// (toggle / open state). Returns the response — drive a `Popup::menu` off it.
 pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> egui::Response {
-    const H: f32 = 26.0;
+    let h = dropdown_height(ui);
     const R: f32 = 4.0;
     let font = egui::TextStyle::Button.resolve(ui.style());
     // Laid out with `PLACEHOLDER`, which `Painter::galley` fills in from the colour passed
@@ -132,8 +208,8 @@ pub(super) fn overlay_button(ui: &mut egui::Ui, content: &str, active: bool) -> 
     let galley = ui
         .painter()
         .layout_no_wrap(content.to_owned(), font, egui::Color32::PLACEHOLDER);
-    let w = (galley.size().x + 14.0).max(H);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, H), egui::Sense::click());
+    let w = (galley.size().x + 2.0 * ui.spacing().button_padding.x).max(h);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
     let vis = ui.style().interact_selectable(&resp, active);
     let fill = if active {
         ui.visuals().selection.bg_fill
@@ -191,11 +267,11 @@ pub(super) fn truncated(ui: &mut egui::Ui, label: egui::Label, reserve: f32) -> 
 /// (by ink bounds, at the toolbar button height) — so a label sitting next to `overlay_button`
 /// dropdowns lines up with them instead of riding high/low.
 pub(super) fn toolbar_label(ui: &mut egui::Ui, text: &str) {
-    const H: f32 = 26.0;
+    let h = dropdown_height(ui);
     let font = egui::TextStyle::Button.resolve(ui.style());
     let col = ui.visuals().text_color();
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, col);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(galley.size().x, H), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(galley.size().x, h), egui::Sense::hover());
     paint_ink_centered(ui.painter(), rect, galley, col);
 }
 
@@ -406,6 +482,317 @@ pub(super) fn slider_with_edit(
     });
 }
 
+pub(super) const COLOR_PICKER_WIDTH: f32 = 230.0;
+pub(super) const COLOR_SWATCH_GAP: f32 = 6.0;
+pub(super) const COLOR_SWATCH_SIZE: f32 = (COLOR_PICKER_WIDTH - 5.0 * COLOR_SWATCH_GAP) / 6.0;
+
+pub(super) fn set_color_picker_palette(ctx: &egui::Context, palette: &[[u8; 4]]) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new("color_picker_palette"), palette.to_vec()));
+}
+
+/// Shared popup contents for every color selector: the palette and the free picker.
+pub(super) fn color_picker_contents(
+    ui: &mut egui::Ui,
+    color: &mut egui::Color32,
+    palette: Option<&[[u8; 4]]>,
+) -> bool {
+    let before = *color;
+    ui.set_width(COLOR_PICKER_WIDTH);
+    let cached = ui.ctx().data(|data| data.get_temp::<Vec<[u8; 4]>>(egui::Id::new("color_picker_palette")))
+        .unwrap_or_else(|| crate::color::ColorPreferences::default().discrete_palette().to_vec());
+    let mut rgba = color.to_array();
+    if solid_presets(ui, palette.unwrap_or(&cached), &mut rgba) {
+        *color = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
+    }
+    ui.separator();
+    free_color_picker(ui, color);
+    *color != before
+}
+
+/// A small clickable color swatch in the `Solid` submenu grid. Highlights on
+/// hover and rings the currently-selected color.
+pub(super) fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(COLOR_SWATCH_SIZE), egui::Sense::click());
+    ui.painter()
+        .rect_filled(rect, 2.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
+    let stroke = if selected {
+        egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill)
+    } else if resp.hovered() {
+        egui::Stroke::new(1.5_f32, ui.visuals().widgets.hovered.fg_stroke.color)
+    } else {
+        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80))
+    };
+    ui.painter()
+        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
+    resp.on_hover_text(format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))
+        .clicked()
+}
+
+pub(super) fn solid_presets(ui: &mut egui::Ui, palette: &[[u8; 4]], current: &mut [u8; 4]) -> bool {
+    let mut changed = false;
+    egui::Grid::new("solid_presets")
+        .min_col_width(COLOR_SWATCH_SIZE)
+        .min_row_height(COLOR_SWATCH_SIZE)
+        .spacing(egui::Vec2::splat(COLOR_SWATCH_GAP))
+        .show(ui, |ui| {
+            for (index, &color) in palette.iter().enumerate() {
+                if swatch_button(ui, color, color == *current) {
+                    *current = color;
+                    changed = true;
+                }
+                if (index + 1) % 6 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    changed
+}
+
+fn color_gradient_mesh(
+    rect: egui::Rect,
+    columns: u32,
+    rows: u32,
+    color_at: impl Fn(f32, f32) -> egui::Color32,
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    for y in 0..=rows {
+        for x in 0..=columns {
+            let u = x as f32 / columns as f32;
+            let v = y as f32 / rows as f32;
+            mesh.colored_vertex(rect.min + rect.size() * egui::vec2(u, v), color_at(u, v));
+            if x < columns && y < rows {
+                let i = y * (columns + 1) + x;
+                mesh.add_triangle(i, i + 1, i + columns + 1);
+                mesh.add_triangle(i + 1, i + columns + 2, i + columns + 1);
+            }
+        }
+    }
+    mesh
+}
+
+/// KDE-style hue/saturation field and a vertical brightness slider, with RGB editing
+/// and a preview. Remember hue/saturation while the chosen color is black/gray.
+pub(super) fn free_color_picker(ui: &mut egui::Ui, color: &mut egui::Color32) -> bool {
+    use egui::ecolor::HsvaGamma;
+    let before = *color;
+    let mut rgb = [color.r(), color.g(), color.b()];
+    let mut rgb_changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (label, channel) in ["R", "G", "B"].into_iter().zip(rgb.iter_mut()) {
+            ui.label(label);
+            rgb_changed |= ui.add_sized(
+                [45.0, dropdown_height(ui)],
+                egui::DragValue::new(channel).range(0..=255).speed(1.0),
+            ).changed();
+        }
+    });
+    if rgb_changed {
+        *color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+    }
+    let (preview, _) = ui.allocate_exact_size(
+        egui::vec2(COLOR_PICKER_WIDTH, 16.0), egui::Sense::hover(),
+    );
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(COLOR_PICKER_WIDTH, 200.0), egui::Sense::click_and_drag(),
+    );
+    let cache_id = response.id.with("hsv");
+    let mut hsv = ui.ctx().data(|data| data.get_temp::<(egui::Color32, HsvaGamma)>(cache_id))
+        .filter(|(cached, _)| *cached == *color)
+        .map(|(_, hsv)| hsv)
+        .unwrap_or_else(|| HsvaGamma::from(*color));
+    hsv.a = 1.0;
+    let field = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right() - 28.0, rect.bottom()));
+    let value_bar = egui::Rect::from_min_max(
+        egui::pos2(field.right() + 8.0, rect.top()),
+        egui::pos2(rect.right() - 6.0, rect.bottom()),
+    );
+    if let Some(pointer) = response.interact_pointer_pos() {
+        let origin = ui.input(|input| input.pointer.press_origin()).unwrap_or(pointer);
+        if origin.x > field.right() + 4.0 {
+            hsv.v = (1.0 - (pointer.y - value_bar.top()) / value_bar.height()).clamp(0.0, 1.0);
+        } else {
+            hsv.h = (1.0 - (pointer.x - field.left()) / field.width()).clamp(0.0, 1.0);
+            hsv.s = (1.0 - (pointer.y - field.top()) / field.height()).clamp(0.0, 1.0);
+        }
+        *color = hsv.into();
+    }
+    ui.ctx().data_mut(|data| data.insert_temp(cache_id, (*color, hsv)));
+    ui.painter().rect_filled(preview, 0.0, *color);
+    if ui.is_rect_visible(rect) {
+        ui.painter().add(egui::Shape::mesh(color_gradient_mesh(field, 48, 24, |x, y| {
+            HsvaGamma { h: 1.0 - x, s: 1.0 - y, ..hsv }.into()
+        })));
+        ui.painter().add(egui::Shape::mesh(color_gradient_mesh(value_bar, 1, 32, |_, y| {
+            HsvaGamma { v: 1.0 - y, ..hsv }.into()
+        })));
+        for area in [field, value_bar] {
+            ui.painter().rect_stroke(area, 0.0, ui.visuals().widgets.noninteractive.bg_stroke,
+                egui::StrokeKind::Inside);
+        }
+        let center = field.min + field.size() * egui::vec2(1.0 - hsv.h, 1.0 - hsv.s);
+        let painter = ui.painter().with_clip_rect(field.intersect(ui.clip_rect()));
+        for (width, ink) in [(3.0_f32, egui::Color32::WHITE), (1.0_f32, egui::Color32::BLACK)] {
+            for delta in [egui::vec2(6.0, 0.0), egui::vec2(0.0, 6.0)] {
+                painter.line_segment([center - delta, center + delta], egui::Stroke::new(width, ink));
+            }
+        }
+        let y = value_bar.bottom() - hsv.v * value_bar.height();
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![egui::pos2(value_bar.right(), y), egui::pos2(rect.right(), y - 4.0),
+                egui::pos2(rect.right(), y + 4.0)],
+            ui.visuals().text_color(), egui::Stroke::NONE,
+        ));
+    }
+    if *color != before {
+        response.mark_changed();
+    }
+    response.changed()
+}
+
+#[cfg(test)]
+mod free_color_picker_tests {
+    use super::*;
+
+    #[test]
+    fn menus_size_to_their_content_on_a_wide_screen() {
+        for menu in ["style", "color", "edit"] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+            for _ in 0..3 {
+                let _ = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+                    ..Default::default()
+                }, |ui| {
+                    let header = ui.button("Menu");
+                    egui::Popup::open_id(&ctx, egui::Popup::default_response_id(&header));
+                    let popup = egui::Popup::menu(&header).show(|ui| {
+                        let spacing = ui.spacing().item_spacing.y;
+                        match menu {
+                            "style" => for kind in RepKind::ALL { super::super::pickers::style_option(ui, kind, false); },
+                            "color" => for method in ColorMethod::ALL { super::super::pickers::color_option(ui, method, false, false); },
+                            _ => {
+                                history_menu_item(ui, false, icon::ARROW_COUNTER_CLOCKWISE, "Undo", "Ctrl+Z", None);
+                                history_menu_item(ui, false, icon::ARROW_CLOCKWISE, "Redo", "Ctrl+Shift+Z", None);
+                                ui.separator();
+                                let _ = ui.button("Settings…");
+                            }
+                        }
+                        assert_eq!(ui.spacing().item_spacing.y, spacing, "normal list spacing must survive");
+                    }).unwrap();
+                    assert!(popup.response.rect.width() < 260.0,
+                        "{menu} menu expanded to {}", popup.response.rect.width());
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn shared_color_picker_displays_and_selects_the_active_palette() {
+        let ctx = egui::Context::default();
+        let mut palette = crate::color::ColorPreferences::default().discrete_palette().to_vec();
+        palette[0] = [11, 122, 250, 255];
+        set_color_picker_palette(&ctx, &palette);
+        let mut color = egui::Color32::BLACK;
+        let frame = |color: &mut egui::Color32, events| ctx.run_ui(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 700.0))),
+            events, ..Default::default()
+        }, |ui| { color_picker_contents(ui, color, None); });
+        let output = frame(&mut color, vec![]);
+        let swatches: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if (rect.rect.width() - COLOR_SWATCH_SIZE).abs() < 0.1
+                && (rect.rect.height() - COLOR_SWATCH_SIZE).abs() < 0.1 && rect.fill.a() > 0 =>
+                Some((rect.rect.center(), rect.fill.to_array())),
+            _ => None,
+        }).collect();
+        assert_eq!(swatches.iter().map(|(_, rgba)| *rgba).collect::<Vec<_>>(), palette);
+        let pos = swatches[0].0;
+        for pressed in [true, false] {
+            frame(&mut color, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert_eq!(color.to_array(), palette[0]);
+    }
+
+    #[test]
+    fn history_description_is_small_and_clicks_the_same_menu_item() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let frame = |clicked: &mut bool, events| ctx.run_ui(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+            events, ..Default::default()
+        }, |ui| {
+            *clicked |= history_menu_item(ui, true, icon::ARROW_COUNTER_CLOCKWISE, "Undo", "Ctrl+Z",
+                Some("toggle representation")).clicked();
+        });
+        let mut clicked = false;
+        let output = frame(&mut clicked, vec![]);
+        let text = |label: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text().contains(label) =>
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size())),
+            _ => None,
+        }).unwrap();
+        let title = text("Undo");
+        let shortcut = text("Ctrl+Z");
+        let description = text("toggle representation");
+        assert!((title.center().y - shortcut.center().y).abs() < 0.1);
+        assert!(description.top() > title.bottom());
+        assert!(description.height() < title.height());
+        let pos = description.center();
+        for pressed in [true, false] {
+            frame(&mut clicked, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert!(clicked);
+    }
+
+    #[test]
+    fn color_field_and_brightness_keep_the_chosen_hue_through_black() {
+        for theme in [crate::settings::ThemeMode::Light, crate::settings::ThemeMode::Dark] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, &crate::settings::AppearanceSettings {
+                theme, ..Default::default()
+            });
+            let mut color = egui::Color32::WHITE;
+            let frame = |color: &mut egui::Color32, events| {
+                ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 500.0))),
+                    events, ..Default::default()
+                }, |ui| {
+                    free_color_picker(ui, color);
+                    assert!((ui.min_rect().width() - COLOR_PICKER_WIDTH).abs() < 0.1);
+                })
+            };
+            let output = frame(&mut color, vec![]);
+            let gradients: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) => Some(mesh.calc_bounds()),
+                _ => None,
+            }).collect();
+            assert_eq!(gradients.len(), 2);
+            let (field, brightness) = (gradients[0], gradients[1]);
+            assert!((brightness.right() + 6.0 - field.left() - COLOR_PICKER_WIDTH).abs() < 0.1);
+            let click = |color: &mut egui::Color32, pos| {
+                for pressed in [true, false] {
+                    frame(color, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    }]);
+                }
+            };
+            click(&mut color, egui::pos2(field.center().x, field.top() + 0.01));
+            assert!(color.r() < 80 && color.g() > 250 && color.b() > 250);
+            click(&mut color, egui::pos2(brightness.center().x, brightness.bottom() - 0.001));
+            assert_eq!(color, egui::Color32::BLACK);
+            click(&mut color, egui::pos2(field.left() + field.width() * 2.0 / 3.0, field.top() + 0.01));
+            assert_eq!(color, egui::Color32::BLACK);
+            click(&mut color, egui::pos2(brightness.center().x, brightness.top() + 0.01));
+            assert!(color.g() > 250 && color.r() < 80 && color.b() < 80);
+        }
+    }
+}
+
 /// A color "selector": a swatch button that opens (on click, downward) a popup
 /// holding a full color picker. A nested `Popup::menu` so it stays within the parent
 /// `CloseOnClickOutside` menu's hierarchy, and `CloseOnClickOutside` itself so
@@ -419,13 +806,8 @@ pub(super) fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             // Fixed width so the picker doesn't resize as its contents change.
-            ui.set_min_width(230.0);
-            ui.set_max_width(230.0);
-            if egui::color_picker::color_picker_color32(
-                ui,
-                &mut col,
-                egui::color_picker::Alpha::Opaque,
-            ) {
+            ui.set_width(COLOR_PICKER_WIDTH);
+            if color_picker_contents(ui, &mut col, None) {
                 let lin = egui::Rgba::from(col);
                 *c = [lin.r(), lin.g(), lin.b(), 1.0];
             }

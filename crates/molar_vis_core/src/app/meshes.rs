@@ -283,13 +283,13 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_space(22.0);
                     let old_style = mesh.state.style;
-                    let label_width = max_label_width(ui, MeshStyle::ALL.into_iter().map(MeshStyle::label));
                     let icon_kind = match mesh.state.style {
                         MeshStyle::Points => RepKind::Vdw,
                         MeshStyle::Wireframe => RepKind::Lines,
                         MeshStyle::Surface => RepKind::Surface,
                     };
                     let color = ui.visuals().text_color();
+                    let label_width = max_label_width(ui, MeshStyle::ALL.into_iter().map(MeshStyle::label));
                     let response = picker_button(ui, mesh.state.style.label(), label_width, |p, rect| {
                         super::pickers::paint_style_icon(p, rect, icon_kind, color);
                     });

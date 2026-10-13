@@ -469,14 +469,14 @@ pub fn interaction_color(kind: crate::interactions::InteractionKind) -> [u8; 4] 
 /// by kind. Reuses the same dash cadence as PBC half-bonds via [`dashes`].
 pub fn interaction_lines(
     interactions: &[crate::interactions::Interaction],
-    width: f32,
+    settings: &crate::interactions::InteractionSettings,
 ) -> Vec<LineVertex> {
     let mut out = Vec::new();
     for it in interactions {
-        let color = crate::color::pack_rgba8(interaction_color(it.kind));
+        let color = crate::color::pack_rgba8(settings.color(it.kind));
         for (s, e) in dashes(it.a.to_array(), it.b.to_array()) {
-            out.push(LineVertex { pos: s, color, width, offset_px: 0.0 });
-            out.push(LineVertex { pos: e, color, width, offset_px: 0.0 });
+            out.push(LineVertex { pos: s, color, width: settings.line_width, offset_px: 0.0 });
+            out.push(LineVertex { pos: e, color, width: settings.line_width, offset_px: 0.0 });
         }
     }
     out
