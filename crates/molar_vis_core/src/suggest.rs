@@ -77,10 +77,12 @@ mod tests {
             let syntax = item.split('"').next().unwrap()
                 .replace("&lt;", "<").replace("&gt;", ">")
                 .replace("&quot;", "\"").replace("&#x27;", "'").replace("&amp;", "&");
-            molar::prelude::SelectionExpr::new(&syntax).unwrap_or_else(|e| panic!("{syntax}: {e}"));
+            let mut resolver = crate::selection::SceneVariables::default();
+            molar::prelude::SelectionExpr::new_with_resolver(&syntax, &mut resolver)
+                .unwrap_or_else(|e| panic!("{syntax}: {e}"));
             count += 1;
         }
-        assert_eq!(count, 30, "verify every copyable example in the web reference");
+        assert_eq!(count, 34, "verify every copyable example in the web reference");
     }
 
 }

@@ -306,6 +306,11 @@ impl App {
             // wasm: a browser download). **Image…** opens a dialog to pick the output size +
             // format, then saves (ray-traced on a compute device — see `render/raytrace.rs`).
             menu_buttons.push(ui.menu_button("Render", |ui| {
+                if ui.button("Reset clipping").on_hover_text("Fit the visible scene without changing its orientation").clicked() {
+                    self.reset_clipping();
+                    ui.close();
+                }
+
                 if ui.button(format!("{}  Image…", icon::IMAGE)).clicked() {
                     self.rt.image_dialog = Some(ModalState::new(ImageDialog { scale: 1 }));
                     ui.close();
@@ -413,8 +418,8 @@ impl App {
         });
     }
 
-    /// Loaded molecules. Each is a foldable block: a header row (fold caret, name,
-    /// atom count, then a right-justified action group: add-rep, eye, trash), with
+    /// Loaded molecules. Each is a foldable block: a header row (visibility badge,
+    /// fold caret, name, then a right-justified action group), with
     /// the molecule's representations nested below when expanded.
     pub(super) fn draw_molecule_list(&mut self, ui: &mut egui::Ui) -> bool {
         if self.scene.molecules.is_empty() {
@@ -442,30 +447,14 @@ impl App {
 
         // Top-level entries in panel order: a standalone molecule, or a group shown at
         // the position of its first member (later members are folded into the group).
-        enum Entry {
-            Mol(usize),
-            Group(usize),
-        }
-        let mut seen_groups = std::collections::HashSet::new();
-        let mut entries: Vec<Entry> = Vec::new();
-        for (i, mol) in self.scene.molecules.iter().enumerate() {
-            match mol.group {
-                None => entries.push(Entry::Mol(i)),
-                Some(gid) => {
-                    if seen_groups.insert(gid) {
-                        if let Some(gi) = self.scene.group_index(gid) {
-                            entries.push(Entry::Group(gi));
-                        }
-                    }
-                }
-            }
-        }
+        use crate::selection::SourceEntry as Entry;
+        let entries = self.scene.source_entries();
 
-        for entry in entries {
+        for (source_index, entry) in entries.into_iter().enumerate() {
             let i = match entry {
                 Entry::Mol(i) => i,
                 Entry::Group(gi) => {
-                    let out = self.draw_group_entry(ui, gi);
+                    let out = self.draw_group_entry(ui, gi, source_index);
                     view_dirty |= out.view_dirty;
                     // Applied after the loop: a deletion shifts the entry indices.
                     match out.escalate {
@@ -480,15 +469,17 @@ impl App {
             {
                 let mol = &mut self.scene.molecules[i];
                 ui.horizontal(|ui| {
-                    let caret = if mol.reps_open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
-                    if ui
-                        .selectable_label(false, caret)
+                    if index_badge(ui, "m", source_index, mol.visible).clicked() {
+                        mol.visible = !mol.visible;
+                        view_dirty = true;
+                    }
+                    if molecule_expander(ui, mol.reps_open)
                         .on_hover_text("Representations")
                         .clicked()
                     {
                         mol.reps_open = !mol.reps_open;
                     }
-                    // Right-justified action group: load · add-rep · zoom · eye · menu —
+                    // Right-justified action group: load · add-rep · zoom · menu —
                     // placed first, so the name (after it, in the space left) can never push it.
                     let spacing = ui.spacing().clone();
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -543,15 +534,6 @@ impl App {
                         })
                         .response
                         .on_hover_text("Molecule menu");
-                        let eye = if mol.visible { icon::EYE } else { icon::EYE_SLASH };
-                        if ui
-                            .selectable_label(mol.visible, eye)
-                            .on_hover_text(if mol.visible { "Hide" } else { "Show" })
-                            .clicked()
-                        {
-                            mol.visible = !mol.visible;
-                            view_dirty = true;
-                        }
                         // (Edit/draw is now per-representation — see each rep row's menu.)
                         if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to molecule")
                             .clicked()
@@ -693,7 +675,7 @@ impl App {
     /// switch with camera re-fit, eye, expand, add shared/own rep); a "Delete group"
     /// is deferred to the caller via `delete_group` (it removes molecules, which would
     /// shift the outer loop's indices). Returns whether the view needs re-rendering.
-    pub(super) fn draw_group_entry(&mut self, ui: &mut egui::Ui, gi: usize) -> GroupOutcome {
+    pub(super) fn draw_group_entry(&mut self, ui: &mut egui::Ui, gi: usize, source_index: usize) -> GroupOutcome {
         let mut view_dirty = false;
         // Snapshot display data so the UI closures don't hold a scene borrow.
         let gid = self.scene.groups[gi].id;
@@ -720,14 +702,12 @@ impl App {
         // closures (which must stay borrow-free), applied once they have all ended.
         let mut action: Option<GroupAction> = None;
 
-        // Header row.
+        // Header source label uses the same numbering as the resolver.
         ui.horizontal(|ui| {
-            let caret = if expanded { icon::CARET_DOWN } else { icon::CARET_RIGHT };
-            if ui
-                .selectable_label(false, caret)
-                .on_hover_text("Shared representations + Molecules")
-                .clicked()
-            {
+            if index_badge(ui, "m", source_index, gvisible).clicked() {
+                action = Some(GroupAction::ToggleEye);
+            }
+            if molecule_expander(ui, expanded).on_hover_text("Shared representations + Molecules").clicked() {
                 action = Some(GroupAction::ToggleExpand);
             }
             let spacing = ui.spacing().clone();
@@ -750,14 +730,6 @@ impl App {
                 })
                 .response
                 .on_hover_text("Group menu");
-                let eye = if gvisible { icon::EYE } else { icon::EYE_SLASH };
-                if ui
-                    .selectable_label(gvisible, eye)
-                    .on_hover_text(if gvisible { "Hide group" } else { "Show group" })
-                    .clicked()
-                {
-                    action = Some(GroupAction::ToggleEye);
-                }
                 // (Edit/draw is now per-representation — see each member rep row's menu.)
                 if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to shown molecule").clicked() {
                     action = Some(GroupAction::Focus);
@@ -836,13 +808,11 @@ impl App {
                                 let hl = ui.painter().add(egui::Shape::Noop);
                                 let m = &mut self.scene.molecules[mmi];
                                 let row = ui.horizontal(|ui| {
-                                    let caret = if m.reps_open {
-                                        icon::CARET_DOWN
-                                    } else {
-                                        icon::CARET_RIGHT
-                                    };
-                                    if ui
-                                        .selectable_label(false, caret)
+                                    if index_badge_label(ui, &format!("m{source_index}[{pos}]"), m.visible).clicked() {
+                                        m.visible = !m.visible;
+                                        view_dirty = true;
+                                    }
+                                    if molecule_expander(ui, m.reps_open)
                                         .on_hover_text("Own representations")
                                         .clicked()
                                     {

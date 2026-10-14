@@ -2168,8 +2168,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ca8131b16b1897fcec7a97f1f974897f9708cee200f7ceaf851d41fce5a0965"
+source = "git+https://github.com/yesint/molar.git?rev=cdda9334aa053541ebb9e7e8d53e0409a8980b31#cdda9334aa053541ebb9e7e8d53e0409a8980b31"
 dependencies = [
  "anyhow",
  "clap",
@@ -2207,8 +2206,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43f77f446d637a46d0da651d6f96497733447b85b76826e6c709f7c82682a76"
+source = "git+https://github.com/yesint/molar.git?rev=cdda9334aa053541ebb9e7e8d53e0409a8980b31#cdda9334aa053541ebb9e7e8d53e0409a8980b31"
 dependencies = [
  "cc",
  "libloading",
@@ -2307,9 +2305,8 @@ dependencies = [
 
 [[package]]
 name = "molly"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75dccedc345e14623ecc79262729c65fb6a7262751e1ad7e4230664475c7957b"
+version = "0.6.1"
+source = "git+https://github.com/ma3ke/molly.git#9f2fd6bcff4cdad8c4ab509a519192f89d843774"
 
 [[package]]
 name = "moxcms"
@@ -3099,8 +3096,7 @@ dependencies = [
 [[package]]
 name = "powersasa"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a1073b929b2cd79502edb9ed1e64aa5dd859466b696dbfe3c0fbf33eb1f4111"
+source = "git+https://github.com/yesint/powersasa-llm.git#2b9465029fe9da4432b4a0cf64a2d9a86621da3c"
 dependencies = [
  "nalgebra",
  "thiserror 2.0.19",

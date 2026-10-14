@@ -13,6 +13,115 @@ pub struct AppLaunch {
     /// `Vec` is one molecule: the first file provides the topology, and all frames of
     /// the group's files form the trajectory. See [`parse_file_args`].
     pub files: Vec<Vec<PathBuf>>,
+    /// Docking startup uses the same receptor/pose loader as the docking dialog.
+    pub docking: Option<DockingLaunch>,
+}
+
+/// Files supplied by `-r`/`--receptor` and `-l`/`--ligand`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockingLaunch {
+    pub receptor: Vec<PathBuf>,
+    pub ligands: Vec<PathBuf>,
+}
+
+/// Parse normal molecule arguments or a docking result. Both docking sides are
+/// required; mixing docking flags with ordinary molecule groups is rejected.
+/// Repeated docking flags append files, and `--` ends option parsing.
+pub fn parse_launch_args<I, S>(args: I) -> Result<AppLaunch, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    #[derive(Clone, Copy)]
+    enum Side {
+        Files,
+        Receptor,
+        Ligands,
+    }
+    let mut side = Side::Files;
+    let mut ordinary = Vec::new();
+    let mut current = Vec::new();
+    let mut molecule_flag = false;
+    let mut receptor = Vec::new();
+    let mut ligands = Vec::new();
+    let mut docking = false;
+    let mut options = true;
+    let mut pending: Option<&str> = None;
+    for arg in args {
+        let arg = arg.as_ref();
+        if options && arg == "--" {
+            options = false;
+            continue;
+        }
+        let flag = if options {
+            if arg == "-r" || arg == "--receptor" {
+                Some((Side::Receptor, "-r"))
+            } else if arg == "-l" || arg == "--ligand" {
+                Some((Side::Ligands, "-l"))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((next, name)) = flag {
+            if let Some(previous) = pending {
+                return Err(format!("{previous} requires at least one file"));
+            }
+            side = next;
+            docking = true;
+            pending = Some(name);
+            continue;
+        }
+        if options && (arg == "-m" || arg == "--molecule") {
+            if docking {
+                return Err("cannot mix -m with docking flags -r/-l".into());
+            }
+            molecule_flag = true;
+            if !current.is_empty() {
+                ordinary.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if options && arg.to_string_lossy().starts_with('-') {
+            return Err(format!(
+                "unknown option {}; use -- before a filename starting with '-'",
+                arg.to_string_lossy()
+            ));
+        }
+        match side {
+            Side::Files => current.push(PathBuf::from(arg)),
+            Side::Receptor => receptor.push(PathBuf::from(arg)),
+            Side::Ligands => ligands.push(PathBuf::from(arg)),
+        }
+        pending = None;
+    }
+    if let Some(flag) = pending {
+        return Err(format!("{flag} requires at least one file"));
+    }
+    if docking {
+        if !ordinary.is_empty() || !current.is_empty() || molecule_flag {
+            return Err("cannot mix ordinary molecule files with docking flags -r/-l".into());
+        }
+        if receptor.is_empty() {
+            return Err("docking requires -r RECEPTOR_FILES...".into());
+        }
+        if ligands.is_empty() {
+            return Err("docking requires -l LIGAND_FILES...".into());
+        }
+        Ok(AppLaunch {
+            files: vec![],
+            docking: Some(DockingLaunch { receptor, ligands }),
+        })
+    } else {
+        if !current.is_empty() {
+            ordinary.push(current);
+        }
+        Ok(AppLaunch {
+            files: ordinary,
+            docking: None,
+        })
+    }
 }
 
 /// Parse VMD-style command-line file arguments into per-molecule groups.
@@ -222,5 +331,106 @@ mod tests {
         assert!(parse_file_args(Vec::<String>::new()).is_empty());
         // Leading/doubled/trailing `-m` just open (empty → ignored) groups.
         assert_eq!(parse_file_args(["-m", "-m", "a.pdb", "-m"]), vec![vec![p("a.pdb")]]);
+    }
+}
+
+#[cfg(test)]
+mod docking_cli_tests {
+    use super::*;
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn docking_lists_support_multiple_files_and_either_order() {
+        for args in [
+            vec!["-r", "protein.pdb", "protein.xtc", "-l", "a.sd", "b.pdb"],
+            vec![
+                "--ligand",
+                "a.sd",
+                "b.pdb",
+                "--receptor",
+                "protein.pdb",
+                "protein.xtc",
+            ],
+            vec![
+                "-r",
+                "protein.pdb",
+                "-l",
+                "a.sd",
+                "-r",
+                "protein.xtc",
+                "-l",
+                "b.pdb",
+            ],
+        ] {
+            let launch = parse_launch_args(args).unwrap();
+            assert!(launch.files.is_empty());
+            assert_eq!(
+                launch.docking.unwrap(),
+                DockingLaunch {
+                    receptor: paths(&["protein.pdb", "protein.xtc"]),
+                    ligands: paths(&["a.sd", "b.pdb"]),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_docking_arguments_are_rejected() {
+        for args in [
+            vec!["-r"],
+            vec!["-l", "poses.sd"],
+            vec!["-r", "protein.pdb"],
+            vec!["-r", "-l", "poses.sd"],
+            vec!["a.pdb", "-r", "b.pdb", "-l", "c.sd"],
+            vec!["-m", "-r", "b.pdb", "-l", "c.sd"],
+            vec!["-r", "b.pdb", "-l", "c.sd", "-m", "d.pdb"],
+            vec!["--typo"],
+        ] {
+            assert!(parse_launch_args(&args).is_err(), "accepted {args:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_loading_is_preserved_and_double_dash_keeps_paths_literal() {
+        for args in [
+            vec![],
+            vec!["a.pdb", "a.xtc"],
+            vec!["-m", "-m", "a.pdb", "-m"],
+            vec!["a.pdb", "--molecule", "b.pdb"],
+        ] {
+            let launch = parse_launch_args(&args).unwrap();
+            assert_eq!(launch.files, parse_file_args(&args));
+            assert!(launch.docking.is_none());
+        }
+        assert_eq!(
+            parse_launch_args(["--", "-m", "-r"]).unwrap().files,
+            vec![paths(&["-m", "-r"])]
+        );
+        assert_eq!(
+            parse_launch_args(["-r", "a.pdb", "-l", "--", "-poses.sd"])
+                .unwrap()
+                .docking
+                .unwrap()
+                .ligands,
+            paths(&["-poses.sd"])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_paths_need_not_be_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = std::ffi::OsString::from_vec(b"pose\xff.sd".to_vec());
+        let launch = parse_launch_args([
+            std::ffi::OsString::from("-r"),
+            "protein.pdb".into(),
+            "-l".into(),
+            path.clone(),
+        ])
+        .unwrap();
+        assert_eq!(launch.docking.unwrap().ligands, vec![PathBuf::from(path)]);
     }
 }

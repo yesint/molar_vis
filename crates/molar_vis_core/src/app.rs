@@ -702,7 +702,8 @@ impl App {
     /// contacts against the partner representation `(partner_mol, partner_rep)`. Wires the
     /// same [`Representation::partner`] the interactive partner-picker sets (keyed by the
     /// partner molecule's [`MoleculeSource`]), so the build path is exactly the one
-    /// `MOLAR_VIS_DEBUG_INTERACTIONS` and the docking loader use. Returns the new rep index.
+    /// `MOLAR_VIS_DEBUG_INTERACTIONS` and the docking loader use. Also shows dynamic
+    /// receptor pocket lines within 0.6 nm of the ligand source rep. Returns the new rep index.
     pub fn add_interactions_rep(
         &mut self,
         mol: usize,
@@ -734,8 +735,10 @@ impl App {
         rep.geom_dirty = true;
         let m = &mut self.scene.molecules[mol];
         m.reps.push(rep);
+        let ri = m.reps.len() - 1;
+        self.scene.show_interaction_pocket(mol, ri, partner_mol, &self.rep_defaults);
         self.view_dirty = true;
-        Ok(m.reps.len() - 1)
+        Ok(ri)
     }
 
     /// Set representation `(mol, rep)`'s line width in pixels. Supported by the **Lines**
@@ -930,6 +933,15 @@ impl App {
         self.view_dirty = true;
     }
 
+    /// Restore the full visible scene while keeping orientation and rendering settings.
+    pub fn reset_clipping(&mut self) {
+        if let Some([min, max]) = self.scene.visible_depth_bounds() {
+            self.camera.depth_bounds = Some([min, max]);
+            self.camera.focus_bbox(min, max);
+        }
+        self.view_dirty = true;
+    }
+
     /// Rotate and scale the camera to show representation `rep` of molecule `mol` with
     /// the least obstruction — the view direction that keeps the **most of the rep's
     /// atoms directly on screen** (front-most, hidden by neither another rep nor another
@@ -958,9 +970,9 @@ impl App {
     /// including a nearer atom of another target rep — so the group is handled as if it
     /// were a single rep. `zoom_out` behaves as in [`Self::unobstructed_view`].
     ///
-    /// Atoms are modeled as vdW spheres (see [`crate::unobstructed`]); occluders are the
-    /// atoms of every visible per-atom rep that is *not* in `targets` (Interactions reps
-    /// draw no per-atom geometry and are skipped). Selections are refreshed first
+    /// Targets use vdW spheres (see [`crate::unobstructed`]); visible background reps
+    /// supply spheres at their rendered radii or actual mesh triangles. Interactions
+    /// reps are skipped. Selections are refreshed first
     /// so a freshly built scene (e.g. from the Python API) has evaluated selections.
     ///
     /// `resolution` is the coarse direction-search sample count (see
@@ -980,17 +992,22 @@ impl App {
             target,
             occluders,
             visual_bounds,
+            triangles,
         } = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
 
         // Best direction, then fit visual extents in that camera basis.
         #[cfg(not(target_arch = "wasm32"))]
-        let gpu_dir = self.render_state.as_ref().and_then(|rs| {
+        let gpu_dir = self.render_state.as_ref().filter(|_| triangles.is_empty()).and_then(|rs| {
             self.renderer.try_unobstructed_direction(rs, &target, &occluders, resolution)
         });
         #[cfg(target_arch = "wasm32")]
         let gpu_dir = None;
         let dir = gpu_dir.unwrap_or_else(|| {
-            crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution)
+            if triangles.is_empty() {
+                crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution)
+            } else {
+                crate::unobstructed::best_direction_with_triangles_cancellable(&target, &occluders, &triangles, resolution, &|| false).expect("uncancelled search")
+            }
         });
         #[cfg(not(target_arch = "wasm32"))]
         log::info!(
@@ -1292,7 +1309,9 @@ impl eframe::App for App {
         // MOLAR_VIS_DEBUG_SAVE_UI=<path>: capture the whole egui surface (panels included)
         // and quit — the offscreen alternative to screenshotting a real window.
         #[cfg(not(target_arch = "wasm32"))]
-        self.rt.service_debug_ui_capture(&ctx);
+        if self.unobstructed_job.is_none() {
+            self.rt.service_debug_ui_capture(&ctx);
+        }
 
         // Service a pending "Save image" request here: `frame` (the wgpu render state) is
         // available, and `draw_viewport` has just refreshed `last_size`. Native saves

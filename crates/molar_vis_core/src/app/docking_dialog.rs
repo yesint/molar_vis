@@ -50,10 +50,6 @@ const HEAVY_ATOMS: &str = "not apolh";
 /// on screen.
 const POSE_VIEW_MARGIN: f32 = 0.6;
 
-/// Line width (px) for the receptor's lines rep. Wider than the 1 px default because the
-/// receptor here is a backdrop being read *through* — at 1 px it disappears against the pose.
-const DOCKING_LINE_WIDTH: f32 = 3.0;
-
 /// One line of the file summary: "3 files: jak2.pdb, jak2_traj.pdb, …" or the single name.
 fn describe(paths: &[std::path::PathBuf]) -> String {
     let name = |p: &std::path::PathBuf| {
@@ -286,8 +282,8 @@ impl App {
         // The Interactions rep goes on the *group* (a shared rep, so it survives member
         // switching and applies to whichever pose is shown) and points at the receptor's
         // first rep — exactly the state the partner picker would leave behind.
-        self.scene.add_docking_interactions(gi, protein_src, 0, &self.rep_defaults);
         self.scene.style_poses(gi);
+        self.scene.add_docking_interactions(gi, protein_src, 0, &self.rep_defaults);
         // Flexible docking: line the receptor's frame up with the shown pose from the
         // start, and let the two step together from then on (`sync_docking_frames`).
         if mode == DockingMode::Flexible {
@@ -331,21 +327,18 @@ impl App {
 /// pose group's `Interactions` rep to the receptor. These read and write nothing but the
 /// scene, so they sit on [`Scene`].
 impl Scene {
-    /// The receptor's docking view: **lines** over the heavy atoms (wider than the default,
-    /// since it is a backdrop being read *through*) plus a **cartoon coloured by secondary
-    /// structure**, which is what makes a binding site legible as part of a fold.
+    /// Start the receptor with a secondary-structure cartoon. Pocket lines are
+    /// added when the ligand's Interactions rep is wired to this receptor.
     pub(super) fn style_receptor(&mut self, mi: usize) {
         let mol = &mut self.molecules[mi];
         if let Some(rep) = mol.reps.first_mut() {
-            rep.kind = RepKind::Lines;
-            rep.params = RepParams::Lines { width: DOCKING_LINE_WIDTH, bond_color_blend: 0.0 };
+            rep.kind = RepKind::Cartoon;
+            rep.params = RepParams::for_kind(RepKind::Cartoon);
+            rep.color = ColorMethod::SecStruct;
             rep.sel_text = HEAVY_ATOMS.to_string();
             rep.sel_dirty = true;
+            rep.geom_dirty = true;
         }
-        let mut cartoon = Representation::new(RepKind::Cartoon);
-        cartoon.color = ColorMethod::SecStruct;
-        cartoon.sel_text = HEAVY_ATOMS.to_string();
-        mol.reps.push(cartoon);
         mol.selected_rep = Some(0);
     }
 
@@ -387,13 +380,18 @@ impl Scene {
         let mut rep = Representation::from_defaults(&RepDefaults {
             kind: RepKind::Interactions, ..defaults.clone()
         });
+        rep.sel_text = HEAVY_ATOMS.to_string();
         rep.partner = Some((protein_src, protein_rep));
+        let receptor_mol = super::build::partner_index(self, &rep).map(|(mi, _)| mi);
         let mol = &mut self.molecules[mi];
         // Appended to the shared prefix, so it is shared across members like the Licorice.
         let at = mol.n_shared.min(mol.reps.len());
         mol.reps.insert(at, rep);
         mol.n_shared = at + 1;
         mol.selected_rep = Some(at);
+        if let Some(receptor_mol) = receptor_mol {
+            self.show_interaction_pocket(mi, at, receptor_mol, defaults);
+        }
     }
 
     /// The receptor molecule of a flexible-docking pair: the molecule targeted by the
@@ -489,5 +487,55 @@ impl App {
             }
         }
         self.view_dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod docking_rep_tests {
+    use super::*;
+    use molar::prelude::Atom;
+
+    #[test]
+    fn receptor_has_cartoon_and_pocket_lines_only() {
+        let mut scene = Scene::default();
+        let defaults = RepDefaults::default();
+        scene.add(
+            data::RawMolecule::single_atom(
+                "receptor",
+                Atom::new().with_name("CA"),
+                glam::Vec3::ZERO,
+            )
+            .unwrap(),
+            &defaults,
+        );
+        scene.style_receptor(0);
+        let receptor = scene.molecules[0].source.clone();
+        scene.add_group(
+            vec![
+                data::RawMolecule::single_atom(
+                    "pose0",
+                    Atom::new().with_name("CA"),
+                    glam::Vec3::ZERO,
+                )
+                .unwrap(),
+                data::RawMolecule::single_atom("pose1", Atom::new().with_name("CA"), glam::Vec3::X)
+                    .unwrap(),
+            ],
+            MoleculeSource::default(),
+            "poses".into(),
+            &defaults,
+        );
+        scene.style_poses(0);
+        scene.add_docking_interactions(0, receptor, 0, &defaults);
+        let reps = &scene.molecules[0].reps;
+        assert_eq!(reps.len(), 2);
+        assert_eq!(reps[0].kind, RepKind::Cartoon);
+        assert_eq!(reps[0].color, ColorMethod::SecStruct);
+        assert_eq!(reps[1].kind, RepKind::Lines);
+        assert_eq!(reps[1].sel_text, "not apolh and within 0.6 of m1.r0");
+        assert_eq!(
+            super::super::build::partner_index(&scene, &scene.molecules[1].reps[1]),
+            Some((0, 0))
+        );
     }
 }

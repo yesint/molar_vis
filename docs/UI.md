@@ -277,3 +277,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
 History labels via `describe_change` ("edit selection", "change coloring",
 "reorder representations", …). FPS in the footer.
 
+
+Shift+RMB moves the scene through the front clipping plane. The far clipping plane
+automatically covers the visible scene, including when a small selection is framed.
+**Render → Reset clipping** fits the visible scene and clears the clipping offset
+while preserving the viewing orientation.

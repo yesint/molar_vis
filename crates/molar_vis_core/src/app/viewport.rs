@@ -69,6 +69,7 @@ impl App {
                 gray_active,
                 true,
             );
+            self.camera.depth_bounds = self.scene.visible_depth_bounds();
 
             let geometry_pending = self.scene.molecules.iter().filter(|m| m.visible)
                 .any(|m| m.reps.iter().any(|r| r.geometry_pending()));
@@ -81,7 +82,7 @@ impl App {
 
             // VMD-style navigation:
             //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
-            //   RMB = pan           · Shift+RMB = move scene along view Z (fixed clip → slab)
+            //   RMB = pan           · Shift+RMB = move scene along view Z (fixed front clip)
             //   middle = pan        · wheel = scale (zoom)
             // In Lasso pick mode an LMB drag draws the selection polygon (the held
             // modifier picks the set op on release: plain = replace, Shift = add,
@@ -140,7 +141,7 @@ impl App {
                 }
             } else if response.dragged_by(egui::PointerButton::Secondary) {
                 if shift {
-                    // Move the scene along the view axis with fixed clip planes (slabbing),
+                    // Move the scene along the view axis with a fixed front clip plane (slabbing),
                     // not a zoom — so the molecule can be pushed through the near plane.
                     self.camera.translate_z(delta.y);
                 } else {
@@ -801,6 +802,7 @@ impl App {
         if let Some(rep) = self.scene.molecules[target_mi].reps.get_mut(target_rep) {
             rep.partner = Some((chosen_src, chosen_rep));
             rep.geom_dirty = true;
+            self.scene.show_interaction_pocket(target_mi, target_rep, chosen_mi, &self.rep_defaults);
         }
         self.rep_pick = None;
         self.scene.clear_hover();

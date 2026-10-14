@@ -47,7 +47,7 @@ pub fn apply_scene_command(
             // Pre-validate for an immediate error; an empty match is a (non-fatal)
             // warning the field flags, so let it through.
             if let Err(EvalError::Invalid { message, .. }) =
-                scene.molecules[mi].data.evaluate(&text)
+                scene.validate_selection(mi, ri, &text)
             {
                 return Err(message);
             }
@@ -118,7 +118,7 @@ pub fn apply_scene_command(
         Command::Focus { mol, text } => {
             let mi = resolve_mol(scene, mol)?;
             let m = &scene.molecules[mi];
-            let (_, sel) = m.data.evaluate(&text).map_err(|e| match e {
+            let sel = scene.select(mi, &text).map_err(|e| match e {
                 EvalError::Empty => "selection matched no atoms".to_string(),
                 EvalError::Invalid { message, .. } => message,
             })?;

@@ -69,7 +69,7 @@ impl App {
                 let gpu = rs
                     .as_ref()
                     .filter(|rs| {
-                        atoms.target.len() >= 1024
+                        atoms.triangles.is_empty() && atoms.target.len() >= 1024
                             && rs.adapter.get_info().device_type != wgpu::DeviceType::Cpu
                             && std::env::var_os("MOLAR_VIS_DEBUG_UNOBSTRUCTED_CPU").is_none()
                             && rs
@@ -101,12 +101,11 @@ impl App {
                                 log::warn!("unobstructed GPU search failed; using CPU: {e}");
                             }
                         }
-                        crate::unobstructed::best_unobstructed_direction_cancellable(
-                            &atoms.target,
-                            &atoms.occluders,
-                            256,
-                            &is_cancelled,
-                        )
+                        if atoms.triangles.is_empty() {
+                            crate::unobstructed::best_unobstructed_direction_cancellable(&atoms.target, &atoms.occluders, 256, &is_cancelled)
+                        } else {
+                            crate::unobstructed::best_direction_with_triangles_cancellable(&atoms.target, &atoms.occluders, &atoms.triangles, 256, &is_cancelled)
+                        }
                     }
                 };
                 if direction.is_ok() && !is_cancelled() {

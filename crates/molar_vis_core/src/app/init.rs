@@ -460,7 +460,7 @@ impl App {
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
             if let Some(mol) = scene.molecules.first() {
-                if let Ok((_, sel)) = mol.data.evaluate(&sel_text) {
+                if let Ok(sel) = scene.select(0, &sel_text) {
                     let (min, max) = mol.sel_bbox(&sel);
                     camera.focus_bbox(min, max);
                 }
@@ -491,7 +491,7 @@ impl App {
                 if !mol.visible {
                     continue;
                 }
-                let Ok((_, sel)) = mol.data.evaluate(&sel_text) else { continue };
+                let Ok(sel) = scene.select(mi, &sel_text) else { continue };
                 let atoms: Vec<usize> =
                     mol.data.bind(&sel).iter_particle().map(|p| p.id).collect();
                 if atoms.is_empty() {
@@ -604,6 +604,12 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             render_state: cc.wgpu_render_state.clone(),
         };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(docking) = &launch.docking {
+            app.status = app.load_docking(&docking.receptor, &docking.ligands)?;
+            log::info!("{}", app.status);
+        }
 
         // Verification hook: MOLAR_VIS_DEBUG_AXES=1 shows the orientation-axes gizmo.
         app.camera.axes_on = std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok();
@@ -772,16 +778,7 @@ impl App {
                 }
                 // Selections aren't evaluated until the first `rebuild_dirty`, and the
                 // button works off `rep.sel` — so resolve it here as that frame would.
-                {
-                    let mol = &mut app.scene.molecules[mi];
-                    if mol.reps[0].sel.is_none() {
-                        let text = mol.reps[0].sel_text.clone();
-                        if let Ok((expr, sel)) = mol.data.evaluate(&text) {
-                            mol.reps[0].expr = Some(expr);
-                            mol.reps[0].sel = Some(sel);
-                        }
-                    }
-                }
+                app.scene.refresh_selections();
                 app.compute_rep_charges(mi, 0);
                 match app.charge_status.as_ref() {
                     Some((_, m)) if m.starts_with('!') => {
@@ -991,8 +988,11 @@ impl App {
 
         // Start the same asynchronous search as the rep magnifier for hidden UI capture.
         #[cfg(not(target_arch = "wasm32"))]
-        if std::env::var_os("MOLAR_VIS_DEBUG_UNOBSTRUCTED").is_some() {
-            if let Err(e) = app.start_unobstructed_view(0, 0, &cc.egui_ctx) {
+        if let Ok(target) = std::env::var("MOLAR_VIS_DEBUG_UNOBSTRUCTED") {
+            let (mi, ri) = target.split_once(':')
+                .and_then(|(mi, ri)| Some((mi.parse().ok()?, ri.parse().ok()?)))
+                .unwrap_or((0, 0));
+            if let Err(e) = app.start_unobstructed_view(mi, ri, &cc.egui_ctx) {
                 log::error!("debug unobstructed view: {e}");
             }
         }

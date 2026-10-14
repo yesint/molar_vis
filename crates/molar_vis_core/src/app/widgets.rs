@@ -235,6 +235,61 @@ pub(super) fn bold_name(ui: &egui::Ui, text: &str) -> egui::RichText {
     egui::RichText::new(text).font(crate::theme::bold(size))
 }
 
+/// A molecule or representation index that toggles visibility. Both node types
+/// use the single-line selection field height, independent of compact action groups.
+pub(super) fn index_badge(
+    ui: &mut egui::Ui,
+    prefix: &str,
+    index: usize,
+    visible: bool,
+) -> egui::Response {
+    index_badge_label(ui, &format!("{prefix}{index}"), visible)
+}
+
+pub(super) fn index_badge_label(ui: &mut egui::Ui, label: &str, visible: bool) -> egui::Response {
+    let height = node_row_height(ui);
+    let galley = egui::WidgetText::from(bold_name(ui, label))
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+    // Allocate before styling: egui's Button frame margins vary with hover strokes.
+    let size = egui::vec2(galley.size().x + 2.0 * ui.spacing().button_padding.x, height);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let visuals = ui.style().interact_selectable(&response, visible);
+    ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+    ui.painter().rect_stroke(
+        rect,
+        visuals.corner_radius,
+        egui::Stroke::new(1.0_f32, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        egui::StrokeKind::Inside,
+    );
+    paint_ink_centered(ui.painter(), rect, galley, visuals.text_color());
+    response.on_hover_text(if visible { "Hide" } else { "Show" })
+}
+
+fn node_row_height(ui: &egui::Ui) -> f32 {
+    // TextEdit's single-line body text has two points of margin above and below.
+    ui.painter().layout_no_wrap(
+        "Mg".to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().text_color(),
+    ).size().y + 4.0
+}
+
+/// Square molecule expander aligned with the visibility badge and selection row.
+pub(super) fn molecule_expander(ui: &mut egui::Ui, open: bool) -> egui::Response {
+    let height = node_row_height(ui);
+    let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
+    let galley = egui::WidgetText::from(caret)
+        .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(height), egui::Sense::click());
+    let visuals = ui.style().interact(&response);
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        ui.painter().rect_stroke(rect, visuals.corner_radius, visuals.bg_stroke, egui::StrokeKind::Inside);
+    }
+    paint_ink_centered(ui.painter(), rect, galley, visuals.text_color());
+    response
+}
+
 /// Run `add_contents` in a left-to-right area that fills what is left of a row whose
 /// right-aligned actions are already placed (call it last inside the row's
 /// `right_to_left` layout), with the row's normal spacing back (the actions use
@@ -653,6 +708,55 @@ pub(super) fn free_color_picker(ui: &mut egui::Ui, color: &mut egui::Color32) ->
 #[cfg(test)]
 mod free_color_picker_tests {
     use super::*;
+
+    #[test]
+    fn index_badges_keep_rows_aligned_on_hover() {
+        for theme in [crate::settings::ThemeMode::Light, crate::settings::ThemeMode::Dark] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, &crate::settings::AppearanceSettings {
+                theme, ..Default::default()
+            });
+            for visible in [false, true] {
+                let frame = |pointer| {
+                    let mut rects = Vec::new();
+                    let _ = ctx.run_ui(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO, egui::vec2(500.0, 300.0),
+                        )),
+                        events: vec![egui::Event::PointerMoved(pointer)],
+                        ..Default::default()
+                    }, |ui| {
+                        for prefix in ["m", "r"] {
+                            ui.horizontal(|ui| {
+                                rects.push(index_badge(ui, prefix, 0, visible).rect);
+                                let mut selection = "all".to_owned();
+                                rects.push(super::super::rep_panel::sel_text_edit(
+                                    ui, &mut selection, egui::Id::new(prefix), 150.0, None,
+                                ).rect);
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            rects.push(molecule_expander(ui, visible).rect);
+                            rects.push(ui.label("Molecule name").rect);
+                        });
+                    });
+                    rects
+                };
+                let corner = egui::pos2(499.0, 299.0);
+                frame(corner);
+                let resting = frame(corner);
+                assert_eq!(resting[0].height(), resting[2].height());
+                assert_eq!(resting[0].height(), resting[1].height());
+                assert_eq!(resting[2].height(), resting[3].height());
+                assert_eq!(resting[0].height(), resting[4].height());
+                for index in [0, 2, 4] {
+                    frame(resting[index].center());
+                    assert_eq!(resting, frame(resting[index].center()),
+                        "{theme:?}, visible={visible}: hovering a badge shifts the row");
+                }
+            }
+        }
+    }
 
     #[test]
     fn menus_size_to_their_content_on_a_wide_screen() {

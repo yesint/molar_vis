@@ -9,6 +9,7 @@ cargo build
 cargo run -p molar_vis -- tests/2lao.pdb            # one molecule
 cargo run -p molar_vis -- a.pdb a.xtc               # VMD-style: a.pdb + a.xtc traj = ONE molecule
 cargo run -p molar_vis -- -m a.pdb a.xtc -m b.pdb   # `-m` starts a new molecule → two molecules
+cargo run -p molar_vis -- -r tests/jak2.pdb -l tests/jak2_inhs.sd   # docking result
 cargo test -p molar_vis_core
 cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness check (now green)
 cargo build -p molar_vis_py                                     # native Python module (compile check)
@@ -229,3 +230,13 @@ first, then update the workspace's registry version requirements and lockfile.
   existing GitHub Pages artifact. Help → Selection language opens its public URL. The normal
   selection-assistance tests parse all copyable examples. Publishing uses the existing
   `pages.yml` tag trigger or a manual workflow dispatch on the desired branch.
+
+
+## Selection resolver development dependency
+
+The unreleased selection resolver API is supplied by the `[patch.crates-io]`
+entry in the workspace manifest, pinned to the molar Git commit implementing it.
+Cargo fetches that revision automatically; no sibling checkout is required.
+The patch also makes the Python and force-field crates use that same molar type
+implementation. Replace the patch with the published dependency version when
+molar releases the resolver API.

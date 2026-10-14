@@ -2,6 +2,7 @@
 use super::*;
 
 use crate::interactions::InteractionSet;
+use molar::prelude::IndexSliceProvider;
 
 
 /// Build the hover detail "lens": a distance-faded CPK ball-and-stick of the atoms
@@ -116,9 +117,8 @@ pub(super) fn build_glow(
     n_atoms: usize,
     dashed_pbc: bool,
 ) -> geometry::GeometryData {
-    let Some(index_str) = pick::index_selection_string(atoms) else {
-        return geometry::GeometryData::default();
-    };
+    if atoms.is_empty() { return geometry::GeometryData::default(); }
+    let highlighted: std::collections::HashSet<_> = atoms.iter().copied().collect();
     // Highlighted residues (resindex), for extracting the Cartoon sub-ribbon.
     let topo = data.topology();
     let res_set: std::collections::HashSet<u32> = atoms
@@ -145,10 +145,10 @@ pub(super) fn build_glow(
         }
         // (rep selection) ∩ (pending atoms): glow only this rep's own atoms, in its
         // own style. Skip on an empty/invalid intersection.
-        let combined = format!("({}) and ({})", rep.sel_text, index_str);
-        let Ok((_, sel)) = data.evaluate(&combined) else {
-            continue;
-        };
+        let Some(selected) = &rep.sel else { continue };
+        let ids = selected.get_index_slice().iter().copied()
+            .filter(|id| highlighted.contains(id)).collect();
+        let Ok(sel) = molar::prelude::Sel::from_vec(ids) else { continue };
         let bound = data.bind_with_state(&sel, state);
         let mut geom = geometry::build(
             &bound, n_atoms, bonds, &rep.params, rep.color_spec(), rep.material,
@@ -636,66 +636,11 @@ mod tests {
 }
 
 
-/// Evaluate a dirty selection without constructing or uploading geometry.
-/// Returns true when an empty selection cleared previously drawn geometry.
-pub(super) fn refresh_selection(data: &crate::moldata::MolData, rep: &mut Representation) -> bool {
-    if !rep.sel_dirty {
-        return false;
-    }
-    let _timing = crate::performance::span("selection");
-    let mut cleared = false;
-    // Parse + evaluate the selection (against the System's own
-    // state). On error keep the previous selection/geometry and
-    // just surface the message.
-    match data.evaluate(rep.sel_text.as_str()) {
-        Ok((expr, sel)) => {
-            rep.expr = Some(expr);
-            rep.sel = Some(sel);
-            rep.sel_error = None;
-            rep.sel_error_span = None;
-            rep.sel_empty = false;
-            rep.geom_dirty = true;
-        }
-        // Valid selection that matches no atoms: not an error — drop
-        // the geometry (render nothing), keep the text, and flag the
-        // field. The viewport must re-render to clear the old mesh.
-        Err(scene::EvalError::Empty) => {
-            rep.expr = None;
-            rep.sel = None;
-            rep.sel_error = None;
-            rep.sel_error_span = None;
-            rep.sel_empty = true;
-            rep.gpu = Default::default();
-            rep.primitive_cache = None;
-            rep.cartoon_cache = None;
-            #[cfg(not(target_arch = "wasm32"))]
-            { rep.geometry_job = None; rep.geometry_waiting = false; }
-            rep.cache_geometry(Default::default(), 0, false, true);
-            rep.mesh_cache = None;
-            cleared = true;
-        }
-        Err(scene::EvalError::Invalid { message, span }) => {
-            // molar trims the input before parsing, so shift the span
-            // past any leading whitespace to align it with the field's
-            // text (leading whitespace is ASCII, so bytes == chars).
-            let lead = rep
-                .sel_text
-                .bytes()
-                .take_while(|b| *b == b' ' || *b == b'\t')
-                .count();
-            rep.sel_error = Some(message);
-            rep.sel_error_span = span.map(|r| r.start + lead..r.end + lead);
-            rep.sel_empty = false;
-        }
-    }
-    rep.sel_dirty = false;
-    cleared
-}
-
 pub(super) struct UnobstructedAtoms {
     pub target: Vec<(glam::Vec3, f32)>,
     pub occluders: Vec<(glam::Vec3, f32)>,
     pub visual_bounds: Vec<(glam::Vec3, f32)>,
+    pub triangles: Vec<[glam::Vec3; 3]>,
 }
 
 /// Gather each atom once, refreshing only selections relevant to this view.
@@ -716,24 +661,19 @@ pub(super) fn gather_unobstructed_atoms(
         }
     }
     let target_reps: std::collections::HashSet<_> = targets.iter().copied().collect();
-    for (mi, mol) in scene.molecules.iter_mut().enumerate() {
-        for (ri, rep) in mol.reps.iter_mut().enumerate() {
-            if target_reps.contains(&(mi, ri))
-                || (mol.visible && rep.visible && rep.kind != RepKind::Interactions)
-            {
-                if refresh_selection(&mol.data, rep) {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        mol.pick_dirty = true;
-                    }
-                }
-            }
-        }
-    }
+    let requested = scene.molecules.iter().enumerate().flat_map(|(mi, mol)| {
+        let targets = &target_reps;
+        mol.reps.iter().enumerate().filter_map(move |(ri, rep)| {
+            (targets.contains(&(mi, ri)) || (mol.visible && rep.visible && rep.kind != RepKind::Interactions))
+                .then_some((mi, ri))
+        })
+    }).collect();
+    scene.refresh_selections_for(&requested);
     let mut out = UnobstructedAtoms {
         target: Vec::new(),
         occluders: Vec::new(),
         visual_bounds: Vec::new(),
+        triangles: Vec::new(),
     };
     let mut seen = std::collections::HashSet::new();
     for &(mi, ri) in targets {
@@ -776,12 +716,29 @@ pub(super) fn gather_unobstructed_atoms(
                 continue;
             }
             let Some(sel) = &rep.sel else { continue };
-            let bound = mol.data.bind_with_state(sel, mol.render_state());
+            let smoothed = (rep.smooth_window > 1).then(|| mol.trajectory.smoothed_state(rep.smooth_window)).flatten();
+            let state = smoothed.as_ref().unwrap_or(mol.render_state());
+            let bound = mol.data.bind_with_state(sel, state);
+            if rep.kind.draws_mesh() {
+                let built;
+                let mesh = if !rep.geom_dirty && !rep.coords_dirty {
+                    rep.mesh_cache.as_ref().map(|cache| &cache.mesh)
+                } else { None };
+                let mesh = if let Some(mesh) = mesh { mesh } else {
+                    let ss = geometry::needs_ss(&rep.params, rep.color).then(|| SsMap::compute(&bound, rep.ss_algo));
+                    built = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true);
+                    &built.mesh
+                };
+                for triangle in mesh.indices.chunks_exact(3) {
+                    out.triangles.push([0,1,2].map(|i| glam::Vec3::from_array(mesh.vertices[triangle[i] as usize].pos)));
+                }
+                continue;
+            }
             for p in bound.iter_particle() {
                 // Target atoms are already blockers in the combined projection.
                 if seen.insert((mi, p.id)) {
                     out.occluders
-                        .push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), p.atom.vdw()));
+                        .push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), rep.params.visual_radius(p.atom.vdw())));
                 }
             }
         }
@@ -873,7 +830,7 @@ background: bool,
 ) -> bool {
     #[cfg(target_arch = "wasm32")]
     let _ = background;
-    let mut changed = false;
+    let mut changed = scene.refresh_selections();
     // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
     // once: the molecule loop below borrows `self.scene` mutably).
     let dashed = settings.behavior.dashed_pbc_bonds;
@@ -943,7 +900,6 @@ background: bool,
         for (j, rep) in mol.reps.iter_mut().enumerate() {
             // Grey out every rep except the one open in the editor (Draw mode only).
             let grayed = matches!(gray_active, Some((tid, tr)) if !(mol_id == tid && j == tr));
-            changed |= refresh_selection(&mol.data, rep);
             #[cfg(not(target_arch = "wasm32"))]
             let background_allowed = background && gray_active.is_none()
                 && mol.trajectory.frames.len() <= 1 && !mol.trajectory.playing
@@ -1364,17 +1320,18 @@ mod unobstructed_tests {
     #[test]
     fn selection_refresh_preserves_invalid_selection_and_handles_empty_selection() {
         let mut scene = fixture_scene();
-        let mol = &mut scene.molecules[0];
-        let mut r = rep("index 0 1");
-        assert!(!refresh_selection(&mol.data, &mut r));
-        r.sel_text = "  definitely_invalid_keyword".into();
-        r.sel_dirty = true;
-        refresh_selection(&mol.data, &mut r);
-        assert_eq!(r.sel.as_ref().unwrap().len(), 2);
-        assert!(r.sel_error.is_some());
-        r.sel_text = "index 999999".into();
-        r.sel_dirty = true;
-        assert!(refresh_selection(&mol.data, &mut r));
+        scene.molecules[0].reps = vec![rep("index 0:1")];
+        scene.refresh_selections();
+        assert_eq!(scene.molecules[0].reps[0].sel.as_ref().unwrap().len(), 2);
+        scene.molecules[0].reps[0].sel_text = "  definitely_invalid_keyword".into();
+        scene.molecules[0].reps[0].sel_dirty = true;
+        scene.refresh_selections();
+        assert_eq!(scene.molecules[0].reps[0].sel.as_ref().unwrap().len(), 2);
+        assert!(scene.molecules[0].reps[0].sel_error.is_some());
+        scene.molecules[0].reps[0].sel_text = "index 999999".into();
+        scene.molecules[0].reps[0].sel_dirty = true;
+        assert!(scene.refresh_selections());
+        let r = &scene.molecules[0].reps[0];
         assert!(r.sel.is_none() && r.sel_empty && r.sel_error.is_none());
         assert!(!r.sel_dirty);
     }
