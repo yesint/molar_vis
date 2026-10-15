@@ -162,6 +162,10 @@ show Custom; sessions and saved startup settings retain the chosen colors.
 Styles edits geometry defaults for every style (including
 interaction detection), while Materials uses the same preview-asset picker as the
 representation row. Relevant shader sliders sit beside a live glycine VdW preview colored by element.
+Velvet uses a single surface with matte lighting and a broad, tinted sheen.
+Edge softness (0–1, stored as `hairiness`) reduces shading contrast near grazing
+angles. Sheen controls its strength; Roughness controls its width. It adds no
+layers or transparency and skips hard-surface AO/shadows to keep edges muted.
 Styles also shows a live preview using the viewport renderer: glycine (C, N, O, H) for atom/bond
 styles and the small crambin protein (PDB 1CRN) for Cartoon and Surface. Drag either preview
 to rotate at fixed zoom; its camera fits a rotation-invariant envelope of the

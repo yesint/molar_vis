@@ -1872,8 +1872,10 @@ fn illustrative_materials_match_in_actual_molecular_renders() {
         let mut factory_images = Vec::new();
         let mut outline = Material::FlatOutline.options(); outline.outline_width = 0.75; outline.outline = 0.65;
         let mut nodes = Material::MolecularNodes.options(); nodes.shininess = 0.8; nodes.specular = 0.8;
+        let mut velvet = Material::Velvet.options(); velvet.hairiness = 0.0;
         let mut glass = Material::Opaque.options(); glass.opacity = 0.55; glass.specular = 0.85;
-        for material in [Material::FlatOutline, Material::MolecularNodes, Material::Opaque,
+        for material in [Material::FlatOutline, Material::MolecularNodes, Material::Opaque, Material::Velvet,
+            Material::Velvet.with_options(velvet),
             Material::FlatOutline.with_options(outline), Material::MolecularNodes.with_options(nodes),
             Material::Opaque.with_options(glass)] {
             populate_rep(&renderer, &rs, &mut scene, style, material);
@@ -2042,4 +2044,80 @@ fn cosmo_mesh_styles_render_sizes_and_smoothing() {
     }
     assert!(images[4].0.pixels().zip(images[5].0.pixels()).filter(|(a,b)| a != b).count() > 100,
         "surface smoothing must change the rendered mesh");
+}
+
+#[test]
+#[ignore = "requires GPU; verifies single-surface velvet sheen without a geometry halo"]
+fn velvet_sheen_softens_shading_without_expanding_the_surface() {
+    use crate::{geometry::RepKind, material::Material};
+    use molar::prelude::Atom;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = Scene::default();
+    scene.add(crate::data::RawMolecule::single_atom("density", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
+        &crate::settings::RepDefaults::default());
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.3), Vec3::splat(0.3), 0.9);
+    camera.background = crate::camera::Background::for_theme(false);
+    camera.ao.enabled = false; camera.shadow.enabled = false; camera.depth_cue.enabled = false;
+    let mut options = Material::Velvet.options(); options.hairiness = 0.0;
+    populate_rep(&renderer, &rs, &mut scene, RepKind::Vdw, Material::Velvet.with_options(options));
+    let (hard, _) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 256, 256);
+    options.hairiness = 1.0;
+    populate_rep(&renderer, &rs, &mut scene, RepKind::Vdw, Material::Velvet.with_options(options));
+    let (fluffy, traced) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 256, 256);
+    // Softness changes the lighting, while coverage remains that of one surface.
+    let x_hard = (0..128).find(|&x| hard.get_pixel(x, 128)[0] < 252).unwrap();
+    let x_soft = (0..128).find(|&x| fluffy.get_pixel(x, 128)[0] < 252).unwrap();
+    assert!(x_hard.abs_diff(x_soft) <= 1, "softness must not expand geometry: {x_hard}/{x_soft}");
+    let outside = hard.pixels().zip(fluffy.pixels()).filter(|(a, b)|
+        a[0] == 255 && a[1] == 255 && a[2] == 255 && b[0] < 252).count();
+    assert_eq!(outside, 0, "single-surface sheen must not create a halo");
+    let edge = x_hard + 3;
+    assert!(fluffy.get_pixel(edge, 128)[0] > hard.get_pixel(edge, 128)[0],
+        "edge softness should lift the dark grazing region");
+    let error: f64 = fluffy.pixels().zip(traced.pixels()).map(|(a,b)|
+        (0..3).map(|i| (a[i] as f64 - b[i] as f64).abs()).sum::<f64>()).sum::<f64>() / (256.0 * 256.0 * 3.0);
+    assert!(error < 4.0, "velvet raster/trace mismatch: {error}");
+    if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+        std::fs::create_dir_all(&dir).unwrap();
+        hard.save(format!("{dir}/velvet_softness_zero.png")).unwrap();
+        fluffy.save(format!("{dir}/velvet_softness_one.png")).unwrap();
+        traced.save(format!("{dir}/velvet_sheen_trace.png")).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires GPU; records live velvet-cartoon pass timings and a close-up"]
+fn velvet_cartoon_raster_timings() {
+    use crate::{geometry::RepKind, material::Material};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mut camera = Camera::frame_bbox(scene.molecules[0].bbox_min, scene.molecules[0].bbox_max, 0.9);
+    camera.distance *= 0.55;
+    camera.orientation = glam::Quat::from_rotation_y(0.6) * glam::Quat::from_rotation_x(0.3);
+    camera.background = crate::camera::Background::for_theme(false);
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = true; camera.shadow.enabled = true;
+    populate_rep(&renderer, &rs, &mut scene, RepKind::Cartoon, Material::Velvet);
+    let mut times = Vec::new();
+    for frame in 0..8 {
+        let start = std::time::Instant::now();
+        let cap = renderer.capture_begin(&rs, 1000, 800, camera.view(), camera.proj(1.25), camera.is_perspective(),
+            camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+            camera.eye_depth_range(), &scene);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let image = cap.read();
+        if frame >= 3 { times.push(start.elapsed().as_secs_f64() * 1000.0); }
+        if frame == 7 {
+            if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                image.save(format!("{dir}/velvet_cartoon_closeup.png")).unwrap();
+            }
+        }
+    }
+    times.sort_by(f64::total_cmp);
+    eprintln!("VELVET_RASTER_MEDIAN_MS {:.3}", times[times.len()/2]);
 }

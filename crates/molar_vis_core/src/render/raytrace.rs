@@ -326,8 +326,9 @@ impl RtScene {
                     fresh.as_ref()
                 };
 
+                let has_envelope = super::envelope::needed_primitives(geom.spheres, geom.cylinders);
                 for &off in &offsets {
-                    let envelope_group = if super::envelope::needed_primitives(geom.spheres, geom.cylinders) {
+                    let envelope_group = if has_envelope {
                         let group = next_envelope_group;
                         next_envelope_group += 1;
                         group

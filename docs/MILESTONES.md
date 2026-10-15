@@ -2,6 +2,14 @@
 
 > Reference doc for [molar_vis](../CLAUDE.md). Split out of the master `CLAUDE.md` for on-demand reading — see it for the project overview, build quick-start, and the full docs index.
 
+- Velvet material: fast single-surface matte shading with broad, tinted sheen.
+  Replaces the sampled density layer to remove its geometry and transparency cost.
+  Edge softness reduces normal contrast near the silhouette; Sheen controls the
+  highlight strength and Roughness its width. Hard-surface AO/shadows are skipped
+  to avoid a dark contour. Raster rendering, ray tracing, and picker previews
+  share the same lighting. Saved `hairiness` values now control Edge softness.
+  Available through `material="Velvet"` in the external APIs.
+
 ## Milestone status
 
 - ✅ M0 scaffold + offscreen triangle

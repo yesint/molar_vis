@@ -453,6 +453,8 @@ pub(super) fn preview_shade(
         }
         crate::material::Shading::MolecularNodes =>
             crate::material::shade_molecular_nodes(base, n, glam::Vec3::Z, p),
+        crate::material::Shading::Velvet =>
+            crate::material::shade_velvet(base, n, glam::Vec3::Z, p),
         crate::material::Shading::Classic => {
             let ndl = n.dot(light).max(0.0);
             let ndh = n.dot(half).max(0.0);

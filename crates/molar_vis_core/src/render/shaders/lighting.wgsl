@@ -1,8 +1,10 @@
-// Edited presets use four 7-bit coefficients plus a four-bit shader tag.
+// Edited presets use a four-bit shader tag and 28 coefficient bits.
+// Velvet uses 5/5/6/6/6 bits for ambient/diffuse/sheen/roughness/fuzz.
 // Factory words retain their original encoding and exact appearance.
 fn material_kind(m: u32) -> u32 {
-    if (m == MATERIAL_FLAT_OUTLINE || m == MATERIAL_MOLECULAR_NODES) { return m; }
+    if (m == MATERIAL_FLAT_OUTLINE || m == MATERIAL_MOLECULAR_NODES || m == MATERIAL_VELVET) { return m; }
     if ((m >> 28u) == 0xau) { return MATERIAL_FLAT_OUTLINE; }
+    if ((m >> 28u) == 0xeu) { return MATERIAL_VELVET; }
     if ((m >> 28u) == 0xbu) { return MATERIAL_MOLECULAR_NODES; }
     return m;
 }
@@ -13,16 +15,22 @@ fn custom_coefficients(m: u32) -> vec4<f32> {
 // Reserved words select specialized shading without changing classic materials.
 fn unpack_material(m: u32) -> vec4<f32> {
     if (m == MATERIAL_FLAT_OUTLINE) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }
+    if (m == MATERIAL_VELVET) { return vec4<f32>(0.16, 0.55, 0.85, 0.65); }
     if (m == MATERIAL_MOLECULAR_NODES) { return vec4<f32>(0.34, 0.62, 0.3, 0.4); }
+    if ((m >> 28u) == 0xeu) {
+        return vec4<f32>(f32(m & 31u) / 31.0, f32((m >> 5u) & 31u) / 31.0,
+            f32((m >> 10u) & 63u) / 63.0, f32((m >> 16u) & 63u) / 63.0);
+    }
     if ((m >> 28u) >= 0xau) { return custom_coefficients(m); }
     return vec4<f32>(f32(m & 0xffu) / 255.0, f32((m >> 8u) & 0xffu) / 255.0,
         f32((m >> 16u) & 0xffu) / 255.0, f32((m >> 24u) & 0x7fu) / 127.0);
 }
 
 // Normal-buffer alpha carries the deferred-effects policy per pixel.
-// 0: flat outline (no AO/shadows); 1: classic; 2: Molecular Nodes contact AO.
+// 0: flat outline or velvet (no dark hard-surface AO/shadows);
+// 1: classic; 2: Molecular Nodes contact AO.
 fn material_effects(m: u32) -> f32 {
-    if (material_kind(m) == MATERIAL_FLAT_OUTLINE) { return 0.0; }
+    if (material_kind(m) == MATERIAL_FLAT_OUTLINE || material_kind(m) == MATERIAL_VELVET) { return 0.0; }
     if (material_kind(m) == MATERIAL_MOLECULAR_NODES) { return 2.0; }
     return 1.0;
 }
@@ -51,11 +59,33 @@ fn shade_molecular_nodes(base: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: vec4<
         + molecular_studio_light(base, n, v, normalize(vec3<f32>(0.7, -0.2, 0.9)), mat) * (mat.y * (0.28 / 0.62));
 }
 
+// Saved hairiness now controls shading softness, without additional geometry.
+fn material_fuzz(m: u32) -> f32 {
+    if (m == MATERIAL_VELVET) { return 0.65; }
+    return f32((m >> 22u) & 63u) / 63.0;
+}
+fn shade_velvet(base: vec3<f32>, normal: vec3<f32>, v: vec3<f32>, mat: vec4<f32>, fuzz: f32) -> vec3<f32> {
+    let nv = clamp(dot(normal, v), 0.0, 1.0);
+    let roughness = clamp(mat.w, 0.0, 1.0);
+    let rim = pow(1.0 - nv, mix(3.5, 1.2, roughness));
+    // Broad wrapped lighting keeps the body matte. At grazing angles, reduce
+    // normal contrast and add a muted, color-tinted sheen rather than a bright rim.
+    let key = clamp((dot(normal, normalize(vec3<f32>(0.3, 0.4, 1.0))) + 0.5) / 1.5, 0.0, 1.0);
+    let fill = clamp((dot(normal, normalize(vec3<f32>(-0.6, 0.2, 0.7))) + 0.5) / 1.5, 0.0, 1.0);
+    let body = base * (mat.x + mat.y * (0.35 + 0.65 * key + 0.2 * fill));
+    let tint = mix(base, sqrt(max(base, vec3<f32>(0.0))), 0.3);
+    let soft_edge = tint * (mat.x + mat.y * 0.85);
+    let sheen = tint * (0.3 * mat.z * rim * (0.6 + 0.4 * key));
+    return mix(body, soft_edge, fuzz * rim * 0.65) + sheen;
+
+}
+
 // Shared view-space lighting for raster and ray-traced surfaces. Mesh ribbons use
 // a wider fill than analytic spheres/capsules, as in the live renderer.
 fn shade_material(base: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, mat: vec4<f32>, mesh: bool, packed: u32) -> vec3<f32> {
     if (material_kind(packed) == MATERIAL_FLAT_OUTLINE) { return base; }
     if (material_kind(packed) == MATERIAL_MOLECULAR_NODES) { return shade_molecular_nodes(base, normal, view_dir, mat); }
+    if (material_kind(packed) == MATERIAL_VELVET) { return shade_velvet(base, normal, view_dir, mat, material_fuzz(packed)); }
     let light_dir = normalize(vec3<f32>(0.3, 0.4, 1.0));
     let ndotl = max(dot(normal, light_dir), 0.0);
     let half = normalize(light_dir + view_dir);
@@ -80,7 +110,7 @@ fn apply_outline(color: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>, m: u3
         let ink = 1.0 - smoothstep(width * 0.7, max(width, 0.001), facing);
         return mix(color, vec3<f32>(0.045), ink * strength);
     }
-    if (material_kind(m) == MATERIAL_MOLECULAR_NODES) { return color; }
+    if (material_kind(m) == MATERIAL_MOLECULAR_NODES || material_kind(m) == MATERIAL_VELVET) { return color; }
     var on = f32((m >> 31u) & 1u);
     if ((m >> 28u) >= 0xau) { on = select(0.0, 1.0, (m >> 28u) == 0xdu); }
     let edge = pow(1.0 - abs(dot(normal, view_dir)), 2.0);

@@ -618,7 +618,7 @@ fn shade_tier1(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, sample_ind
     shaded = apply_outline(shaded, s.nrm, view_dir, s.mat_raw);
     // Raster AO/shadows act on opaque geometry, before transparent compositing.
     var visibility = 1.0;
-    if (s.opacity >= 0.999 && material_kind(s.mat_raw) != MATERIAL_FLAT_OUTLINE) {
+    if (s.opacity >= 0.999 && material_effects(s.mat_raw) > 0.5) {
         var shadow = 0.0;
         let count = select(SHADOW_RAYS, 1u, U.shadow.w <= 0.0 || U.shadow.z <= 0.5);
         for (var i = 0u; i < count; i = i + 1u) {
@@ -676,7 +676,7 @@ fn shade_surface(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, axis: ve
         tier1 = clamp(tier1, vec3<f32>(0.0), vec3<f32>(1.0));
     }
     tier1 = tier1 * direct.w;
-    if (U.bg.w > 0.001 && material_kind(s.mat_raw) != MATERIAL_FLAT_OUTLINE) {
+    if (U.bg.w > 0.001 && material_effects(s.mat_raw) > 0.5) {
         let gi = shade_gi(s, persp, light, GI_BOUNCES, seed);
         return mix(tier1, apply_fog(aces(gi), s.p, axis), U.bg.w);
     }

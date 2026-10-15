@@ -137,8 +137,8 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\n",
-        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD);
+    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\nconst MATERIAL_VELVET: u32 = {}u;\n",
+        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD, crate::material::VELVET_WORD);
     format!("{}\n{}\n{}\n{}\n{}", constants, envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
 }
 
@@ -2477,7 +2477,7 @@ impl SceneRenderer {
                 for &cam in &images[mi][j] {
                     pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
                     self.bind_envelope(pass, rep.gpu.envelope.as_ref());
-                    if let Some(p) = &rep.gpu.points {
+                    if let Some(p) = rep.gpu.points.as_ref() {
                         pass.set_pipeline(&self.point_pipeline[i]);
                         pass.set_vertex_buffer(0, p.buffer.slice(..));
                         pass.draw(0..4, 0..p.count);
@@ -2492,7 +2492,7 @@ impl SceneRenderer {
                         pass.set_vertex_buffer(0, c.buffer.slice(..));
                         pass.draw(0..4, 0..c.count);
                     }
-                    if let Some(l) = &rep.gpu.lines {
+                    if let Some(l) = rep.gpu.lines.as_ref() {
                         // Instanced fat-line quads: one segment (2 verts) per instance.
                         pass.set_pipeline(&self.line_pipeline[i]);
                         pass.set_vertex_buffer(0, l.buffer.slice(..));
@@ -2510,12 +2510,12 @@ impl SceneRenderer {
             self.bind_envelope(pass, None);
             for mesh in &mol.meshes {
                 if !mesh.state.visible || mesh.transparent() != transparent { continue; }
-                if let Some(points) = &mesh.gpu.points {
+                if let Some(points) = mesh.gpu.points.as_ref() {
                     pass.set_pipeline(&self.point_pipeline[i]);
                     pass.set_vertex_buffer(0, points.buffer.slice(..));
                     pass.draw(0..4, 0..points.count);
                 }
-                if let Some(lines) = &mesh.gpu.lines {
+                if let Some(lines) = mesh.gpu.lines.as_ref() {
                     pass.set_pipeline(&self.line_pipeline[i]);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..4, 0..lines.count / 2);

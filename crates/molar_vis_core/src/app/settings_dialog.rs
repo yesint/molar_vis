@@ -1485,6 +1485,12 @@ pub(super) fn settings_page_materials(
                         .on_hover_text("0 is invisible; 1 is fully opaque.");
                     slider_with_edit(ui, &mut options.opacity, 0.0..=1.0, true);
                     ui.end_row();
+                    if *selected == Material::Velvet {
+                        ui.label("Edge softness")
+                            .on_hover_text("Strength of the soft, tinted lighting near the silhouette.");
+                        slider_with_edit(ui, &mut options.hairiness, 0.0..=1.0, true);
+                        ui.end_row();
+                    }
                     if *selected == Material::FlatOutline {
                         ui.label("Contour width");
                         slider_with_edit(ui, &mut options.outline_width, 0.05..=1.0, true);
@@ -1501,11 +1507,11 @@ pub(super) fn settings_page_materials(
                             .on_hover_text("Strength of the light falling on the surface.");
                         slider_with_edit(ui, &mut options.diffuse, 0.0..=1.0, true);
                         ui.end_row();
-                        ui.label("Specular")
+                        ui.label(if *selected == Material::Velvet { "Sheen" } else { "Specular" })
                             .on_hover_text("Strength of surface highlights.");
                         slider_with_edit(ui, &mut options.specular, 0.0..=1.0, true);
                         ui.end_row();
-                        ui.label(if *selected == Material::MolecularNodes {
+                        ui.label(if matches!(*selected, Material::MolecularNodes | Material::Velvet) {
                             "Roughness"
                         } else {
                             "Shininess"
