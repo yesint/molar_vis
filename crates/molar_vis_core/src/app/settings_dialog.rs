@@ -697,10 +697,10 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             ui.label("Pick mode");
-            fixed_combo(ui, "set_pick_mode", [PickMode::Off, PickMode::Click, PickMode::Lasso].into_iter().map(|mode| mode.label()))
+            fixed_combo(ui, "set_pick_mode", [PickMode::Off, PickMode::Info, PickMode::Click, PickMode::Lasso].into_iter().map(|mode| mode.label()))
                 .selected_text(b.pick_mode.label())
                 .show_ui(ui, |ui| {
-                    for m in [PickMode::Off, PickMode::Click, PickMode::Lasso] {
+                    for m in [PickMode::Off, PickMode::Info, PickMode::Click, PickMode::Lasso] {
                         ui.selectable_value(&mut b.pick_mode, m, m.label());
                     }
                 });
@@ -726,11 +726,11 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
              over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
         );
-    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep magnifier does an unobstructed view")
+    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep and group magnifiers do an unobstructed view")
         .on_hover_text(
-            "The magnifier button on each representation rotates and scales the camera to show \
-             that rep with the least obstruction by the other reps (default). Off → it just \
-             zooms to fit the selection at the current orientation.",
+            "Representation and molecule-group magnifiers rotate and scale the camera to show \
+             the target with the least obstruction (default). A group targets the shown member's \
+             visible representations. Off → zoom to fit at the current orientation.",
         );
 
     ui.add_space(8.0);
@@ -1577,7 +1577,7 @@ fn settings_interaction_options(
     }
     egui::Grid::new("interaction_rendering").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
         ui.label("Line width (px)");
-        slider_with_edit(ui, &mut s.line_width, 1.0..=10.0, true);
+        slider_with_edit(ui, &mut s.line_width, 1.0..=20.0, true);
         ui.end_row();
     });
     section(ui, "H-bonds", &mut s.hbonds, &mut s.colors[0], &mut [

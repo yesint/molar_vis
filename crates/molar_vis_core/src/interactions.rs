@@ -78,10 +78,15 @@ pub enum InteractionKind {
 }
 
 /// One detected interaction, as a line segment between two atoms / group centroids (nm).
+#[derive(Clone, Copy, Debug)]
 pub struct Interaction {
     pub kind: InteractionKind,
     pub a: Vec3,
     pub b: Vec3,
+    /// D–H···A, C–X···A or ring-plane angle, in degrees, when defined.
+    pub angle: Option<f32>,
+    /// Lateral ring-axis offset for π contacts, in nm.
+    pub offset: Option<f32>,
 }
 
 /// Per-type detection cutoffs (nm / degrees). Derived from the user-facing
@@ -393,16 +398,24 @@ fn atom_level(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mu
                 }
             }
             if p.hbonds && (hbond_ok(qi, gi, d, p) || hbond_ok(gi, qi, d, p)) {
-                out.push(Interaction { kind: InteractionKind::HBond, a: qi.pos, b: gi.pos });
+                let angle = [(qi, gi), (gi, qi)].into_iter()
+                    .filter(|(donor, acc)| hbond_ok(donor, acc, d, p))
+                    .flat_map(|(donor, acc)| donor.attached_h.iter()
+                        .map(move |h| angle_deg(donor.pos - *h, acc.pos - *h)))
+                    .filter(|&angle| angle > p.hbond_angle_min)
+                    .max_by(f32::total_cmp);
+                out.push(Interaction { kind: InteractionKind::HBond, a: qi.pos, b: gi.pos, angle, offset: None });
             }
             if p.halogen && (halogen_ok(qi, gi, d, p) || halogen_ok(gi, qi, d, p)) {
-                out.push(Interaction { kind: InteractionKind::Halogen, a: qi.pos, b: gi.pos });
+                let (x, acc) = if halogen_ok(qi, gi, d, p) { (qi, gi) } else { (gi, qi) };
+                let angle = x.antecedent.map(|c| angle_deg(c - x.pos, acc.pos - x.pos));
+                out.push(Interaction { kind: InteractionKind::Halogen, a: qi.pos, b: gi.pos, angle, offset: None });
             }
         });
     }
 
     for (_, (_d, pa, pb)) in hydro {
-        out.push(Interaction { kind: InteractionKind::Hydrophobic, a: pa, b: pb });
+        out.push(Interaction { kind: InteractionKind::Hydrophobic, a: pa, b: pb, angle: None, offset: None });
     }
 }
 
@@ -423,6 +436,8 @@ fn salt_bridges(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &
                         kind: InteractionKind::SaltBridge,
                         a: cg.center,
                         b: ng.center,
+                        angle: None,
+                        offset: None,
                     });
                 }
             }
@@ -465,6 +480,11 @@ fn pi_stacking(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &m
                 kind: InteractionKind::PiStacking,
                 a: ra.center,
                 b: rb.center,
+                angle: Some(ang),
+                offset: parallel.then(|| {
+                    let n = ra.normal.normalize_or_zero();
+                    (cc - n * cc.dot(n)).length()
+                }),
             });
         }
     }
@@ -497,6 +517,8 @@ fn pi_cation(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mut
                     kind: InteractionKind::PiCation,
                     a: r.center,
                     b: c.center,
+                    angle: Some(angle_deg(n, cc).min(angle_deg(-n, cc))),
+                    offset: Some(offset),
                 });
             }
         }
@@ -540,7 +562,7 @@ mod tests {
         for kind in [InteractionKind::HBond, InteractionKind::Hydrophobic, InteractionKind::SaltBridge,
             InteractionKind::PiStacking, InteractionKind::PiCation, InteractionKind::Halogen] {
             let lines = crate::geometry::interaction_lines(&[Interaction {
-                kind, a: Vec3::ZERO, b: Vec3::X,
+                kind, a: Vec3::ZERO, b: Vec3::X, angle: None, offset: None,
             }], &restored);
             assert!(!lines.is_empty());
             assert!(lines.iter().all(|line| line.color == crate::color::pack_rgba8(settings.color(kind))));
@@ -577,6 +599,8 @@ mod tests {
         let acc = atom([0.30, 0.0, 0.0], 8, 1);
         let r = detect(&set(vec![donor]), &set(vec![acc]), &InteractionSettings::default().detect());
         assert_eq!(count(&r, InteractionKind::HBond), 1);
+        assert!((r[0].angle.unwrap() - 180.0).abs() < 1e-4);
+        assert!((r[0].a.distance(r[0].b) - 0.30).abs() < 1e-6);
     }
 
     #[test]
@@ -593,6 +617,7 @@ mod tests {
         let p = InteractionSettings::default().detect();
         let close = detect(&set(vec![atom([0.0, 0.0, 0.0], 7, 0)]), &set(vec![atom([0.30, 0.0, 0.0], 8, 1)]), &p);
         assert_eq!(count(&close, InteractionKind::HBond), 1);
+        assert_eq!(close[0].angle, None, "no fabricated angle without H coordinates");
         let far = detect(&set(vec![atom([0.0, 0.0, 0.0], 7, 0)]), &set(vec![atom([0.40, 0.0, 0.0], 8, 1)]), &p);
         assert_eq!(count(&far, InteractionKind::HBond), 0);
     }
@@ -617,7 +642,9 @@ mod tests {
         let mut cl = atom([0.18, 0.0, 0.0], 17, 0);
         cl.antecedent = Some(Vec3::new(0.0, 0.0, 0.0)); // the C
         let acc = atom([0.50, 0.0, 0.0], 8, 1);
-        assert_eq!(count(&detect(&set(vec![cl]), &set(vec![acc]), &p), InteractionKind::Halogen), 1);
+        let found = detect(&set(vec![cl]), &set(vec![acc]), &p);
+        assert_eq!(count(&found, InteractionKind::Halogen), 1);
+        assert!((found[0].angle.unwrap() - 180.0).abs() < 1e-4);
         // Acceptor off to the side (bent) → rejected.
         let mut cl2 = atom([0.18, 0.0, 0.0], 17, 0);
         cl2.antecedent = Some(Vec3::new(0.0, 0.0, 0.0));
@@ -641,7 +668,10 @@ mod tests {
         // Two parallel rings (normals +z) stacked 0.38 nm apart, aligned → parallel stack.
         let a = InteractionSet { rings: vec![RingInfo { center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }], ..Default::default() };
         let b = InteractionSet { rings: vec![RingInfo { center: Vec3::new(0.0, 0.0, 0.38), normal: Vec3::Z, res_key: 1 }], ..Default::default() };
-        assert_eq!(count(&detect(&a, &b, &p), InteractionKind::PiStacking), 1);
+        let found = detect(&a, &b, &p);
+        assert_eq!(count(&found, InteractionKind::PiStacking), 1);
+        assert_eq!(found[0].angle, Some(0.0));
+        assert_eq!(found[0].offset, Some(0.0));
         // Same distance but laterally offset by 0.4 nm → no overlap → rejected.
         let off = InteractionSet { rings: vec![RingInfo { center: Vec3::new(0.40, 0.0, 0.38), normal: Vec3::Z, res_key: 1 }], ..Default::default() };
         assert_eq!(count(&detect(&a, &off, &p), InteractionKind::PiStacking), 0);
@@ -652,7 +682,10 @@ mod tests {
         let p = InteractionSettings::default().detect();
         let a = InteractionSet { rings: vec![RingInfo { center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }], ..Default::default() };
         let b = InteractionSet { cations: vec![ChargeGroup { center: Vec3::new(0.0, 0.0, 0.40), res_key: 1 }], ..Default::default() };
-        assert_eq!(count(&detect(&a, &b, &p), InteractionKind::PiCation), 1);
+        let found = detect(&a, &b, &p);
+        assert_eq!(count(&found, InteractionKind::PiCation), 1);
+        assert_eq!(found[0].angle, Some(0.0));
+        assert_eq!(found[0].offset, Some(0.0));
     }
 
     /// Brute-force reference for the atom-level types, to validate the grid path.

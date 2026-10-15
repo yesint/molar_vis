@@ -258,7 +258,7 @@ pub struct BehaviorSettings {
     /// by default** — it's a niche aid and adds a per-hover grid query + rebuild. A
     /// behavior setting (applies live).
     pub hover_detail_lens: bool,
-    /// The per-rep magnifier button rotates **and** scales the camera to show that rep
+    /// Rep and group magnifier buttons rotate **and** scale the camera to show the target
     /// with the least obstruction by other reps (the unobstructed view) instead of only
     /// zooming to fit its selection at the current orientation. **On by default.** A
     /// behavior setting (applies live — read when the button is clicked).

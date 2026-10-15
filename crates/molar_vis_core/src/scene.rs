@@ -276,6 +276,8 @@ pub struct Representation {
     /// extracts the chosen residues' sub-ribbon from it (coincident → no z-fight, and
     /// works for a single residue). `None` for other reps. Transient.
     pub mesh_cache: Option<MeshCache>,
+    /// Detected contacts and their rendered dash segments, rebuilt with interaction geometry.
+    pub(crate) interaction_cache: Vec<crate::pick::InteractionGeometry>,
     /// Coordinate-independent inputs, replaced on every structural rebuild.
     pub(crate) primitive_cache: Option<geometry::PrimitiveCache>,
     pub(crate) cartoon_cache: Option<geometry::CartoonCache>,
@@ -481,6 +483,7 @@ impl Representation {
             ss_per_frame,
             ss_cache: None,
             mesh_cache: None,
+            interaction_cache: Vec::new(),
             primitive_cache: None,
             cartoon_cache: None,
             geometry_cache: None,

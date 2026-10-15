@@ -20,7 +20,7 @@ pub(super) enum GroupAction {
     ToggleEye,
     /// Append a shared rep to the shown member's shared prefix.
     AddSharedRep,
-    /// Zoom-to-fit the shown member (the header magnifier).
+    /// Frame the shown member, using the magnifier's unobstructed-view setting.
     Focus,
     /// Write every member to one multi-record file. Native only (see
     /// [`RepAction::SaveSelection`](super::rep_panel::RepAction::SaveSelection)).
@@ -128,7 +128,7 @@ impl App {
                         overlay_button(ui, &pick_label, false).on_hover_text("Selection mode");
                     let mut pick_changed = false;
                     egui::Popup::menu(&resp).show(|ui| {
-                        for m in [PickMode::Off, PickMode::Click, PickMode::Lasso] {
+                        for m in [PickMode::Off, PickMode::Info, PickMode::Click, PickMode::Lasso] {
                             if ui.selectable_value(&mut self.pick_mode, m, m.label()).clicked() {
                                 pick_changed = true;
                             }
@@ -153,9 +153,9 @@ impl App {
                     // Scope dropdown (how a hit expands: Atoms / Residues / Bound H).
                     // Only relevant when picking is on, so hidden while pick mode is Off.
                     // `Bound H` is meaningless for single-atom click picking, so hidden in
-                    // Click mode (and a stale value snaps back to Atoms).
+                    // Info/Click modes (and a stale value snaps back to Atoms).
                     if self.pick_mode != PickMode::Off {
-                        let single = self.pick_mode == PickMode::Click;
+                        let single = self.pick_mode.shows_hover_info();
                         if single && self.selection_mode == SelectionMode::BoundH {
                             self.selection_mode = SelectionMode::Atoms;
                         }
@@ -697,6 +697,7 @@ impl App {
             .collect();
         let cur_mi = members.get(current).and_then(|&id| self.scene.mol_index(id));
         let cur_bbox = cur_mi.map(|mi| self.scene.molecules[mi].current_bbox());
+        let zoom_unobstructed = self.settings.behavior.rep_zoom_unobstructed;
 
         // The single thing this entry asked for — see [`GroupAction`]. Set inside the UI
         // closures (which must stay borrow-free), applied once they have all ended.
@@ -731,7 +732,15 @@ impl App {
                 .response
                 .on_hover_text("Group menu");
                 // (Edit/draw is now per-representation — see each member rep row's menu.)
-                if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to shown molecule").clicked() {
+                if icon_button(
+                    ui,
+                    icon::MAGNIFYING_GLASS_PLUS,
+                    if zoom_unobstructed {
+                        "Unobstructed view of shown molecule"
+                    } else {
+                        "Zoom to shown molecule"
+                    },
+                ).clicked() {
                     action = Some(GroupAction::Focus);
                 }
                 if ui
@@ -751,182 +760,186 @@ impl App {
             });
         });
 
-        // Member cycle bar (which molecule is shown). Tooltip shows "N/M <name>".
-        ui.indent(egui::Id::new(("groupbar", gid)), |ui| {
-            if let Some(nc) = draw_group_bar(ui, &member_names, current) {
-                action = Some(GroupAction::ShowMember(nc));
-            }
-        });
-
-        // (A pending selection on the shown member is drawn with that **member's own rows**,
-        // down in the member list — it captured that member's atoms, not the group's. Getting
-        // there means unfolding this entry, the "Molecules" list and the member's own fold,
-        // which `Scene::reveal_pending` does when the selection is made.)
-
-        // Top-level expanded: the group's shared reps, then a nested "Molecules"
-        // sub-expander (each opens/closes independently).
-        if expanded {
-            // Shared reps: the shown member's prefix, drawn under the group header.
-            // Again only when non-empty (a group whose shared reps were all deleted) — see above.
-            if let Some(mi) = cur_mi.filter(|&mi| self.scene.molecules[mi].n_shared > 0) {
-                let n_shared = self.scene.molecules[mi].n_shared;
-                ui.indent(egui::Id::new(("shared", gid)), |ui| {
-                    view_dirty |= self.draw_reps_for(ui, mi, 0, n_shared, true);
-                });
-            }
-
-            // Nested "Molecules" sub-expander — its own fold, listing the members below.
-            ui.indent(egui::Id::new(("molhdr", gid)), |ui| {
-                ui.horizontal(|ui| {
-                    let mcaret = if members_expanded {
-                        icon::CARET_DOWN
-                    } else {
-                        icon::CARET_RIGHT
-                    };
-                    if ui
-                        .selectable_label(false, format!("{mcaret}  Molecules"))
-                        .on_hover_text("Member molecules")
-                        .clicked()
-                    {
-                        action = Some(GroupAction::ToggleMembers);
-                    }
-                    ui.weak(format!("({n_members})"));
-                });
+        // One indent owns the entire group body so its tree guide remains
+        // continuous between the cycle bar, shared reps and member list.
+        ui.indent(egui::Id::new(("groupbody", gid)), |ui| {
+            // Member cycle bar (which molecule is shown). Tooltip shows "N/M <name>".
+            ui.push_id(("groupbar", gid), |ui| {
+                if let Some(nc) = draw_group_bar(ui, &member_names, current) {
+                    action = Some(GroupAction::ShowMember(nc));
+                }
             });
 
-            // Member list (the whole panel list scrolls — see draw_left_panel), each
-            // foldable to its own (non-shared) reps. Member name is clickable → jump.
-            if members_expanded {
-              ui.indent(egui::Id::new(("members", gid)), |ui| {
-                        for (pos, &mid) in members.iter().enumerate() {
-                            let Some(mmi) = self.scene.mol_index(mid) else { continue };
-                            let mopen;
-                            {
-                                let shown = pos == current;
-                                // Reserve a shape slot *before* the row so the shown
-                                // member's highlight can be painted behind its content.
-                                let hl = ui.painter().add(egui::Shape::Noop);
-                                let m = &mut self.scene.molecules[mmi];
-                                let row = ui.horizontal(|ui| {
-                                    if index_badge_label(ui, &format!("m{source_index}[{pos}]"), m.visible).clicked() {
-                                        m.visible = !m.visible;
-                                        view_dirty = true;
-                                    }
-                                    if molecule_expander(ui, m.reps_open)
-                                        .on_hover_text("Own representations")
-                                        .clicked()
-                                    {
-                                        m.reps_open = !m.reps_open;
-                                    }
-                                    let spacing = ui.spacing().clone();
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            compact_actions(ui);
-                                            ui.menu_button(icon::LIST, |ui| {
-                                                if ui.button(format!("{}  Load mesh…", icon::CUBE_TRANSPARENT)).clicked() {
-                                                    action = Some(GroupAction::LoadMesh(mid));
-                                                    ui.close();
-                                                }
+            // (A pending selection on the shown member is drawn with that **member's own rows**,
+            // down in the member list — it captured that member's atoms, not the group's. Getting
+            // there means unfolding this entry, the "Molecules" list and the member's own fold,
+            // which `Scene::reveal_pending` does when the selection is made.)
+
+            // Top-level expanded: the group's shared reps, then a nested "Molecules"
+            // sub-expander (each opens/closes independently).
+            if expanded {
+                // Shared reps: the shown member's prefix, drawn under the group header.
+                // Again only when non-empty (a group whose shared reps were all deleted) — see above.
+                if let Some(mi) = cur_mi.filter(|&mi| self.scene.molecules[mi].n_shared > 0) {
+                    let n_shared = self.scene.molecules[mi].n_shared;
+                    ui.push_id(("shared", gid), |ui| {
+                        view_dirty |= self.draw_reps_for(ui, mi, 0, n_shared, true);
+                    });
+                }
+
+                // Nested "Molecules" sub-expander — its own fold, listing the members below.
+                ui.push_id(("molhdr", gid), |ui| {
+                    ui.horizontal(|ui| {
+                        let mcaret = if members_expanded {
+                            icon::CARET_DOWN
+                        } else {
+                            icon::CARET_RIGHT
+                        };
+                        if ui
+                            .selectable_label(false, format!("{mcaret}  Molecules"))
+                            .on_hover_text("Member molecules")
+                            .clicked()
+                        {
+                            action = Some(GroupAction::ToggleMembers);
+                        }
+                        ui.weak(format!("({n_members})"));
+                    });
+                });
+
+                // Member list (the whole panel list scrolls — see draw_left_panel), each
+                // foldable to its own (non-shared) reps. Member name is clickable → jump.
+                if members_expanded {
+                  ui.push_id(("members", gid), |ui| {
+                            for (pos, &mid) in members.iter().enumerate() {
+                                let Some(mmi) = self.scene.mol_index(mid) else { continue };
+                                let mopen;
+                                {
+                                    let shown = pos == current;
+                                    // Reserve a shape slot *before* the row so the shown
+                                    // member's highlight can be painted behind its content.
+                                    let hl = ui.painter().add(egui::Shape::Noop);
+                                    let m = &mut self.scene.molecules[mmi];
+                                    let row = ui.horizontal(|ui| {
+                                        if index_badge_label(ui, &format!("m{source_index}[{pos}]"), m.visible).clicked() {
+                                            m.visible = !m.visible;
+                                            view_dirty = true;
+                                        }
+                                        if molecule_expander(ui, m.reps_open)
+                                            .on_hover_text("Own representations")
+                                            .clicked()
+                                        {
+                                            m.reps_open = !m.reps_open;
+                                        }
+                                        let spacing = ui.spacing().clone();
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                compact_actions(ui);
+                                                ui.menu_button(icon::LIST, |ui| {
+                                                    if ui.button(format!("{}  Load mesh…", icon::CUBE_TRANSPARENT)).clicked() {
+                                                        action = Some(GroupAction::LoadMesh(mid));
+                                                        ui.close();
+                                                    }
+                                                    if ui
+                                                        .button(format!(
+                                                            "{}  Delete molecule",
+                                                            icon::TRASH
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        action = Some(GroupAction::DeleteMember(mid));
+                                                        ui.close();
+                                                    }
+                                                })
+                                                .response
+                                                .on_hover_text("Molecule menu");
                                                 if ui
-                                                    .button(format!(
-                                                        "{}  Delete molecule",
-                                                        icon::TRASH
-                                                    ))
+                                                    .button(format!("{} rep", icon::PLUS))
+                                                    .on_hover_text(
+                                                        "Add a representation to this molecule only",
+                                                    )
                                                     .clicked()
                                                 {
-                                                    action = Some(GroupAction::DeleteMember(mid));
-                                                    ui.close();
+                                                    action = Some(GroupAction::AddMemberRep(mid));
                                                 }
-                                            })
-                                            .response
-                                            .on_hover_text("Molecule menu");
-                                            if ui
-                                                .button(format!("{} rep", icon::PLUS))
-                                                .on_hover_text(
-                                                    "Add a representation to this molecule only",
-                                                )
-                                                .clicked()
-                                            {
-                                                action = Some(GroupAction::AddMemberRep(mid));
-                                            }
-                                            row_rest(ui, &spacing, |ui| {
-                                                // Clickable name: underlines on hover, click shows it.
-                                                // Bold like every molecule name; the *shown* member is
-                                                // marked by its accent bar + underline instead.
-                                                let text = bold_name(ui, m.name.as_str());
-                                                let text = if shown { text.underline() } else { text };
-                                                // Truncated with "…" (full name in the tooltip).
-                                                let label =
-                                                    egui::Label::new(text).sense(egui::Sense::click());
-                                                let resp = truncated(ui, label, 0.0)
-                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                                    .on_hover_text(format!(
-                                                        "{}\n{} atoms — click to show{}",
-                                                        m.name,
-                                                        m.n_atoms,
-                                                        if shown { " (shown)" } else { "" }
-                                                    ));
-                                                if resp.hovered() {
-                                                    let r = resp.rect;
-                                                    ui.painter().hline(
-                                                        r.x_range(),
-                                                        r.bottom(),
-                                                        egui::Stroke::new(1.0_f32, ui.visuals().text_color()),
-                                                    );
-                                                }
-                                                if resp.clicked() {
-                                                    // Clicking a name shows it AND centers the
-                                                    // camera on it (partial focus — pan, no zoom).
-                                                    action = Some(GroupAction::ShowMember(pos));
-                                                }
-                                            });
-                                        },
-                                    );
-                                });
-                                // Highlight the currently-shown member's row (a subtle
-                                // accent bar behind its content).
-                                if shown {
-                                    let c = ui.visuals().selection.bg_fill;
-                                    let bar = egui::Color32::from_rgba_unmultiplied(
-                                        c.r(),
-                                        c.g(),
-                                        c.b(),
-                                        60,
-                                    );
-                                    ui.painter().set(
-                                        hl,
-                                        egui::Shape::rect_filled(
-                                            row.response.rect.expand2(egui::vec2(4.0, 1.0)),
-                                            3.0,
-                                            bar,
-                                        ),
-                                    );
-                                }
-                                mopen = m.reps_open;
-                            }
-                            if mopen {
-                                // The own-reps pass also draws this member's pending-selection
-                                // stub, so it runs for a member with *no* own reps too — a
-                                // freshly loaded SDF member has none, and a lasso on it would
-                                // otherwise glow with no way to accept it.
-                                let (start, end, pending) = {
-                                    let m = &self.scene.molecules[mmi];
-                                    (m.n_shared, m.reps.len(), m.pending.is_some())
-                                };
-                                ui.indent(egui::Id::new(("ownreps", mid)), |ui| {
-                                    if start < end || pending {
-                                        view_dirty |= self.draw_reps_for(ui, mmi, start, end, false);
-                                    } else if self.scene.molecules[mmi].meshes.is_empty() {
-                                        ui.weak("(no own representations)");
+                                                row_rest(ui, &spacing, |ui| {
+                                                    // Clickable name: underlines on hover, click shows it.
+                                                    // Bold like every molecule name; the *shown* member is
+                                                    // marked by its accent bar + underline instead.
+                                                    let text = bold_name(ui, m.name.as_str());
+                                                    let text = if shown { text.underline() } else { text };
+                                                    // Truncated with "…" (full name in the tooltip).
+                                                    let label =
+                                                        egui::Label::new(text).sense(egui::Sense::click());
+                                                    let resp = truncated(ui, label, 0.0)
+                                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                        .on_hover_text(format!(
+                                                            "{}\n{} atoms — click to show{}",
+                                                            m.name,
+                                                            m.n_atoms,
+                                                            if shown { " (shown)" } else { "" }
+                                                        ));
+                                                    if resp.hovered() {
+                                                        let r = resp.rect;
+                                                        ui.painter().hline(
+                                                            r.x_range(),
+                                                            r.bottom(),
+                                                            egui::Stroke::new(1.0_f32, ui.visuals().text_color()),
+                                                        );
+                                                    }
+                                                    if resp.clicked() {
+                                                        // Clicking a name shows it AND centers the
+                                                        // camera on it (partial focus — pan, no zoom).
+                                                        action = Some(GroupAction::ShowMember(pos));
+                                                    }
+                                                });
+                                            },
+                                        );
+                                    });
+                                    // Highlight the currently-shown member's row (a subtle
+                                    // accent bar behind its content).
+                                    if shown {
+                                        let c = ui.visuals().selection.bg_fill;
+                                        let bar = egui::Color32::from_rgba_unmultiplied(
+                                            c.r(),
+                                            c.g(),
+                                            c.b(),
+                                            60,
+                                        );
+                                        ui.painter().set(
+                                            hl,
+                                            egui::Shape::rect_filled(
+                                                row.response.rect.expand2(egui::vec2(4.0, 1.0)),
+                                                3.0,
+                                                bar,
+                                            ),
+                                        );
                                     }
-                                    view_dirty |= self.draw_meshes_for(ui, mmi);
-                                });
+                                    mopen = m.reps_open;
+                                }
+                                if mopen {
+                                    // The own-reps pass also draws this member's pending-selection
+                                    // stub, so it runs for a member with *no* own reps too — a
+                                    // freshly loaded SDF member has none, and a lasso on it would
+                                    // otherwise glow with no way to accept it.
+                                    let (start, end, pending) = {
+                                        let m = &self.scene.molecules[mmi];
+                                        (m.n_shared, m.reps.len(), m.pending.is_some())
+                                    };
+                                    ui.indent(egui::Id::new(("ownreps", mid)), |ui| {
+                                        if start < end || pending {
+                                            view_dirty |= self.draw_reps_for(ui, mmi, start, end, false);
+                                        } else if self.scene.molecules[mmi].meshes.is_empty() {
+                                            ui.weak("(no own representations)");
+                                        }
+                                        view_dirty |= self.draw_meshes_for(ui, mmi);
+                                    });
+                                }
                             }
-                        }
-              });
+                  });
+                }
             }
-        }
+        });
         ui.add_space(4.0);
 
         // --- Apply the one action this entry asked for. ----------------------------------
@@ -953,8 +966,21 @@ impl App {
                 view_dirty = true;
             }
             Some(GroupAction::Focus) => {
-                // Full zoom-to-fit the shown member (the magnifier means "zoom").
-                if let Some((min, max)) = cur_bbox {
+                let targets: Vec<_> = cur_mi.into_iter().flat_map(|mi| {
+                    self.scene.molecules[mi].reps.iter().enumerate()
+                        .filter(|(_, rep)| rep.visible && rep.kind != RepKind::Interactions)
+                        .map(move |(ri, _)| (mi, ri))
+                }).collect();
+                if zoom_unobstructed && !targets.is_empty() {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let result = self.start_unobstructed_view_multi(&targets, ui.ctx());
+                    #[cfg(target_arch = "wasm32")]
+                    let result = self.unobstructed_view_multi(&targets, 1.0, 256);
+                    if let Err(e) = result {
+                        log::warn!("unobstructed view: {e}");
+                    }
+                    view_dirty = true;
+                } else if let Some((min, max)) = cur_bbox {
                     self.camera.focus_bbox(min, max);
                     view_dirty = true;
                 }

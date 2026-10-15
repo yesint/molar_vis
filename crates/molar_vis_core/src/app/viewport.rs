@@ -397,7 +397,7 @@ impl App {
             if picking_center {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
-            let hovering = (self.pick_mode == PickMode::Click || picking_partner || picking_center)
+            let hovering = (self.pick_mode.shows_hover_info() || picking_partner || picking_center)
                 && !response.dragged();
             let mut residue_hit = false;
             let mut lens_shown = false;
@@ -445,6 +445,14 @@ impl App {
                         let proj = self.camera.proj(aspect);
                         pick::pick(&self.scene, view, proj, ndc_x, ndc_y)
                     };
+                    let interaction_hit = if !picking_partner && !picking_center {
+                        pick::pick_interaction(
+                            &self.scene, self.camera.view(), self.camera.proj(aspect),
+                            glam::vec2(ndc_x, ndc_y),
+                            glam::vec2(size_px[0] as f32, size_px[1] as f32),
+                            hit.as_ref(),
+                        )
+                    } else { None };
                     if picking_partner {
                         // Choosing an Interactions rep's partner: highlight the whole
                         // rep under the cursor (its atoms glow), and assign it on click.
@@ -472,7 +480,7 @@ impl App {
                         // Ring + info box on the atom under the cursor; a click makes it
                         // the centre of rotation, a click on empty space cancels.
                         if let Some(hit) = &hit {
-                            draw_pick_overlay(ui, rect, &self.camera, aspect, hit);
+                            draw_pick_overlay(ui, rect, &self.camera, aspect, &self.scene, hit);
                         }
                         if response.clicked() {
                             if let Some(hit) = &hit {
@@ -481,12 +489,14 @@ impl App {
                             self.center_pick = false;
                             ui.ctx().request_repaint();
                         }
+                    } else if let Some(hit) = interaction_hit {
+                        draw_interaction_overlay(ui, rect, &self.camera, aspect, &self.scene, &hit);
                     } else if let Some(hit) = hit {
                         // Click selects the hovered atom/residue: merge it into the
                         // active (pending) selection (Shift = add, Ctrl/⌘ = subtract,
                         // plain = replace), expanded per the scope mode. A plain LMB
                         // *drag* still orbits (handled above), so only a real click here.
-                        if response.clicked() {
+                        if self.pick_mode == PickMode::Click && response.clicked() {
                             let m = ui.input(|i| i.modifiers);
                             let op = if m.shift {
                                 LassoOp::Add
@@ -522,14 +532,14 @@ impl App {
                                     SelectionMode::Residues,
                                 )
                             };
-                            draw_residue_info_overlay(ui, rect, &hit, atoms.len());
+                            draw_residue_info_overlay(ui, rect, &self.scene, &hit, atoms.len());
                             if self.scene.set_hover(hit.mol, atoms) {
                                 ui.ctx().request_repaint();
                             }
                             residue_hit = true;
                         } else {
                             // Atoms mode: egui ring + atom info box.
-                            draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
+                            draw_pick_overlay(ui, rect, &self.camera, aspect, &self.scene, &hit);
                         }
                     }
                     // Hover detail lens: **independent of any atom hit** — wherever the
@@ -763,7 +773,7 @@ impl App {
     /// meaningless for single-atom hover picking, so it falls back to `Atoms` there
     /// (and the toolbar hides it); it stays available for the lasso.
     pub(super) fn effective_selection_mode(&self) -> SelectionMode {
-        if self.pick_mode == PickMode::Click && self.selection_mode == SelectionMode::BoundH {
+        if self.pick_mode.shows_hover_info() && self.selection_mode == SelectionMode::BoundH {
             SelectionMode::Atoms
         } else {
             self.selection_mode

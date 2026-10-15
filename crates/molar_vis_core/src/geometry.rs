@@ -770,7 +770,7 @@ fn wrap_thresh2(b: &PeriodicBox) -> f32 {
 
 /// Split `p0 → p1` into dash segments (`DASH_LEN` on, `DASH_GAP` off). Always
 /// emits at least one segment.
-fn dashes(p0: [f32; 3], p1: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
+pub(crate) fn dashes(p0: [f32; 3], p1: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
     let d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
     let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     if len < 1e-6 {

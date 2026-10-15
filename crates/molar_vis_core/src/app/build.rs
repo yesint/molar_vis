@@ -540,7 +540,19 @@ pub(crate) fn build_interactions(
     self_mi: usize,
     rep_idx: usize,
 ) -> geometry::GeometryData {
-    let empty = geometry::GeometryData::default;
+    let found = detect_interactions(scene, self_mi, rep_idx);
+    let Some(RepParams::Interactions { settings }) = scene.molecules.get(self_mi)
+        .and_then(|mol| mol.reps.get(rep_idx)).map(|rep| &rep.params) else {
+        return geometry::GeometryData::default();
+    };
+    geometry::GeometryData {
+        lines: geometry::interaction_lines(&found, settings),
+        ..Default::default()
+    }
+}
+
+fn detect_interactions(scene: &Scene, self_mi: usize, rep_idx: usize) -> Vec<crate::interactions::Interaction> {
+    let empty = Vec::new;
     let Some(mol) = scene.molecules.get(self_mi) else {
         return empty();
     };
@@ -568,11 +580,7 @@ pub(crate) fn build_interactions(
 
     let set_a = gather_set(mol, self_mi, sel_a, displayed_state(mol));
     let set_b = gather_set(pmol, pmi, sel_b, displayed_state(pmol));
-    let found = crate::interactions::detect(&set_a, &set_b, &settings.detect());
-    geometry::GeometryData {
-        lines: geometry::interaction_lines(&found, &settings),
-        ..Default::default()
-    }
+    crate::interactions::detect(&set_a, &set_b, &settings.detect())
 }
 
 /// World-space (nm) outward shell offset for the active-selection glow mesh — large
@@ -1179,13 +1187,19 @@ background: bool,
     for (mi, ri) in inter_jobs {
         // Compute (immutable scene borrow), then upload + store (drops the borrow
         // first, so mutating the rep afterwards is fine).
-        let geom = build_interactions(scene, mi, ri);
+        let found = detect_interactions(scene, mi, ri);
+        let RepParams::Interactions { settings } = scene.molecules[mi].reps[ri].params else { continue };
+        let geom = geometry::GeometryData {
+            lines: geometry::interaction_lines(&found, &settings),
+            ..Default::default()
+        };
         log::debug!(
             "interactions rep {mi}:{ri} → {} dashed line vertices",
             geom.lines.len()
         );
         let gpu = renderer.upload(rs, &geom);
         let rep = &mut scene.molecules[mi].reps[ri];
+        rep.interaction_cache = found.into_iter().map(crate::pick::InteractionGeometry::new).collect();
         rep.gpu = gpu;
         rep.geom_dirty = false;
         rep.coords_dirty = false;

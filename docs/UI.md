@@ -121,8 +121,9 @@ the viewport — a real panel, **not** a floating `Area` over the 3D image; span
 area right of the left panel, added in `ui()` between the left panel and `draw_viewport`).
 Left-aligned **selection controls**, then a right-aligned (`Layout::right_to_left`) **hamburger**
 opening the compact view-settings popup:
-**selection** — a **`Selection mode`-labelled pick-mode dropdown** (`Off` default / `Click` / `Lasso` —
-see `pick.rs` / M11; **`Click`** hovers to show the atom's identity/glow (as before) and **on click
+**selection** — a **`Selection mode`-labelled pick-mode dropdown** (`Off` default / `Info` / `Click` / `Lasso` —
+see `pick.rs` / M11; **`Info`** highlights hovered atoms/residues without selecting them.
+Hover info includes the sidebar molecule/rep address (such as `m0:r1`). **`Click`** hovers to show the atom's identity/glow and **on click
 selects** the hovered atom/residue — merging it into the molecule's **active (pending) selection**
 via the same op as the lasso (plain = replace, **Shift** = add, **Ctrl/⌘** = subtract;
 `merge_into_pending`), expanded per the `Atoms`/`Residues` scope; in `Lasso` an LMB drag accumulates
@@ -131,10 +132,14 @@ drawn as a cyan polyline, and on release `finish_lasso` stages the enclosed atom
 the same `Molecule::pending` (*not* a rep yet) glowing highlight + minimal accept/discard UI;
 **two-step**, so accepting is the only undoable part) and — **only when the selection mode isn't
 `Off`** — a **`Scope` dropdown** (`Atoms`/`Residues`/`Bound H` — how a hit expands;
-`App::selection_mode`, see `pick::expand_selection`; `Bound H` is lasso-only, hidden in `Click`). In
+`App::selection_mode`, see `pick::expand_selection`; `Bound H` is lasso-only, hidden in `Info`/`Click`). In
 `Click`/`Lasso` mode, while a modifier is held a **modifier hint** (add/subtract, + rotate for
 Lasso-Alt) is drawn as a **floating overlay on the 3D viewport** (a top-center pill,
 `draw_modifier_hint_overlay` in `draw_viewport`) — *not* a toolbar row, so it never resizes the view.
+In `Info`/`Click`, interaction dashes also highlight on hover and report their type, distance
+(nm), and applicable angles (degrees) or lateral ring offsets. Hydrogen bonds detected by the
+heavy-atom fallback report that no H angle is available. Hovering or clicking a dash does not
+change the atom selection.
 **centre of rotation** (`GPS_FIX` button, or the **C** key outside Draw mode / text fields) — VMD's
 `c` pick: arms the one-shot `App::center_pick`; the cursor becomes a crosshair, the hovered atom gets
 the pick ring, and a click makes it the rotation centre (`Camera::set_center` → `Camera::pivot`). The

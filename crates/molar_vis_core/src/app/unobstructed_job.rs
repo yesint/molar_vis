@@ -53,8 +53,16 @@ impl App {
         rep: usize,
         ctx: &egui::Context,
     ) -> Result<(), String> {
+        self.start_unobstructed_view_multi(&[(mol, rep)], ctx)
+    }
+
+    pub(super) fn start_unobstructed_view_multi(
+        &mut self,
+        targets: &[(usize, usize)],
+        ctx: &egui::Context,
+    ) -> Result<(), String> {
         let started = Instant::now();
-        let mut atoms = build::gather_unobstructed_atoms(&mut self.scene, &[(mol, rep)])?;
+        let mut atoms = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
         self.view_dirty = true;
         let visual_bounds = std::mem::take(&mut atoms.visual_bounds);
         let rs = self.render_state.clone();
