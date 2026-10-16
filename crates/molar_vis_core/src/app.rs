@@ -46,6 +46,7 @@ mod movie;
 mod background_movie;
 pub(crate) mod build;
 mod commands;
+mod groups;
 mod dihedral;
 #[cfg(not(target_arch = "wasm32"))]
 mod docking_dialog;
@@ -513,9 +514,20 @@ impl App {
 
     pub fn resolve_rep(&self, mol_id: u64, rep_id: u64) -> Result<(usize, usize), String> {
         let mi = self.resolve_molecule(mol_id)?;
-        let ri = self.scene.molecules[mi].reps.iter().position(|r| r.id.0 == rep_id)
-            .ok_or_else(|| format!("stale representation handle {rep_id} on molecule {mol_id}"))?;
-        Ok((mi, ri))
+        if let Some(ri) = self.scene.molecules[mi].reps.iter().position(|r| r.id.0 == rep_id) {
+            return Ok((mi, ri));
+        }
+        // A shared representation moves to the group's shown member. Existing
+        // handles must continue addressing that same representation after a switch.
+        if let Some(gi) = self.scene.molecules[mi].group.and_then(|g| self.scene.group_index(g)) {
+            let group = &self.scene.groups[gi];
+            if let Some(shown) = group.members.get(group.current).and_then(|id| self.scene.mol_index(*id)) {
+                if let Some(ri) = self.scene.molecules[shown].reps.iter().position(|r| r.id.0 == rep_id) {
+                    return Ok((shown, ri));
+                }
+            }
+        }
+        Err(format!("stale representation handle {rep_id} on molecule {mol_id}"))
     }
 
     pub fn add_shared_molecule_with_id(
@@ -641,6 +653,17 @@ impl App {
         }
         self.view_dirty = true;
         Ok(idx)
+    }
+
+    /// Whether molecule `mol` is currently shown.
+    pub fn molecule_visible(&self, mol: usize) -> Result<bool, String> {
+        self.scene.molecules.get(mol).map(|m| m.visible)
+            .ok_or_else(|| format!("no molecule {mol}"))
+    }
+
+    /// Show or hide molecule `mol` through the shared scene-command path.
+    pub fn set_molecule_visible(&mut self, mol: usize, visible: bool) -> Result<(), String> {
+        self.execute_command(crate::script::Command::ShowMol { mol, visible })
     }
 
     /// Append a default representation to molecule `mol`; returns the new rep index.
@@ -1003,22 +1026,27 @@ impl App {
             occluders,
             visual_bounds,
             triangles,
+            pixels,
         } = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
 
         // Best direction, then fit visual extents in that camera basis.
         #[cfg(not(target_arch = "wasm32"))]
-        let gpu_dir = self.render_state.as_ref().filter(|_| triangles.is_empty()).and_then(|rs| {
+        let gpu_dir = self.render_state.as_ref().filter(|_| triangles.is_empty() && pixels.is_none()).and_then(|rs| {
             self.renderer.try_unobstructed_direction(rs, &target, &occluders, resolution)
         });
         #[cfg(target_arch = "wasm32")]
         let gpu_dir = None;
-        let dir = gpu_dir.unwrap_or_else(|| {
+        let dir = if let Some(pixels) = pixels {
+            pixels.best_direction(resolution, Some(&crate::unobstructed::PixelView {
+                camera: &self.camera, bounds: &visual_bounds, size: self.last_size, zoom_out,
+            }), &|| false)?
+        } else { gpu_dir.unwrap_or_else(|| {
             if triangles.is_empty() {
                 crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution)
             } else {
                 crate::unobstructed::best_direction_with_triangles_cancellable(&target, &occluders, &triangles, resolution, &|| false).expect("uncancelled search")
             }
-        });
+        }) };
         #[cfg(not(target_arch = "wasm32"))]
         log::info!(
             "unobstructed view: {}, {} target atoms, {} occluders, {:.1} ms",

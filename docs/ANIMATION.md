@@ -62,6 +62,42 @@ preparation, before playback starts; this search can take time. Focus and
 unobstructed destinations use the coordinates present at preparation time; they
 do not continuously track moving atoms.
 
+For a complete protein/inhibitor example, run
+`python examples/jak2_movie.py`. It loads the bundled JAK2 protein and the first ten
+SD inhibitor records, makes a three-second orbit, approaches an unobstructed pocket
+view, shows receptor–ligand interaction dashes, and returns to the whole protein.
+One MolGroup owns the ligand and interaction representations. Each inhibitor gets
+a one-second camera transition with no subsequent hold. The complete sequence is
+one movie and one render call. Output defaults to `target/jak2_movie.mp4`
+(1280 × 720, 30 fps).
+
+To use a saved scene's materials, representation parameters, colors and display
+settings, run `python examples/jak2_movie.py --session ~/Downloads/session.mvs --visible`.
+The script replaces the saved camera pose with its programmed starting pose and
+keeps the same camera sequence. It renders in the foreground (`background=False`).
+
+Load a native molecular group and add shared contacts once:
+
+```python
+ligands = vis.load_group("tests/jak2_inhs.sd")
+contacts = ligands.add_interactions(protein_mol)
+contacts.width = 3
+movie = vis.movie()
+for member in range(10):
+    movie.unobstructed_group_member(ligands, member, duration=1, zoom_out=2)
+movie.render("ligands.mp4").wait()
+```
+
+`vis.groups` lists groups; `len(group)`, `group.members` and `group.reps` expose
+their members and shared representations. Set `group.current` to switch members
+without moving the camera. Shared representation handles continue to refer to
+the active member after a switch. `unobstructed_group_member` switches at the start
+of its transition and searches for the member's destination during preparation.
+Forward and backward seeking set the corresponding member deterministically.
+Preparation restores the original shown members, including on failure; export
+restores them on success, failure or cancellation. Preview leaves the sampled
+member selected, like trajectory preview leaves its sampled frame.
+
 To animate loaded molecular trajectory frames as well as the camera:
 
 ```python

@@ -66,6 +66,9 @@ impl App {
         let mut atoms = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
         self.view_dirty = true;
         let visual_bounds = std::mem::take(&mut atoms.visual_bounds);
+        let camera = self.camera;
+        let size = self.last_size;
+        let search_bounds = visual_bounds.clone();
         let rs = self.render_state.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel = cancelled.clone();
@@ -78,7 +81,7 @@ impl App {
                 let gpu = rs
                     .as_ref()
                     .filter(|rs| {
-                        atoms.triangles.is_empty() && atoms.target.len() >= 1024
+                        atoms.triangles.is_empty() && atoms.pixels.is_none() && atoms.target.len() >= 1024
                             && rs.adapter.get_info().device_type != wgpu::DeviceType::Cpu
                             && std::env::var_os("MOLAR_VIS_DEBUG_UNOBSTRUCTED_CPU").is_none()
                             && rs
@@ -110,7 +113,11 @@ impl App {
                                 log::warn!("unobstructed GPU search failed; using CPU: {e}");
                             }
                         }
-                        if atoms.triangles.is_empty() {
+                        if let Some(pixels) = &atoms.pixels {
+                            pixels.best_direction(256, Some(&crate::unobstructed::PixelView {
+                                camera: &camera, bounds: &search_bounds, size, zoom_out: 1.0,
+                            }), &is_cancelled)
+                        } else if atoms.triangles.is_empty() {
                             crate::unobstructed::best_unobstructed_direction_cancellable(&atoms.target, &atoms.occluders, 256, &is_cancelled)
                         } else {
                             crate::unobstructed::best_direction_with_triangles_cancellable(&atoms.target, &atoms.occluders, &atoms.triangles, 256, &is_cancelled)

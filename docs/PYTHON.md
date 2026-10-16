@@ -73,14 +73,20 @@ DSSP, geometric selections, …), so you analyze and visualize in one session.
 | `mv.spawn() -> Visualizer` | open a viewer window (non-blocking) |
 | `vis.add_mol(system) -> MolHandle` | render a molecule, zero-copy |
 | `vis.mols` | all live molecules, including those opened in the UI or restored from sessions |
+| `vis.load_session(path)` | load saved representations, colors, view settings and molecule sources |
 | `mol.add_rep(sel=None, style=…, color=…, material=…) -> RepHandle` | add a representation |
 | `mol.reps` | all live representations belonging to that molecule |
+| `mol.visible = False` | hide a molecule; set `True` to show it |
+| `vis.load_group(path)` / `vis.groups` | load or list molecular groups with shared representations |
+| `group.members` / `group.reps` / `len(group)` | inspect a group's members and shared representations |
+| `group.current = index` | switch the shown member without moving the camera |
+| `group.add_interactions(partner)` | add one shared contact representation that follows the shown member |
 | `rep.style = …` · `rep.color = …` · `rep.material = …` | live property setters |
 | `rep.select(sel)` | set a representation's selection from a pymolar `Sel` |
 | `rep.width = pixels` | set Lines or Interactions width (at least 1 pixel) |
 | `mol.add_interactions(partner)` | add contacts against a representation, or a molecule's first representation |
 | `vis.focus(mol, sel)` | frame a selection |
-| `vis.unobstructed_view(rep, zoom_out=1.0, resolution=256)` | search for a view that exposes the most target atoms |
+| `vis.unobstructed_view(rep, zoom_out=1.0, resolution=256)` | search for a clear view that maximizes visible ligand area |
 | `vis.unobstructed_view_multi(reps, zoom_out=1.0, resolution=256)` | search with a nonempty list of representations as one target |
 | `vis.rotation_center(x, y, z)` | set the orbit pivot in nm without moving the view |
 | `mol.load_mesh(path)` / `mol.add_mesh_ply(name, bytes)` | attach a PLY mesh in nm; return a mesh handle |

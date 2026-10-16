@@ -838,3 +838,22 @@
   A compact progress/Cancel panel has an optional preview. The checkbox shows
   `requires ~X Mb additional RAM`, estimated from snapshot data, smoothing frames,
   geometry, frame buffers and encoding. Shared Python data is copied under the GIL.
+
+- Python exposes native molecular groups through `vis.load_group`, `vis.groups`,
+  member selection and shared representations. One shared interaction representation
+  follows the shown member; existing representation handles stay valid after switches.
+  Movie steps can switch a group member and animate its unobstructed view in one
+  continuous render. Seeking works in both directions, and export restores the original
+  member on success, failure or cancellation. The JAK2 example uses this API for ten
+  inhibitors, with one shared contact representation and no holds between members.
+  Python can load a saved session, and the example's `--session` option keeps its
+  display settings while applying the programmed camera sequence in the foreground.
+
+- Unobstructed ligand views now score finite rendered geometry rather than atom
+  centres. The fixed-scale area score includes ligand self-overlap, receptor ribbon
+  meshes, solid bonds and screen-width lines. Clear solid-receptor openings take
+  priority, with a small silhouette guard to prevent grazing overlaps. Covered
+  pixels also have an extra cost while maximizing readable ligand area. The
+  pre-October-14 sphere-proxy search was replayed on ten JAK2 inhibitors and still
+  produced obstructed views. The replacement is checked with rendered ligand masks
+  against receptor-hidden references, plus finite-bond, wide-line and ring tests.

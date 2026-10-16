@@ -3,8 +3,8 @@ use crate::camera::Camera;
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -109,6 +109,15 @@ pub enum ViewAction {
         #[serde(default = "resolution")]
         resolution: usize,
     },
+    /// Switch the shown group member and approach its unobstructed view.
+    GroupUnobstructed {
+        group: u64,
+        member: usize,
+        #[serde(default = "one")]
+        zoom_out: f32,
+        #[serde(default = "resolution")]
+        resolution: usize,
+    },
     Reset,
     Hold,
 }
@@ -157,6 +166,11 @@ impl ViewAction {
                     && (1..=65536).contains(resolution)
             }
             Self::Focus { selection, .. } => !selection.trim().is_empty(),
+            Self::GroupUnobstructed {
+                zoom_out,
+                resolution,
+                ..
+            } => zoom_out.is_finite() && *zoom_out > 0.0 && (1..=65536).contains(resolution),
             _ => true,
         };
         if valid {
@@ -560,23 +574,27 @@ mod timeline_tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn publication_and_cancellation_have_one_terminal_result() {
         let completed = AnimationHandle::default();
-        assert!(completed
-            .complete_when_ready(|| Some(Ok(())))
-            .unwrap()
-            .is_ok());
+        assert!(
+            completed
+                .complete_when_ready(|| Some(Ok(())))
+                .unwrap()
+                .is_ok()
+        );
         completed.cancel();
         assert!(!completed.cancelled());
         assert!(matches!(completed.progress().state, TaskState::Completed));
         let cancelled = AnimationHandle::default();
         cancelled.cancel();
         let published = std::sync::atomic::AtomicBool::new(false);
-        assert!(cancelled
-            .complete_when_ready(|| {
-                published.store(true, Ordering::Relaxed);
-                Some(Ok(()))
-            })
-            .unwrap()
-            .is_err());
+        assert!(
+            cancelled
+                .complete_when_ready(|| {
+                    published.store(true, Ordering::Relaxed);
+                    Some(Ok(()))
+                })
+                .unwrap()
+                .is_err()
+        );
         assert!(!published.load(Ordering::Relaxed));
         cancelled.finish(Ok(()));
         assert!(matches!(cancelled.progress().state, TaskState::Cancelled));

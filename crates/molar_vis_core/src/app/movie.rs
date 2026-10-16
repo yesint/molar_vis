@@ -72,7 +72,13 @@ impl App {
         if options.raytrace && !self.renderer.raytrace_supported() {
             return Err("ray tracing requires a compute-capable device".into());
         }
-        let prepared = self.prepare_movie(movie, options.width as f32 / options.height as f32)?;
+        // Screen-width receptor lines must be scored at the export resolution,
+        // which can differ from the interactive viewport. Restore it on errors too.
+        let viewport = self.last_size;
+        self.last_size = [options.width, options.height];
+        let prepared = self.prepare_movie(movie, options.width as f32 / options.height as f32);
+        self.last_size = viewport;
+        let prepared = prepared?;
         if options.background {
             return self.render_background_movie(movie, path, options, prepared);
         }
@@ -111,6 +117,7 @@ impl App {
     fn finish_movie(&mut self, job: MovieJob, result: Result<(), String>) {
         self.renderer.rt_trace_cancel();
         self.camera = job.original;
+        job.movie.restore_groups(&mut self.scene);
         for &(id, current, playing) in &job.playback {
             if let Some(mi) = self.scene.mol_index(id) {
                 let mol = &mut self.scene.molecules[mi];

@@ -394,6 +394,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   rebuild GPU targets.
 - `animation.rs` — explicit-time camera motion, saved poses, recipes, trajectory tracks and
   task handles. `app/animation.rs` resolves destinations and drives preview/seek.
+  Group-member changes and unobstructed views share the same timeline.
+  `app/groups.rs` exposes stable group handles, member switching and shared interactions.
 - `video.rs` (native) — bounded frame queue, FFmpeg process and PNG sequence sink.
   `app/movie.rs` pumps foreground capture and restores state. Native
   `app/background_movie.rs` captures owned data, estimates extra RAM, and runs an
@@ -464,6 +466,16 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   back counts plus a bounded list of queries near floating-point boundaries, checked using
   CPU arithmetic and the sphere tree to preserve scores. Overflow falls back to the full CPU
   search. `unobstructed.rs` shares the direction search and provides the CPU scorer.
+  Small solid targets (at most 512 selected atoms) instead use `unobstructed/pixels.rs`:
+  a fixed-world-scale orthographic depth grid scores rendered atom spheres, bond capsules
+  (including multiple-bond offsets) and mesh triangles. Target self-overlap contributes
+  area only once. Openings with at most 0.5% solid-receptor coverage (including a
+  one-grid-cell silhouette guard) take priority, then area is maximized. Covered pixels
+  also carry a stronger penalty than gained area, including screen-width line coverage.
+  Receptor lines and point discs retain their screen width using the final camera fit.
+  Interaction dashes are annotations and do not steer the search. Eight separate coarse
+  openings are refined; native scoring uses at most eight worker threads, with serial
+  browser fallback and cancellation between primitives and directions.
   Targets below 1024 atoms, browser builds, software adapters, unsupported devices, and searches
   exceeding device limits use the CPU. The compute pipeline is created on first use.
 - `geometry/surface.rs` — grid SES reconstruction with half-cell distance correction,

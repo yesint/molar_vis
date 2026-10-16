@@ -387,7 +387,7 @@ impl App {
             }
         };
         match Session::from_json(&json) {
-            Ok(session) => self.apply_session(session),
+            Ok(session) => { let _ = self.apply_session(session); }
             Err(e) => {
                 log::error!("{e}");
                 self.status = e;
@@ -395,12 +395,20 @@ impl App {
         }
     }
 
+    /// Load a saved scene and view, reporting read, parse and source-load errors to hosts.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_session_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        self.apply_session(Session::from_json(&json)?)
+    }
+
     /// Rebuild the scene from a parsed [`Session`]: reload each molecule from its
     /// source file, restore its representations / visibility / box / trajectory,
     /// then apply the global view state. Reloading a session is treated as opening
     /// a new document — the undo history is reset to the loaded state.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn apply_session(&mut self, session: Session) {
+    pub(super) fn apply_session(&mut self, session: Session) -> Result<(), String> {
         // Replace the whole document.
         self.reset_document();
 
@@ -553,6 +561,7 @@ impl App {
             }
             format!("Loaded {loaded} molecule(s); {} issue(s) — see log", errors.len())
         };
+        if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
     }
 
     /// Load the small bundled structure (2lao) so the web/GitHub-Pages demo opens

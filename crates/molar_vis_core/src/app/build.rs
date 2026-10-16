@@ -605,6 +605,68 @@ mod tests {
         std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/")).join(f)
     }
 
+    #[test]
+    #[ignore = "requires GPU; writes isolated JAK2 group visibility diagnostics"]
+    fn jak2_group_members_remain_visible_when_cycling() {
+        let rs = crate::render::test_gpu();
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx);
+        cc.wgpu_render_state = Some(rs.clone());
+        let mut app = App::new(&cc, AppLaunch {
+            files: vec![vec![tpath("jak2.pdb")], vec![tpath("jak2_inhs.sd")]],
+            ..Default::default()
+        }).unwrap();
+        let output = tpath("../target/jak2-group-debug");
+        std::fs::create_dir_all(&output).unwrap();
+        assert_eq!(app.scene.groups.len(), 1);
+        app.set_rep_style(0, 0, "cartoon").unwrap();
+        app.set_rep_color(0, 0, "solid:180,180,180").unwrap();
+        let first = app.scene.mol_index(app.scene.groups[0].members[0]).unwrap();
+        let group = app.scene.groups[0].id.0;
+        let owner = app.scene.molecules[first].id.0;
+        let ligand_rep = app.scene.molecules[first].reps[0].id.0;
+        let contacts = scene::reserve_rep_id().0;
+        app.add_group_interactions_with_id(group, contacts,
+            app.scene.molecules[0].id.0, app.scene.molecules[0].reps[0].id.0).unwrap();
+        assert_eq!(app.scene.molecules[0].reps.len(), 2, "one receptor pocket representation");
+        app.set_rep_color(first, 0, "solid:255,0,255").unwrap();
+        rebuild_dirty(&mut app.scene, &app.renderer, &app.settings, true, &rs, None, false);
+        app.unobstructed_view_multi_immediate(&[(first, 0)], 2.0, 256).unwrap();
+        app.camera.ao.enabled = false;
+        app.camera.shadow.enabled = false;
+        app.camera.depth_cue.enabled = false;
+        app.camera.background = crate::camera::Background::for_theme(false);
+        for member in 0..10 {
+            app.show_group_member(group, member).unwrap();
+            rebuild_dirty(&mut app.scene, &app.renderer, &app.settings, true, &rs, None, false);
+            let mi = app.scene.mol_index(app.scene.groups[0].members[member]).unwrap();
+            assert_eq!(app.resolve_rep(owner, ligand_rep).unwrap(), (mi, 0));
+            assert_eq!(app.resolve_rep(owner, contacts).unwrap(), (mi, 1));
+            assert_eq!(app.scene.molecules.iter().flat_map(|m| &m.reps)
+                .filter(|r| r.kind == RepKind::Interactions).count(), 1);
+            let mol = &app.scene.molecules[mi];
+            let rep = &mol.reps[0];
+            assert!(mol.visible && rep.visible, "member {member}: visibility");
+            assert!(rep.sel.as_ref().is_some_and(|s| !s.get_index_slice().is_empty()),
+                "member {member}: selection {:?}", rep.sel_error);
+            assert!(rep.gpu.has_geometry(), "member {member}: no GPU geometry");
+            app.camera.depth_bounds = app.scene.visible_depth_bounds();
+            let camera = &app.camera;
+            let capture = app.renderer.capture_begin(&rs, 480, 360,
+                camera.view(), camera.proj(480.0 / 360.0), camera.is_perspective(),
+                camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(),
+                camera.background, camera.eye_depth_range(), &app.scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let image = capture.read();
+            image.save(output.join(format!("member-{member:02}.png"))).unwrap();
+            let ligand_pixels = image.pixels().filter(|p|
+                p[0] > p[1].saturating_add(40) && p[2] > p[1].saturating_add(40)).count();
+            eprintln!("member {member}: {} atoms, {} selected, {ligand_pixels} ligand pixels",
+                mol.n_atoms, rep.sel.as_ref().unwrap().get_index_slice().len());
+            assert!(ligand_pixels > 50, "member {member}: inhibitor is not visible");
+        }
+    }
+
     /// An Interactions rep whose partner is a MolGroup member follows the group's
     /// currently-shown member — so sliding the group updates the interactions target.
     #[test]
@@ -649,6 +711,7 @@ pub(super) struct UnobstructedAtoms {
     pub occluders: Vec<(glam::Vec3, f32)>,
     pub visual_bounds: Vec<(glam::Vec3, f32)>,
     pub triangles: Vec<[glam::Vec3; 3]>,
+    pub pixels: Option<crate::unobstructed::PixelScene>,
 }
 
 /// Gather each atom once, refreshing only selections relevant to this view.
@@ -682,8 +745,10 @@ pub(super) fn gather_unobstructed_atoms(
         occluders: Vec::new(),
         visual_bounds: Vec::new(),
         triangles: Vec::new(),
+        pixels: None,
     };
-    let mut seen = std::collections::HashSet::new();
+    let mut target_indices = std::collections::HashMap::new();
+    let mut occluder_indices = std::collections::HashMap::new();
     for &(mi, ri) in targets {
         let mol = &scene.molecules[mi];
         let rep = &mol.reps[ri];
@@ -700,8 +765,12 @@ pub(super) fn gather_unobstructed_atoms(
             // same atom at different sizes. Deduplicate only the visibility search.
             let radius = rep.params.visual_radius(p.atom.vdw());
             out.visual_bounds.push((pos, radius));
-            if seen.insert((mi, p.id)) {
-                out.target.push((pos, p.atom.vdw()));
+            if let Some(&i) = target_indices.get(&(mi, p.id)) {
+                let entry: &mut (glam::Vec3, f32) = &mut out.target[i];
+                entry.1 = entry.1.max(radius);
+            } else {
+                target_indices.insert((mi, p.id), out.target.len());
+                out.target.push((pos, radius));
             }
         }
         if let Some(geom) = rep.cached_geometry(false) {
@@ -713,6 +782,28 @@ pub(super) fn gather_unobstructed_atoms(
     }
     if out.target.is_empty() {
         return Err("target reps select no atoms".to_string());
+    }
+    // Small solid targets are scored by rendered area, including finite bonds
+    // and self-occlusion. Large targets retain the accelerated atom search.
+    if out.target.len() <= 512 {
+        let mut pixels = crate::unobstructed::PixelScene::default();
+        for (mi, mol) in scene.molecules.iter().enumerate() {
+            for (ri, rep) in mol.reps.iter().enumerate() {
+                let is_target = target_reps.contains(&(mi, ri));
+                if (!is_target && (!mol.visible || !rep.visible)) || rep.kind == RepKind::Interactions { continue; }
+                let Some(sel) = &rep.sel else { continue };
+                let smoothed = (rep.smooth_window > 1).then(|| mol.trajectory.smoothed_state(rep.smooth_window)).flatten();
+                let bound = mol.data.bind_with_state(sel, smoothed.as_ref().unwrap_or(mol.render_state()));
+                let built;
+                let geom = if let Some(geom) = rep.cached_geometry(true) { geom } else {
+                    let ss = geometry::needs_ss(&rep.params, rep.color).then(|| SsMap::compute(&bound, rep.ss_algo));
+                    built = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true);
+                    built.as_ref()
+                };
+                if is_target { pixels.target.extend(geom); } else { pixels.occluders.extend(geom); }
+            }
+        }
+        if !pixels.target.is_empty() { out.pixels = Some(pixels); }
     }
     for (mi, mol) in scene.molecules.iter().enumerate() {
         if !mol.visible {
@@ -744,9 +835,15 @@ pub(super) fn gather_unobstructed_atoms(
             }
             for p in bound.iter_particle() {
                 // Target atoms are already blockers in the combined projection.
-                if seen.insert((mi, p.id)) {
+                if target_indices.contains_key(&(mi, p.id)) { continue; }
+                let radius = rep.params.visual_radius(p.atom.vdw());
+                if let Some(&i) = occluder_indices.get(&(mi, p.id)) {
+                    let entry: &mut (glam::Vec3, f32) = &mut out.occluders[i];
+                    entry.1 = entry.1.max(radius);
+                } else {
+                    occluder_indices.insert((mi, p.id), out.occluders.len());
                     out.occluders
-                        .push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), rep.params.visual_radius(p.atom.vdw())));
+                        .push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), radius));
                 }
             }
         }
@@ -1332,12 +1429,14 @@ mod unobstructed_tests {
         assert!((max - min - glam::Vec3::splat(0.06)).length() < 1e-5);
         let both = gather_unobstructed_atoms(&mut scene, &[(0, 0), (0, 1)]).unwrap();
         assert_eq!(both.target.len(), 1);
-        let (pos, vdw) = both.target[0];
+        let (pos, radius) = both.target[0];
         let (min, max) = bounds(&both);
-        assert!((min - (pos - glam::Vec3::splat(vdw * 2.0))).length() < 1e-5);
-        assert!((max - (pos + glam::Vec3::splat(vdw * 2.0))).length() < 1e-5);
+        assert!((min - (pos - glam::Vec3::splat(radius))).length() < 1e-5);
+        assert!((max - (pos + glam::Vec3::splat(radius))).length() < 1e-5);
         let reverse = gather_unobstructed_atoms(&mut scene, &[(0, 1), (0, 0)]).unwrap();
         assert_eq!(bounds(&both), bounds(&reverse));
+        assert_eq!(both.target, reverse.target);
+        assert_eq!(small.target[0].1, 0.03);
     }
 
     #[test]
@@ -1486,6 +1585,91 @@ mod geometry_job_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod unobstructed_render_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires GPU; audits ribbon occlusion and ring readability for ten JAK2 inhibitors"]
+    fn jak2_unobstructed_views_clear_ribbons_and_show_ring_faces() {
+        use crate::material::Material;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let rs = crate::render::test_gpu();
+        let mut cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+        cc.wgpu_render_state = Some(rs.clone());
+        let mut app = App::new(&cc, AppLaunch {
+            files: vec![vec![root.join("tests/jak2.pdb")], vec![root.join("tests/jak2_inhs.sd")]],
+            ..Default::default()
+        }).unwrap();
+        app.last_size = [640, 360];
+        app.set_rep_style(0, 0, "cartoon").unwrap();
+        let protein = &mut app.scene.molecules[0].reps[0];
+        protein.params = RepParams::Cartoon { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness: 0.03, bevel_height: 0.0 };
+        protein.sel_text = "not apolh".into();
+        protein.sel_dirty = true;
+        protein.color = ColorMethod::Solid([140,140,140,255]);
+        protein.material = Material::Opaque;
+        let group = app.scene.groups[0].id.0;
+        let owner = app.scene.mol_index(app.scene.groups[0].members[0]).unwrap();
+        let ligand = &mut app.scene.molecules[owner].reps[0];
+        ligand.sel_text = "not apolh".into();
+        ligand.sel_dirty = true;
+        ligand.color = ColorMethod::Solid([255,0,255,255]);
+        ligand.material = Material::Opaque;
+        app.add_group_interactions_with_id(group, scene::reserve_rep_id().0,
+            app.scene.molecules[0].id.0, app.scene.molecules[0].reps[0].id.0).unwrap();
+        app.camera.ao.enabled = false;
+        app.camera.shadow.enabled = false;
+        app.camera.depth_cue.enabled = false;
+        app.camera.background = crate::camera::Background { kind: BgKind::Solid, color: [1.0;4], ..Default::default() };
+        let dir = root.join("target/unobstructed-regression");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capture = |app: &mut App| {
+            app.camera.depth_bounds = app.scene.visible_depth_bounds();
+            let c = &app.camera;
+            let cap = app.renderer.capture_begin(&rs, 640, 360, c.view(), c.proj(640.0/360.0),
+                c.is_perspective(), c.cue_uniform(), c.ao_uniform(), c.shadow_uniform(),
+                c.background, c.eye_depth_range(), &app.scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            cap.read()
+        };
+        let mut failures = Vec::new();
+        for member in 0..10 {
+            app.show_group_member(group, member).unwrap();
+            let mi = app.scene.mol_index(app.scene.groups[0].members[member]).unwrap();
+            rebuild_dirty(&mut app.scene, &app.renderer, &app.settings, true, &rs, None, false);
+            app.unobstructed_view_multi_immediate(&[(mi,0)], 2.0, 256).unwrap();
+            let direction = app.camera.orientation * glam::Vec3::Z;
+            app.scene.molecules[mi].ensure_interaction_rings();
+            let mol = &app.scene.molecules[mi];
+            let face = mol.interaction_rings.as_deref().unwrap_or(&[]).iter().map(|ring| {
+                let points = ring.iter().map(|&i| v3(&mol.render_state().coords[i])).collect::<Vec<_>>();
+                crate::interactions::ring_normal(&points).dot(direction).abs()
+            }).fold(1.0_f32, f32::min);
+            // The pixel oracle excludes pocket/contact dashes to measure only the
+            // ribbon, using identical geometry/pose in both reference captures.
+            app.scene.molecules[mi].reps[1].visible = false;
+            let all_receptor = capture(&mut app);
+            app.scene.molecules[0].reps[1].visible = false;
+            let visible = capture(&mut app);
+            app.scene.molecules[0].visible = false;
+            let isolated = capture(&mut app);
+            app.scene.molecules[0].visible = true;
+            app.scene.molecules[0].reps[1].visible = true;
+            app.scene.molecules[mi].reps[1].visible = true;
+            let magenta = |p: &image::Rgba<u8>| p[0] > p[1].saturating_add(60) && p[2] > p[1].saturating_add(60);
+            let reference = isolated.pixels().filter(|p| magenta(p)).count();
+            let shown = isolated.pixels().zip(visible.pixels()).filter(|(a,b)| magenta(a) && magenta(b)).count();
+            let fraction = shown as f32 / reference.max(1) as f32;
+            let all_shown = isolated.pixels().zip(all_receptor.pixels()).filter(|(a,b)| magenta(a) && magenta(b)).count();
+            let all_fraction = all_shown as f32 / reference.max(1) as f32;
+            visible.save(dir.join(format!("ligand-{:02}.png",member+1))).unwrap();
+            eprintln!("ligand {}: ribbon clearance {:.2}%, all receptor {:.2}%, minimum ring face {:.3}", member+1, fraction*100.0, all_fraction*100.0, face);
+            // Even the least face-on ring must retain at least one fifth of
+            // its face area; an edge-on collapse previously scored below 0.01.
+            if fraction < 0.995 || all_fraction < 0.98 || face < 0.2 {
+                failures.push(format!("ligand {}: clearance {fraction:.3}, all receptor {all_fraction:.3}, ring face {face:.3}", member+1));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+    }
     use crate::camera::{Camera, Projection};
     use glam::Vec3;
 

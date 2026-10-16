@@ -229,6 +229,17 @@ impl Movie {
         self.prepared = None;
         Ok(())
     }
+
+    /// Switch a group's shown molecule at the start of this camera transition.
+    #[pyo3(signature = (group, member, duration=1.0, zoom_out=1.0, resolution=256, easing="smooth"))]
+    fn unobstructed_group_member(
+        &mut self, group: &MolGroup, member: usize, duration: f64,
+        zoom_out: f32, resolution: usize, easing: &str,
+    ) -> PyResult<()> {
+        self.push(ViewAction::GroupUnobstructed {
+            group: group.id, member, zoom_out, resolution,
+        }, duration, easing)
+    }
     #[getter]
     fn duration(&self) -> f64 {
         self.recipe.duration()
@@ -396,6 +407,22 @@ struct Visualizer {
 
 #[pymethods]
 impl Visualizer {
+    /// Load a saved session, including representations, colors and view settings.
+    fn load_session(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        query_job(&self.jobs, py, move |app| app.load_session_file(std::path::Path::new(&path)))
+    }
+
+    /// Load a multi-record SD/MOL file as one group with shared representations.
+    fn load_group(&self, py: Python<'_>, path: String) -> PyResult<MolGroup> {
+        let id = query_job(&self.jobs, py, move |app| app.load_group(&path))?;
+        Ok(MolGroup { id, jobs: self.jobs.clone() })
+    }
+
+    #[getter]
+    fn groups(&self, py: Python<'_>) -> PyResult<Vec<MolGroup>> {
+        let ids = query_job(&self.jobs, py, |app| Ok(app.group_ids()))?;
+        Ok(ids.into_iter().map(|id| MolGroup { id, jobs: self.jobs.clone() }).collect())
+    }
     /// Set the camera orbit pivot (x, y, z) in nanometers.
     fn rotation_center(&self, x: f32, y: f32, z: f32) -> PyResult<()> {
         if ![x, y, z].iter().all(|v| v.is_finite()) { return Err(PyValueError::new_err("rotation center must be finite")); }
@@ -940,6 +967,73 @@ impl Visualizer {
     }
 }
 
+/// Handle to one molecular group. Shared representations follow its shown member.
+#[pyclass]
+struct MolGroup {
+    id: u64,
+    jobs: Sender<AppJob>,
+}
+
+#[pymethods]
+impl MolGroup {
+    #[getter]
+    fn members(&self, py: Python<'_>) -> PyResult<Vec<MolHandle>> {
+        let id = self.id;
+        let ids = query_job(&self.jobs, py, move |app| app.group_members(id))?;
+        Ok(ids.into_iter().map(|mol| MolHandle { mol, jobs: self.jobs.clone() }).collect())
+    }
+
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        let id = self.id;
+        query_job(&self.jobs, py, move |app| app.group_members(id).map(|m| m.len()))
+    }
+
+    #[getter]
+    fn current(&self, py: Python<'_>) -> PyResult<usize> {
+        let id = self.id;
+        query_job(&self.jobs, py, move |app| app.group_current(id))
+    }
+
+    #[setter]
+    fn set_current(&self, py: Python<'_>, member: usize) -> PyResult<()> {
+        let id = self.id;
+        query_job(&self.jobs, py, move |app| app.show_group_member(id, member))
+    }
+
+    #[getter]
+    fn reps(&self, py: Python<'_>) -> PyResult<Vec<RepHandle>> {
+        let id = self.id;
+        let (mol, reps) = query_job(&self.jobs, py, move |app| app.group_rep_ids(id))?;
+        Ok(reps.into_iter().map(|rep| RepHandle { mol, rep, jobs: self.jobs.clone() }).collect())
+    }
+
+    /// Add one shared interaction representation, following the group's member.
+    fn add_interactions(&self, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
+        let (partner_mol, partner_rep) = partner_ids(&self.jobs, py, partner)?;
+        let group = self.id;
+        let rep = molar_vis_core::reserve_rep_id().0;
+        let mol = query_job(&self.jobs, py, move |app| {
+            app.add_group_interactions_with_id(group, rep, partner_mol, partner_rep)?;
+            app.group_rep_ids(group).map(|(mol, _)| mol)
+        })?;
+        Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
+    }
+}
+
+fn partner_ids(jobs: &Sender<AppJob>, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<(u64, u64)> {
+    if let Ok(r) = partner.cast::<RepHandle>() {
+        let r = r.borrow();
+        Ok((r.mol, r.rep))
+    } else if let Ok(m) = partner.cast::<MolHandle>() {
+        let mol = m.borrow().mol;
+        let first = query_job(jobs, py, move |app| app.rep_ids(mol))?.into_iter().next()
+            .ok_or_else(|| PyValueError::new_err("partner molecule has no representations"))?;
+        Ok((mol, first))
+    } else {
+        Err(PyValueError::new_err("partner must be a RepHandle or a MolHandle"))
+    }
+}
+
 /// Handle to a molecule in the viewer.
 #[pyclass]
 struct MolHandle {
@@ -949,6 +1043,25 @@ struct MolHandle {
 
 #[pymethods]
 impl MolHandle {
+    /// Whether this molecule is shown.
+    #[getter]
+    fn visible(&self, py: Python<'_>) -> PyResult<bool> {
+        let mol = self.mol;
+        query_job(&self.jobs, py, move |app| {
+            let mi = app.resolve_molecule(mol)?;
+            app.molecule_visible(mi)
+        })
+    }
+
+    #[setter]
+    fn set_visible(&self, py: Python<'_>, visible: bool) -> PyResult<()> {
+        let mol = self.mol;
+        query_job(&self.jobs, py, move |app| {
+            let mi = app.resolve_molecule(mol)?;
+            app.set_molecule_visible(mi, visible)
+        })
+    }
+
     /// Import a molecule-owned PLY mesh from memory. Coordinates are in nanometers.
     fn add_mesh_ply(&self, py: Python<'_>, name: String, bytes: &[u8]) -> PyResult<MeshHandle> {
         molar_vis_core::import_ply(bytes).map_err(PyValueError::new_err)?;
@@ -1041,19 +1154,7 @@ impl MolHandle {
     /// `partner` — a [`RepHandle`] (its rep) or a [`MolHandle`] (that molecule's first rep).
     /// Returns a handle to the new rep.
     fn add_interactions(&self, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
-        let (partner_mol, partner_rep) = if let Ok(r) = partner.cast::<RepHandle>() {
-            let r = r.borrow();
-            (r.mol, r.rep)
-        } else if let Ok(m) = partner.cast::<MolHandle>() {
-            let mol = m.borrow().mol;
-            let first = query_job(&self.jobs, py, move |app| app.rep_ids(mol))?.into_iter().next()
-                .ok_or_else(|| PyValueError::new_err("partner molecule has no representations"))?;
-            (mol, first)
-        } else {
-            return Err(PyValueError::new_err(
-                "partner must be a RepHandle or a MolHandle",
-            ));
-        };
+        let (partner_mol, partner_rep) = partner_ids(&self.jobs, py, partner)?;
         let rep = molar_vis_core::reserve_rep_id().0;
         let mol = self.mol;
         query_job(&self.jobs, py, move |app| app.add_interactions_rep_with_id(mol, rep, partner_mol, partner_rep))?;
@@ -1322,6 +1423,7 @@ fn molar_vis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Animation>()?;
     m.add_class::<Movie>()?;
     m.add_class::<MolHandle>()?;
+    m.add_class::<MolGroup>()?;
     m.add_class::<RepHandle>()?;
     m.add_class::<MeshHandle>()?;
     m.add_function(wrap_pyfunction!(spawn, m)?)?;

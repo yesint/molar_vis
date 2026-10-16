@@ -1,12 +1,16 @@
 //! Unobstructed-view geometry — pure, GPU-free, wasm-safe.
 //!
+//! Small solid targets use rendered spheres, capsules and mesh triangles in a
+//! fixed-scale depth grid (`pixels`): maximize visible area, including self-overlap.
+//! Large targets retain the accelerated atom-centre search below.
+//!
 //! Given a target representation's atoms and the atoms of every other rep that could
 //! hide it, this picks the camera view direction that leaves the **most target atoms
 //! directly visible** — front-most, hidden by neither another rep nor another atom of
 //! the target rep itself ("most of the rep is on screen").
 //!
-//! Target atoms use van-der-Waals spheres; background primitives use their rendered
-//! radii. Mesh representations supply actual triangles, accelerated with a BVH.
+//! The fallback atom search uses representation radii. Mesh representations supply
+//! actual triangles, accelerated with a BVH.
 //! Projection is orthographic (the viewer's default). A target atom counts as visible
 //! when its projected centre is covered by neither nearer spheres nor mesh triangles.
 //! The search maximizes that count over Fibonacci directions and a local refinement.
@@ -15,6 +19,9 @@
 //! `+d` side and looks back along `-d`, so a larger `dot(pos, d)` means nearer the
 //! camera. [`look_along_quat`] turns `d` into the camera orientation used by
 //! `App::unobstructed_view`.
+
+mod pixels;
+pub(crate) use pixels::{PixelScene, PixelView};
 
 use glam::{Mat3, Quat, Vec3};
 use std::f32::consts::TAU;
@@ -256,43 +263,54 @@ pub(crate) fn best_direction_with_triangles_cancellable(
 
 /// Both scorers use the same directions, tie order and three refinement rings.
 /// A batch scorer allows the GPU to evaluate each pass with one score readback.
-pub(crate) fn search_directions<E>(
+pub(crate) fn search_directions<E, S: Copy + Ord>(
     resolution: usize,
-    mut score: impl FnMut(&[Vec3]) -> Result<Vec<u32>, E>,
+    score: impl FnMut(&[Vec3]) -> Result<Vec<S>, E>,
+) -> Result<Vec3, E> {
+    search_directions_with_seeds(resolution, 1, score)
+}
+
+fn search_directions_with_seeds<E, S: Copy + Ord>(
+    resolution: usize,
+    seeds: usize,
+    mut score: impl FnMut(&[Vec3]) -> Result<Vec<S>, E>,
 ) -> Result<Vec3, E> {
     let dirs = fibonacci_sphere(resolution.max(8));
     let scores = score(&dirs)?;
     debug_assert_eq!(scores.len(), dirs.len());
-    let mut best = dirs[0];
-    let mut best_score = scores[0];
-    for (&d, &s) in dirs.iter().zip(&scores).skip(1) {
-        if s > best_score {
-            best_score = s;
-            best = d;
+    let mut ranked = dirs.into_iter().zip(scores).collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut candidates: Vec<(Vec3, S)> = Vec::new();
+    for candidate in ranked {
+        if candidates.iter().all(|(d, _)| d.dot(candidate.0) < 15_f32.to_radians().cos()) {
+            candidates.push(candidate);
+            if candidates.len() >= seeds { break; }
         }
     }
     for &ring_deg in &[10.0_f32, 4.0, 1.5] {
-        let base = best;
-        let (t1, t2) = tangent_basis(base);
         let tilt = ring_deg.to_radians();
         let (c, s) = (tilt.cos(), tilt.sin());
-        let dirs: Vec<_> = (0..16)
-            .map(|k| {
+        let dirs: Vec<_> = candidates.iter().flat_map(|&(base, _)| {
+            let (t1, t2) = tangent_basis(base);
+            (0..16).map(move |k| {
                 let az = k as f32 / 16.0 * TAU;
                 let tdir = t1 * az.cos() + t2 * az.sin();
                 (base * c + tdir * s).normalize()
-            })
+            }) })
             .collect();
         let scores = score(&dirs)?;
         debug_assert_eq!(scores.len(), dirs.len());
-        for (&d, &s) in dirs.iter().zip(&scores) {
-            if s > best_score {
-                best_score = s;
-                best = d;
+        for (candidate, (dirs, scores)) in candidates.iter_mut().zip(dirs.chunks(16).zip(scores.chunks(16))) {
+            for (&d, &s) in dirs.iter().zip(scores) {
+                if s > candidate.1 { *candidate = (d, s); }
             }
         }
     }
-    Ok(best.normalize_or_zero())
+    let mut best = candidates[0];
+    for candidate in candidates.into_iter().skip(1) {
+        if candidate.1 > best.1 { best = candidate; }
+    }
+    Ok(best.0.normalize_or_zero())
 }
 
 /// Camera orientation (a `Quat`) that looks at the target from direction `d`: the eye
@@ -604,6 +622,7 @@ impl TriangleOccluders {
 #[cfg(test)]
 mod triangle_tests {
     use super::*;
+
     #[test]
     fn mesh_silhouettes_occlude_even_when_no_atom_proxy_is_near_the_ray() {
         let triangles = [[
