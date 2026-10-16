@@ -885,3 +885,9 @@ Unobstructed view treats interaction representations as annotations, excluding
 both dashed and glowing geometry from obstacle scoring and framing. Interaction
 reps included in a combined target list are ignored; selecting only interactions
 reports that an atom representation is needed.
+
+Ligand unobstructed-view scoring builds one spatial hierarchy for receptor mesh
+triangles and clips blocker rasterization to the ligand silhouette plus its
+one-pixel clearance guard band. Regions behind the target or outside its projected
+bounds are skipped. The 192×192 scoring grid, candidate directions and readability
+objective remain unchanged; large-target atom scoring retains its existing path.

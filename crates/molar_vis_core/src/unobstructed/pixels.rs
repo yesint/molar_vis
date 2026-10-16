@@ -136,6 +136,16 @@ impl ViewGeometry {
         depth: &mut [f32],
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String> {
+        self.raster_solid_with_mesh(frame, depth, cancelled, None)
+    }
+
+    fn raster_solid_with_mesh(
+        &self,
+        frame: &Frame,
+        depth: &mut [f32],
+        cancelled: &dyn Fn() -> bool,
+        mesh: Option<&super::TriangleOccluders>,
+    ) -> Result<(), String> {
         depth.fill(f32::NEG_INFINITY);
         for (i, &(p, r)) in self.spheres.iter().enumerate() {
             if i % 256 == 0 && cancelled() {
@@ -196,34 +206,23 @@ impl ViewGeometry {
                 },
             );
         }
-        for (i, t) in self.triangles.iter().enumerate() {
-            if i % 256 == 0 && cancelled() {
-                return Err("cancelled".into());
+        if let Some(mesh) = mesh {
+            if !mesh.nodes.is_empty() {
+                frame.raster_mesh(mesh, 0, depth, cancelled)?;
             }
-            let [a, b, c] = t.map(|p| frame.project(p));
-            let ab = b - a;
-            let ac = c - a;
-            let det = ab.x * ac.y - ab.y * ac.x;
-            if det.abs() < 1e-12 {
-                continue;
-            }
-            frame.visit(a.min(b).min(c), a.max(b).max(c), depth, |x, y| {
-                let qx = x - a.x;
-                let qy = y - a.y;
-                let u = (qx * ac.y - qy * ac.x) / det;
-                let v = (ab.x * qy - ab.y * qx) / det;
-                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 {
-                    a.z + u * ab.z + v * ac.z
-                } else {
-                    f32::NEG_INFINITY
+        } else {
+            for (i, t) in self.triangles.iter().enumerate() {
+                if i % 256 == 0 && cancelled() {
+                    return Err("cancelled".into());
                 }
-            });
+                frame.raster_triangle(t, depth);
+            }
         }
         Ok(())
     }
 }
 
-struct Frame {
+struct Frame<'a> {
     center: Vec3,
     u: Vec3,
     v: Vec3,
@@ -231,12 +230,137 @@ struct Frame {
     radius: f32,
     size: usize,
     pixel_world_size: f32,
+    // Only blocker pixels within one cell of the target can affect the score.
+    coverage: Option<&'a Coverage>,
 }
-impl Frame {
+
+struct Coverage {
+    rows: Vec<(usize, usize)>,
+    lo: Vec3,
+    hi: Vec3,
+}
+impl Coverage {
+    fn new(size: usize) -> Self {
+        Self {
+            rows: vec![(size, 0); size],
+            lo: Vec3::ZERO,
+            hi: Vec3::ZERO,
+        }
+    }
+
+    fn update(&mut self, target: &[f32], frame: &Frame) {
+        let size = frame.size;
+        self.rows.fill((size, 0));
+        let mut min_x = size;
+        let mut max_x = 0;
+        let mut min_y = size;
+        let mut max_y = 0;
+        let mut min_depth = f32::INFINITY;
+        for (y, row) in target.chunks_exact(size).enumerate() {
+            for (x, &z) in row.iter().enumerate() {
+                if !z.is_finite() {
+                    continue;
+                }
+                min_depth = min_depth.min(z);
+                let x0 = x.saturating_sub(1);
+                let x1 = (x + 2).min(size);
+                for span in &mut self.rows[y.saturating_sub(1)..(y + 2).min(size)] {
+                    span.0 = span.0.min(x0);
+                    span.1 = span.1.max(x1);
+                }
+                min_x = min_x.min(x0);
+                max_x = max_x.max(x1);
+                min_y = min_y.min(y.saturating_sub(1));
+                max_y = max_y.max((y + 2).min(size));
+            }
+        }
+        let cell = 2.0 * frame.radius / size as f32;
+        self.lo = Vec3::new(
+            min_x as f32 * cell - frame.radius,
+            min_y as f32 * cell - frame.radius,
+            min_depth - 1e-5,
+        );
+        self.hi = Vec3::new(
+            max_x as f32 * cell - frame.radius,
+            max_y as f32 * cell - frame.radius,
+            f32::INFINITY,
+        );
+    }
+}
+
+impl Frame<'_> {
     fn project(&self, p: Vec3) -> Vec3 {
         let p = p - self.center;
         Vec3::new(p.dot(self.u), p.dot(self.v), p.dot(self.d))
     }
+    fn raster_triangle(&self, triangle: &[Vec3; 3], depth: &mut [f32]) {
+        let [a, b, c] = triangle.map(|p| self.project(p));
+        let ab = b - a;
+        let ac = c - a;
+        let det = ab.x * ac.y - ab.y * ac.x;
+        if det.abs() < 1e-12 {
+            return;
+        }
+        self.visit(a.min(b).min(c), a.max(b).max(c), depth, |x, y| {
+            let qx = x - a.x;
+            let qy = y - a.y;
+            let u = (qx * ac.y - qy * ac.x) / det;
+            let v = (ab.x * qy - ab.y * qx) / det;
+            if u >= 0.0 && v >= 0.0 && u + v <= 1.0 {
+                a.z + u * ab.z + v * ac.z
+            } else {
+                f32::NEG_INFINITY
+            }
+        });
+    }
+
+    // Cull whole ribbon/surface regions before projecting individual triangles.
+    // The hierarchy is built once and shared by every candidate direction.
+    fn raster_mesh(
+        &self,
+        mesh: &super::TriangleOccluders,
+        index: usize,
+        depth: &mut [f32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        if cancelled() {
+            return Err("cancelled".into());
+        }
+        let node = &mesh.nodes[index];
+        let center = self.project((node.min + node.max) * 0.5);
+        let half = (node.max - node.min) * 0.5;
+        let extent = Vec3::new(
+            self.u.abs().dot(half),
+            self.v.abs().dot(half),
+            self.d.abs().dot(half),
+        );
+        let (lo, hi) = self.coverage.map_or(
+            (
+                Vec3::new(-self.radius, -self.radius, f32::NEG_INFINITY),
+                Vec3::new(self.radius, self.radius, f32::INFINITY),
+            ),
+            |coverage| (coverage.lo, coverage.hi),
+        );
+        let epsilon = 1e-5;
+        if center.x - extent.x > hi.x + epsilon
+            || center.x + extent.x < lo.x - epsilon
+            || center.y - extent.y > hi.y + epsilon
+            || center.y + extent.y < lo.y - epsilon
+            || center.z + extent.z < lo.z - epsilon
+        {
+            return Ok(());
+        }
+        if let Some([left, right]) = node.children {
+            self.raster_mesh(mesh, left, depth, cancelled)?;
+            self.raster_mesh(mesh, right, depth, cancelled)?;
+        } else {
+            for triangle in &mesh.triangles[node.range.clone()] {
+                self.raster_triangle(triangle, depth);
+            }
+        }
+        Ok(())
+    }
+
     fn visit(
         &self,
         lo: Vec3,
@@ -250,7 +374,11 @@ impl Frame {
         let x1 = (((hi.x + self.radius) * scale).ceil().max(0.0) as usize).min(self.size);
         let y1 = (((hi.y + self.radius) * scale).ceil().max(0.0) as usize).min(self.size);
         for y in y0..y1 {
-            for x in x0..x1 {
+            let (start, end) = self.coverage.map_or((x0, x1), |coverage| {
+                let (start, end) = coverage.rows[y];
+                (x0.max(start), x1.min(end))
+            });
+            for x in start..end {
                 let z = surface(
                     (x as f32 + 0.5) / scale - self.radius,
                     (y as f32 + 0.5) / scale - self.radius,
@@ -306,18 +434,20 @@ impl PixelScene {
         }
         let (center, radius) = self.target.bounds();
         let size = 192;
+        let mesh = super::TriangleOccluders::new(&self.occluders.triangles);
         let buffers = || {
             (
                 vec![f32::NEG_INFINITY; size * size],
                 vec![f32::NEG_INFINITY; size * size],
+                Coverage::new(size),
             )
         };
-        let score = |buffers: &mut (Vec<f32>, Vec<f32>), d: Vec3| {
+        let score = |buffers: &mut (Vec<f32>, Vec<f32>, Coverage), d: Vec3| {
             if cancelled() {
                 return Err("cancelled".into());
             }
             let (u, v) = super::tangent_basis(d);
-            let frame = Frame {
+            let mut frame = Frame {
                 center,
                 u,
                 v,
@@ -326,10 +456,14 @@ impl PixelScene {
                 size,
                 pixel_world_size: view
                     .map_or(2.0 * radius / 720.0, |view| view.pixel_world_size(d)),
+                coverage: None,
             };
-            let (target, blockers) = buffers;
+            let (target, blockers, coverage) = buffers;
             self.target.raster(&frame, target, cancelled)?;
-            self.occluders.raster_solid(&frame, blockers, cancelled)?;
+            coverage.update(target, &frame);
+            frame.coverage = Some(coverage);
+            self.occluders
+                .raster_solid_with_mesh(&frame, blockers, cancelled, Some(&mesh))?;
             let area = target.iter().filter(|t| t.is_finite()).count();
             let mut solid_covered = 0;
             for y in 1..size - 1 {
@@ -406,6 +540,151 @@ impl PixelScene {
 mod tests {
     use super::*;
     #[test]
+    fn accelerated_mesh_depth_matches_brute_force_raster() {
+        // Include triangles crossing the grid from far outside and geometry
+        // behind/in front of the target, not just triangles wholly inside it.
+        let mut geometry = ViewGeometry::default();
+        for i in 0..240 {
+            let a = i as f32 * 0.37;
+            let center = Vec3::new(a.sin() * 4.0, (a * 1.7).cos() * 4.0, a.cos());
+            geometry.triangles.push([
+                center + Vec3::new(-0.4, -0.2, 0.1),
+                center + Vec3::new(0.3, -0.1, -0.1),
+                center + Vec3::new(0.0, 0.5, 0.2),
+            ]);
+        }
+        geometry.triangles.push([
+            Vec3::new(-20.0, -20.0, 0.3),
+            Vec3::new(20.0, -20.0, 0.3),
+            Vec3::new(0.0, 20.0, 0.3),
+        ]);
+        let mesh = super::super::TriangleOccluders::new(&geometry.triangles);
+        for d in super::super::fibonacci_sphere(32) {
+            let (u, v) = super::super::tangent_basis(d);
+            let frame = Frame {
+                center: Vec3::new(0.1, -0.2, 0.3),
+                u,
+                v,
+                d,
+                radius: 1.0,
+                size: 64,
+                pixel_world_size: 0.01,
+                coverage: None,
+            };
+            let mut brute = vec![0.0; 64 * 64];
+            let mut accelerated = brute.clone();
+            geometry
+                .raster_solid(&frame, &mut brute, &|| false)
+                .unwrap();
+            geometry
+                .raster_solid_with_mesh(&frame, &mut accelerated, &|| false, Some(&mesh))
+                .unwrap();
+            assert_eq!(brute, accelerated, "depth differs for {d:?}");
+        }
+        let mut depth = vec![0.0; 64 * 64];
+        let frame = Frame {
+            center: Vec3::ZERO,
+            u: Vec3::X,
+            v: Vec3::Y,
+            d: Vec3::Z,
+            radius: 1.0,
+            size: 64,
+            pixel_world_size: 0.01,
+            coverage: None,
+        };
+        assert!(geometry
+            .raster_solid_with_mesh(&frame, &mut depth, &|| true, Some(&mesh))
+            .is_err());
+    }
+
+    #[test]
+    fn target_clipping_preserves_visibility_and_guard_band() {
+        let mut target = ViewGeometry::default();
+        target.capsules.push((
+            Vec3::new(-0.6, -0.3, 0.0),
+            Vec3::new(0.4, 0.2, 0.1),
+            0.08,
+            0.0,
+        ));
+        target.spheres.push((Vec3::new(0.4, -0.5, 0.2), 0.12));
+        let mut blockers = ViewGeometry::default();
+        for i in 0..80 {
+            let a = i as f32 * 0.73;
+            let p = Vec3::new(a.sin(), a.cos(), (a * 0.6).sin());
+            blockers.spheres.push((p, 0.1));
+            blockers
+                .capsules
+                .push((p, p + Vec3::new(0.4, 0.0, 0.2), 0.06, 0.02));
+            blockers.lines.push((p, p + Vec3::Y, 8.0, 2.0));
+            blockers.points.push((p, 6.0));
+            blockers.triangles.push([p, p + Vec3::X, p + Vec3::Y]);
+        }
+        let mesh = super::super::TriangleOccluders::new(&blockers.triangles);
+        let size = 64;
+        for d in super::super::fibonacci_sphere(32) {
+            let (u, v) = super::super::tangent_basis(d);
+            let mut frame = Frame {
+                center: Vec3::ZERO,
+                u,
+                v,
+                d,
+                radius: 1.5,
+                size,
+                pixel_world_size: 0.01,
+                coverage: None,
+            };
+            let mut target_depth = vec![0.0; size * size];
+            let mut brute = target_depth.clone();
+            let mut clipped = target_depth.clone();
+            target.raster(&frame, &mut target_depth, &|| false).unwrap();
+            blockers
+                .raster_solid(&frame, &mut brute, &|| false)
+                .unwrap();
+            let mut coverage = Coverage::new(size);
+            coverage.update(&target_depth, &frame);
+            frame.coverage = Some(&coverage);
+            blockers
+                .raster_solid_with_mesh(&frame, &mut clipped, &|| false, Some(&mesh))
+                .unwrap();
+            for y in 1..size - 1 {
+                for x in 1..size - 1 {
+                    let z = target_depth[y * size + x];
+                    if !z.is_finite() {
+                        continue;
+                    }
+                    for yy in y - 1..=y + 1 {
+                        for xx in x - 1..=x + 1 {
+                            let i = yy * size + xx;
+                            assert_eq!(
+                                brute[i] > z + 1e-5,
+                                clipped[i] > z + 1e-5,
+                                "solid guard band differs for {d:?} at {x},{y}"
+                            );
+                        }
+                    }
+                }
+            }
+            frame.coverage = None;
+            blockers
+                .raster_screen(&frame, &mut brute, &|| false)
+                .unwrap();
+            frame.coverage = Some(&coverage);
+            blockers
+                .raster_screen(&frame, &mut clipped, &|| false)
+                .unwrap();
+            for (i, &z) in target_depth.iter().enumerate() {
+                if z.is_finite() {
+                    assert_eq!(
+                        z >= brute[i] - 1e-5,
+                        z >= clipped[i] - 1e-5,
+                        "final visibility differs for {d:?} at {i}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn licorice_ring_prefers_a_face_over_a_collapsed_edge() {
         let mut scene = PixelScene::default();
         for i in 0..6 {
@@ -428,6 +707,7 @@ mod tests {
             radius: 2.0,
             size: 128,
             pixel_world_size: 0.01,
+            coverage: None,
         };
         let mut g = ViewGeometry::default();
         g.spheres.push((Vec3::ZERO, 0.5));
@@ -449,6 +729,7 @@ mod tests {
             radius: 2.0,
             size: 128,
             pixel_world_size: 0.01,
+            coverage: None,
         };
         let mut g = ViewGeometry::default();
         g.capsules.push((
@@ -474,6 +755,7 @@ mod tests {
             radius: 2.0,
             size: 128,
             pixel_world_size: 0.01,
+            coverage: None,
         };
         let mut g = ViewGeometry::default();
         g.lines.push((
