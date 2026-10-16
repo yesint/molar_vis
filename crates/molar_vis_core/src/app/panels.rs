@@ -315,6 +315,11 @@ impl App {
                     self.rt.image_dialog = Some(ModalState::new(ImageDialog { scale: 1 }));
                     ui.close();
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui.button(format!("{}  Movie…", icon::FILM_STRIP)).clicked() {
+                    self.movie_dialog = Some(ModalState::new(super::movie::MovieDialog::new(&self.scene)));
+                    ui.close();
+                }
             }).response);
 
             // — Edit —
@@ -357,25 +362,6 @@ impl App {
                 {
                     self.align_dialog =
                         Some(super::align_dialog::AlignDialog::new(&self.scene));
-                    ui.close();
-                }
-            }).response);
-
-            // — View — (its only entry is the console toggle, so the whole menu goes
-            // with the `scripting` feature)
-            #[cfg(feature = "scripting")]
-            menu_buttons.push(ui.menu_button("View", |ui| {
-                // Checkable Console toggle (a `[x]`-style item via the leading icon).
-                let mark = if self.console.open { icon::CHECK_SQUARE } else { icon::SQUARE };
-                if ui
-                    .button(format!("{}  Console", mark))
-                    .on_hover_text("Scripting console (Rhai) — drive the viewer with commands")
-                    .clicked()
-                {
-                    self.console.open = !self.console.open;
-                    if self.console.open {
-                        self.console.ui.focus_input = true; // grab the input field on open
-                    }
                     ui.close();
                 }
             }).response);
@@ -663,7 +649,7 @@ impl App {
             }
         }
         if let Some((min, max)) = focus {
-            self.camera.focus_bbox(min, max);
+            self.focus_camera_bounds(min, max);
             view_dirty = true;
         }
         view_dirty
@@ -981,7 +967,7 @@ impl App {
                     }
                     view_dirty = true;
                 } else if let Some((min, max)) = cur_bbox {
-                    self.camera.focus_bbox(min, max);
+                    self.focus_camera_bounds(min, max);
                     view_dirty = true;
                 }
             }
@@ -994,7 +980,7 @@ impl App {
                 if let Some(&id) = self.scene.groups[gi].members.get(nc) {
                     if let Some(mi) = self.scene.mol_index(id) {
                         let (min, max) = self.scene.molecules[mi].current_bbox();
-                        self.camera.recenter(0.5 * (min + max));
+                        self.center_camera_on(0.5 * (min + max));
                     }
                 }
                 view_dirty = true;

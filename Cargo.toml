@@ -37,9 +37,6 @@ egui-stylesheet = "0.1"
 molar = { version = "=2.3.0", default-features = false }
 molar_python = { version = "=2.3.0" }
 molar_ff = { version = "=2.3.0", default-features = false }
-# Pure-Rust embedded scripting language for the in-app command console (native + wasm).
-# default-features=false + "std" == Rhai's own default; single-threaded (no "sync"), no time deps.
-rhai = { version = "1", default-features = false, features = ["std"] }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]

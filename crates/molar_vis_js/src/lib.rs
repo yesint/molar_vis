@@ -44,6 +44,186 @@ use molar_vis_core::{
     parse_projection,
 };
 
+use molar_vis_core::{
+    AnimationHandle as CoreAnimation, Easing, Movie as CoreMovie, PreparedMovie, TaskState,
+    ViewAction, ViewStep,
+};
+
+#[wasm_bindgen]
+pub struct Animation {
+    handle: CoreAnimation,
+    jobs: Sender<AppJob>,
+}
+#[wasm_bindgen]
+impl Animation {
+    pub fn cancel(&self) {
+        self.handle.cancel();
+    }
+    #[wasm_bindgen(getter)]
+    pub fn done(&self) -> bool {
+        self.handle.is_done()
+    }
+    pub fn progress_json(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.handle.progress()).map_err(|e| JsError::new(&e.to_string()))
+    }
+    pub async fn wait(&self) -> Result<(), JsError> {
+        let handle = self.handle.clone();
+        while !handle.is_done() {
+            // Yield to the viewer's next frame; no busy loop on the browser thread.
+            query_job(&self.jobs, |_| Ok(())).await?;
+        }
+        let p = handle.progress();
+        match p.state {
+            TaskState::Completed => Ok(()),
+            TaskState::Cancelled => Err(JsError::new("animation cancelled")),
+            _ => Err(JsError::new(
+                &p.error.unwrap_or_else(|| "animation failed".into()),
+            )),
+        }
+    }
+}
+async fn schedule_view(
+    jobs: &Sender<AppJob>,
+    action: ViewAction,
+    duration: Option<f64>,
+    easing: Option<String>,
+) -> Result<Animation, JsError> {
+    action.validate().map_err(|e| JsError::new(&e))?;
+    if duration.is_some_and(|d| !d.is_finite() || d < 0.0) { return Err(JsError::new("duration must be finite and non-negative")); }
+    let easing = Easing::parse(easing.as_deref().unwrap_or("smooth")).map_err(|e| JsError::new(&e))?;
+    let handle = query_job(jobs, move |app| app.program_view(action, duration, easing)).await?;
+    Ok(Animation {
+        handle,
+        jobs: jobs.clone(),
+    })
+}
+
+#[wasm_bindgen]
+pub struct Movie {
+    recipe: CoreMovie,
+    prepared: Option<PreparedMovie>,
+    jobs: Sender<AppJob>,
+}
+impl Movie {
+    fn push(
+        &mut self,
+        action: ViewAction,
+        duration: f64,
+        easing: Option<String>,
+    ) -> Result<(), JsError> {
+        let step = ViewStep {
+            action,
+            duration,
+            easing: Easing::parse(easing.as_deref().unwrap_or("smooth"))
+                .map_err(|e| JsError::new(&e))?,
+        };
+        step.validate().map_err(|e| JsError::new(&e))?;
+        self.recipe.steps.push(step);
+        self.prepared = None;
+        Ok(())
+    }
+    async fn prepare(&mut self) -> Result<PreparedMovie, JsError> {
+        if let Some(movie) = &self.prepared {
+            return Ok(movie.clone());
+        }
+        let recipe = self.recipe.clone();
+        let movie = query_job(&self.jobs, move |app| app.prepare_movie_viewport(&recipe)).await?;
+        self.prepared = Some(movie.clone());
+        Ok(movie)
+    }
+}
+#[wasm_bindgen]
+impl Movie {
+    pub fn rotate(
+        &mut self,
+        yaw: f32,
+        pitch: f32,
+        duration: f64,
+        easing: Option<String>,
+    ) -> Result<(), JsError> {
+        self.push(ViewAction::rotation(yaw, pitch), duration, easing)
+    }
+    pub fn zoom(
+        &mut self,
+        factor: f32,
+        duration: f64,
+        easing: Option<String>,
+    ) -> Result<(), JsError> {
+        self.push(ViewAction::zoom(factor), duration, easing)
+    }
+    pub fn hold(&mut self, duration: f64) -> Result<(), JsError> {
+        self.push(ViewAction::Hold, duration, None)
+    }
+    pub fn unobstructed_view(
+        &mut self,
+        rep: &RepHandle,
+        duration: f64,
+        zoom_out: Option<f32>,
+        resolution: Option<usize>,
+    ) -> Result<(), JsError> {
+        self.push(
+            ViewAction::Unobstructed {
+                targets: vec![(rep.mol, rep.rep)],
+                zoom_out: zoom_out.unwrap_or(1.0),
+                resolution: resolution.unwrap_or(256),
+            },
+            duration,
+            None,
+        )
+    }
+    pub fn focus(
+        &mut self,
+        mol: &MolHandle,
+        selection: String,
+        duration: f64,
+    ) -> Result<(), JsError> {
+        self.push(
+            ViewAction::Focus {
+                mol: mol.mol,
+                selection,
+            },
+            duration,
+            None,
+        )
+    }
+    /// Add any shared ViewStep, including simultaneous motion and saved-view transitions.
+    pub fn add_step_json(&mut self, json: &str) -> Result<(), JsError> {
+        let step: ViewStep =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        step.validate().map_err(|e| JsError::new(&e))?;
+        self.recipe.steps.push(step);
+        self.prepared = None;
+        Ok(())
+    }
+    pub fn trajectory(&mut self, mol: &MolHandle, start: usize, end: usize, fps: f64) -> Result<(), JsError> {
+        if !fps.is_finite() || fps <= 0.0 { return Err(JsError::new("trajectory fps must be finite and positive")); }
+        self.recipe.trajectories.retain(|track| track.mol != mol.mol);
+        self.recipe.trajectories.push(molar_vis_core::TrajectoryTrack { mol: mol.mol, start, end, fps });
+        self.prepared = None;
+        Ok(())
+    }
+    #[wasm_bindgen(getter)]
+    pub fn duration(&self) -> f64 {
+        self.recipe.duration()
+    }
+    pub async fn preview(&mut self) -> Result<Animation, JsError> {
+        let movie = self.prepare().await?;
+        let handle = query_job(&self.jobs, move |app| app.preview_movie(movie)).await?;
+        Ok(Animation {
+            handle,
+            jobs: self.jobs.clone(),
+        })
+    }
+    pub async fn seek(&mut self, time: f64) -> Result<(), JsError> {
+        let movie = self.prepare().await?;
+        query_job(&self.jobs, move |app| {
+            app.cancel_animation();
+            app.seek_movie(&movie, time)
+        })
+        .await
+    }
+}
+
 // At most one viewer per page for v1 (single-threaded wasm + one global job channel).
 thread_local! {
     static VIEWER_STARTED: Cell<bool> = const { Cell::new(false) };
@@ -191,32 +371,90 @@ impl Visualizer {
         if ![x, y, z].iter().all(|v| v.is_finite()) { return Err(JsError::new("rotation center must be finite")); }
         send(&self.jobs, Box::new(move |app| app.set_rotation_center_xyz([x, y, z]))); Ok(())
     }
-    pub fn focus(&self, mol: &MolHandle, sel: &Sel) {
-        let m = mol.mol; let indices = sel.indices.clone();
-        send(&self.jobs, Box::new(move |app| { if let Err(e) = app.resolve_molecule(m).and_then(|mi| app.focus_selection(mi, &indices)) { log::error!("focus: {e}"); } }));
+    pub async fn focus(
+        &self,
+        mol: &MolHandle,
+        sel: &Sel,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        let selection = format!(
+            "index {}",
+            sel.indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        schedule_view(
+            &self.jobs,
+            ViewAction::Focus {
+                mol: mol.mol,
+                selection,
+            },
+            duration,
+            easing,
+        )
+        .await
     }
-    pub fn unobstructed_view(&self, rep: &RepHandle, zoom_out: f32, resolution: usize) {
-        let (m, r) = (rep.mol, rep.rep);
-        send(&self.jobs, Box::new(move |app| { if let Err(e) = app.resolve_rep(m, r).and_then(|(mi,ri)| app.unobstructed_view(mi, ri, zoom_out, resolution)) { log::error!("unobstructed view: {e}"); } }));
+    pub async fn unobstructed_view(
+        &self,
+        rep: &RepHandle,
+        zoom_out: f32,
+        resolution: usize,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        schedule_view(
+            &self.jobs,
+            ViewAction::Unobstructed {
+                targets: vec![(rep.mol, rep.rep)],
+                zoom_out,
+                resolution,
+            },
+            duration,
+            easing,
+        )
+        .await
     }
-    pub fn unobstructed_view_multi(&self, reps: &js_sys::Array, zoom_out: f32, resolution: usize) -> Result<(), JsError> {
-        if reps.length() == 0 { return Err(JsError::new("reps must not be empty")); }
-        let targets: Vec<_> = reps.iter().map(|value| {
-            let read = |name: &str| -> Result<u64, JsError> {
-                let n = js_sys::Reflect::get(&value, &JsValue::from_str(name))
-                    .map_err(|_| JsError::new("could not read representation handle"))?
-                    .as_f64().ok_or_else(|| JsError::new("reps must contain RepHandle objects"))?;
-                if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 9_007_199_254_740_991.0 { return Err(JsError::new("invalid representation ID")); }
-                Ok(n as u64)
-            };
-            Ok((read("molId")?, read("repId")?))
-        }).collect::<Result<_, JsError>>()?;
-        send(&self.jobs, Box::new(move |app| {
-            let result = targets.iter().map(|&(m,r)| app.resolve_rep(m,r)).collect::<Result<Vec<_>,_>>()
-                .and_then(|pairs| app.unobstructed_view_multi(&pairs, zoom_out, resolution));
-            if let Err(e) = result { log::error!("unobstructed view multi: {e}"); }
-        })); Ok(())
+    pub async fn unobstructed_view_multi(
+        &self,
+        reps: &js_sys::Array,
+        zoom_out: f32,
+        resolution: usize,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        let targets = reps
+            .iter()
+            .map(|value| {
+                let read = |name: &str| -> Result<u64, JsError> {
+                    let n = js_sys::Reflect::get(&value, &JsValue::from_str(name))
+                        .map_err(|_| JsError::new("could not read representation handle"))?
+                        .as_f64()
+                        .ok_or_else(|| JsError::new("reps must contain RepHandle objects"))?;
+                    if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 9_007_199_254_740_991.0
+                    {
+                        return Err(JsError::new("invalid representation ID"));
+                    }
+                    Ok(n as u64)
+                };
+                Ok((read("molId")?, read("repId")?))
+            })
+            .collect::<Result<Vec<_>, JsError>>()?;
+        schedule_view(
+            &self.jobs,
+            ViewAction::Unobstructed {
+                targets,
+                zoom_out,
+                resolution,
+            },
+            duration,
+            easing,
+        )
+        .await
     }
+
     /// JSON snapshot of current colors, including viewer UI/session edits.
     pub async fn colors_json(&self) -> Result<String, JsError> {
         let (tx, rx) = futures_channel::oneshot::channel();
@@ -442,29 +680,111 @@ impl Visualizer {
 
     // --- View controls (mirror the view-settings UI + the Python module). ---
 
-    /// Orbit the camera by absolute angles in degrees (yaw about up, pitch about right).
-    pub fn rotate(&self, yaw: f32, pitch: f32) {
-        send(&self.jobs, Box::new(move |app| app.rotate_view(yaw, pitch)));
+    pub fn movie(&self) -> Movie {
+        Movie {
+            recipe: CoreMovie::default(),
+            prepared: None,
+            jobs: self.jobs.clone(),
+        }
     }
-
-    /// Roll the camera about the view axis by an angle in degrees.
-    pub fn roll(&self, angle: f32) {
-        send(&self.jobs, Box::new(move |app| app.roll_view(angle)));
+    pub async fn view_json(&self) -> Result<String, JsError> {
+        query_job(&self.jobs, |app| {
+            serde_json::to_string(&app.view_pose()).map_err(|e| e.to_string())
+        })
+        .await
     }
-
-    /// Pan by a fraction of the viewport height (`+x` right, `+y` up).
-    pub fn pan(&self, dx: f32, dy: f32) {
-        send(&self.jobs, Box::new(move |app| app.pan_view(dx, dy)));
+    pub async fn animate_json(&self, json: &str) -> Result<Animation, JsError> {
+        let step: ViewStep =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        step.validate().map_err(|e| JsError::new(&e))?;
+        let handle = query_job(&self.jobs, move |app| app.animate_view(step)).await?;
+        Ok(Animation {
+            handle,
+            jobs: self.jobs.clone(),
+        })
     }
-
-    /// Zoom by a factor (`>1` closer, `<1` farther).
-    pub fn zoom(&self, factor: f32) {
-        send(&self.jobs, Box::new(move |app| app.zoom_view(factor)));
+    pub async fn rotate(
+        &self,
+        yaw: f32,
+        pitch: f32,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        schedule_view(
+            &self.jobs,
+            ViewAction::rotation(yaw, pitch),
+            duration,
+            easing,
+        )
+        .await
     }
-
-    /// Re-frame all molecules (zoom-to-fit), keeping projection/background/lighting.
-    pub fn reset_view(&self) {
-        send(&self.jobs, Box::new(|app| app.reset_view()));
+    pub async fn roll(
+        &self,
+        angle: f32,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        schedule_view(
+            &self.jobs,
+            ViewAction::Move {
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: angle,
+                zoom: 1.0,
+                pan: [0.0; 2],
+            },
+            duration,
+            easing,
+        )
+        .await
+    }
+    pub async fn pan(
+        &self,
+        dx: f32,
+        dy: f32,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        schedule_view(
+            &self.jobs,
+            ViewAction::Move {
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: 0.0,
+                zoom: 1.0,
+                pan: [dx, dy],
+            },
+            duration,
+            easing,
+        )
+        .await
+    }
+    pub async fn zoom(
+        &self,
+        factor: f32,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        schedule_view(&self.jobs, ViewAction::zoom(factor), duration, easing).await
+    }
+    pub async fn reset_view(
+        &self,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        schedule_view(&self.jobs, ViewAction::Reset, duration, easing).await
+    }
+    pub async fn go_to_view(
+        &self,
+        json: &str,
+        duration: Option<f64>,
+        easing: Option<String>,
+    ) -> Result<Animation, JsError> {
+        let view = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        schedule_view(&self.jobs, ViewAction::To { view }, duration, easing).await
+    }
+    pub fn cancel_animation(&self) {
+        send(&self.jobs, Box::new(|app| app.cancel_animation()));
     }
 
     /// Set the projection: `"perspective"` or `"orthographic"`.

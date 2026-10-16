@@ -1923,7 +1923,7 @@ fn transparent_vdw_hides_enclosed_sphere_surfaces() {
     use crate::{geometry::RepKind, material::Material};
     use molar::prelude::Atom;
     let rs = gpu();
-    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings { ssaa: 1, shadow_res: 256 });
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings { ssaa: 1, shadow_res: 256, ..Default::default() });
     let mut camera = Camera::frame_bbox(Vec3::splat(-0.22), Vec3::splat(0.22), 0.8);
     camera.background.color = [1.0; 4];
     camera.ao.enabled = false;

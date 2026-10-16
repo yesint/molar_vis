@@ -14,11 +14,6 @@ description = "Interactive molecular viewer with GPU rendering, PLY meshes, and 
 name = "molar_vis"
 path = "src/main.rs"
 
-[features]
-# Pass-through for the core's in-app Rhai scripting console (off by default — see
-# `molar_vis_core`'s own `scripting` feature). Build with `--features scripting` to get it.
-scripting = ["molar_vis_core/scripting"]
-
 [dependencies]
 molar_vis_core = { version = "0.2.2", path = "../molar_vis_core" }
 env_logger = "0.11"

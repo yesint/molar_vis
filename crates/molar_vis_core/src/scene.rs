@@ -58,6 +58,7 @@ pub struct GroupId(pub u64);
 /// Switching members strips the prefix off the old member and re-materializes it
 /// onto the new one ([`Scene::switch_group_member`]); snapshots (undo/session)
 /// carry their own `Vec<RepState>` copies.
+#[derive(Clone)]
 pub struct MolGroup {
     pub id: GroupId,
     /// Display name (the source file's name).

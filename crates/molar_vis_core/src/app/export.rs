@@ -214,6 +214,7 @@ impl App {
             return;
         }
         let (cap, name) = self.rt.pending_capture.take().unwrap();
+        if let Some(error) = cap.error() { self.status = error; return; }
         let img = cap.read();
         let mut bytes = std::io::Cursor::new(Vec::new());
         match img.write_to(&mut bytes, image::ImageFormat::Png) {

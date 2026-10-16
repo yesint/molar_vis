@@ -34,9 +34,6 @@ cargo test -q -p molar_vis_core
 # molar_vis_py is excluded on purpose: it enables pyo3 `extension-module`
 # unconditionally and is cdylib-only, so a test harness for it finds no libpython.
 
-echo "== tests (--features scripting) =="
-cargo test -q -p molar_vis_core --features scripting
-
 echo "== wasm32 build check =="
 cargo build -q --target wasm32-unknown-unknown -p molar_vis_core
 

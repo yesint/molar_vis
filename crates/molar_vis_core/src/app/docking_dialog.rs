@@ -317,7 +317,7 @@ impl App {
         if let Some(mi) = self.scene.mol_index(member_id) {
             let (min, max) = self.scene.molecules[mi].current_bbox();
             let pad = glam::Vec3::splat(POSE_VIEW_MARGIN);
-            self.camera.focus_bbox(min - pad, max + pad);
+            self.focus_camera_bounds(min - pad, max + pad);
         }
     }
 
@@ -483,7 +483,7 @@ impl App {
         if let Some(&id) = self.scene.groups[gi].members.get(member) {
             if let Some(mi) = self.scene.mol_index(id) {
                 let (min, max) = self.scene.molecules[mi].current_bbox();
-                self.camera.recenter(0.5 * (min + max));
+                self.center_camera_on(0.5 * (min + max));
             }
         }
         self.view_dirty = true;

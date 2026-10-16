@@ -79,16 +79,13 @@ impl App {
     /// Shared by [`Self::new_session`] (start empty) and [`Self::apply_session`]
     /// (start empty, then reload from a file).
     pub(super) fn reset_document(&mut self) {
+        self.cancel_animation();
         self.scene.molecules.clear();
         self.scene.groups.clear();
         self.scene.trash.clear();
         self.scene.group_trash.clear();
         self.scene.loaders.clear();
         self.load_dialog = None;
-        // A new document = a fresh REPL: drop console variables so a stored handle
-        // (`let m = mol(0)`) doesn't outlive the molecule it referred to.
-        #[cfg(feature = "scripting")]
-        self.console.repl.reset();
     }
 
     /// Start a new, empty visualization state: remove every molecule, reset the

@@ -5,6 +5,9 @@
 //! live in the `molar_vis` binary so this crate can compile to `wasm32-unknown-unknown`.
 
 mod analysis;
+mod animation;
+#[cfg(not(target_arch = "wasm32"))]
+mod video;
 mod app;
 mod camera;
 /// Espaloma partial-charge assignment (native only — see the module docs).
@@ -70,3 +73,8 @@ pub use launch::run_web;
 // Re-export eframe so downstream crates (the bin, a future web crate) can name
 // its types without pinning the version themselves.
 pub use eframe;
+
+pub use animation::{AnimationHandle, Easing, Movie, TaskProgress, TaskState, TrajectoryTrack, ViewAction, ViewPose, ViewStep};
+pub use app::PreparedMovie;
+#[cfg(not(target_arch = "wasm32"))]
+pub use video::VideoOptions;

@@ -598,9 +598,14 @@ impl App {
             mesh_rx,
             draw: None,
             last_gray_active: None,
-            #[cfg(feature = "scripting")]
-            console: Console::default(),
             jobs_rx: None,
+            preview: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            movie_job: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            background_movie: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            movie_dialog: None,
             #[cfg(not(target_arch = "wasm32"))]
             render_state: cc.wgpu_render_state.clone(),
         };
@@ -732,26 +737,6 @@ impl App {
         }
         if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_ALIGN") {
             app.debug_align(&spec);
-        }
-
-        // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai
-        // script at startup through the same path the console uses, so a command's
-        // effect (e.g. `mol(0).rep(0).set_color("chain")`) can be screenshot headlessly.
-        // Ahead of the offscreen-render hooks below, so the effect lands in a
-        // MOLAR_VIS_DEBUG_SAVE_IMAGE render and not just in a window screenshot.
-        #[cfg(feature = "scripting")]
-        if let Ok(src) = std::env::var("MOLAR_VIS_DEBUG_SCRIPT") {
-            #[cfg(not(target_arch = "wasm32"))]
-            let src = match src.strip_prefix('@') {
-                Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
-                    log::error!("debug script file: {e}");
-                    String::new()
-                }),
-                None => src,
-            };
-            app.run_script(&src);
-            app.console.open = true; // show the console (echo + output) for the screenshot
-            app.console.ui.focus_input = true;
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>] opens that rep in Draw

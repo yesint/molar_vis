@@ -380,6 +380,7 @@ pub struct CaptureReadback {
     /// drives the map with a blocking `device.poll(Wait)` instead.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl CaptureReadback {
@@ -388,6 +389,8 @@ impl CaptureReadback {
     pub fn is_ready(&self) -> bool {
         self.ready.load(std::sync::atomic::Ordering::Acquire)
     }
+
+    pub fn error(&self) -> Option<String> { self.error.lock().unwrap().clone() }
 
     /// De-pad the readback rows, swizzle BGRA→RGBA if needed, and downsample the
     /// supersampled render to the requested output size. Consumes the readback (unmaps
@@ -1981,16 +1984,17 @@ impl SceneRenderer {
 
         let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = ready.clone();
+        let error = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let map_error = error.clone();
         buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
+            if let Err(e) = res { *map_error.lock().unwrap() = Some(format!("GPU readback failed: {e}")); }
+            flag.store(true, std::sync::atomic::Ordering::Release);
         });
         let bgra = matches!(
             self.color_format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
-        CaptureReadback { buffer, out, render, padded_bpr, bgra, ready }
+        CaptureReadback { buffer, out, render, padded_bpr, bgra, ready, error }
     }
 
     /// Large native searches use compute; small selections and unsupported devices
@@ -2242,6 +2246,7 @@ impl SceneRenderer {
 
     /// Abort an in-progress trace (the camera moved): stop issuing submits.
     pub fn rt_trace_cancel(&mut self) {
+        self.save_target = None;
         if let Some(rt) = self.raytracer.as_mut() {
             rt.trace_cancel();
         }

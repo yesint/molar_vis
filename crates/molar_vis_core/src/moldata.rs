@@ -35,6 +35,13 @@ use crate::scene::EvalError;
 /// interior-mutability / lifetime discipline (mirroring how pymolar uses `UnsafeCell`
 /// under the GIL).
 pub trait SharedSource {
+    /// Return an independent topology/coordinate snapshot under the host's lock.
+    /// The default rejects snapshots rather than borrow mutable external memory.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn snapshot(&self) -> Result<(Topology, State), String> {
+        Err("this shared data source does not support background snapshots".into())
+    }
+
     /// Borrow the externally-owned topology.
     fn topology(&self) -> &Topology;
     /// Borrow the externally-owned state (live coordinates / box / time).
@@ -61,6 +68,17 @@ pub enum MolData {
 }
 
 impl MolData {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn snapshot(&self) -> Result<(Topology, State), String> {
+        match self {
+            Self::Owned(system) => Ok((system.topology().clone(), State {
+                coords: system.state().coords.clone(), time: system.state().time,
+                pbox: system.state().pbox.clone(), ..Default::default()
+            })),
+            Self::Shared(source) => source.snapshot(),
+        }
+    }
+
     /// Whether this molecule renders from an external shared source (pymolar). Such
     /// molecules have their coordinates mutated from outside the viewer, so the
     /// render loop polls [`coords_version`](Self::coords_version) to re-read them when

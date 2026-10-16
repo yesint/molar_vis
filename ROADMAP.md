@@ -45,7 +45,7 @@ materials/OIT, surface, trajectories, browser app, picking/lasso, …) are track
 
 ## Scripting & extensibility
 - ~~Python bindings with exposed visualizer objects~~ — **shipped** (M26)
-- ~~Embedded internal command language~~ — **shipped** (optional Rhai console)
+- ~~Camera animation and native FFmpeg movie export~~ — **shipped**; see [the guide](docs/ANIMATION.md).
 - Plugins architecture
 
 ## Drug-discovery goodies

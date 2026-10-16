@@ -824,6 +824,28 @@ fn queue_geometry(rep: &mut Representation, input: crate::geometry_jobs::Input) 
 /// hottest function in the app actually touches, and lets a caller keep the rest of `self`
 /// borrowed while it runs.
 pub(super) fn rebuild_dirty(
+    scene: &mut Scene, renderer: &SceneRenderer, settings: &Settings,
+    view_dirty: bool, rs: &eframe::egui_wgpu::RenderState,
+    gray_active: Option<(crate::scene::MolId, usize)>, background: bool,
+) -> bool {
+    rebuild_dirty_inner(scene,renderer,settings,view_dirty,rs,gray_active,RebuildOptions { background, preserve_cached_ss: false })
+}
+
+/// Preserve frozen secondary structure when first reconstructing a movie snapshot.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn rebuild_movie_snapshot(
+    scene: &mut Scene, renderer: &SceneRenderer, settings: &Settings,
+    rs: &eframe::egui_wgpu::RenderState,
+) -> bool {
+    rebuild_dirty_inner(scene,renderer,settings,true,rs,None,RebuildOptions { background: false, preserve_cached_ss: true })
+}
+
+struct RebuildOptions {
+    background: bool,
+    preserve_cached_ss: bool,
+}
+
+fn rebuild_dirty_inner(
 scene: &mut Scene,
 renderer: &SceneRenderer,
 settings: &Settings,
@@ -834,8 +856,9 @@ rs: &eframe::egui_wgpu::RenderState,
 // in Draw mode. `None` when not drawing → nothing greyed. The caller marks all reps
 // `geom_dirty` when this changes, so a rebuild reaches every rep.
 gray_active: Option<(crate::scene::MolId, usize)>,
-background: bool,
+options: RebuildOptions,
 ) -> bool {
+    let RebuildOptions { background, preserve_cached_ss } = options;
     #[cfg(target_arch = "wasm32")]
     let _ = background;
     let mut changed = scene.refresh_selections();
@@ -978,8 +1001,11 @@ background: bool,
                 // into the cache, build geometry, recreate GPU buffers.
                 let (geom, fresh_ss, primitive_cache, cartoon_cache) = {
                     let bound = mol.data.bind_with_state(sel, state);
-                    let ss = geometry::needs_ss(&rep.params, rep.color)
-                        .then(|| SsMap::compute(&bound, rep.ss_algo));
+                    let ss = geometry::needs_ss(&rep.params, rep.color).then(|| {
+                        if preserve_cached_ss && !rep.ss_per_frame && !rep.dynamic {
+                            rep.ss_cache.clone().unwrap_or_else(|| SsMap::compute(&bound, rep.ss_algo))
+                        } else { SsMap::compute(&bound, rep.ss_algo) }
+                    });
                     let primitive_cache = geometry::PrimitiveCache::new(
                         &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                         ss.as_ref(),

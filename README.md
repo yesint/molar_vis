@@ -262,8 +262,8 @@ reference, including meshes, colors and camera controls. The
 [JavaScript API](https://github.com/yesint/molar_vis/blob/main/crates/molar_vis_js/README.md) exposes browser viewer controls;
 it does not expose MolAR's full analysis API or live coordinate editing.
 
-An optional in-app [Rhai](https://rhai.rs) console is available when building with
-`--features scripting`.
+Camera controls support animated transitions. Native movie export streams frames to an
+external FFmpeg process. See [animation and video export](docs/ANIMATION.md).
 
 ## Selections
 

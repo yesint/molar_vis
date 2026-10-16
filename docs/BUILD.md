@@ -15,15 +15,8 @@ cargo build -p molar_vis_core --target wasm32-unknown-unknown   # WASM-readiness
 cargo build -p molar_vis_py                                     # native Python module (compile check)
 wasm-pack build crates/molar_vis_js --target web --out-dir web/pkg   # browser JS API (M27)
 
-cargo run -p molar_vis --features scripting          # + the in-app Rhai console (M31)
-cargo test -p molar_vis_core --features scripting    # include optional console tests
 ```
 
-**Feature flags.** The one feature is **`scripting`** (M31, **off by default**): the in-app Rhai
-console. Every crate has a pass-through of it (`molar_vis`, `molar_vis_web`, `molar_vis_py`,
-`molar_vis_js` → `molar_vis_core/scripting`). Verify **both** configurations after touching
-anything near `script*` or the `App` console fields — with it off, `rhai` is out of the
-dependency graph entirely (`cargo tree -p molar_vis | grep rhai` → nothing).
 
 **Native Python module** (`crates/molar_vis_py`, M26): `import molar_vis` to drive the viewer
 from Python/Jupyter (see that crate + the *Native Python module* notes below). Build/install with
@@ -192,11 +185,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   screenshot from a window) +
   `MOLAR_VIS_DEBUG_DIHEDRAL_ROTATE=<deg>` (also twist that bond's J-side by `<deg>`° up front, so a
   `MOLAR_VIS_DEBUG_SAVE_IMAGE` render shows the rotated geometry headlessly) +
-  `MOLAR_VIS_DEBUG_SCRIPT="<rhai source>"` (or `@path` to a file, native; **requires
-  `--features scripting`**) — runs a console script at startup through the same path the console uses,
-  and opens the console window, so a command's effect (e.g. `mol(0).rep(0).set_color("chain")`) + the
-  echoed output can be screenshot headlessly. It and `_CHARGES` run **before** the offscreen-render
-  hooks, so their effect lands in a `_SAVE_IMAGE` render too. Generate a
+  Generate a
   quick test trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not
   in git**).
 
@@ -209,9 +198,7 @@ molar **2.3.0** (crates.io, pinned with `=2.3.0`, `default-features=false` →
 molar_ff **2.3.0** (same registry release — GAFF/GAFF2 typing and a fixed Espaloma
 charge kernel without `tract` or a general ONNX runtime; native-only in this viewer),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
-`../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature),
-rhai **1** (**optional**, behind the `scripting` feature: `default-features=false,
-features=["std"]` — pure-Rust embedded scripting language for the console; builds for wasm).
+`../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature).
 **`molar_vis_py` only** (native Python module, M26):
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.

@@ -167,3 +167,10 @@ thread on Linux and Windows; macOS Python viewer support is pending.
 
 
 See the [README](../README.md) for the feature overview and desktop installation.
+
+## Camera animation and movies
+
+Camera methods accept `duration=...` and `easing="smooth"` or `"linear"`, and return
+an `Animation` handle with `wait()`, `cancel()` and progress properties. Build a
+sequence with `vis.movie()`, then preview, seek or render it through an FFmpeg pipe.
+See [the animation guide](ANIMATION.md) for complete examples and export options.

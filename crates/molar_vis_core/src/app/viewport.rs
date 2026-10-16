@@ -109,6 +109,9 @@ impl App {
                 matches!(self.draw.as_ref().map(|d| d.tool), Some(DrawTool::DihedralRotate));
             let dihedral_dragging =
                 self.draw.as_ref().is_some_and(|d| d.dihedral.drag.is_some());
+            if response.dragged() || (response.hovered() && ui.input(|i| i.smooth_scroll_delta != egui::Vec2::ZERO)) {
+                self.cancel_animation();
+            }
             let delta = response.drag_delta();
             let mods = ui.input(|i| i.modifiers);
             let (shift, alt) = (mods.shift, mods.alt);

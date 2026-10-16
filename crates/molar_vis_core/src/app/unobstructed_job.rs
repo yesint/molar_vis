@@ -61,6 +61,7 @@ impl App {
         targets: &[(usize, usize)],
         ctx: &egui::Context,
     ) -> Result<(), String> {
+        self.cancel_animation();
         let started = Instant::now();
         let mut atoms = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
         self.view_dirty = true;
@@ -160,10 +161,14 @@ impl App {
                 let job = self.unobstructed_job.take().unwrap();
                 match result {
                     Ok(dir) => {
+                        let start = self.camera;
                         self.camera.orientation = crate::unobstructed::look_along_quat(dir);
                         let [width, height] = self.last_size;
                         self.camera.focus_visual_bounds(&job.visual_bounds,
                             width.max(1) as f32 / height.max(1) as f32, 1.0);
+                        let target = self.camera;
+                        self.camera = start;
+                        self.transition_camera(target);
                         self.view_dirty = true;
                     }
                     Err(e) => {

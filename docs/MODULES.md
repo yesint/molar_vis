@@ -44,7 +44,7 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     `gray_out` (desaturate + dim a built rep's colours for Draw-mode's non-active greying).
   - `app/loaders.rs` — load/delete-frames/rename dialogs, loaders, `pick_file` (cfg-heavy IO).
   - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
-  - `app/console.rs` — scripting-console UI + command-execution glue.
+  - `app/commands.rs` — shared scene-command execution.
   - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.
     A Draw session is **scoped to one representation** (`DrawSession::target_rep`, an index into
     the target molecule's `reps`): hover / Draw / Erase only touch that rep's evaluated selection
@@ -386,50 +386,18 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   `egui::Window`; the viewer opens only its shared View page in a compact anchored popup.
   Live application is separate from disk writes. View-style capture excludes camera pose.
 
-- `script.rs` (+ `script/command.rs`) — **the command layer, always compiled**: `Command` (the
-  vocabulary of scene mutations) + `apply_scene_command` + the `parse_*` helpers. The app's own menu
-  actions and the Python/JS hosts drive the viewer through it, so it does **not** ride the `scripting`
-  feature; only the Rhai front end on top of it does (`script/engine.rs` + `script/console.rs`,
-  below). `RepRef`/`Command` carry `#[allow(dead_code)]` because *which* variants have an in-crate
-  constructor depends on which front ends are compiled in.
-- `script/engine.rs` + `script/console.rs` — **in-app Rhai scripting console** (M24), behind the
-  non-default **`scripting`** feature (M31). A
-  togglable Console — a **resizable bottom `Panel::bottom`** (View menu → `[x] Console`; the input
-  field auto-focuses on open via `console.focus_input`), *not* a floating window. The input row is a
-  nested `Panel::bottom` (keeps the outer panel at its set height — computing a scroll height from
-  `available_height` instead fed back and blew the panel to full size); the field is `add_sized`
-  with the Run (↵) button to its right (a plain row — a `right_to_left` + INFINITY-width field also
-  broke the sizing), close is the phosphor `X`. The user types **Rhai** commands in a **fluent,
-  object-oriented** style:
-  `mol(i)` → a `MolHandle`, `.rep(j)` → a `RepHandle`, with chaining
-  (`mol(0).rep(0).set_style("vdw").set_color("chain").select("protein")`;
-  `mol(0).add_rep("cartoon").set_color("ss")`). **Command-queue binding**: the handles are
-  lightweight (a molecule index + a [`RepRef`] + a clone of a shared `Rc<RefCell<Vec<Command>>>`);
-  Rhai closures can't borrow `&mut App`, so the handle methods **push** `Command`s
-  (`script/command.rs`) during eval and never touch the scene; `print`/`debug`/`list()` route text
-  into an output buffer. **`RepRef {Index, Last}`** lets `add_rep` return a handle to the
-  just-appended rep (`Last` resolves to the molecule's last rep at apply time) so further `.set_*`
-  chain onto it. `evaluate_script(source, summary)` builds a *local* `Engine` (operation/call/expr-
-  depth limits; `register_type_with_name` for the two handles), runs, and returns
-  `EvalOutcome { commands, output }`. `App::run_script` echoes the line, appends the output, applies
-  each command, then records **one** undo checkpoint.
-  `apply_scene_command(scene, camera, rep_defaults, cmd)` (the testable, GPU-free seam) does the
-  *same field-set + dirty-flag the GUI does* for every command except `Load` — `select` → `sel_text`
-  + `sel_dirty`, `set_color`/`set_style`/`set_material` → `geom_dirty`, `add_rep`/`delete_rep`/
-  `show`/`hide`, `frame`/`play`/`pause`, `focus` → `camera.focus_bbox` — converging on the normal
-  `rebuild_dirty` path with no new render branch (`resolve_rep` maps `RepRef::Last` → last index);
-  `App::execute_command` handles `Load` (native `data::load_with` + `add_loaded`; wasm → "not
-  available") and delegates the rest. Enum args (color/style/material) ride as raw strings, parsed
-  (with `parse_color`/`parse_material`/`RepKind::from_name`) in `apply_scene_command` so a bad value
-  is one clean console error. `mol(i)`/`load(path)`/`list()` are the only free functions; `list()`
-  reflects the **pre-script** scene summary. Pure-Rust + WASM-safe (the console runs in the browser;
-  only `load()` is native-gated). 5 unit tests
-  (parse→commands, chaining/loops, syntax-error-not-panic, color-parser, apply→scene). `script/console.rs`
-  is pure UI (`ScriptConsole` state + `show(ui, …)` builds the bottom panel — drawn in the panel
-  sequence *before* `draw_viewport` so the 3D view fills the space above it; scrollback fills the
-  middle with the **input row pinned to the bottom via a nested `Panel::bottom`** so the prompt stays
-  visible/editable at any height; Enter via the rename-dialog focus idiom, ↑/↓ history recall, ✕
-  close). See M24.
+- `script.rs` (+ `script/command.rs`) — the shared scene-command layer and view-enum parsers.
+  Python/JavaScript hosts and the app use `Command` / `apply_scene_command`; there is no
+  embedded language or console. `app/commands.rs` handles commands that need app access.
+- Settings → Rendering includes `camera_transition_ms` (default 0). Programmed navigation
+  inherits this duration; explicit API/movie durations override it. Changing it does not
+  rebuild GPU targets.
+- `animation.rs` — explicit-time camera motion, saved poses, recipes, trajectory tracks and
+  task handles. `app/animation.rs` resolves destinations and drives preview/seek.
+- `video.rs` (native) — bounded frame queue, FFmpeg process and PNG sequence sink.
+  `app/movie.rs` pumps foreground capture and restores state. Native
+  `app/background_movie.rs` captures owned data, estimates extra RAM, and runs an
+  independent renderer on a worker without changing the live view. See [ANIMATION.md](ANIMATION.md).
 - `suggest.rs` — **selection-input assistance** for the rep selection field (M14). `SelHints`
   (distinct chains / resnames / names + resid/resindex/index ranges, computed once from the
   static topology and cached per molecule on `App::sel_hints`); `SelHints::hint_for(text)` finds

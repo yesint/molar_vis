@@ -469,6 +469,11 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
                 });
             ui.end_row();
 
+            ui.label("Camera transition animation [ms]")
+                .on_hover_text("Duration of programmed camera moves, including zoom, focus and unobstructed view. Zero applies immediately. Mouse navigation stays direct.");
+            ui.add(egui::DragValue::new(&mut r.camera_transition_ms).range(0..=u32::MAX).speed(25));
+            ui.end_row();
+
             ui.label("Shadow-map resolution").on_hover_text("Higher resolutions improve cast-shadow detail. Used when cast shadows are enabled; applies immediately.");
             fixed_combo(ui, "set_shadow_res", ["1024²", "2048²", "4096²"].into_iter())
                 .selected_text(format!("{}²", r.shadow_res))
@@ -964,7 +969,7 @@ impl App {
         if previous.appearance != next.appearance {
             crate::theme::apply(ctx, &next.appearance);
         }
-        if previous.rendering != next.rendering {
+        if previous.rendering.ssaa != next.rendering.ssaa || previous.rendering.shadow_res != next.rendering.shadow_res {
             if let Some(rs) = frame.wgpu_render_state() {
                 self.renderer.reconfigure(rs, &next.rendering);
             }
@@ -1837,6 +1842,7 @@ impl SettingsPreview {
             &crate::settings::RenderingSettings {
                 ssaa: 2,
                 shadow_res: 256,
+                ..Default::default()
             },
         );
         let raw = data::load_from_bytes(

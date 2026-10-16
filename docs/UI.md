@@ -36,6 +36,11 @@ next frame). The menus —
   tonemap — see the GI bullet under `render/raytrace.rs`). Separately, pressing **R** in the viewport
   ray-traces the current view in place (PyMOL-`ray` style; honors AO/shadows + GI) and holds it until
   the camera moves; see `render/raytrace.rs`.
+- **Render → Movie…** (native, `FILM_STRIP`) offers explicit **Trajectory** and **Fly around**
+  modes. Trajectory selects a visible molecule, inclusive frame range and playback rate;
+  Fly around selects camera rotation, duration and zoom. During export, actual completed
+  frames appear in the viewport with a compact progress/Cancel overlay. **Background render**
+  keeps the viewer editable and shows estimated additional RAM directly below the checkbox. See [ANIMATION.md](ANIMATION.md).
 - **Help → Selection language** — opens the [colored selection reference](https://yesint.github.io/molar_vis/selection-language.html) in the browser. The static page has copyable examples, syntax colors, light/dark themes, and a responsive layout. It is also accessible from the web build.
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
@@ -85,10 +90,6 @@ next frame). The menus —
     coordinates) and without moving anything for [RMSD]; over several frames it reads
     `mean of N frames (min …, max …)`, since one number for a fitted trajectory can't say whether
     it is uniformly close or has outlier frames.
-- **View** — **`[x] Console`** (a `CHECK_SQUARE`/`SQUARE`-marked toggle of `console_open` — the Rhai
-  scripting console bottom panel; opening it sets `console.focus_input` so the input grabs focus; see
-  `script/engine.rs` / M24). This is the menu's only entry, so the **whole View menu is behind the
-  `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
 expand-caret + **name** (**bold** via `widgets::bold_name` — the embedded Ubuntu Bold; see

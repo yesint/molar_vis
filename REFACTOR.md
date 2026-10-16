@@ -74,7 +74,6 @@ set -e
 # NB -p, not --workspace: molar_vis_py enables pyo3 `extension-module` unconditionally
 # and is cdylib-only, so a test harness for it has no libpython to link.
 cargo test -p molar_vis_core
-cargo test -p molar_vis_core --features scripting
 cargo build --target wasm32-unknown-unknown -p molar_vis_core
 
 # Session save->load->save must stay byte-identical.
@@ -304,7 +303,6 @@ Only these two survive co-usage analysis.
   `viewport.rs:122-124` reads three together, `:179-188` writes three, `:195-227` touches four,
   `export.rs:104-110` writes five in six lines. Move `export.rs`'s five functions to `impl RtState`
   taking `(&mut SceneRenderer, &Camera, &Scene, &mut String)`; `draw_viewport` keeps `&mut self`.
-- **`Console`** *(scripting)* — `console_open`, `console`, `script`. 13 sites; `console.rs:20`
   already passes the first two as a `&mut` pair into `script::console::show`.
 
 Also worth doing here, both small and both fixing a real ownership smell:

@@ -1440,7 +1440,7 @@ impl App {
                         let mol = &self.scene.molecules[mi];
                         if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
                             let (min, max) = mol.sel_bbox(sel);
-                            self.camera.focus_bbox(min, max);
+                            self.focus_camera_bounds(min, max);
                             view_dirty = true;
                         }
                     }
@@ -1463,7 +1463,7 @@ impl App {
                         .find(|m| m.source == src)
                         .and_then(|pmol| Some(pmol.sel_bbox(pmol.reps.get(pr)?.sel.as_ref()?)));
                     if let Some((min, max)) = bbox {
-                        self.camera.focus_bbox(min, max);
+                        self.focus_camera_bounds(min, max);
                         view_dirty = true;
                     }
                 }

@@ -349,27 +349,9 @@
   molar's `Vec<Bond>` carries `BondOrder`, and Double/Triple/Aromatic render as parallel/dashed
   screen-space strands. `MOLAR_VIS_DEBUG_DRAW=methane|ethane|water|benzene` builds + relaxes a preset
   headlessly. (Documented in detail in the `app.rs` / `minimize.rs` sections above.)
-- ✅ M24 **In-app scripting console (Rhai)** — the first slice of the scripting roadmap (the data
-  layer was already Python-scriptable via molar's published `pymolar` PyO3 bindings; PyO3 can't
-  target `wasm32-unknown-unknown`, so the *portable* surface is a pure-Rust embedded language).
-  **Decision: Rhai** (pure-Rust, WASM-proven, best API-binding ergonomics, sandboxable) driven from
-  an **in-app console window** (works in the browser too); external-terminal / Python-driver
-  transports deferred behind a transport-agnostic command core. **Fluent OO surface** (per user
-  feedback — the first flat-function cut, `color("chain")`, was "lame"): `mol(i).rep(j).set_style(…)
-  .set_color(…).select(…)`, `mol(i).add_rep("cartoon").set_color("ss")`, `mol(i).show()/hide()/
-  frame(n)/play()/focus(sel)`. `script.rs` (+ `script/{command,console}.rs`): lightweight
-  `MolHandle`/`RepHandle` (index + `RepRef{Index,Last}` + shared command queue) whose methods push a
-  `Command`; `evaluate_script` (Rhai fns push commands, no scene access) + `apply_scene_command`
-  (GPU-free, testable; same field-set + dirty-flag the GUI does → converges on `rebuild_dirty`, no
-  new render branch) + `App::{run_script,execute_command,draw_console}`. Free fns: `mol(i)`,
-  `load(path)` (native), `list()`, plus Rhai's `print`. One undo checkpoint per script run. Console
-  is a resizable bottom panel toggled from the **View menu** (`[x] Console`); `MOLAR_VIS_DEBUG_SCRIPT` runs a script
-  at startup for headless verification. See the `script.rs` module bullet. Verified: 5 unit tests
-  (62 total), native+wasm green, and a headless screenshot of `mol(0).rep(0).set_style("vdw")
-  .set_color("resid"); mol(0).add_rep("cartoon")` (rep 0 → rainbow VDW spheres + a new Cartoon rep,
-  in the console + rep list). Deferred: property setters (`rep.style = …`) + indexing (`mol[0]`,
-  declined by the user), camera/background scripting, autocompletion, multi-line editor, `.rhai`
-  file open/save, external/Python transports.
+- ✅ M24 **Shared scene commands** — `Command` / `apply_scene_command` provide a
+  GPU-free mutation layer used by the app and the Python/JavaScript hosts.
+
 - ✅ M25 **`app.rs` modularization** — the 7276-line `app.rs` (4× the next file) was split into a
   thin root (~690 lines: `App` struct + enums + `ui` loop + `rebuild_dirty` + IME tests) plus **14
   `app/` submodules** by concern (see the `app.rs` + `app/` module bullet). Pure no-behavior-change
@@ -596,7 +578,7 @@
   session round-trip reloads the edited coords). Deferred: persisting edits of *grouped* members
   (they still reload from the SDF by index); edge-on-axis drag is ill-conditioned (freezes rather
   than jumps).
-- ✅ M31 **molar 2.1 migration + charge coloring (espaloma) + optional scripting** — four coupled
+- ✅ M31 **molar 2.1 migration + charge coloring (espaloma)** — four coupled
   changes.
   **(1) molar 2.1** (SoA atom + columnar bond storage): every atom property read became an
   `AtomLike::get_*()` call on the `AtomRef`/`AtomRefMut` proxies (there is no `&Atom`/`&Bond` to
@@ -620,12 +602,7 @@
   prediction on demand recorded as an undoable `StructEdit::Charges`. Also capped the multi-order bond
   strand radius at Ball-and-Stick's — with SDF orders now surviving, Licorice's double bonds were
   twice as thick *and* twice as splayed.
-  **(4) `scripting` feature** (non-default): Rhai + the console UI moved behind it, split along the
-  seam that already existed — the `Command`/`apply_scene_command` layer the app's menus and the
-  Python/JS hosts use stays always-compiled in `script.rs`; everything Rhai-specific moved to
-  `script/engine.rs`.
-  Verified: **96 tests** with `--features scripting`, 92 without (16 new across the four changes),
-  all five crates building for native + wasm32 in **both** configurations with no warnings, clippy
+  Verified native and wasm32 builds, unit tests, clippy,
   clean, a byte-identical session round-trip, and headless renders of the charge scheme on aspirin
   (21 atoms, −0.683…+0.830 e, carbonyl O red / their C blue), the SS/B-factor/ResID schemes, the four
   rep styles, and the fixed Licorice double bonds (Ball-and-Stick byte-identical to before). molar
@@ -652,7 +629,7 @@
   (not in git; see `tests/README.md`). Verified: 13 unit tests over the three pure decisions
   (mode from frame counts, whether the structure file's own frame is a pose, which side to drive
   — first reconcile, either direction, playback,
-  both-moved precedence, idle), 103 tests total (107 with `scripting`), all crates green for
+  both-moved precedence, idle), 103 tests total, all crates green for
   native + wasm32 in both feature configurations with no warnings, and headless offscreen checks
   of the dialog, the loaded result (pose in the site with green H-bond dashes, receptor at 26
   frames), both coupling directions at several indices, rigid mode staying decoupled, and the
@@ -676,7 +653,7 @@
   refusal and the name-paired path; a <3-atom fit refused; **undo restores the pre-align
   coordinates**; `Move whole molecule` off moving only the selection; both label shapes; a 20-member
   SDF group listed as **one** dropdown row with its members inside), 137
-  tests total (141 with `scripting`), native + wasm32 +
+  tests total, native + wasm32 +
   `molar_vis_py` green with no warnings, clippy clean, and headless checks: an identical-pair RMSD of
   0.000, the count-mismatch message, a 27-frame `same as source` trajectory fit
   (`0.036 nm — mean of 27 frames (min 0.000, max 0.061)`, min 0 being the reference frame fitting
@@ -838,3 +815,26 @@
   pickers use its entries as presets. These controls replace the fixed scheme ramps
   and Solid swatch grid described in earlier milestones. Changes apply live, settings
   Save persists them on native and browser builds, and sessions retain the active colors.
+
+- Camera animation and native movie export: shared explicit-time camera paths for
+  Rust/Python/JavaScript, full-turn rotation and pivot support, multiplicative zoom,
+  saved views, animated unobstructed framing, sequences, holds, seek/preview and
+  discrete trajectory tracks. Native exports stream RGBA through a bounded queue to
+  external FFmpeg, or save PNG sequences. Raster and frame-pumped ray tracing share
+  the evaluator. Task handles expose progress/cancel/completion; export restores
+  camera and trajectory state. Render → Movie provides explicit Trajectory and Fly around modes, a film-strip
+  icon, and a viewport preview of rendered frames with a compact progress overlay. The
+  embedded language and console were removed; shared scene commands remain.
+  See [ANIMATION.md](ANIMATION.md).
+
+- Settings → Rendering now includes **Camera transition animation [ms]**, default 0.
+  GUI and Rust/Python/JavaScript navigation inherit it for zoom, focus, unobstructed
+  view, reset, rotation, pan and docking focus. Explicit durations override it, and
+  movie timing and direct mouse navigation remain independent.
+
+- Native **Background render** captures an independent scene and required trajectory
+  frames, then renders with its own GPU resources on a worker. The viewer stays
+  editable; deleting objects or starting a new session does not change the movie.
+  A compact progress/Cancel panel has an optional preview. The checkbox shows
+  `requires ~X Mb additional RAM`, estimated from snapshot data, smoothing frames,
+  geometry, frame buffers and encoding. Shared Python data is copied under the GIL.
