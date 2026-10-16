@@ -1220,7 +1220,7 @@ impl App {
                             let mut w_changed = false;
                             if let RepParams::Interactions { settings } = &mut rep.params {
                                 ui.horizontal(|ui| {
-                                    ui.label("Line width");
+                                    ui.label(if settings.glowing_path { "Tube width" } else { "Line width" });
                                     w_changed = ui
                                         .add(egui::Slider::new(&mut settings.line_width, 1.0..=20.0))
                                         .changed();

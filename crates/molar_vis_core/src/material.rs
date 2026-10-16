@@ -44,6 +44,36 @@ pub enum Material {
 pub(crate) const FLAT_OUTLINE_WORD: u32 = 0xffff_fffe;
 pub(crate) const MOLECULAR_NODES_WORD: u32 = 0xffff_fffd;
 pub(crate) const VELVET_WORD: u32 = 0xffff_fffc;
+/// Internal emission profile for interaction paths.
+pub(crate) const GLOWING_PATH_WORD: u32 = 0x9000_0000;
+
+/// The unused 0x9 tag stores a 10-bit octahedral axis per component and an
+/// 8-bit length (0–2 nm). The normal attribute stores the path center instead.
+/// This keeps the glow payload inside the existing mesh vertex layout.
+pub(crate) fn glowing_path_word(axis: glam::Vec3, length: f32) -> u32 {
+    let p = axis / axis.abs().element_sum();
+    let mut oct = p.truncate();
+    if p.z < 0.0 {
+        oct = (glam::Vec2::ONE - glam::Vec2::new(oct.y, oct.x).abs()) * glam::Vec2::new(
+            if oct.x >= 0.0 { 1.0 } else { -1.0 },
+            if oct.y >= 0.0 { 1.0 } else { -1.0 });
+    }
+    let q = |x: f32| ((x * 0.5 + 0.5) * 1023.0).round() as u32;
+    let len = (length.clamp(0.0, 2.0) * 127.5).round().max(1.0) as u32;
+    GLOWING_PATH_WORD | q(oct.x) | (q(oct.y) << 10) | (len << 20)
+}
+
+/// Match the shader's decoded frame when building the enclosing capsule. This
+/// lets its radius carry the tube width without adding mesh vertex attributes.
+pub(crate) fn glowing_path_frame(word: u32) -> (glam::Vec3, f32) {
+    let x = (word & 1023) as f32 / 1023.0 * 2.0 - 1.0;
+    let y = ((word >> 10) & 1023) as f32 / 1023.0 * 2.0 - 1.0;
+    let mut axis = glam::Vec3::new(x, y, 1.0 - x.abs() - y.abs());
+    let fold = (-axis.z).max(0.0);
+    axis.x += if axis.x >= 0.0 { -fold } else { fold };
+    axis.y += if axis.y >= 0.0 { -fold } else { fold };
+    (axis.normalize(), ((word >> 20) & 255) as f32 / 127.5)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Shading {

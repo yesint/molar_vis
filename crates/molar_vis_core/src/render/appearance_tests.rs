@@ -2121,3 +2121,209 @@ fn velvet_cartoon_raster_timings() {
     times.sort_by(f64::total_cmp);
     eprintln!("VELVET_RASTER_MEDIAN_MS {:.3}", times[times.len()/2]);
 }
+
+/// A single isolated path must retain a luminous center through end-on views.
+#[test]
+#[ignore = "requires GPU; renders glowing paths from side-on to exactly end-on"]
+fn glowing_path_stays_visible_end_on() {
+    use crate::{geometry, interactions::{Interaction, InteractionKind, InteractionSettings}, scene::Representation};
+    use molar::prelude::Atom;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = Scene::default();
+    scene.add(crate::data::RawMolecule::single_atom("path", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
+        &crate::settings::RepDefaults::default());
+    let settings = InteractionSettings { glowing_path: true, ..Default::default() };
+    let geom = geometry::interaction_geometry(&[Interaction {
+        kind: InteractionKind::HBond, a: -Vec3::Z * 0.15, b: Vec3::Z * 0.15, angle: None, offset: None,
+    }], &settings);
+    renderer.raytracer.as_mut().unwrap().upload(&rs,
+        &raytrace::RtScene::from_test_mesh(&geom.mesh, geometry::RepKind::Interactions));
+    let mut rep = Representation::new(geometry::RepKind::Interactions);
+    rep.params = geometry::RepParams::Interactions { settings };
+    rep.gpu = renderer.upload(&rs, &geom);
+    scene.molecules[0].reps = vec![rep];
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.25), Vec3::splat(0.25), 0.9);
+    camera.projection = Projection::Orthographic;
+    camera.depth_cue.enabled = false;
+    camera.background.kind = BgKind::Solid;
+    let dir = std::env::temp_dir().join("glowing-path-angles");
+    std::fs::create_dir_all(&dir).unwrap();
+    for light in [false, true] {
+        camera.background.color = if light { [0.94, 0.94, 0.94, 1.0] } else { [0.02, 0.02, 0.05, 1.0] };
+        for degrees in [0.0_f32, 1.0, 5.0, 20.0, 45.0, 90.0] {
+            camera.orientation = glam::Quat::from_rotation_y(degrees.to_radians());
+            let cap = renderer.capture_begin(&rs, 320, 320, camera.view(), camera.proj(1.0), false,
+                camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+                camera.eye_depth_range(), &scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let image = cap.read();
+            let trace = renderer.capture_begin_raytrace(&rs, 320, 320, &camera, 8).unwrap();
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            for (mode, image) in [("raster", image), ("trace", trace.read())] {
+                image.save(dir.join(format!("{}_{}_{}.png", mode, if light { "light" } else { "dark" }, degrees as u32))).unwrap();
+                if degrees == 90.0 {
+                    // Check alternating crests of the requested six-turn wave,
+                    // rather than accepting a straight glow as visible enough.
+                    let project = |point: Vec3| {
+                        let p = camera.proj(1.0) * camera.view() * point.extend(1.0);
+                        (((p.x / p.w * 0.5 + 0.5) * 320.0) as i32,
+                         ((0.5 - p.y / p.w * 0.5) * 320.0) as i32)
+                    };
+                    let sample_contrast = |point| {
+                        let (x, y) = project(point);
+                        let pixels = (x-1..=x+1).flat_map(move |px| (y-1..=y+1).map(move |py| (px, py)));
+                        let channels = pixels.map(|(px, py)| image.get_pixel(px as u32, py as u32)[if light { 0 } else { 1 }]);
+                        if light { 255 - channels.min().unwrap() } else { channels.max().unwrap() }
+                    };
+                    let center_glow = sample_contrast(Vec3::new(0.0, -0.009, -0.0375)); // inner crest
+                    let attachment_glow = sample_contrast(-Vec3::Z * 0.15);
+                    assert!(center_glow > attachment_glow.saturating_add(25),
+                        "{mode}: glow should be stronger in the bond center than at the atoms");
+                    for turn in 1..5 {
+                        for quarter in [0.25_f32, 0.75] {
+                            let t = (turn as f32 + quarter) / 6.0;
+                            let y = if quarter < 0.5 { -0.009 } else { 0.009 };
+                            let (x, y_peak) = project(Vec3::new(0.0, y, (t - 0.5) * 0.3));
+                            let (_, y_other) = project(Vec3::new(0.0, -y, (t - 0.5) * 0.3));
+                            let peak = |py| (x-1..=x+1).flat_map(move |px| (py-1..=py+1).map(move |yy| (px, yy)))
+                                .map(|(px, yy)| image.get_pixel(px as u32, yy as u32)[if light { 0 } else { 1 }]);
+                            if light {
+                                assert!(peak(y_peak).min().unwrap().saturating_add(12) < peak(y_other).min().unwrap(),
+                                    "{mode}: missing spiral crest {turn}/{quarter} on light background");
+                            } else {
+                                assert!(peak(y_peak).max().unwrap() > peak(y_other).max().unwrap().saturating_add(20),
+                                    "{mode}: missing spiral crest {turn}/{quarter} on dark background");
+                            }
+                        }
+                    }
+                }
+                // A spiral moves the core off the straight axis. Check its small
+                // central neighborhood, including the projected end-on coil.
+                let radius = 8;
+                let samples = (160-radius..=160+radius).flat_map(|x| (160-radius..=160+radius).map(move |y| (x, y)));
+                if light {
+                    assert!(samples.map(|(x,y)| image.get_pixel(x,y)[0]).min().unwrap() < 150,
+                        "{mode}, light background, {degrees} deg: path vanished");
+                } else {
+                    assert!(samples.map(|(x,y)| image.get_pixel(x,y)[1]).max().unwrap() > 110,
+                        "{mode}, dark background, {degrees} deg: path vanished");
+                }
+            }
+        }
+    }
+}
+
+/// The connected atoms must retain their opaque colors over the glow.
+#[test]
+#[ignore = "requires GPU; checks endpoint atom occlusion in raster and trace"]
+fn glowing_path_stays_below_connected_atoms() {
+    use crate::{geometry, interactions::{Interaction, InteractionKind, InteractionSettings}, scene::Representation};
+    use molar::prelude::Atom;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = Scene::default();
+    scene.add(crate::data::RawMolecule::single_atom("path", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
+        &crate::settings::RepDefaults::default());
+    let settings = InteractionSettings { glowing_path: true, hbonds: false, ..Default::default() };
+    let endpoints = [-Vec3::Z * 0.15, Vec3::Z * 0.15];
+    let mut geom = geometry::interaction_geometry(&[Interaction {
+        kind: InteractionKind::PiStacking, a: endpoints[0], b: endpoints[1], angle: None, offset: None,
+    }], &settings);
+    geom.spheres = endpoints.map(|p| SphereInstance { center: p.to_array(), radius: 0.06,
+        color: crate::color::pack_rgba8([210, 80, 40, 255]), mat: 255, pick: [0, 0] }).to_vec();
+    let mut path_mesh = std::mem::take(&mut geom.mesh);
+    let mut rep = Representation::new(geometry::RepKind::Interactions);
+    rep.params = geometry::RepParams::Interactions { settings };
+    scene.molecules[0].reps = vec![rep];
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.25), Vec3::splat(0.25), 0.9);
+    camera.projection = Projection::Orthographic;
+    camera.depth_cue.enabled = false;
+    camera.background.kind = BgKind::Solid;
+    camera.background.color = [0.94, 0.94, 0.94, 1.0];
+    let dir = std::env::temp_dir().join("glowing-path-occlusion");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut baseline = Vec::new();
+    for show_path in [false, true] {
+        if show_path { geom.mesh = std::mem::take(&mut path_mesh); }
+        scene.molecules[0].reps[0].gpu = renderer.upload(&rs, &geom);
+        renderer.raytracer.as_mut().unwrap().upload(&rs,
+            &raytrace::RtScene::from_test_mesh_and_spheres(&geom.mesh, geometry::RepKind::Interactions, &geom.spheres));
+        for (angle_index, degrees) in [0.0_f32, 45.0, 90.0].into_iter().enumerate() {
+            camera.orientation = glam::Quat::from_rotation_y(degrees.to_radians());
+            let cap = renderer.capture_begin(&rs, 320, 320, camera.view(), camera.proj(1.0), false,
+                camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+                camera.eye_depth_range(), &scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let raster = cap.read();
+            let trace = renderer.capture_begin_raytrace(&rs, 320, 320, &camera, 8).unwrap();
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            for (mode_index, (mode, image)) in [("raster", raster), ("trace", trace.read())].into_iter().enumerate() {
+                image.save(dir.join(format!("{mode}_{degrees}_{show_path}.png"))).unwrap();
+                if !show_path { baseline.push(image); continue; }
+                let reference = &baseline[angle_index * 2 + mode_index];
+                for atom in endpoints {
+                    let clip = camera.proj(1.0) * camera.view() * atom.extend(1.0);
+                    let x = ((clip.x / clip.w * 0.5 + 0.5) * 320.0) as u32;
+                    let y = ((0.5 - clip.y / clip.w * 0.5) * 320.0) as u32;
+                    for dx in -2..=2 { for dy in -2..=2 {
+                        let (px, py) = ((x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                        let actual = image.get_pixel(px, py);
+                        let expected = reference.get_pixel(px, py);
+                        assert!((0..3).all(|c| actual[c].abs_diff(expected[c]) <= 8),
+                            "{mode}, {degrees} deg: glow tinted endpoint atom: {actual:?} vs {expected:?}");
+                    }}
+                }
+                if degrees == 90.0 {
+                    assert!((152..=168).any(|y| image.get_pixel(160, y)[0].saturating_add(40)
+                        < reference.get_pixel(160, y)[0]), "{mode}: path disappeared from the gap between atoms");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires GPU; compares visible tube thickness at three width settings"]
+fn glowing_path_width_scales_core_and_halo() {
+    use crate::{geometry, interactions::{Interaction, InteractionKind, InteractionSettings}, scene::Representation};
+    use molar::prelude::Atom;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = Scene::default();
+    scene.add(crate::data::RawMolecule::single_atom("path", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
+        &crate::settings::RepDefaults::default());
+    scene.molecules[0].reps = vec![Representation::new(geometry::RepKind::Interactions)];
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.25), Vec3::splat(0.25), 0.9);
+    camera.projection = Projection::Orthographic;
+    camera.depth_cue.enabled = false;
+    camera.background.kind = BgKind::Solid;
+    camera.background.color = [0.02, 0.02, 0.05, 1.0];
+    let dir = std::env::temp_dir().join("glowing-path-widths");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut areas = [Vec::new(), Vec::new()];
+    for width in [1.5, 3.0, 6.0] {
+        let settings = InteractionSettings { glowing_path: true, line_width: width, ..Default::default() };
+        let geom = geometry::interaction_geometry(&[Interaction { kind: InteractionKind::HBond,
+            a: -Vec3::X * 0.15, b: Vec3::X * 0.15, angle: None, offset: None }], &settings);
+        scene.molecules[0].reps[0].params = geometry::RepParams::Interactions { settings };
+        scene.molecules[0].reps[0].gpu = renderer.upload(&rs, &geom);
+        renderer.raytracer.as_mut().unwrap().upload(&rs,
+            &raytrace::RtScene::from_test_mesh(&geom.mesh, geometry::RepKind::Interactions));
+        let raster = renderer.capture_begin(&rs, 320, 320, camera.view(), camera.proj(1.0), false,
+            camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+            camera.eye_depth_range(), &scene);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let raster = raster.read();
+        let trace = renderer.capture_begin_raytrace(&rs, 320, 320, &camera, 8).unwrap();
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        for (i, (mode, image)) in [("raster", raster), ("trace", trace.read())].into_iter().enumerate() {
+            areas[i].push(image.pixels().filter(|p| p[1] > 35).count());
+            image.save(dir.join(format!("{mode}_{width}.png"))).unwrap();
+        }
+    }
+    for (mode, area) in ["raster", "trace"].into_iter().zip(areas) {
+        assert!(area[1] > area[0] * 12 / 10 && area[2] > area[1] * 12 / 10,
+            "{mode}: visible tube area must grow with width: {area:?}");
+    }
+}

@@ -545,10 +545,7 @@ pub(crate) fn build_interactions(
         .and_then(|mol| mol.reps.get(rep_idx)).map(|rep| &rep.params) else {
         return geometry::GeometryData::default();
     };
-    geometry::GeometryData {
-        lines: geometry::interaction_lines(&found, settings),
-        ..Default::default()
-    }
+    geometry::interaction_geometry(&found, settings)
 }
 
 fn detect_interactions(scene: &Scene, self_mi: usize, rep_idx: usize) -> Vec<crate::interactions::Interaction> {
@@ -731,6 +728,16 @@ pub(super) fn gather_unobstructed_atoms(
             return Err(format!("no rep {ri} on molecule {mi}"));
         }
     }
+    // Interactions are annotations, even when a caller includes them in a
+    // combined target. Their source selection must not become target blockers
+    // or enlarge the framing just because glowing paths now contain triangles.
+    let molecular_targets: Vec<_> = targets.iter().copied()
+        .filter(|&(mi, ri)| scene.molecules[mi].reps[ri].kind != RepKind::Interactions)
+        .collect();
+    if molecular_targets.is_empty() {
+        return Err("unobstructed view needs an atom representation; interactions are annotations".into());
+    }
+    let targets = molecular_targets.as_slice();
     let target_reps: std::collections::HashSet<_> = targets.iter().copied().collect();
     let requested = scene.molecules.iter().enumerate().flat_map(|(mi, mol)| {
         let targets = &target_reps;
@@ -1312,10 +1319,7 @@ options: RebuildOptions,
         // first, so mutating the rep afterwards is fine).
         let found = detect_interactions(scene, mi, ri);
         let RepParams::Interactions { settings } = scene.molecules[mi].reps[ri].params else { continue };
-        let geom = geometry::GeometryData {
-            lines: geometry::interaction_lines(&found, &settings),
-            ..Default::default()
-        };
+        let geom = geometry::interaction_geometry(&found, &settings);
         log::debug!(
             "interactions rep {mi}:{ri} → {} dashed line vertices",
             geom.lines.len()
@@ -1454,6 +1458,57 @@ mod unobstructed_tests {
         assert!(scene.molecules[0].reps[2].sel_dirty);
         assert!(scene.molecules[0].reps[3].sel_dirty);
         assert!(scene.molecules[1].reps[0].sel_dirty);
+    }
+
+    #[test]
+    fn glowing_and_dashed_interactions_never_obstruct_or_expand_combined_targets() {
+        use crate::interactions::{Interaction, InteractionKind, InteractionSettings};
+        use glam::Vec3;
+        // Cover both the small-target pixel scorer and the large-target atom scorer.
+        for selection in ["index 0:2", "index 0:599"] {
+            let mut scene = fixture_scene();
+            scene.molecules[0].reps = vec![rep(selection), rep("index 700:710")];
+            scene.molecules[1].visible = false;
+            let baseline = gather_unobstructed_atoms(&mut scene, &[(0, 0)]).unwrap();
+            let direction = |atoms: &UnobstructedAtoms| {
+                if let Some(pixels) = &atoms.pixels {
+                    pixels.best_direction(32, None, &|| false).unwrap()
+                } else {
+                    crate::unobstructed::best_unobstructed_direction(&atoms.target, &atoms.occluders, 32)
+                }
+            };
+            let expected_direction = direction(&baseline);
+            let origin = baseline.target[0].0;
+            for glowing in [false, true] {
+                let settings = InteractionSettings { glowing_path: glowing, line_width: 20.0, ..Default::default() };
+                let geometry = geometry::interaction_geometry(&[Interaction { kind: InteractionKind::HBond,
+                    a: origin + Vec3::new(-0.3, 0.0, 0.1), b: origin + Vec3::new(0.3, 0.0, 0.1),
+                    angle: None, offset: None }], &settings);
+                assert_eq!(!geometry.mesh.vertices.is_empty(), glowing);
+                assert_eq!(!geometry.lines.is_empty(), !glowing);
+                let mol = &mut scene.molecules[0];
+                let mut annotation = Representation::new(RepKind::Interactions);
+                annotation.params = RepParams::Interactions { settings };
+                annotation.sel = Some(mol.data.select_all());
+                annotation.sel_dirty = false;
+                annotation.geom_dirty = false;
+                annotation.coords_dirty = false;
+                annotation.cache_geometry(geometry, mol.n_atoms, true, false);
+                assert!(annotation.cached_geometry(true).is_some(), "exercise populated, clean annotation geometry");
+                mol.reps.push(annotation);
+                for targets in [vec![(0, 0)], vec![(0, 0), (0, 2)]] {
+                    let actual = gather_unobstructed_atoms(&mut scene, &targets).unwrap();
+                    assert_eq!(actual.target, baseline.target);
+                    assert_eq!(actual.occluders, baseline.occluders);
+                    assert_eq!(actual.visual_bounds, baseline.visual_bounds);
+                    assert_eq!(actual.triangles, baseline.triangles);
+                    assert_eq!(actual.pixels.is_some(), baseline.pixels.is_some());
+                    assert_eq!(direction(&actual), expected_direction);
+                }
+                assert!(gather_unobstructed_atoms(&mut scene, &[(0, 2)]).err().unwrap().contains("interactions are annotations"));
+                scene.molecules[0].reps.pop();
+            }
+        }
     }
 
     #[test]

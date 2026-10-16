@@ -10,11 +10,11 @@ use bytemuck::{Pod, Zeroable};
 pub struct MeshVertex {
     /// World-space position (nm).
     pub pos: [f32; 3],
-    /// World-space normal (unit).
+    /// World-space normal (unit). Glowing paths instead store their world-space center.
     pub normal: [f32; 3],
     /// RGBA8 packed; alpha carries the material opacity.
     pub color: u32,
-    /// Packed material lighting (ambient|diffuse<<8|specular<<16|shininess<<24).
+    /// Packed material lighting, or the internal glowing-path tag and axis.
     pub mat: u32,
 }
 

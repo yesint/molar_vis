@@ -721,6 +721,18 @@ impl App {
             log::info!("debug docking: pose={pose:?} receptor_frame={frame:?}");
         }
 
+        // Exercise glowing interaction paths on the CLI docking scene before capture.
+        if std::env::var("MOLAR_VIS_DEBUG_GLOWING_PATH").is_ok() {
+            for mol in &mut app.scene.molecules {
+                for rep in &mut mol.reps {
+                    if let RepParams::Interactions { settings } = &mut rep.params {
+                        settings.glowing_path = true;
+                        rep.geom_dirty = true;
+                    }
+                }
+            }
+        }
+
         // Verification hooks: MOLAR_VIS_DEBUG_ALIGN_DIALOG=1 opens the Analysis ▸ Align
         // window; MOLAR_VIS_DEBUG_ALIGN=<spec> also runs it (see `App::debug_align`).
         // Ahead of the offscreen-render hooks, so a moved molecule lands in a

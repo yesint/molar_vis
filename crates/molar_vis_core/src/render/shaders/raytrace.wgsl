@@ -339,6 +339,11 @@ fn closest_hit_filtered(ro: vec3<f32>, rd: vec3<f32>, opaque_only: bool) -> Hit 
                     if (t > 0.0 && (t < hit.t || (t == hit.t && hit.prim != 0xffffffffu && link > hit.leaf)) && (!opaque_only || primitive_opacity(tagged, ro + rd * t, vec2<f32>(0.0)) >= 0.999) && !inside_envelope(ro + rd * t, tagged)) { hit.t = t; hit.prim = tagged; hit.leaf = link; }
                 } else {
                     let tri = triangles[idx];
+                    if (is_glowing_path(bitcast<u32>(mesh_verts[tri.x].n.w))) {
+                        let face = cross(mesh_verts[tri.y].p.xyz - mesh_verts[tri.x].p.xyz,
+                            mesh_verts[tri.z].p.xyz - mesh_verts[tri.x].p.xyz);
+                        if (dot(face, rd) >= 0.0) { continue; }
+                    }
                     let r = ray_triangle(mesh_verts[tri.x].p.xyz, mesh_verts[tri.y].p.xyz, mesh_verts[tri.z].p.xyz, ro, rd);
                     if (r.x > 0.0 && (r.x < hit.t || (r.x == hit.t && hit.prim != 0xffffffffu && link > hit.leaf)) && (!opaque_only || primitive_opacity(tagged, ro + rd * r.x, r.yz) >= 0.999)) { hit.t = r.x; hit.prim = tagged; hit.leaf = link; hit.uv = r.yz; }
                 }
@@ -446,6 +451,7 @@ const GI_BOUNCES: u32 = 3u;
 // (ambient, diffuse, specular, shininess) + the raw material word (for the outline bit).
 struct Surf {
     p: vec3<f32>,
+    depth_p: vec3<f32>,
     ray_p: vec3<f32>, // smooth-surface origin for secondary rays; primary depth stays planar
     nrm: vec3<f32>,
     base: vec3<f32>,
@@ -459,6 +465,7 @@ struct Surf {
 
 fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     let p = ro + rd * hit.t;
+    var depth_p = p;
     let typ = hit.prim >> 30u;
     let idx = hit.prim & IDX_MASK;
     var nrm: vec3<f32>;
@@ -467,6 +474,7 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     var base: vec3<f32>;
     var mat_raw: u32;
     var opacity: f32;
+    var path_center = vec3<f32>(0.0);
     if (typ == 0u) {
         let sp = spheres[idx];
         nrm = normalize(p - sp.c.xyz);
@@ -512,6 +520,7 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
         let wt = 1.0 - hit.uv.x - hit.uv.y;
         let face = normalize(cross(b.p.xyz - a.p.xyz, c.p.xyz - a.p.xyz));
         let interpolated = wt * a.n.xyz + hit.uv.x * b.n.xyz + hit.uv.y * c.n.xyz;
+        path_center = interpolated;
         nrm = face;
         if (dot(interpolated, interpolated) > 1e-12) { nrm = normalize(interpolated); }
         // The planar hit lies below the smooth surface's vertex tangent planes.
@@ -539,7 +548,16 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     }
     let view_dir = select(-rd, normalize(U.eye.xyz - p), persp);
     if (dot(nrm, view_dir) < 0.0) { nrm = -nrm; } // two-sided
-    return Surf(p, ray_p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u, closed, hit.prim);
+    if (is_glowing_path(mat_raw)) {
+        let axis = glowing_path_axis(mat_raw);
+        let radius = glowing_path_radius_from_bound(mesh_verts[triangles[idx].x].p.xyz, path_center, axis, mat_raw);
+        let sample = glowing_path_sample(p, path_center, view_dir, axis, glowing_path_u(axis), mat_raw, radius);
+        depth_p = sample.depth_point;
+        let c = glowing_path_color(base, sample.radius2, opacity * sample.intensity, U.fog_color.rgb);
+        base = c.rgb;
+        opacity = c.a;
+    }
+    return Surf(p, depth_p, ray_p, nrm, base, unpack_mat(mat_raw), mat_raw, opacity, typ == 2u, closed, hit.prim);
 }
 
 // Sample a finite directional light. Moving the origin across shadow-map texels
@@ -668,6 +686,7 @@ fn shade_gi(first: Surf, persp: bool, light: vec3<f32>, max_bounces: u32, seed: 
 }
 
 fn shade_surface(s: Surf, rd: vec3<f32>, persp: bool, light: vec3<f32>, axis: vec3<f32>, sample_index: u32, seed: ptr<function, u32>) -> vec3<f32> {
+    if (is_glowing_path(s.mat_raw)) { return s.base; }
     let direct = shade_tier1(s, rd, persp, light, sample_index);
     if (material_kind(s.mat_raw) == MATERIAL_FLAT_OUTLINE) { return direct.xyz; }
     var tier1 = apply_fog(direct.xyz, s.p, axis);
@@ -741,12 +760,16 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (hit.prim == 0xffffffffu) { break; }
             let surface = surface_at(hit, cursor, rd, persp);
             if (dot(surface.p - ro, rd) >= opaque_distance || surface.opacity >= 0.999) { break; }
-            let eye_z = (U.view * vec4<f32>(surface.p, 1.0)).z;
-            let weight = transparency_weight(-eye_z, surface.opacity, U.depth_range.xy);
-            let shaded = shade_surface(surface, rd, persp, light, axis, s + U.dims.w, &seed);
-            accum_color = accum_color + shaded * surface.opacity * weight;
-            accum_weight = accum_weight + surface.opacity * weight;
-            reveal = reveal * (1.0 - surface.opacity);
+            // Compare the path's centerline depth with opaque atoms, while the
+            // traversal cursor continues from the bounding entry to find all layers.
+            if (dot(surface.depth_p - ro, rd) < opaque_distance) {
+                let eye_z = (U.view * vec4<f32>(surface.depth_p, 1.0)).z;
+                let weight = transparency_weight(-eye_z, surface.opacity, U.depth_range.xy);
+                let shaded = shade_surface(surface, rd, persp, light, axis, s + U.dims.w, &seed);
+                accum_color = accum_color + shaded * surface.opacity * weight;
+                accum_weight = accum_weight + surface.opacity * weight;
+                reveal = reveal * (1.0 - surface.opacity);
+            }
             cursor = surface.p + rd * 1e-4;
             hit = camera_hit(cursor, rd, false);
         }

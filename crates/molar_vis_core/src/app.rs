@@ -997,7 +997,8 @@ impl App {
     ///
     /// Targets use vdW spheres (see [`crate::unobstructed`]); visible background reps
     /// supply spheres at their rendered radii or actual mesh triangles. Interactions
-    /// reps are skipped. Selections are refreshed first
+    /// reps (including glowing helices) are skipped as both obstacles and members
+    /// of a combined target. Selections are refreshed first
     /// so a freshly built scene (e.g. from the Python API) has evaluated selections.
     ///
     /// `resolution` is the coarse direction-search sample count (see

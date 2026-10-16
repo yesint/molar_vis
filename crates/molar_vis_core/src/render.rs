@@ -137,8 +137,8 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\nconst MATERIAL_VELVET: u32 = {}u;\n",
-        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD, crate::material::VELVET_WORD);
+    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\nconst MATERIAL_VELVET: u32 = {}u;\nconst MATERIAL_GLOWING_PATH: u32 = {}u;\n",
+        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD, crate::material::VELVET_WORD, crate::material::GLOWING_PATH_WORD);
     format!("{}\n{}\n{}\n{}\n{}", constants, envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
 }
 
@@ -640,7 +640,7 @@ impl ShadowKey {
                 continue;
             }
             for (index, rep) in mol.reps.iter().enumerate() {
-                if !rep.visible || rep.material.is_transparent() {
+                if !rep.visible || rep.material.is_transparent() || rep.params.has_glowing_path() {
                     continue;
                 }
                 if rep.geometry_revision == 0
@@ -703,6 +703,7 @@ pub struct SceneRenderer {
     line_pipeline: [wgpu::RenderPipeline; 3],
     point_pipeline: [wgpu::RenderPipeline; 3],
     mesh_pipeline: [wgpu::RenderPipeline; 3],
+    path_mesh_pipeline: [wgpu::RenderPipeline; 3],
     sphere_shadow_pipeline: wgpu::RenderPipeline,
     cylinder_shadow_pipeline: wgpu::RenderPipeline,
     mesh_shadow_pipeline: wgpu::RenderPipeline,
@@ -936,6 +937,10 @@ impl SceneRenderer {
         let mesh_pipeline = triple(&|t, dw, dc, fs| {
             mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
         });
+        let path_mesh_pipeline = triple(&|t, dw, dc, fs| {
+            let entry = match fs { "fs_main" => "fs_path_main", "fs_oit" => "fs_path_oit", _ => fs };
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, entry)
+        });
         let sphere_shadow_pipeline = sphere::build_pipeline(
             device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), &[], true, less,
             "fs_shadow", early_z,
@@ -1095,6 +1100,7 @@ impl SceneRenderer {
             line_pipeline,
             point_pipeline,
             mesh_pipeline,
+            path_mesh_pipeline,
             sphere_shadow_pipeline,
             cylinder_shadow_pipeline,
             mesh_shadow_pipeline,
@@ -1591,7 +1597,7 @@ impl SceneRenderer {
         // device can't do OIT (WebGL2), transparent reps are drawn in the opaque pass
         // with plain alpha blending instead, so the dedicated OIT pass never runs.
         let has_transparent = scene.molecules.iter().any(|m| {
-            m.visible && (m.reps.iter().any(|r| r.visible && r.material.is_transparent())
+            m.visible && (m.reps.iter().any(|r| r.visible && (r.material.is_transparent() || r.params.has_glowing_path()))
                 || m.meshes.iter().any(|s| s.state.visible && s.transparent()))
         });
         let use_oit = has_transparent && self.oit_enabled;
@@ -2339,7 +2345,7 @@ impl SceneRenderer {
                 }
             }
             for rep in &mol.reps {
-                if !rep.visible || rep.material.is_transparent() {
+                if !rep.visible || rep.material.is_transparent() || rep.params.has_glowing_path() {
                     continue;
                 }
                 if let Some(s) = &rep.gpu.spheres {
@@ -2476,38 +2482,43 @@ impl SceneRenderer {
             };
             for j in order {
                 let rep = &mol.reps[j];
-                if !rep.visible || rep.material.is_transparent() != transparent {
-                    continue;
-                }
+                let path = rep.params.has_glowing_path();
+                let draw_base = rep.material.is_transparent() == transparent;
+                let draw_mesh = (rep.material.is_transparent() || path) == transparent;
+                if !rep.visible || (!draw_base && !draw_mesh) { continue; }
                 for &cam in &images[mi][j] {
                     pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
                     self.bind_envelope(pass, rep.gpu.envelope.as_ref());
-                    if let Some(p) = rep.gpu.points.as_ref() {
-                        pass.set_pipeline(&self.point_pipeline[i]);
-                        pass.set_vertex_buffer(0, p.buffer.slice(..));
-                        pass.draw(0..4, 0..p.count);
+                    if draw_base {
+                        if let Some(p) = rep.gpu.points.as_ref() {
+                            pass.set_pipeline(&self.point_pipeline[i]);
+                            pass.set_vertex_buffer(0, p.buffer.slice(..));
+                            pass.draw(0..4, 0..p.count);
+                        }
+                        if let Some(s) = &rep.gpu.spheres {
+                            pass.set_pipeline(&self.sphere_pipeline[i]);
+                            pass.set_vertex_buffer(0, s.buffer.slice(..));
+                            pass.draw(0..4, 0..s.count);
+                        }
+                        if let Some(c) = &rep.gpu.cylinders {
+                            pass.set_pipeline(&self.cylinder_pipeline[i]);
+                            pass.set_vertex_buffer(0, c.buffer.slice(..));
+                            pass.draw(0..4, 0..c.count);
+                        }
+                        if let Some(l) = rep.gpu.lines.as_ref() {
+                            // Instanced fat-line quads: one segment (2 verts) per instance.
+                            pass.set_pipeline(&self.line_pipeline[i]);
+                            pass.set_vertex_buffer(0, l.buffer.slice(..));
+                            pass.draw(0..4, 0..l.count / 2);
+                        }
                     }
-                    if let Some(s) = &rep.gpu.spheres {
-                        pass.set_pipeline(&self.sphere_pipeline[i]);
-                        pass.set_vertex_buffer(0, s.buffer.slice(..));
-                        pass.draw(0..4, 0..s.count);
-                    }
-                    if let Some(c) = &rep.gpu.cylinders {
-                        pass.set_pipeline(&self.cylinder_pipeline[i]);
-                        pass.set_vertex_buffer(0, c.buffer.slice(..));
-                        pass.draw(0..4, 0..c.count);
-                    }
-                    if let Some(l) = rep.gpu.lines.as_ref() {
-                        // Instanced fat-line quads: one segment (2 verts) per instance.
-                        pass.set_pipeline(&self.line_pipeline[i]);
-                        pass.set_vertex_buffer(0, l.buffer.slice(..));
-                        pass.draw(0..4, 0..l.count / 2);
-                    }
-                    if let Some(m) = &rep.gpu.mesh {
-                        pass.set_pipeline(&self.mesh_pipeline[i]);
-                        pass.set_vertex_buffer(0, m.vertices.slice(..));
-                        pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..m.index_count, 0, 0..1);
+                    if draw_mesh {
+                        if let Some(m) = &rep.gpu.mesh {
+                            pass.set_pipeline(if path { &self.path_mesh_pipeline[i] } else { &self.mesh_pipeline[i] });
+                            pass.set_vertex_buffer(0, m.vertices.slice(..));
+                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..m.index_count, 0, 0..1);
+                        }
                     }
                 }
             }

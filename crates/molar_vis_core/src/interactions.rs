@@ -115,7 +115,7 @@ pub struct DetectParams {
 
 /// The user-editable interaction settings carried by an `Interactions` rep
 /// (`RepParams::Interactions`). Each type has an enable flag + a distance cutoff (nm);
-/// `line_width` is the dashed-line width (px). `Copy` + serde so it rides `RepParams`
+/// `line_width` sets dashed-line width (px) or relative glowing-tube thickness. `Copy` + serde so it rides `RepParams`
 /// through undo/redo and sessions. Convert to [`DetectParams`] with [`Self::detect`].
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InteractionSettings {
@@ -173,6 +173,9 @@ pub struct InteractionSettings {
     #[serde(default = "d_halogen_angle")]
     pub halogen_angle: f32,
     // --- Rendering ---
+    /// Translucent glowing helices for all enabled interaction types.
+    #[serde(default)]
+    pub glowing_path: bool,
     #[serde(default = "d_width")]
     pub line_width: f32,
 }
@@ -246,6 +249,7 @@ impl Default for InteractionSettings {
             halogen_dist: d_halogen(),
             halogen_angle: d_halogen_angle(),
             line_width: d_width(),
+            glowing_path: false,
         }
     }
 }
@@ -571,6 +575,47 @@ mod tests {
         older.as_object_mut().unwrap().remove("colors");
         let restored: InteractionSettings = serde_json::from_value(older).unwrap();
         assert_eq!(restored.colors, InteractionSettings::default().colors);
+    }
+
+    #[test]
+    fn glowing_paths_keep_all_type_colors_and_load_older_settings() {
+        let kinds = [InteractionKind::HBond, InteractionKind::Hydrophobic, InteractionKind::SaltBridge,
+            InteractionKind::PiStacking, InteractionKind::PiCation, InteractionKind::Halogen];
+        let contact = |kind| Interaction { kind, a: Vec3::ZERO, b: Vec3::X * 0.3, angle: None, offset: None };
+        let contacts = kinds.map(contact);
+        let mut settings = InteractionSettings::default();
+        let dashed = crate::geometry::interaction_geometry(&contacts, &settings);
+        assert!(dashed.mesh.vertices.is_empty());
+        assert!(!dashed.lines.is_empty());
+        settings.glowing_path = true;
+        settings.colors = [[24, 100, 220, 255], [110, 90, 60, 255], [180, 120, 30, 255],
+            [140, 40, 200, 255], [210, 30, 150, 255], [20, 180, 190, 255]];
+        let glowing = crate::geometry::interaction_geometry(&contacts, &settings);
+        assert!(glowing.lines.is_empty());
+        let mut vertex_offset = 0;
+        for kind in kinds {
+            let single = crate::geometry::interaction_geometry(&[contact(kind)], &settings);
+            assert!(!single.mesh.vertices.is_empty());
+            let vertices = &glowing.mesh.vertices[vertex_offset..vertex_offset + single.mesh.vertices.len()];
+            let expected = crate::color::pack_rgba8(settings.color(kind)) & 0xffffff;
+            assert!(vertices.iter().all(|v| v.pos.iter().all(|x| x.is_finite()) && v.color & 0xffffff == expected));
+            // Each path has one field definition, independent of its type/color.
+            assert!(vertices.iter().all(|v| v.color == vertices[0].color
+                && v.normal == [0.15, 0.0, 0.0] && v.mat == vertices[0].mat));
+            vertex_offset += single.mesh.vertices.len();
+        }
+        assert_eq!(vertex_offset, glowing.mesh.vertices.len());
+        assert!(glowing.mesh.indices.iter().all(|&i| (i as usize) < glowing.mesh.vertices.len()));
+        // Turning off H-bonds must not send the other helices through opaque rendering.
+        settings.hbonds = false;
+        assert!(crate::geometry::RepParams::Interactions { settings }.has_glowing_path());
+        assert!(!crate::geometry::interaction_geometry(&contacts[1..], &settings).mesh.vertices.is_empty());
+        let mut saved = serde_json::to_value(settings).unwrap();
+        assert!(serde_json::from_value::<InteractionSettings>(saved.clone()).unwrap().glowing_path);
+        saved.as_object_mut().unwrap().remove("glowing_path");
+        assert!(!serde_json::from_value::<InteractionSettings>(saved).unwrap().glowing_path);
+        let empty = Interaction { b: Vec3::ZERO, ..contacts[0] };
+        assert!(crate::geometry::interaction_geometry(&[empty], &settings).mesh.vertices.is_empty());
     }
 
     fn atom(pos: [f32; 3], atomicnum: u8, res: u64) -> AtomInfo {

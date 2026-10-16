@@ -155,6 +155,8 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   first rep if a second molecule is loaded, else a disjoint-half second rep on mol 0 — and expand its
   panel; exercises the cross-molecule contact detection + dashed-line build; pair with
   `MOLAR_VIS_DEBUG_SAVE_IMAGE`) +
+  `MOLAR_VIS_DEBUG_GLOWING_PATH=1` (enable the single-surface glowing interaction paths on
+  existing interaction reps, including CLI docking scenes; pair with `_SAVE_IMAGE`) +
   `MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[hbond|hydrophobic|salt|pistacking|pication|halogen]` (open the
   tabbed interaction-settings dialog at that type tab — pair with `MOLAR_VIS_DEBUG_INTERACTIONS=1`) +
   `MOLAR_VIS_DEBUG_THEME=light|dark|system` (pin the theme without touching the saved config, so

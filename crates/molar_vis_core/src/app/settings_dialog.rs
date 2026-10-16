@@ -1586,8 +1586,11 @@ fn settings_interaction_options(
             });
         });
     }
+    ui.checkbox(&mut s.glowing_path, "Glowing path")
+        .on_hover_text("Render all enabled interaction types as glowing helices in their configured colors, brightest at the bond center.");
     egui::Grid::new("interaction_rendering").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-        ui.label("Line width (px)");
+        ui.label(if s.glowing_path { "Tube width" } else { "Line width (px)" })
+            .on_hover_text("Controls the core and halo thickness of glowing tubes; 3 is the default. Dashed-line width is in pixels.");
         slider_with_edit(ui, &mut s.line_width, 1.0..=20.0, true);
         ui.end_row();
     });

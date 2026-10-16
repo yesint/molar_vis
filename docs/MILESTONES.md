@@ -857,3 +857,31 @@
   pre-October-14 sphere-proxy search was replayed on ten JAK2 inhibitors and still
   produced obstructed views. The replacement is checked with rendered ligand masks
   against receptor-hidden references, plus finite-bond, wide-line and ring tests.
+
+### Glowing interaction paths
+
+Settings → Interactions has an opt-in **Glowing path** option. All enabled interaction types connect
+interacting atoms with a translucent glowing helix of uniform tube width. One mesh
+surface per contact uses shader emission for the bright core and soft halo; no
+nested transparent shells or extra glow buffers. H-bonds, hydrophobic contacts,
+salt bridges, π-stacking, π-cation and halogen bonds use their configured type colors.
+Disabling the option restores dashed lines. The option persists in settings, sessions and undo/redo; older
+settings retain dashed rendering. Live rendering, captures and ray tracing use
+the same path geometry and emission profile. The saturated, nonreflective core
+peaks in intensity at the bond center and fades toward the atoms; core and halo darken on
+light backgrounds. One enclosing capsule evaluates a continuous ray-to-path
+glow field once per pixel. The soft end-on glow and wavy side view have no
+separate visible cap or wall contributions. Occlusion uses the path centerline
+depth, allowing connected atoms to cover the core and halo at attachment points
+in both live and ray-traced rendering. The path follows a small six-turn spiral
+(up to 0.009 nm amplitude), fixed in world space and smoothly anchored at both atoms.
+
+The interaction width control also scales the glowing tube's core and halo;
+3 preserves the original thickness. Helix amplitude, turn count and the axial
+intensity profile are independent of width. The enclosing capsule grows with
+the tube, retaining soft edges at larger widths in both rendering modes.
+
+Unobstructed view treats interaction representations as annotations, excluding
+both dashed and glowing geometry from obstacle scoring and framing. Interaction
+reps included in a combined target list are ignored; selecting only interactions
+reports that an atom representation is needed.
