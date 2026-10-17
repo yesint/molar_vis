@@ -1212,8 +1212,8 @@ impl App {
                         if dragged.is_some() {
                             ui.disable();
                         }
-                        // Interactions reps: a single line-width slider (applies to all
-                        // types) + the button opening the general settings dialog. Every
+                        // Interactions reps: width and animation controls (all types)
+                        // + the button opening the general settings dialog. Every
                         // other style uses the normal params grid. (The Partner picker is
                         // on the style row above.)
                         if matches!(rep.kind, RepKind::Interactions) {
@@ -1234,6 +1234,9 @@ impl App {
                                         action = Some(RepAction::OpenInteractionSettings);
                                     }
                                 });
+                                if settings.glowing_path {
+                                    w_changed |= ui.checkbox(&mut settings.animate_glowing_path, "Animate glowing paths").changed();
+                                }
                             }
                             if w_changed {
                                 rep.geom_dirty = true;

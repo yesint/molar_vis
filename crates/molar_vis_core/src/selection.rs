@@ -261,11 +261,16 @@ fn representation(
     Ok((owner, index))
 }
 
+#[derive(Debug)]
+struct ForeignSelection {
+    target: Option<Target>,
+}
+
 /// The table stores parsed descriptions only, never molecular borrows or objects.
 #[derive(Debug, Default)]
 pub(crate) struct SceneVariables {
     identity: SelectionResolverId,
-    targets: Vec<Target>,
+    targets: Vec<ForeignSelection>,
 }
 impl SceneVariables {
     fn is_empty(&self) -> bool {
@@ -276,8 +281,47 @@ impl SelectionResolver for SceneVariables {
     fn identity(&self) -> SelectionResolverId {
         self.identity
     }
+    fn parse_atom(&self, input: &str, position: usize) -> Option<ForeignParse> {
+        let rest = &input[position..];
+        let bytes = rest.as_bytes();
+        if bytes.first() != Some(&b'm')
+            || !bytes
+                .get(1)
+                .is_some_and(|c| c.is_ascii_digit() || *c == b'-')
+        {
+            return None;
+        }
+        let len = rest
+            .char_indices()
+            .find(|(_, c)| {
+                c.is_whitespace()
+                    || matches!(c, ':' | '(' | ')' | '&' | '|' | '<' | '>' | '=' | '!' | ',')
+            })
+            .map_or(rest.len(), |(i, _)| i);
+        Some(ForeignParse::matched(position + len, &rest[..len]))
+    }
+    fn parse_prefix(&self, input: &str, position: usize) -> Option<ForeignParse> {
+        let rest = input[position..].strip_prefix("interacts")?;
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let rest = rest.trim_start();
+        let tail = rest.strip_prefix("with")?;
+        if !tail.is_empty() && !tail.starts_with(char::is_whitespace) && !tail.starts_with('(') {
+            return None;
+        }
+        Some(ForeignParse::matched(
+            input.len() - tail.len(),
+            "interacts with",
+        ))
+    }
     fn prepare(&mut self, name: &str) -> Result<SelectionReferenceId, SelectionResolveError> {
-        self.targets.push(Target::parse(name)?);
+        let target = if name == "interacts with" {
+            None
+        } else {
+            Some(Target::parse(name)?)
+        };
+        self.targets.push(ForeignSelection { target });
         Ok(self.identity.reference(self.targets.len() - 1))
     }
     fn bind(
@@ -374,6 +418,10 @@ impl SelectionResolver for Binding<'_> {
             .targets
             .get(id.slot())
             .ok_or_else(|| SelectionResolveError::new("unknown prepared reference"))?;
+        let target = target
+            .target
+            .as_ref()
+            .ok_or_else(|| SelectionResolveError::new("a prefix needs an operand"))?;
         let mi = target.molecule(self.scene)?;
         let mol = &self.scene.molecules[mi];
         let domain = if let Some(rep) = target.rep {
@@ -408,6 +456,68 @@ impl SelectionResolver for Binding<'_> {
         )
         .map_err(|error| SelectionResolveError::new(error.to_string()))
     }
+    fn evaluate_prefix(
+        &self,
+        id: SelectionReferenceId,
+        current: SelectionSourceView<'_>,
+        operands: &[SelectionSourceView<'_>],
+    ) -> Result<Vec<usize>, SelectionResolveError> {
+        let foreign = self
+            .variables
+            .targets
+            .get(id.slot())
+            .ok_or_else(|| SelectionResolveError::new("unknown prepared prefix"))?;
+        if foreign.target.is_some() {
+            return Err(SelectionResolveError::new("expected an interaction prefix"));
+        }
+        let (mi, source, source_state) = interaction_source(self.scene, current)?;
+        let Ok(sel) = Sel::from_vec((0..source.n_atoms).collect()) else {
+            return Ok(Vec::new());
+        };
+        let a = crate::interaction_source::gather_set(source, mi, &sel, source_state);
+        let mut indices = Vec::new();
+        for view in operands {
+            let (pmi, partner, partner_state) = interaction_source(self.scene, *view)?;
+            let ids = view
+                .indices()
+                .map_or_else(|| (0..partner.n_atoms).collect(), |ids| ids.to_vec());
+            let Ok(sel) = Sel::from_vec(ids) else {
+                continue;
+            };
+            let b = crate::interaction_source::gather_set(partner, pmi, &sel, partner_state);
+            for contact in
+                crate::interactions::detect(&a, &b, &self.scene.interaction_settings.detect())
+            {
+                let [source_atoms, _] = contact.atoms;
+                indices.extend(source_atoms.into_iter().map(|atom| atom.index));
+            }
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        Ok(indices)
+    }
+}
+
+fn interaction_source<'a>(
+    scene: &'a Scene,
+    view: SelectionSourceView<'_>,
+) -> Result<(usize, &'a crate::scene::Molecule, &'a State), SelectionResolveError> {
+    for (mi, mol) in scene.molecules.iter().enumerate() {
+        if !std::ptr::eq(view.atom_storage(), &mol.data.topology().atoms) {
+            continue;
+        }
+        for state in std::iter::once(mol.render_state())
+            .chain(mol.trajectory.frames.iter())
+            .chain(std::iter::once(mol.data.state()))
+        {
+            if unsafe { view.coords_ptr() } == state.coords.as_ptr() {
+                return Ok((mi, mol, state));
+            }
+        }
+    }
+    Err(SelectionResolveError::new(
+        "interaction operand is not a scene source",
+    ))
 }
 
 type Programs = HashMap<RepKey, Result<Program, EvalError>>;
@@ -428,8 +538,10 @@ impl<'a> Evaluation<'a> {
     }
     fn dependencies(&mut self, variables: &SceneVariables) {
         for target in &variables.targets {
-            if let Ok(Some(key)) = target.key(self.scene) {
-                let _ = self.rep(key);
+            if let Some(target) = target.target {
+                if let Ok(Some(key)) = target.key(self.scene) {
+                    let _ = self.rep(key);
+                }
             }
         }
     }
@@ -561,6 +673,7 @@ fn signature(scene: &Scene) -> u64 {
             rep.sel_text.hash(&mut hasher);
         }
     }
+    format!("{:?}", scene.interaction_settings.detect()).hash(&mut hasher);
     for group in &scene.groups {
         group.id.hash(&mut hasher);
         group.members.hash(&mut hasher);
@@ -749,7 +862,17 @@ mod tests {
     fn raw(xs: &[f32], names: &[&str]) -> RawMolecule {
         let mut top = Topology::default();
         for name in names {
-            top.atoms.push(&Atom::new().with_name(name).with_mass(1.0));
+            top.atoms.push(
+                &Atom::new()
+                    .with_name(name)
+                    .with_mass(1.0)
+                    .with_atomic_number(match *name {
+                        "N" => 7,
+                        "O" => 8,
+                        "C" => 6,
+                        _ => 0,
+                    }),
+            );
         }
         top.assign_resindex();
         let state = State {
@@ -798,12 +921,197 @@ mod tests {
             }
         }
     }
+    fn contact_scene() -> Scene {
+        let mut scene = Scene::default();
+        scene.add(raw(&[0.0, 2.0], &["N", "C"]), &RepDefaults::default());
+        scene.add(raw(&[0.3, 5.0], &["O", "C"]), &RepDefaults::default());
+        scene.molecules[0].reps = vec![rep("all")];
+        scene.molecules[1].reps = vec![rep("all")];
+        scene
+    }
+
+    #[test]
+    fn external_parser_owns_references_and_rejects_braces() {
+        let scene = contact_scene();
+        assert_eq!(ids(scene.select(0, "m0.r0").unwrap()), [0, 1]);
+        for text in ["{m0.r0}", "{interacts with m1.r0}", "interacts m1.r0"] {
+            assert!(
+                matches!(scene.select(0, text), Err(EvalError::Invalid { .. })),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_interaction_operands_keep_source_identity_and_precedence() {
+        let scene = contact_scene();
+        for text in [
+            "interacts with (m1.r0 or name N)",
+            "interacts with (m1.r0 or (index 0 and name N))",
+            "interacts with (m1.r0 or interacts with m1.r0)",
+        ] {
+            assert_eq!(ids(scene.select(0, text).unwrap()), [0], "{text}");
+        }
+        assert_eq!(
+            ids(scene.select(0, "interacts with m1.r0 or index 1").unwrap()),
+            [0, 1]
+        );
+        for text in [
+            "m1.r0",
+            "m0.r0 or m1.r0",
+            "name N and m1.r0",
+            "m1.r0 or index 0",
+        ] {
+            assert!(
+                matches!(scene.select(0, text), Err(EvalError::Invalid { .. })),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_source_filters_keep_their_evaluation_source() {
+        let mut scene = contact_scene();
+        scene.add(raw(&[0.4], &["N"]), &RepDefaults::default());
+        assert_eq!(
+            ids(scene
+                .select(0, "within 0.5 of m1:(interacts with m2)")
+                .unwrap()),
+            [0]
+        );
+        assert_eq!(
+            ids(scene
+                .select(0, "interacts with m1:(interacts with m2)")
+                .unwrap()),
+            [0]
+        );
+        assert!(matches!(
+            scene.select(0, "m1:(interacts with m2)"),
+            Err(EvalError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn interaction_queries_return_current_source_and_compose_with_molar() {
+        let mut scene = contact_scene();
+        assert_eq!(ids(scene.select(0, "interacts with m1.r0").unwrap()), [0]);
+        assert_eq!(ids(scene.select(1, "interacts with m0.r0").unwrap()), [0]);
+        assert!(matches!(
+            scene.select(0, "index 1 and interacts with m1.r0"),
+            Err(EvalError::Empty)
+        ));
+        assert_eq!(
+            ids(scene
+                .select(0, "same residue as (interacts with m1.r0)")
+                .unwrap()),
+            [0, 1]
+        );
+        scene.molecules[1].visible = false;
+        scene.molecules[1].reps[0].visible = false;
+        assert_eq!(ids(scene.select(0, "interacts with m1.r0").unwrap()), [0]);
+        scene.interaction_settings.hbond_dist = 0.2;
+        assert!(matches!(
+            scene.select(0, "interacts with m1.r0"),
+            Err(EvalError::Empty)
+        ));
+        scene.interaction_settings.hbond_dist = 0.4;
+        assert_eq!(ids(scene.select(0, "interacts with m1.r0").unwrap()), [0]);
+        scene.interaction_settings.hbonds = false;
+        assert!(matches!(
+            scene.select(0, "interacts with m1.r0"),
+            Err(EvalError::Empty)
+        ));
+    }
+
+    #[test]
+    fn same_molecule_interaction_query_returns_only_the_query_side() {
+        let mut raw = raw(&[0.0, 0.3], &["N", "O"]);
+        let mut top = Topology::default();
+        top.atoms.push(
+            &Atom::new()
+                .with_name("N")
+                .with_atomic_number(7)
+                .with_resid(1),
+        );
+        top.atoms.push(
+            &Atom::new()
+                .with_name("O")
+                .with_atomic_number(8)
+                .with_resid(2),
+        );
+        top.assign_resindex();
+        raw.system = System::new(top, raw.system.state().clone()).unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &RepDefaults::default());
+        scene.molecules[0].reps = vec![rep("all"), rep("index 0")];
+        assert_eq!(ids(scene.select(0, "interacts with m0.r1").unwrap()), [1]);
+    }
+
+    #[test]
+    fn interaction_queries_use_displayed_and_explicit_partner_frames() {
+        let mut scene = contact_scene();
+        let close = scene.molecules[1].data.state().clone();
+        let mut far = close.clone();
+        far.coords[0].x = 1.0;
+        scene.molecules[1].trajectory.frames = vec![close, far];
+        scene.molecules[1].trajectory.current = 1;
+        assert!(matches!(
+            scene.select(0, "interacts with m1.r0"),
+            Err(EvalError::Empty)
+        ));
+        assert_eq!(
+            ids(scene.select(0, "interacts with m1.r0[0]").unwrap()),
+            [0]
+        );
+        assert_eq!(scene.molecules[1].trajectory.current, 1);
+        scene.molecules[1].trajectory.current = 0;
+        assert_eq!(ids(scene.select(0, "interacts with m1.r0").unwrap()), [0]);
+    }
+
+    #[test]
+    fn interaction_queries_refresh_with_coordinates_settings_and_dependencies() {
+        let mut scene = contact_scene();
+        scene.molecules[0].reps[0].sel_text = "interacts with m1.r0".into();
+        scene.refresh_selections();
+        assert_eq!(selected(&scene, 0, 0), [0]);
+        settle(&mut scene);
+        scene.interaction_settings.hbond_dist = 0.2;
+        assert!(scene.refresh_selections());
+        assert!(selected(&scene, 0, 0).is_empty());
+        settle(&mut scene);
+        scene.interaction_settings.hbond_dist = 0.4;
+        scene.refresh_selections();
+        assert_eq!(selected(&scene, 0, 0), [0]);
+        settle(&mut scene);
+        let mut state = scene.molecules[1].data.state().clone();
+        state.coords[0].x = 1.0;
+        scene.molecules[1].data.set_state(state).unwrap();
+        scene.molecules[1].reps[0].coords_dirty = true;
+        scene.refresh_selections();
+        assert!(selected(&scene, 0, 0).is_empty());
+        scene.molecules[1].reps[0].sel_text = "interacts with m0.r0".into();
+        scene.molecules[1].reps[0].sel_dirty = true;
+        scene.refresh_selections();
+        assert!(scene.molecules[0].reps[0]
+            .sel_error
+            .as_ref()
+            .unwrap()
+            .contains("cyclic"));
+        let text = "interacts with m9.r0";
+        match scene.select(0, text) {
+            Err(EvalError::Invalid {
+                span: Some(span), ..
+            }) => assert_eq!(&text[span], "m9.r0"),
+            _ => panic!("expected a positioned missing-reference error"),
+        }
+    }
+
     #[test]
     fn cross_molecule_predicates_and_queries_use_foreign_coordinates() {
         let mut scene = scene();
         scene.refresh_selections();
         assert_eq!(selected(&scene, 0, 0), [0]);
-        assert_eq!(ids(scene.select(0, "within 0.5 of m1.r0:").unwrap()), [0]);
+        assert_eq!(ids(scene.select(0, "within 0.5 of m1.r0").unwrap()), [0]);
         assert_eq!(
             ids(scene
                 .select(0, "within 0.5 of (m1:(name CA) or m1:(name CB))")
@@ -841,7 +1149,7 @@ mod tests {
     #[test]
     fn reference_selection_edits_are_order_independent() {
         let mut scene = scene();
-        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0:".into();
+        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0".into();
         scene.refresh_selections();
         assert_eq!(selected(&scene, 0, 0), [0]);
         settle(&mut scene);
@@ -868,7 +1176,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0:".into();
+        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0".into();
         scene.refresh_selections();
         assert_eq!(selected(&scene, 0, 0), [0]);
         settle(&mut scene);
@@ -881,7 +1189,7 @@ mod tests {
             "static current membership follows its atoms"
         );
         assert_eq!(
-            ids(scene.select(0, "within 0.5 of m1.r0[1]:").unwrap()),
+            ids(scene.select(0, "within 0.5 of m1.r0[1]").unwrap()),
             [0],
             "explicit frame evaluates selection at that frame"
         );
@@ -924,7 +1232,7 @@ mod tests {
     #[test]
     fn empty_reference_can_become_nonempty_again() {
         let mut scene = scene();
-        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0:".into();
+        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0".into();
         scene.molecules[1].reps[0].sel_text = "name NEVER".into();
         scene.refresh_selections();
         assert!(scene.molecules[0].reps[0].sel_empty);
@@ -952,12 +1260,12 @@ mod tests {
         let mut scene = scene();
         scene.refresh_selections();
         assert!(matches!(
-            scene.validate_selection(0, 0, "within 0.5 of m0.r0:"),
+            scene.validate_selection(0, 0, "within 0.5 of m0.r0"),
             Err(EvalError::Invalid { .. })
         ));
-        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0:".into();
+        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1.r0".into();
         scene.molecules[0].reps[0].sel_dirty = true;
-        scene.molecules[1].reps[0].sel_text = "within 0.5 of m0.r0:".into();
+        scene.molecules[1].reps[0].sel_text = "within 0.5 of m0.r0".into();
         scene.molecules[1].reps[0].sel_dirty = true;
         scene.refresh_selections();
         assert!(scene.molecules[0].reps[0]
@@ -985,13 +1293,10 @@ mod tests {
             &RepDefaults::default(),
         );
         scene.molecules[1].reps[0].sel_text = "name CA".into();
-        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1[1].r0:".into();
+        scene.molecules[0].reps[0].sel_text = "within 0.5 of m1[1].r0".into();
         scene.refresh_selections();
         assert_eq!(selected(&scene, 0, 0), [1]);
-        assert_eq!(
-            ids(scene.select(0, "within 0.5 of m1[0].r0:").unwrap()),
-            [0]
-        );
+        assert_eq!(ids(scene.select(0, "within 0.5 of m1[0].r0").unwrap()), [0]);
         scene.switch_group_member(0, 1);
         scene.refresh_selections();
         assert_eq!(selected(&scene, 0, 0), [1]);
@@ -1000,11 +1305,11 @@ mod tests {
     fn missing_reps_frames_and_malformed_names_have_spans() {
         let scene = scene();
         for text in [
-            "within 0.5 of m1.r99:",
-            "within 0.5 of m1.r0[99]:",
-            "within 0.5 of m9[0]:",
+            "within 0.5 of m1.r99",
+            "within 0.5 of m1.r0[99]",
+            "within 0.5 of m9[0]",
             "within 0.5 of m1.whatever:",
-            "within 0.5 of m99999999999999999999999:",
+            "within 0.5 of m99999999999999999999999",
         ] {
             assert!(
                 matches!(
@@ -1031,7 +1336,7 @@ mod tests {
             crate::script::Command::Select {
                 mol: 0,
                 rep: crate::script::RepRef::Index(0),
-                text: "within 0.5 of m1.r0:".into(),
+                text: "within 0.5 of m1.r0".into(),
             },
         );
         assert!(result.is_ok());
@@ -1043,7 +1348,7 @@ mod tests {
             &defaults,
             crate::script::Command::Focus {
                 mol: 0,
-                text: "within 0.5 of m1:".into()
+                text: "within 0.5 of m1".into()
             }
         )
         .is_ok());
@@ -1068,7 +1373,7 @@ mod restricted_refresh_tests {
             );
         }
         let mut rep = Representation::new(RepKind::Vdw);
-        rep.sel_text = "within 0.5 of m1:".into();
+        rep.sel_text = "within 0.5 of m1".into();
         scene.molecules[0].reps.push(rep);
         scene.refresh_selections();
         for mol in &mut scene.molecules {
@@ -1106,7 +1411,7 @@ mod preparation_cache_tests {
             );
         }
         let mut rep = Representation::new(RepKind::Vdw);
-        rep.sel_text = "within 0.5 of m1.r0:".into();
+        rep.sel_text = "within 0.5 of m1.r0".into();
         scene.molecules[0].reps = vec![rep];
         scene
     }
@@ -1181,9 +1486,9 @@ mod group_index_tests {
         own.sel_text = "name NEVER".into();
         scene.molecules[2].reps.push(own);
         assert!(scene.select(0, "within 0.5 of m1.r0").is_ok());
-        assert!(scene.select(0, "within 0.5 of m1[1].r0:").is_ok());
+        assert!(scene.select(0, "within 0.5 of m1[1].r0").is_ok());
         assert!(matches!(
-            scene.select(0, "within 0.5 of m1[1].r1:"),
+            scene.select(0, "within 0.5 of m1[1].r1"),
             Err(EvalError::Empty)
         ));
     }

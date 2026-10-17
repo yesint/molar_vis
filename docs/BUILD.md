@@ -223,9 +223,15 @@ first, then update the workspace's registry version requirements and lockfile.
 
 ## Selection resolver development dependency
 
-The unreleased selection resolver API is supplied by the `[patch.crates-io]`
-entry in the workspace manifest, pinned to the molar Git commit implementing it.
-Cargo fetches that revision automatically; no sibling checkout is required.
-The patch also makes the Python and force-field crates use that same molar type
-implementation. Replace the patch with the published dependency version when
-molar releases the resolver API.
+The workspace pins the unreleased external PEG hooks to a molar Git revision.
+The patch also makes the Python and force-field crates use the same molar types.
+For local development, temporarily replace it with the adjacent `../molar/molar`
+checkout. Push the molar changes first, then pin their Git revision in the viewer;
+do not commit a local path override.
+
+Run the resolver tests with
+`cargo test --manifest-path ../molar/Cargo.toml -p molar --no-default-features --test selection_resolver`.
+
+`MOLAR_VIS_DEBUG_PATH_TIME=<seconds>` sets the glowing-path animation phase for
+headless raster/trace captures. Enable `animate_glowing_path` in the loaded
+session, then vary this time to compare rotation with a fixed camera.

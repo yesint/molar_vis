@@ -2134,7 +2134,7 @@ fn glowing_path_stays_visible_end_on() {
     scene.add(crate::data::RawMolecule::single_atom("path", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
         &crate::settings::RepDefaults::default());
     let settings = InteractionSettings { glowing_path: true, ..Default::default() };
-    let geom = geometry::interaction_geometry(&[Interaction {
+    let geom = geometry::interaction_geometry(&[Interaction { atoms: Default::default(),
         kind: InteractionKind::HBond, a: -Vec3::Z * 0.15, b: Vec3::Z * 0.15, angle: None, offset: None,
     }], &settings);
     renderer.raytracer.as_mut().unwrap().upload(&rs,
@@ -2227,7 +2227,7 @@ fn glowing_path_stays_below_connected_atoms() {
         &crate::settings::RepDefaults::default());
     let settings = InteractionSettings { glowing_path: true, hbonds: false, ..Default::default() };
     let endpoints = [-Vec3::Z * 0.15, Vec3::Z * 0.15];
-    let mut geom = geometry::interaction_geometry(&[Interaction {
+    let mut geom = geometry::interaction_geometry(&[Interaction { atoms: Default::default(),
         kind: InteractionKind::PiStacking, a: endpoints[0], b: endpoints[1], angle: None, offset: None,
     }], &settings);
     geom.spheres = endpoints.map(|p| SphereInstance { center: p.to_array(), radius: 0.06,
@@ -2304,7 +2304,7 @@ fn glowing_path_width_scales_core_and_halo() {
     let mut areas = [Vec::new(), Vec::new()];
     for width in [1.5, 3.0, 6.0] {
         let settings = InteractionSettings { glowing_path: true, line_width: width, ..Default::default() };
-        let geom = geometry::interaction_geometry(&[Interaction { kind: InteractionKind::HBond,
+        let geom = geometry::interaction_geometry(&[Interaction { atoms: Default::default(),  kind: InteractionKind::HBond,
             a: -Vec3::X * 0.15, b: Vec3::X * 0.15, angle: None, offset: None }], &settings);
         scene.molecules[0].reps[0].params = geometry::RepParams::Interactions { settings };
         scene.molecules[0].reps[0].gpu = renderer.upload(&rs, &geom);
@@ -2325,5 +2325,130 @@ fn glowing_path_width_scales_core_and_halo() {
     for (mode, area) in ["raster", "trace"].into_iter().zip(areas) {
         assert!(area[1] > area[0] * 12 / 10 && area[2] > area[1] * 12 / 10,
             "{mode}: visible tube area must grow with width: {area:?}");
+    }
+}
+
+#[test]
+#[ignore = "requires GPU; checks animated glow motion and static-path stability in raster and trace"]
+fn glowing_path_animation_changes_only_enabled_paths() {
+    use crate::{geometry, interactions::{Interaction, InteractionKind, InteractionSettings}, scene::Representation};
+    use molar::prelude::Atom;
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let mut scene = Scene::default();
+    scene.add(crate::data::RawMolecule::single_atom("path", Atom::new().with_name("C").guess(), Vec3::ZERO).unwrap(),
+        &crate::settings::RepDefaults::default());
+    scene.molecules[0].reps = vec![Representation::new(geometry::RepKind::Interactions)];
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.25), Vec3::splat(0.25), 0.9);
+    camera.projection = Projection::Orthographic;
+    camera.depth_cue.enabled = false;
+    camera.background.kind = BgKind::Solid;
+    camera.background.color = [0.94, 0.94, 0.94, 1.0];
+    for animate in [false, true] {
+        let settings = InteractionSettings { glowing_path: true, animate_glowing_path: animate,
+            line_width: 1.5, ..Default::default() };
+        let geom = geometry::interaction_geometry(&[Interaction { atoms: Default::default(), kind: InteractionKind::HBond,
+            a: -Vec3::X * 0.15, b: Vec3::X * 0.15, angle: None, offset: None }], &settings);
+        scene.molecules[0].reps[0].params = geometry::RepParams::Interactions { settings };
+        scene.molecules[0].reps[0].gpu = renderer.upload(&rs, &geom);
+        renderer.raytracer.as_mut().unwrap().upload(&rs,
+            &raytrace::RtScene::from_test_mesh(&geom.mesh, geometry::RepKind::Interactions));
+        let mut baseline: Option<[image::RgbaImage; 2]> = None;
+        for time in [0.0, 0.5, 1.0, 1.5, 2.0] {
+            renderer.set_interaction_animation_time(time);
+            let cap = renderer.capture_begin(&rs, 320, 320, camera.view(), camera.proj(1.0), false,
+                camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(), camera.background,
+                camera.eye_depth_range(), &scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let raster = cap.read();
+            let trace = renderer.capture_begin_raytrace(&rs, 320, 320, &camera, 8).unwrap();
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let images = [raster, trace.read()];
+            if let Some(base) = &baseline {
+                for (mode, (a, b)) in ["raster", "trace"].into_iter().zip(base.iter().zip(&images)) {
+                    let changed = a.pixels().zip(b.pixels()).filter(|(a,b)|
+                        (0..3).any(|c| a[c].abs_diff(b[c]) > 8)).count();
+                    if animate && time < 2.0 {
+                        assert!(changed > 30, "{mode} at {time}: animated path did not move");
+                    } else {
+                        assert_eq!(changed, 0, "{mode} at {time}: static path or full rotation changed");
+                    }
+                }
+            } else { baseline = Some(images); }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires GPU; compares bounded helix search against all 72 segments"]
+fn glowing_path_bounded_search_matches_full_search() {
+    let rs = gpu();
+    let lighting = include_str!("shaders/lighting.wgsl");
+    let start = lighting.find("fn glowing_path_sample(").unwrap();
+    let end = lighting.find("fn glowing_path_profile(").unwrap();
+    let reference = lighting[start..end]
+        .replace("fn glowing_path_sample(", "fn glowing_path_reference(")
+        .replace("if (projected_length2 > 1e-8)", "if (false)");
+    let source = lit_shader_source(&format!(r#"
+        {reference}
+        @group(0) @binding(0) var<storage, read_write> results: array<vec4<f32>>;
+        @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
+            let i = id.x;
+            let angle = f32(i % 97u) / 96.0 * 1.5707963268;
+            let azimuth = f32(i) * 2.39996323;
+            let view = vec3<f32>(sin(angle) * cos(azimuth), sin(angle) * sin(azimuth), cos(angle));
+            let right = normalize(cross(view, vec3<f32>(0.0, 1.0, 0.0)));
+            let up = cross(view, right);
+            let material = ((10u + (i * 17u) % 110u) << 20u) | select(0u, MATERIAL_PATH_ANIMATION_BIT, i % 2u == 0u);
+            let half_length = f32((material >> 20u) & 127u) / 127.0;
+            let width = f32(1u + (i * 13u) % 20u) * 0.04 / 3.0;
+            let hit = right * ((f32((i * 37u) % 251u) / 250.0 - 0.5) * (2.0 * half_length + width))
+                    + up * ((f32((i * 53u) % 241u) / 240.0 - 0.5) * width * 3.0);
+            let phase = f32(i % 71u) * 0.1;
+            let animation = vec4<f32>(cos(phase), sin(phase), 0.8660254, 0.5);
+            let a = glowing_path_sample(hit, vec3<f32>(0.0), view, vec3<f32>(0.0,0.0,1.0), vec3<f32>(1.0,0.0,0.0), material, width, animation);
+            let b = glowing_path_reference(hit, vec3<f32>(0.0), view, vec3<f32>(0.0,0.0,1.0), vec3<f32>(1.0,0.0,0.0), material, width, animation);
+            let visible_a = a.radius2 < 1.0;
+            let visible_b = b.radius2 < 1.0;
+            results[i] = vec4<f32>(select(0.0, 1.0, visible_a != visible_b),
+                select(0.0, abs(a.radius2 - b.radius2), visible_a && visible_b),
+                abs(a.intensity - b.intensity),
+                select(0.0, distance(a.depth_point, b.depth_point), visible_a && visible_b));
+        }}
+    "#));
+    let shader = rs.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("glowing-path-search-comparison"), source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = rs.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None, layout: None, module: &shader, entry_point: Some("main"),
+        compilation_options: Default::default(), cache: None,
+    });
+    let size = 8192 * 16;
+    let output = rs.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None, size, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false,
+    });
+    let readback = rs.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None, size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+    });
+    let group = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: output.as_entire_binding() }],
+    });
+    let mut encoder = rs.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(128, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, size);
+    rs.queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    readback.slice(..).map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    rx.recv().unwrap().unwrap();
+    let bytes = readback.slice(..).get_mapped_range();
+    for (ray, error) in bytemuck::cast_slice::<u8, [f32; 4]>(&bytes).iter().enumerate() {
+        assert!(error.iter().all(|v| v.abs() < 1e-4), "ray {ray}: bounded/full search difference {error:?}");
     }
 }

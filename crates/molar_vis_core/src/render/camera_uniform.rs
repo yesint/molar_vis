@@ -31,6 +31,8 @@ pub struct CameraUniform {
     /// over the viewport are the same decision made once — they used to be a hardcoded pair on
     /// each side, which is two places to keep in step.
     pub glow_color: [f32; 4],
+    /// Helix phase cos/sin and per-segment rotation cos/sin.
+    pub path_animation: [f32; 4],
 }
 
 impl CameraUniform {
@@ -54,6 +56,7 @@ impl CameraUniform {
             fog_color,
             depth_range: [depth_range[0], depth_range[1], 0.0, 0.0],
             glow_color,
+            path_animation: crate::interactions::glowing_path_animation(0.0),
         }
     }
 }

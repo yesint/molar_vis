@@ -8,8 +8,9 @@
 
 The workspace pins the crates.io packages molar, molar_python, and molar_ff to
 version `2.3.0` in `Cargo.toml`. The resolver API is currently supplied by the
-`[patch.crates-io]` entry pinned to the molar Git revision implementing it. Cargo
-fetches it automatically; the patch remains until a molar release contains that API. Molar 2.3 retains the **struct-of-arrays** storage introduced in
+`[patch.crates-io]` entry pointing to the adjacent `../molar/molar` checkout during
+development of the foreign-selection API. Both repositories must be present. This
+local patch can return to a Git revision after the API is published upstream. Molar 2.3 retains the **struct-of-arrays** storage introduced in
 2.0/2.1. `molar_ff` now supplies a fixed Espaloma charge kernel without a general ONNX
 runtime or an `espaloma` feature flag. The viewer still gates charge computation to
 native builds. The storage API details that matter here:
@@ -118,27 +119,43 @@ native builds. The storage API details that matter here:
 
 
 
-### Scene selection variables
+### Foreign selections
 
-The selection editor, scripting selection/focus commands, and view fitting use
-scene-aware evaluation (`Scene::select` and `Scene::refresh_selections`). Molar
-parses an opaque source token, optionally followed by `:(selection)`. The viewer parses that token once into a
-`SceneVariables` table paired with the representation's compiled expression.
-No molecular objects or borrowed source views are stored in the table.
+Molar's PEG parser calls `SelectionResolver::parse_atom` for foreign reference
+operands and `parse_prefix` for foreign unary operation heads. The hooks are pure:
+they return an exclusive input offset and an opaque descriptor, or decline the
+input. Only the committed AST is prepared. The viewer owns the `mN[I].rR[F]`
+reference grammar and `interacts with` prefix; molar owns parentheses, Boolean
+operators, precedence, and nested operands. No braces or text substitution are used.
 
-| Reference | Source |
+| Selection operand | Source |
 |---|---|
 | `m0` | Top-level molecule or group 0, displayed member/frame |
-| `m1:(name CA)` | CA atoms of top-level molecule or group 1, displayed frame |
-| `m0.r1` | Representation 1 of molecule 0, displayed frame |
-| `m1[0]` | Member 0 of molecule group 1, displayed frame |
-| `m0.r2[3]` | Representation 2 of molecule 0, loaded frame 3 |
-| `m1[0].r2[3]` | Representation 2 of group 1's member 0, loaded frame 3 |
+| `m1:(name CA)` | CA atoms of molecule or group 1 |
+| `m0.r1` | Representation 1 of molecule 0 |
+| `m1[0]` | Explicit member 0 of group 1 |
+| `m0.r2[3]` | Representation 2 at loaded frame 3 |
+| `m1[0].r2[3]` | Representation/frame on an explicit group member |
+| `interacts with m1.r0` | Current-source atoms in contacts with the referenced rep |
+
+`protein and interacts with m1.r0` selects receptor contact atoms;
+`same residue as (interacts with m1.r0)` selects their whole residues.
+`interacts with (m1.r0 or name CA)` combines foreign and local partner sets.
+The prefix binds like `within`: `interacts with m1.r0 or name CA` applies the
+operation only to `m1.r0`. Use parentheses to include the union in its operand.
+Intermediate sets retain source identity; final results containing any foreign
+source are hard errors. Indices are never silently imported or discarded.
+
+The operation uses all enabled interaction kinds and active global detection
+thresholds, independent of rendering style or visibility. Ring and charge-group
+contacts include all participant atoms; explicit H-bonds include participating
+hydrogens. Coordinate, selection and detection-setting changes invalidate results
+through the same scene refresh mechanism as interaction drawing. Dependencies and
+cycles are checked before detection. Existing bare-reference sessions remain valid.
 
 All numbers are zero-based. `mN` labels count top-level tree entries, with each group
 occupying one entry. A group reference follows its displayed member; `mN[I]` stays
-bound to member I. Bare references and references with a trailing colon both use
-the full source domain. The Rust/Python molecule handles still use flat scene indices. References are positional, so list
+bound to member I. A reference without a filter uses the full source domain. The Rust/Python molecule handles still use flat scene indices. References are positional, so list
 reordering or deletion can change what a number denotes. Each evaluation looks
 up the current scene. A missing molecule, member, rep or frame is a positioned
 selection error. Frame 0 is also available for a static molecule without a loaded

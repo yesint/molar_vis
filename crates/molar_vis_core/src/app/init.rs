@@ -57,6 +57,9 @@ impl App {
         let bond_params = settings.behavior.bond_params();
 
         let mut scene = Scene::default();
+        if let RepParams::Interactions { settings: interactions } = settings.reps.style_params(RepKind::Interactions) {
+            scene.interaction_settings = interactions;
+        }
         let mut status = String::new();
         // VMD-style command-line grouping: each `launch.files` entry is one molecule's
         // file list — the first file is the structure (topology + frame 0) and any
@@ -795,6 +798,9 @@ impl App {
         {
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_LOAD_SESSION") {
                 app.load_session_from(std::path::Path::new(&path));
+            }
+            if let Ok(seconds) = std::env::var("MOLAR_VIS_DEBUG_PATH_TIME") {
+                if let Ok(seconds) = seconds.parse::<f64>() { app.renderer.set_interaction_animation_time(seconds); }
             }
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_SESSION") {
                 app.save_session_to(std::path::Path::new(&path));

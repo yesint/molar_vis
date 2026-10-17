@@ -7,6 +7,7 @@ struct Camera {
     fog_color: vec4<f32>,
     depth_range: vec4<f32>,
     glow_color: vec4<f32>,
+    path_animation: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 struct VsIn {

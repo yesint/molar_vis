@@ -187,6 +187,10 @@ impl RepParams {
         matches!(self, Self::Interactions { settings } if settings.glowing_path)
     }
 
+    pub(crate) fn has_animated_glowing_path(&self) -> bool {
+        matches!(self, Self::Interactions { settings } if settings.glowing_path && settings.animate_glowing_path)
+    }
+
     pub fn kind(self) -> RepKind {
         match self {
             Self::Vdw { .. } => RepKind::Vdw, Self::Licorice { .. } => RepKind::Licorice,
@@ -503,7 +507,10 @@ pub fn interaction_geometry(
         if !length.is_finite() || length < 1e-5 { continue; }
         let axis = delta / length;
         let rgba = settings.color(it.kind);
-        let path_material = crate::material::glowing_path_word(axis, length);
+        let mut path_material = crate::material::glowing_path_word(axis, length);
+        if settings.animate_glowing_path {
+            path_material |= crate::material::GLOWING_PATH_ANIMATION_BIT;
+        }
         let (axis, length) = crate::material::glowing_path_frame(path_material);
         let u = axis.any_orthonormal_vector();
         let v = axis.cross(u);

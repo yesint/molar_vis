@@ -11,6 +11,7 @@ struct Camera {
     // Selection-glow color (rgb), chosen on the CPU from the viewport background so the
     // glow and the cues egui draws over the scene are one decision. See `theme::glow_color`.
     glow_color: vec4<f32>,
+    path_animation: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -171,7 +172,7 @@ fn path_sample_eye(in: VsOut) -> GlowingPathSample {
     let axis = glowing_path_axis(in.mat);
     let axis_eye = (camera.view * vec4<f32>(axis, 0.0)).xyz;
     let u_eye = (camera.view * vec4<f32>(glowing_path_u(axis), 0.0)).xyz;
-    return glowing_path_sample(in.view_pos, in.normal_eye, view_dir, axis_eye, u_eye, in.mat, in.path_radius);
+    return glowing_path_sample(in.view_pos, in.normal_eye, view_dir, axis_eye, u_eye, in.mat, in.path_radius, camera.path_animation);
 }
 
 fn path_depth(p: vec3<f32>) -> f32 {

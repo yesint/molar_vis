@@ -46,9 +46,10 @@ pub(crate) const MOLECULAR_NODES_WORD: u32 = 0xffff_fffd;
 pub(crate) const VELVET_WORD: u32 = 0xffff_fffc;
 /// Internal emission profile for interaction paths.
 pub(crate) const GLOWING_PATH_WORD: u32 = 0x9000_0000;
+pub(crate) const GLOWING_PATH_ANIMATION_BIT: u32 = 0x0800_0000;
 
-/// The unused 0x9 tag stores a 10-bit octahedral axis per component and an
-/// 8-bit length (0–2 nm). The normal attribute stores the path center instead.
+/// The unused 0x9 tag stores a 10-bit octahedral axis per component,
+/// a 7-bit length (0–2 nm), and an animation flag. The normal stores the path center.
 /// This keeps the glow payload inside the existing mesh vertex layout.
 pub(crate) fn glowing_path_word(axis: glam::Vec3, length: f32) -> u32 {
     let p = axis / axis.abs().element_sum();
@@ -59,7 +60,7 @@ pub(crate) fn glowing_path_word(axis: glam::Vec3, length: f32) -> u32 {
             if oct.y >= 0.0 { 1.0 } else { -1.0 });
     }
     let q = |x: f32| ((x * 0.5 + 0.5) * 1023.0).round() as u32;
-    let len = (length.clamp(0.0, 2.0) * 127.5).round().max(1.0) as u32;
+    let len = (length.clamp(0.0, 2.0) * 63.5).round().max(1.0) as u32;
     GLOWING_PATH_WORD | q(oct.x) | (q(oct.y) << 10) | (len << 20)
 }
 
@@ -72,7 +73,7 @@ pub(crate) fn glowing_path_frame(word: u32) -> (glam::Vec3, f32) {
     let fold = (-axis.z).max(0.0);
     axis.x += if axis.x >= 0.0 { -fold } else { fold };
     axis.y += if axis.y >= 0.0 { -fold } else { fold };
-    (axis.normalize(), ((word >> 20) & 255) as f32 / 127.5)
+    (axis.normalize(), ((word >> 20) & 127) as f32 / 63.5)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

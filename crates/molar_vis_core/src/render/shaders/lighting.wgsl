@@ -14,7 +14,7 @@ fn glowing_path_axis(material: u32) -> vec3<f32> {
 // Recover the profile radius from one vertex on the enclosing capsule. Its
 // quantized frame matches the CPU builder, including on the hemispherical ends.
 fn glowing_path_radius_from_bound(vertex: vec3<f32>, center: vec3<f32>, axis: vec3<f32>, material: u32) -> f32 {
-    let half_length = f32((material >> 20u) & 255u) / 255.0;
+    let half_length = f32((material >> 20u) & 127u) / 127.0;
     let offset = vertex - center;
     let along = clamp(dot(offset, axis), -half_length, half_length);
     let bound_radius = length(offset - axis * along);
@@ -36,9 +36,7 @@ const GLOWING_PATH_CIRCLE = array<vec2<f32>, 12>(
     vec2<f32>(0.0, -1.0), vec2<f32>(0.5, -0.8660254), vec2<f32>(0.8660254, -0.5)
 );
 
-fn glowing_path_helix_point(index: u32, half_length: f32, axis: vec3<f32>, u: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
-    let t = f32(index) / 72.0; // six turns
-    let circle = GLOWING_PATH_CIRCLE[index % 12u];
+fn glowing_path_helix_point(t: f32, circle: vec2<f32>, half_length: f32, axis: vec3<f32>, u: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
     let q = clamp(min(t, 1.0 - t) / 0.08, 0.0, 1.0);
     let envelope = q * q * (3.0 - 2.0 * q);
     let amplitude = min(0.009, half_length * 0.06);
@@ -53,19 +51,53 @@ struct GlowingPathSample {
 };
 
 // Measure the ray against a continuous polyline approximation of the helix.
-// Testing every interval also handles overlapping turns in near-axial views,
-// without local-solver jumps or extra transparent mesh layers.
-fn glowing_path_sample(hit: vec3<f32>, center: vec3<f32>, view: vec3<f32>, axis: vec3<f32>, u: vec3<f32>, material: u32, tube_radius: f32) -> GlowingPathSample {
-    let half_length = f32((material >> 20u) & 255u) / 255.0;
+// Projecting the enclosing cylinder onto the ray plane bounds the contributing
+// intervals. Near-axial views retain the full search for overlapping turns.
+fn glowing_path_sample(hit: vec3<f32>, center: vec3<f32>, view: vec3<f32>, axis: vec3<f32>, u: vec3<f32>, material: u32, tube_radius: f32, animation: vec4<f32>) -> GlowingPathSample {
+    let half_length = f32((material >> 20u) & 127u) / 127.0;
     let offset = center - hit;
     let v = cross(axis, u);
-    var previous = glowing_path_helix_point(0u, half_length, axis, u, v);
+    let animated = (material & MATERIAL_PATH_ANIMATION_BIT) != 0u;
+    let intervals = 72u;
+    var first = 0u;
+    var end = intervals;
+    let projected_axis = axis - view * dot(axis, view);
+    let projected_length2 = dot(projected_axis, projected_axis);
+    if (projected_length2 > 1e-8) {
+        let along = -dot(offset, projected_axis) / projected_length2;
+        let projected_offset = offset - view * dot(offset, view);
+        let sideways = projected_offset + projected_axis * along;
+        // Every polyline point lies within this radius of the straight axis.
+        // The small guard covers rounding of the decoded material frame.
+        let radius = tube_radius + min(0.009, half_length * 0.06) + 1e-5;
+        let remaining2 = radius * radius - dot(sideways, sideways);
+        if (remaining2 < 0.0) { return GlowingPathSample(hit, 1e10, 0.0); }
+        let reach = sqrt(remaining2 / projected_length2);
+        let scale = f32(intervals) / (2.0 * half_length);
+        let lo = (along - reach + half_length) * scale;
+        let hi = (along + reach + half_length) * scale;
+        if (hi < 0.0 || lo > f32(intervals)) { return GlowingPathSample(hit, 1e10, 0.0); }
+        first = u32(clamp(floor(lo), 0.0, f32(intervals - 1u)));
+        end = u32(clamp(floor(hi) + 1.0, 1.0, f32(intervals)));
+    }
+    var circle = GLOWING_PATH_CIRCLE[first % 12u];
+    if (animated) {
+        circle = vec2<f32>(circle.x * animation.x - circle.y * animation.y,
+                           circle.x * animation.y + circle.y * animation.x);
+    }
+    var previous = glowing_path_helix_point(f32(first) / f32(intervals), circle, half_length, axis, u, v);
     var best_radius2 = 1e10;
     var best_intensity = 0.0;
     var best_emission = 0.0;
     var best_point = previous;
-    for (var interval = 0u; interval < 72u; interval += 1u) {
-        let next = glowing_path_helix_point(interval + 1u, half_length, axis, u, v);
+    for (var interval = first; interval < end; interval += 1u) {
+        if (animated) {
+            circle = vec2<f32>(circle.x * animation.z - circle.y * animation.w,
+                               circle.x * animation.w + circle.y * animation.z);
+        } else {
+            circle = GLOWING_PATH_CIRCLE[(interval + 1u) % 12u];
+        }
+        let next = glowing_path_helix_point(f32(interval + 1u) / f32(intervals), circle, half_length, axis, u, v);
         let segment = next - previous;
         let transverse_segment = segment - view * dot(segment, view);
         let delta = offset + previous;
@@ -73,7 +105,7 @@ fn glowing_path_sample(hit: vec3<f32>, center: vec3<f32>, view: vec3<f32>, axis:
         let fraction = clamp(-dot(transverse_delta, transverse_segment)
             / max(dot(transverse_segment, transverse_segment), 1e-10), 0.0, 1.0);
         let transverse = transverse_delta + transverse_segment * fraction;
-        let t = (f32(interval) + fraction) / 72.0;
+        let t = (f32(interval) + fraction) / f32(intervals);
         let waist = 2.0 * t - 1.0;
         // The width setting scales the whole profile; axial brightness stays unchanged.
         let radius2 = dot(transverse, transverse) / (tube_radius * tube_radius);

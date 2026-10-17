@@ -551,7 +551,7 @@ mod shader_style_persistence_tests {
                 pi_stacking: false, pi_stacking_dist: 0.70, pi_stacking_angle: 40.0,
                 pi_stacking_offset: 0.30, pi_cation: false, pi_cation_dist: 0.72,
                 pi_cation_offset: 0.35, halogen: false, halogen_dist: 0.48,
-                halogen_angle: 165.0, line_width: 5.0, glowing_path: true,
+                halogen_angle: 165.0, line_width: 5.0, glowing_path: true, animate_glowing_path: true,
             },
         });
         settings.reps.ss_algo = molar::prelude::SsAlgorithm::Dss;

@@ -2147,7 +2147,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.3.0"
-source = "git+https://github.com/yesint/molar.git?rev=cdda9334aa053541ebb9e7e8d53e0409a8980b31#cdda9334aa053541ebb9e7e8d53e0409a8980b31"
+source = "git+https://github.com/yesint/molar.git?rev=ba71a1d5744a03119955b7481f4443c0dd41c5d8#ba71a1d5744a03119955b7481f4443c0dd41c5d8"
 dependencies = [
  "anyhow",
  "clap",
@@ -2185,7 +2185,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.3.0"
-source = "git+https://github.com/yesint/molar.git?rev=cdda9334aa053541ebb9e7e8d53e0409a8980b31#cdda9334aa053541ebb9e7e8d53e0409a8980b31"
+source = "git+https://github.com/yesint/molar.git?rev=ba71a1d5744a03119955b7481f4443c0dd41c5d8#ba71a1d5744a03119955b7481f4443c0dd41c5d8"
 dependencies = [
  "cc",
  "libloading",

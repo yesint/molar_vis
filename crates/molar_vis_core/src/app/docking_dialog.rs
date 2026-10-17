@@ -532,7 +532,7 @@ mod docking_rep_tests {
         assert_eq!(reps[0].kind, RepKind::Cartoon);
         assert_eq!(reps[0].color, ColorMethod::SecStruct);
         assert_eq!(reps[1].kind, RepKind::Lines);
-        assert_eq!(reps[1].sel_text, "not apolh and within 0.6 of m1.r0");
+        assert_eq!(reps[1].sel_text, "not apolh and same residue as interacts with m1.r0");
         assert_eq!(
             super::super::build::partner_index(&scene, &scene.molecules[1].reps[1]),
             Some((0, 0))

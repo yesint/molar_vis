@@ -44,6 +44,7 @@ struct RtUniform {
     fog_color: vec4<f32>,       // color the fog fades toward
     dims: vec4<u32>,            // width, height, samples-this-step, frame_seed
     accum: vec4<u32>,           // prior_total_samples, reset(0/1), _, _
+    path_animation: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> U: RtUniform;
@@ -551,7 +552,7 @@ fn surface_at(hit: Hit, ro: vec3<f32>, rd: vec3<f32>, persp: bool) -> Surf {
     if (is_glowing_path(mat_raw)) {
         let axis = glowing_path_axis(mat_raw);
         let radius = glowing_path_radius_from_bound(mesh_verts[triangles[idx].x].p.xyz, path_center, axis, mat_raw);
-        let sample = glowing_path_sample(p, path_center, view_dir, axis, glowing_path_u(axis), mat_raw, radius);
+        let sample = glowing_path_sample(p, path_center, view_dir, axis, glowing_path_u(axis), mat_raw, radius, U.path_animation);
         depth_p = sample.depth_point;
         let c = glowing_path_color(base, sample.radius2, opacity * sample.intensity, U.fog_color.rgb);
         base = c.rgb;

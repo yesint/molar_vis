@@ -397,6 +397,7 @@ impl App {
             return Err("time must be finite and non-negative".into());
         }
         movie.apply(&mut self.scene, &mut self.camera, time)?;
+        self.renderer.set_interaction_animation_time(time);
         self.view_dirty = true;
         Ok(())
     }

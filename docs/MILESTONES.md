@@ -891,3 +891,39 @@ triangles and clips blocker rasterization to the ligand silhouette plus its
 one-pixel clearance guard band. Regions behind the target or outside its projected
 bounds are skipped. The 192×192 scoring grid, candidate directions and readability
 objective remain unchanged; large-target atom scoring retains its existing path.
+
+### Foreign selection parser hooks
+
+Molar's PEG parser has external atom and unary-prefix hooks through its resolver
+trait. molar_vis supplies scene references such as `m0.r1` and `interacts with`;
+molar parses their nested operands and ordinary operators. `interacts with
+(m1.r0 or name CA)` evaluates a union of source-aware partner sets and returns
+only current-source participant atoms. Foreign sources in final results are hard
+errors. Existing bare-reference sessions need no migration. Prefix calls evaluate
+per AST occurrence, so different operands never share results just because their
+operation head is identical. Detection results retain atom identities, full
+ring/charge-group members and explicit donor H atoms. Active settings, dependency
+cycles, missing references, empty matches and refresh use the scene selection pass.
+
+Docking results create receptor Lines with `not apolh and same residue as
+interacts with mN.rR`, targeting the matching ligand geometry representation.
+The pocket contains whole contacting residues, follows the displayed ligand
+member, and updates with active detection settings instead of a distance shell.
+
+Settings → Interactions and each glowing interaction rep's parameter panel have
+an opt-in **Animate glowing paths** option. Animated helices keep six turns and
+rotate around their axes once every two seconds. The shader uses the existing
+single capsule; only a small frame uniform changes, with no geometry rebuild or
+extra surfaces.
+Static paths retain six turns. Live views repaint only while an animated path is
+visible; ray-traced stills freeze their phase. Raster and ray-traced captures share
+the same phase, and movie exports use the movie timeline. The flag persists in
+settings, sessions and undo/redo; older files keep static paths.
+
+Glowing-path close-ups bound the helix search to the intervals that can contribute
+to each pixel. A conservative projected-cylinder bound rejects empty rays and
+skips distant turns; near-axial views retain the full search. This applies to
+both raster and ray tracing without reducing the helix resolution. On the JAK2
+fancy-session close-up, the live OIT pass decreased from 9.4 to 4.4 ms; a fixed
+1000×800 capture was pixel-identical. A GPU regression compares 8,192 rays with
+the full search across viewing angles, widths, lengths and animation phases.

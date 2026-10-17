@@ -82,7 +82,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{syntax}: {e}"));
             count += 1;
         }
-        assert_eq!(count, 34, "verify every copyable example in the web reference");
+        assert_eq!(count, 35, "verify every copyable example in the web reference");
     }
 
 }

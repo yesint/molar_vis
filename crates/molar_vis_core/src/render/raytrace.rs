@@ -949,6 +949,7 @@ pub struct RtUniform {
     pub dims: [u32; 4],
     /// Progressive accumulation: prior_total_samples, reset(0/1), _, _. Set by `render`.
     pub accum: [u32; 4],
+    pub path_animation: [f32; 4],
 }
 
 /// GPU ray-tracing resources (compute tracer + fullscreen resolve). Created only on a

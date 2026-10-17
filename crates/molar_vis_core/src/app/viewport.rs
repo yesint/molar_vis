@@ -190,9 +190,24 @@ impl App {
             // The edited rep draws first so it stays visible over the grayed context reps.
             self.renderer.set_edit_active(gray_active);
 
+            let has_animated_paths = self.scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter().any(|rep|
+                rep.visible && rep.params.has_animated_glowing_path() && rep.gpu.has_geometry()));
+            let paths_animating = has_animated_paths && !matches!(self.rt.warm, Some(RtKind::Still))
+                && !matches!(self.rt.job, Some(RtJob::Still)) && !self.rt.still;
+            if paths_animating {
+                let timeline_owns_time = self.preview.is_some();
+                #[cfg(not(target_arch = "wasm32"))]
+                let timeline_owns_time = timeline_owns_time || self.movie_job.is_some();
+                if !timeline_owns_time {
+                    self.renderer.set_interaction_animation_time(ui.input(|i| i.time));
+                }
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            }
+
             let cam_changed = self.last_render_camera != Some(self.camera);
             let size_changed = size_px != self.last_size;
-            let raster_dirty = geom_changed || cam_changed || size_changed || self.view_dirty || pulsing;
+            let scene_dirty = geom_changed || cam_changed || size_changed || self.view_dirty;
+            let raster_dirty = scene_dirty || pulsing || paths_animating;
 
             // Re-gather the tracer's scene before the next trace. The camera counts, not just the
             // geometry: multi-order bond strands are offset along the screen perpendicular, so a
@@ -224,8 +239,9 @@ impl App {
             // Any camera/scene/size change drops a showing still and aborts an in-progress /
             // pending **Still** back to the realtime view. (A Save renders offscreen at its own
             // captured view, so it keeps going.)
-            if raster_dirty {
+            if scene_dirty || pulsing {
                 self.rt.still = false;
+                if has_animated_paths { ui.ctx().request_repaint_after(std::time::Duration::from_millis(16)); }
                 if matches!(self.rt.warm, Some(RtKind::Still)) {
                     self.rt.warm = None;
                 }

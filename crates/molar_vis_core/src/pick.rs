@@ -810,12 +810,12 @@ mod tests {
     fn interaction_picking_matches_dashes_width_visibility_and_depth() {
         use crate::interactions::{Interaction, InteractionKind};
         let mut scene = scene_with_rep(RepKind::Interactions, "all");
-        let contact = Interaction {
+        let contact = Interaction { atoms: Default::default(),
             kind: InteractionKind::Hydrophobic,
             a: Vec3::new(0.0, 0.0, 0.5), b: Vec3::new(0.35, 0.0, 0.5),
             angle: None, offset: None,
         };
-        scene.molecules[0].reps[0].interaction_cache = vec![InteractionGeometry::new(contact)];
+        scene.molecules[0].reps[0].interaction_cache = vec![InteractionGeometry::new(contact.clone())];
         let pick = |scene: &Scene, x, y| pick_interaction(
             scene, Mat4::IDENTITY, Mat4::IDENTITY, Vec2::new(x, y), Vec2::splat(2000.0), None,
         ).map(|hit| (hit.rep, hit.depth));
@@ -827,7 +827,7 @@ mod tests {
         }
         assert!(pick(&scene, 0.01, 0.009).is_some(), "wide lines stay pickable at their edges");
         let mut nearer = Representation::new(RepKind::Interactions);
-        nearer.interaction_cache = vec![InteractionGeometry::new(Interaction {
+        nearer.interaction_cache = vec![InteractionGeometry::new(Interaction { atoms: Default::default(),
             a: Vec3::new(0.0, 0.0, 0.25), b: Vec3::new(0.35, 0.0, 0.25), ..contact
         })];
         scene.molecules[0].reps.push(nearer);

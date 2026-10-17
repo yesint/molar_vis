@@ -45,6 +45,6 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
-# Selection resolvers require this molar revision until its next release.
+# Foreign selections require this molar revision until its next release.
 [patch.crates-io]
-molar = { git = "https://github.com/yesint/molar.git", rev = "cdda9334aa053541ebb9e7e8d53e0409a8980b31" }
+molar = { git = "https://github.com/yesint/molar.git", rev = "ba71a1d5744a03119955b7481f4443c0dd41c5d8" }

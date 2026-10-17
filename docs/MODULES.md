@@ -760,3 +760,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   surface the cleared depth would otherwise expose. Trajectory caveat: the grid/eval use the displayed
   frame's coords (grid invalidated per frame).
 
+
+`selection.rs` implements external reference/prefix parsing and evaluation for
+molar's PEG hooks. Molar owns Boolean and nested-operand syntax. The viewer resolves
+source dependencies and computes current-source contact membership using active
+interaction settings. `interaction_source.rs` gathers chemical input shared by
+selection evaluation and drawing. `interactions.rs` returns contact geometry plus
+participant identities on both input sides for atom, ring and charge-group contacts.

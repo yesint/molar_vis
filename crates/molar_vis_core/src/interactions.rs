@@ -30,7 +30,15 @@ const MIN_DIST: f32 = 0.05;
 /// dedup doesn't merge same-index residues from different molecules (the caller packs
 /// the molecule index into it). Hydrogens are not entries — their positions ride in
 /// their heavy neighbour's `attached_h`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AtomId {
+    pub molecule: usize,
+    pub index: usize,
+}
+
 pub struct AtomInfo {
+    pub id: AtomId,
+    pub attached_h_ids: Vec<AtomId>,
     pub pos: Vec3,
     /// Atomic number: 6=C, 7=N, 8=O, 16=S, 17/35/53 = Cl/Br/I.
     pub atomicnum: u8,
@@ -46,6 +54,7 @@ pub struct AtomInfo {
 
 /// An aromatic ring, reduced to its centroid + plane normal (unit) for π interactions.
 pub struct RingInfo {
+    pub atoms: Vec<AtomId>,
     pub center: Vec3,
     pub normal: Vec3,
     pub res_key: u64,
@@ -54,6 +63,7 @@ pub struct RingInfo {
 /// A formal-charge group (protein sidechain / ligand functional group), reduced to the
 /// centroid of its charged atoms.
 pub struct ChargeGroup {
+    pub atoms: Vec<AtomId>,
     pub center: Vec3,
     pub res_key: u64,
 }
@@ -78,8 +88,10 @@ pub enum InteractionKind {
 }
 
 /// One detected interaction, as a line segment between two atoms / group centroids (nm).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Interaction {
+    /// Atom identities on both sides, including complete ring/charge groups.
+    pub atoms: [Vec<AtomId>; 2],
     pub kind: InteractionKind,
     pub a: Vec3,
     pub b: Vec3,
@@ -176,6 +188,9 @@ pub struct InteractionSettings {
     /// Translucent glowing helices for all enabled interaction types.
     #[serde(default)]
     pub glowing_path: bool,
+    /// Rotate glowing helices around their axes once every two seconds.
+    #[serde(default)]
+    pub animate_glowing_path: bool,
     #[serde(default = "d_width")]
     pub line_width: f32,
 }
@@ -250,6 +265,7 @@ impl Default for InteractionSettings {
             halogen_angle: d_halogen_angle(),
             line_width: d_width(),
             glowing_path: false,
+            animate_glowing_path: false,
         }
     }
 }
@@ -282,6 +298,15 @@ impl InteractionSettings {
             halogen_angle_min: self.halogen_angle,
         }
     }
+}
+
+/// GPU phase and per-segment rotation, computed once per frame. The capsule
+/// stays fixed; its six-turn centerline rotates rigidly (72 segments).
+pub(crate) fn glowing_path_animation(seconds: f64) -> [f32; 4] {
+    let t = if seconds.is_finite() { seconds.rem_euclid(2.0) } else { 0.0 };
+    let phase = std::f64::consts::TAU * t / 2.0;
+    let step = std::f64::consts::TAU / 12.0;
+    [phase.cos() as f32, phase.sin() as f32, step.cos() as f32, step.sin() as f32]
 }
 
 fn is_nos(atomicnum: u8) -> bool {
@@ -377,7 +402,7 @@ fn atom_level(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mu
     );
 
     // Hydrophobic contacts reduce to the shortest per residue pair (avoid a hairball).
-    let mut hydro: BTreeMap<(u64, u64), (f32, Vec3, Vec3)> = BTreeMap::new();
+    let mut hydro: BTreeMap<(u64, u64), (f32, Vec3, Vec3, AtomId, AtomId)> = BTreeMap::new();
 
     for qi in qs {
         grid.neighbors_within(qi.pos, max_cut, |gidx| {
@@ -396,9 +421,9 @@ fn atom_level(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mu
             {
                 let e = hydro
                     .entry(res_pair(qi.res_key, gi.res_key))
-                    .or_insert((f32::INFINITY, Vec3::ZERO, Vec3::ZERO));
+                    .or_insert((f32::INFINITY, Vec3::ZERO, Vec3::ZERO, AtomId::default(), AtomId::default()));
                 if d < e.0 {
-                    *e = (d, qi.pos, gi.pos);
+                    *e = (d, qi.pos, gi.pos, qi.id, gi.id);
                 }
             }
             if p.hbonds && (hbond_ok(qi, gi, d, p) || hbond_ok(gi, qi, d, p)) {
@@ -408,18 +433,29 @@ fn atom_level(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mu
                         .map(move |h| angle_deg(donor.pos - *h, acc.pos - *h)))
                     .filter(|&angle| angle > p.hbond_angle_min)
                     .max_by(f32::total_cmp);
-                out.push(Interaction { kind: InteractionKind::HBond, a: qi.pos, b: gi.pos, angle, offset: None });
+                let mut atoms = [vec![qi.id], vec![gi.id]];
+                for (side, (donor, acc)) in [(qi, gi), (gi, qi)].into_iter().enumerate() {
+                    if hbond_ok(donor, acc, d, p) {
+                        atoms[side].extend(donor.attached_h.iter().zip(&donor.attached_h_ids)
+                            .filter(|(h, _)| angle_deg(donor.pos - **h, acc.pos - **h) > p.hbond_angle_min)
+                            .map(|(_, &id)| id));
+                    }
+                }
+                if a.atoms.len() > b.atoms.len() { atoms.swap(0, 1); }
+                out.push(Interaction { atoms, kind: InteractionKind::HBond, a: qi.pos, b: gi.pos, angle, offset: None });
             }
             if p.halogen && (halogen_ok(qi, gi, d, p) || halogen_ok(gi, qi, d, p)) {
                 let (x, acc) = if halogen_ok(qi, gi, d, p) { (qi, gi) } else { (gi, qi) };
                 let angle = x.antecedent.map(|c| angle_deg(c - x.pos, acc.pos - x.pos));
-                out.push(Interaction { kind: InteractionKind::Halogen, a: qi.pos, b: gi.pos, angle, offset: None });
+                let atoms = if a.atoms.len() <= b.atoms.len() { [vec![qi.id], vec![gi.id]] } else { [vec![gi.id], vec![qi.id]] };
+                out.push(Interaction { atoms, kind: InteractionKind::Halogen, a: qi.pos, b: gi.pos, angle, offset: None });
             }
         });
     }
 
-    for (_, (_d, pa, pb)) in hydro {
-        out.push(Interaction { kind: InteractionKind::Hydrophobic, a: pa, b: pb, angle: None, offset: None });
+    for (_, (_d, pa, pb, ai, bi)) in hydro {
+        let atoms = if a.atoms.len() <= b.atoms.len() { [vec![ai], vec![bi]] } else { [vec![bi], vec![ai]] };
+        out.push(Interaction { atoms, kind: InteractionKind::Hydrophobic, a: pa, b: pb, angle: None, offset: None });
     }
 }
 
@@ -428,7 +464,7 @@ fn salt_bridges(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &
         return;
     }
     let c2 = p.salt_bridge_dist * p.salt_bridge_dist;
-    for (pos, neg) in [(&a.cations, &b.anions), (&b.cations, &a.anions)] {
+    for (side, (pos, neg)) in [(&a.cations, &b.anions), (&b.cations, &a.anions)].into_iter().enumerate() {
         for cg in pos {
             for ng in neg {
                 if cg.res_key == ng.res_key {
@@ -436,7 +472,8 @@ fn salt_bridges(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &
                 }
                 let d2 = (cg.center - ng.center).length_squared();
                 if d2 > MIN_DIST * MIN_DIST && d2 <= c2 {
-                    out.push(Interaction {
+                    let atoms = if side == 0 { [cg.atoms.clone(), ng.atoms.clone()] } else { [ng.atoms.clone(), cg.atoms.clone()] };
+                    out.push(Interaction { atoms,
                         kind: InteractionKind::SaltBridge,
                         a: cg.center,
                         b: ng.center,
@@ -480,7 +517,7 @@ fn pi_stacking(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &m
                     continue;
                 }
             }
-            out.push(Interaction {
+            out.push(Interaction { atoms: [ra.atoms.clone(), rb.atoms.clone()],
                 kind: InteractionKind::PiStacking,
                 a: ra.center,
                 b: rb.center,
@@ -499,7 +536,7 @@ fn pi_cation(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mut
         return;
     }
     let c2 = p.pi_cation_dist * p.pi_cation_dist;
-    for (rings, cats) in [(&a.rings, &b.cations), (&b.rings, &a.cations)] {
+    for (side, (rings, cats)) in [(&a.rings, &b.cations), (&b.rings, &a.cations)].into_iter().enumerate() {
         for r in rings {
             for c in cats {
                 if r.res_key == c.res_key {
@@ -517,7 +554,8 @@ fn pi_cation(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mut
                 if offset > p.pi_cation_offset {
                     continue;
                 }
-                out.push(Interaction {
+                let atoms = if side == 0 { [r.atoms.clone(), c.atoms.clone()] } else { [c.atoms.clone(), r.atoms.clone()] };
+                out.push(Interaction { atoms,
                     kind: InteractionKind::PiCation,
                     a: r.center,
                     b: c.center,
@@ -558,6 +596,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn glowing_path_rotates_every_two_seconds_with_fixed_pitch_and_material_frame() {
+        let turns = |time| {
+            let p = glowing_path_animation(time);
+            p[3].atan2(p[2]) * 72.0 / std::f32::consts::TAU
+        };
+        for (time, expected) in [(0.0, 6.0), (0.5, 6.0), (1.0, 6.0), (1.5, 6.0), (2.0, 6.0)] {
+            assert!((turns(time) - expected).abs() < 1e-4);
+        }
+        assert_eq!(glowing_path_animation(0.0), glowing_path_animation(2.0));
+        let phase = glowing_path_animation(0.5);
+        assert!(phase[0].abs() < 1e-6 && (phase[1] - 1.0).abs() < 1e-6);
+        assert_eq!(glowing_path_animation(f64::NAN), glowing_path_animation(0.0));
+        let half_turn = glowing_path_animation(1.0);
+        assert!((half_turn[0] + 1.0).abs() < 1e-6 && half_turn[1].abs() < 1e-6);
+        let plain = crate::material::glowing_path_word(Vec3::new(1.0, 0.2, 0.4).normalize(), 1.5);
+        let animated = plain | crate::material::GLOWING_PATH_ANIMATION_BIT;
+        assert_eq!(plain & 0xf000_0000, animated & 0xf000_0000);
+        assert_eq!(crate::material::glowing_path_frame(plain), crate::material::glowing_path_frame(animated));
+        assert!(!serde_json::from_str::<InteractionSettings>("{}").unwrap().animate_glowing_path);
+    }
+
+    #[test]
     fn edited_colors_survive_saving_and_reach_rendered_lines() {
         let mut settings = InteractionSettings::default();
         settings.colors = [[11, 80, 155, 255]; 6];
@@ -566,6 +626,7 @@ mod tests {
         for kind in [InteractionKind::HBond, InteractionKind::Hydrophobic, InteractionKind::SaltBridge,
             InteractionKind::PiStacking, InteractionKind::PiCation, InteractionKind::Halogen] {
             let lines = crate::geometry::interaction_lines(&[Interaction {
+                atoms: Default::default(),
                 kind, a: Vec3::ZERO, b: Vec3::X, angle: None, offset: None,
             }], &restored);
             assert!(!lines.is_empty());
@@ -581,7 +642,7 @@ mod tests {
     fn glowing_paths_keep_all_type_colors_and_load_older_settings() {
         let kinds = [InteractionKind::HBond, InteractionKind::Hydrophobic, InteractionKind::SaltBridge,
             InteractionKind::PiStacking, InteractionKind::PiCation, InteractionKind::Halogen];
-        let contact = |kind| Interaction { kind, a: Vec3::ZERO, b: Vec3::X * 0.3, angle: None, offset: None };
+        let contact = |kind| Interaction { atoms: Default::default(), kind, a: Vec3::ZERO, b: Vec3::X * 0.3, angle: None, offset: None };
         let contacts = kinds.map(contact);
         let mut settings = InteractionSettings::default();
         let dashed = crate::geometry::interaction_geometry(&contacts, &settings);
@@ -614,12 +675,12 @@ mod tests {
         assert!(serde_json::from_value::<InteractionSettings>(saved.clone()).unwrap().glowing_path);
         saved.as_object_mut().unwrap().remove("glowing_path");
         assert!(!serde_json::from_value::<InteractionSettings>(saved).unwrap().glowing_path);
-        let empty = Interaction { b: Vec3::ZERO, ..contacts[0] };
+        let empty = Interaction { atoms: Default::default(),  b: Vec3::ZERO, ..contacts[0].clone() };
         assert!(crate::geometry::interaction_geometry(&[empty], &settings).mesh.vertices.is_empty());
     }
 
     fn atom(pos: [f32; 3], atomicnum: u8, res: u64) -> AtomInfo {
-        AtomInfo {
+        AtomInfo { id: Default::default(), attached_h_ids: Vec::new(),
             pos: Vec3::from(pos),
             atomicnum,
             res_key: res,
@@ -700,10 +761,10 @@ mod tests {
     #[test]
     fn salt_bridge_within_cutoff() {
         let p = InteractionSettings::default().detect();
-        let a = InteractionSet { cations: vec![ChargeGroup { center: Vec3::ZERO, res_key: 0 }], ..Default::default() };
-        let b = InteractionSet { anions: vec![ChargeGroup { center: Vec3::new(0.40, 0.0, 0.0), res_key: 1 }], ..Default::default() };
+        let a = InteractionSet { cations: vec![ChargeGroup { atoms: Vec::new(),  center: Vec3::ZERO, res_key: 0 }], ..Default::default() };
+        let b = InteractionSet { anions: vec![ChargeGroup { atoms: Vec::new(),  center: Vec3::new(0.40, 0.0, 0.0), res_key: 1 }], ..Default::default() };
         assert_eq!(count(&detect(&a, &b, &p), InteractionKind::SaltBridge), 1);
-        let far = InteractionSet { anions: vec![ChargeGroup { center: Vec3::new(0.80, 0.0, 0.0), res_key: 1 }], ..Default::default() };
+        let far = InteractionSet { anions: vec![ChargeGroup { atoms: Vec::new(),  center: Vec3::new(0.80, 0.0, 0.0), res_key: 1 }], ..Default::default() };
         assert_eq!(count(&detect(&a, &far, &p), InteractionKind::SaltBridge), 0);
     }
 
@@ -711,22 +772,22 @@ mod tests {
     fn pi_stacking_parallel_and_offset() {
         let p = InteractionSettings::default().detect();
         // Two parallel rings (normals +z) stacked 0.38 nm apart, aligned → parallel stack.
-        let a = InteractionSet { rings: vec![RingInfo { center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }], ..Default::default() };
-        let b = InteractionSet { rings: vec![RingInfo { center: Vec3::new(0.0, 0.0, 0.38), normal: Vec3::Z, res_key: 1 }], ..Default::default() };
+        let a = InteractionSet { rings: vec![RingInfo { atoms: Vec::new(),  center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }], ..Default::default() };
+        let b = InteractionSet { rings: vec![RingInfo { atoms: Vec::new(),  center: Vec3::new(0.0, 0.0, 0.38), normal: Vec3::Z, res_key: 1 }], ..Default::default() };
         let found = detect(&a, &b, &p);
         assert_eq!(count(&found, InteractionKind::PiStacking), 1);
         assert_eq!(found[0].angle, Some(0.0));
         assert_eq!(found[0].offset, Some(0.0));
         // Same distance but laterally offset by 0.4 nm → no overlap → rejected.
-        let off = InteractionSet { rings: vec![RingInfo { center: Vec3::new(0.40, 0.0, 0.38), normal: Vec3::Z, res_key: 1 }], ..Default::default() };
+        let off = InteractionSet { rings: vec![RingInfo { atoms: Vec::new(),  center: Vec3::new(0.40, 0.0, 0.38), normal: Vec3::Z, res_key: 1 }], ..Default::default() };
         assert_eq!(count(&detect(&a, &off, &p), InteractionKind::PiStacking), 0);
     }
 
     #[test]
     fn pi_cation_within_cutoff() {
         let p = InteractionSettings::default().detect();
-        let a = InteractionSet { rings: vec![RingInfo { center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }], ..Default::default() };
-        let b = InteractionSet { cations: vec![ChargeGroup { center: Vec3::new(0.0, 0.0, 0.40), res_key: 1 }], ..Default::default() };
+        let a = InteractionSet { rings: vec![RingInfo { atoms: Vec::new(),  center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }], ..Default::default() };
+        let b = InteractionSet { cations: vec![ChargeGroup { atoms: Vec::new(),  center: Vec3::new(0.0, 0.0, 0.40), res_key: 1 }], ..Default::default() };
         let found = detect(&a, &b, &p);
         assert_eq!(count(&found, InteractionKind::PiCation), 1);
         assert_eq!(found[0].angle, Some(0.0));
@@ -764,6 +825,41 @@ mod tests {
     }
 
     #[test]
+    fn detected_contacts_preserve_atom_hydrogen_and_group_identities() {
+        let id = |molecule, index| AtomId { molecule, index };
+        let p = InteractionSettings::default().detect();
+        let mut donor = atom([0.0, 0.0, 0.0], 7, 0);
+        donor.id = id(0, 4);
+        donor.attached_h = vec![Vec3::new(0.1, 0.0, 0.0)];
+        donor.attached_h_ids = vec![id(0, 5)];
+        let mut acceptor = atom([0.3, 0.0, 0.0], 8, 1);
+        acceptor.id = id(1, 9);
+        // Force the spatial search to iterate the partner side first.
+        let found = detect(&set(vec![donor, atom([10.0, 0.0, 0.0], 6, 2)]), &set(vec![acceptor]), &p);
+        let atoms = &found.iter().find(|c| c.kind == InteractionKind::HBond).unwrap().atoms;
+        for expected in [id(0, 4), id(0, 5), id(1, 9)] { assert!(atoms.iter().flatten().any(|&atom| atom == expected)); }
+        let ring_a = vec![id(0, 1), id(0, 2), id(0, 3)];
+        let ring_b = vec![id(1, 6), id(1, 7), id(1, 8)];
+        let a = InteractionSet {
+            rings: vec![RingInfo { atoms: ring_a.clone(), center: Vec3::ZERO, normal: Vec3::Z, res_key: 0 }],
+            cations: vec![ChargeGroup { atoms: vec![id(0, 10), id(0, 11)], center: Vec3::ZERO, res_key: 0 }],
+            ..Default::default()
+        };
+        let b = InteractionSet {
+            rings: vec![RingInfo { atoms: ring_b.clone(), center: Vec3::Z * 0.38, normal: Vec3::Z, res_key: 1 }],
+            anions: vec![ChargeGroup { atoms: vec![id(1, 12), id(1, 13)], center: Vec3::Z * 0.4, res_key: 1 }],
+            ..Default::default()
+        };
+        let found = detect(&a, &b, &p);
+        assert_eq!(found.iter().find(|c| c.kind == InteractionKind::PiStacking).unwrap().atoms,
+            [ring_a, ring_b]);
+        assert_eq!(found.iter().find(|c| c.kind == InteractionKind::SaltBridge).unwrap().atoms,
+            [vec![id(0, 10), id(0, 11)], vec![id(1, 12), id(1, 13)]]);
+        assert_eq!(found.iter().find(|c| c.kind == InteractionKind::PiCation).unwrap().atoms,
+            [vec![id(0, 10), id(0, 11)], vec![id(1, 6), id(1, 7), id(1, 8)]]);
+    }
+
+    #[test]
     fn grid_matches_brute_force() {
         let mk = |n: usize, res_off: u64, elem: u8| -> Vec<AtomInfo> {
             (0..n)
@@ -793,7 +889,7 @@ mod tests {
     }
 
     fn cloneinfo(a: &AtomInfo) -> AtomInfo {
-        AtomInfo {
+        AtomInfo { id: a.id, attached_h_ids: a.attached_h_ids.clone(),
             pos: a.pos,
             atomicnum: a.atomicnum,
             res_key: a.res_key,

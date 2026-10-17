@@ -1020,6 +1020,9 @@ impl App {
             }
         }
         set_color_picker_palette(ctx, next.colors.discrete_palette());
+        if let RepParams::Interactions { settings } = next.reps.style_params(RepKind::Interactions) {
+            self.scene.interaction_settings = settings;
+        }
         self.settings = next;
         self.rep_defaults = Self::effective_rep_defaults(&self.settings);
         self.last_render_camera = None;
@@ -1588,6 +1591,8 @@ fn settings_interaction_options(
     }
     ui.checkbox(&mut s.glowing_path, "Glowing path")
         .on_hover_text("Render all enabled interaction types as glowing helices in their configured colors, brightest at the bond center.");
+    ui.add_enabled(s.glowing_path, egui::Checkbox::new(&mut s.animate_glowing_path, "Animate glowing paths"))
+        .on_hover_text("Rotate helices around their axes once every 2 seconds, keeping six turns per bond.");
     egui::Grid::new("interaction_rendering").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
         ui.label(if s.glowing_path { "Tube width" } else { "Line width (px)" })
             .on_hover_text("Controls the core and halo thickness of glowing tubes; 3 is the default. Dashed-line width is in pixels.");

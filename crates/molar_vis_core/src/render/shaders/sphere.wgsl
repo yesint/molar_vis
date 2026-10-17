@@ -13,6 +13,7 @@ struct Camera {
     // Selection-glow color (rgb), chosen on the CPU from the viewport background so the
     // glow and the cues egui draws over the scene are one decision. See `theme::glow_color`.
     glow_color: vec4<f32>,
+    path_animation: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
