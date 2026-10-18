@@ -266,6 +266,9 @@ pub struct BehaviorSettings {
     /// zooming to fit its selection at the current orientation. **On by default.** A
     /// behavior setting (applies live — read when the button is clicked).
     pub rep_zoom_unobstructed: bool,
+    /// Re-center the camera when switching molecules in a group. Off by default;
+    /// applies live to the cycle controls, member names, and docking pose sync.
+    pub group_switch_zoom: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -285,6 +288,7 @@ impl Default for BehaviorSettings {
             dashed_pbc_bonds: true,
             hover_detail_lens: false,
             rep_zoom_unobstructed: true,
+            group_switch_zoom: false,
         }
     }
 }

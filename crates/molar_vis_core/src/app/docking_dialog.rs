@@ -474,13 +474,14 @@ impl App {
         }
     }
 
-    /// Show pose `member`, re-centering the camera on it exactly as the cycle bar does
-    /// (partial focus: pan the target, keep the zoom).
+    /// Show pose `member`, optionally re-centering as the cycle bar does.
     fn switch_group_member_synced(&mut self, gi: usize, member: usize) {
         if !self.scene.switch_group_member(gi, member) {
             return;
         }
-        if let Some(&id) = self.scene.groups[gi].members.get(member) {
+        if let Some(&id) = self.scene.groups[gi].members.get(member)
+            .filter(|_| self.settings.behavior.group_switch_zoom)
+        {
             if let Some(mi) = self.scene.mol_index(id) {
                 let (min, max) = self.scene.molecules[mi].current_bbox();
                 self.center_camera_on(0.5 * (min + max));

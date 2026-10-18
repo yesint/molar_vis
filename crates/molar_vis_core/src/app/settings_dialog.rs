@@ -725,20 +725,6 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
         });
     ui.add_space(8.0);
-    ui.label(bold_name(ui, "Interaction aids"));
-    ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
-        .on_hover_text(
-            "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
-             over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
-        );
-    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep and group magnifiers do an unobstructed view")
-        .on_hover_text(
-            "Representation and molecule-group magnifiers rotate and scale the camera to show \
-             the target with the least obstruction (default). A group targets the shown member's \
-             visible representations. Off → zoom to fit at the current orientation.",
-        );
-
-    ui.add_space(8.0);
     ui.label(bold_name(ui, "Trajectory playback"));
     egui::Grid::new("set_behavior_traj")
         .num_columns(2)
@@ -777,7 +763,24 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
              wrapped structure. Off (default) is much faster for large structures.",
         );
 
-
+    ui.add_space(8.0);
+    ui.label(bold_name(ui, "Misc"));
+    ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
+        .on_hover_text(
+            "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
+             over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
+        );
+    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep and group magnifiers do an unobstructed view")
+        .on_hover_text(
+            "Representation and molecule-group magnifiers rotate and scale the camera to show \
+             the target with the least obstruction (default). A group targets the shown member's \
+             visible representations. Off → zoom to fit at the current orientation.",
+        );
+    ui.checkbox(&mut b.group_switch_zoom, "Zoom when switching molecules in mol. group")
+        .on_hover_text(
+            "Re-center the camera on the shown molecule when switching group members, \
+             keeping the current zoom level. Off by default.",
+        );
 }
 
 /// The orientation-axes "screen" widget: a monitor-like rectangle showing a mini

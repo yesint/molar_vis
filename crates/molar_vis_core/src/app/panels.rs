@@ -26,7 +26,7 @@ pub(super) enum GroupAction {
     /// [`RepAction::SaveSelection`](super::rep_panel::RepAction::SaveSelection)).
     #[cfg(not(target_arch = "wasm32"))]
     Save,
-    /// Show member `n` and re-center the camera on it (cycle bar, or a member name clicked).
+    /// Show member `n`, optionally re-centering the camera (cycle bar or member name).
     ShowMember(usize),
     /// Append an own rep to member `mid`.
     AddMemberRep(MolId),
@@ -658,7 +658,7 @@ impl App {
     /// Draw one molecular group: a header (group glyph · name · eye · zoom · add-shared
     /// · menu), a member cycle bar, the shared reps (the shown member's prefix), and —
     /// when expanded — each member with its own reps. Applies its own actions (member
-    /// switch with camera re-fit, eye, expand, add shared/own rep); a "Delete group"
+    /// switch with optional camera re-centering, eye, expand, add shared/own rep); a "Delete group"
     /// is deferred to the caller via `delete_group` (it removes molecules, which would
     /// shift the outer loop's indices). Returns whether the view needs re-rendering.
     pub(super) fn draw_group_entry(&mut self, ui: &mut egui::Ui, gi: usize, source_index: usize) -> GroupOutcome {
@@ -874,8 +874,7 @@ impl App {
                                                         );
                                                     }
                                                     if resp.clicked() {
-                                                        // Clicking a name shows it AND centers the
-                                                        // camera on it (partial focus — pan, no zoom).
+                                                        // Camera re-centering follows the group-switch setting.
                                                         action = Some(GroupAction::ShowMember(pos));
                                                     }
                                                 });
@@ -972,12 +971,12 @@ impl App {
                 }
             }
             Some(GroupAction::ShowMember(nc)) => {
-                // Partial focus: switch the shown member and CENTER the camera on it (pan the
-                // target only, keeping the current zoom). Applies to both the cycle bar
-                // (slider/arrows) and clicking a member name. Not gated on `switch`'s return,
-                // so clicking the already-shown member re-centers it.
+                // Optional partial focus for both the cycle bar and member names.
+                // When enabled, clicking the already-shown member also re-centers it.
                 self.scene.switch_group_member(gi, nc);
-                if let Some(&id) = self.scene.groups[gi].members.get(nc) {
+                if let Some(&id) = self.scene.groups[gi].members.get(nc)
+                    .filter(|_| self.settings.behavior.group_switch_zoom)
+                {
                     if let Some(mi) = self.scene.mol_index(id) {
                         let (min, max) = self.scene.molecules[mi].current_bbox();
                         self.center_camera_on(0.5 * (min + max));
