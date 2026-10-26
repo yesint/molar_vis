@@ -57,6 +57,9 @@ pub(super) enum GroupEscalation {
 
 impl App {
     pub(super) fn draw_left_panel(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.side_panel_collapsed {
+            return false;
+        }
         let mut view_dirty = false;
         egui::Panel::left("controls_panel")
             .resizable(true)
@@ -119,6 +122,16 @@ impl App {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+
+                    if self.side_panel_collapsed {
+                        if overlay_button(ui, icon::CARET_DOUBLE_RIGHT, false)
+                            .on_hover_text("Restore side panel")
+                            .clicked()
+                        {
+                            self.side_panel_collapsed = false;
+                            ui.ctx().request_repaint();
+                        }
+                    }
 
                     // — Selection controls (left) —
                     // Pick/selection-mode dropdown (label + caret). Off by default.
@@ -374,6 +387,16 @@ impl App {
                     ui.close();
                 }
             }).response);
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if overlay_button(ui, icon::CARET_DOUBLE_LEFT, false)
+                    .on_hover_text("Collapse side panel")
+                    .clicked()
+                {
+                    self.side_panel_collapsed = true;
+                    ui.ctx().request_repaint();
+                }
+            });
 
             // Hover-switch: once any bar menu is open, moving the pointer onto a
             // different top-level button opens that menu (and closes the rest, since

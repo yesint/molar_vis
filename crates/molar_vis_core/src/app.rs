@@ -126,6 +126,8 @@ pub struct App {
     rep_defaults: RepDefaults,
     /// Open live settings editor and its opening snapshot, if any.
     settings_dialog: Option<SettingsDialog>,
+    /// Hide the molecule controls while retaining a restore button in the view toolbar.
+    side_panel_collapsed: bool,
     last_settings_page: SettingsPage,
     /// Camera at the last 3D render; `None` forces a render.
     last_render_camera: Option<Camera>,

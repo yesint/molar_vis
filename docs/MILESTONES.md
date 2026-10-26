@@ -820,6 +820,8 @@
   the toggle off restores color editing.
   Shared color pickers show the active discrete palette on the right for quick
   color selection, including settings colors, background, accent, and Solid coloring.
+  The side panel can be collapsed from its menu bar and restored from the view
+  toolbar, giving the viewport the full window width while it is collapsed.
 
 - Camera animation and native movie export: shared explicit-time camera paths for
   Rust/Python/JavaScript, full-turn rotation and pivot support, multiplicative zoom,

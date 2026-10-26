@@ -558,6 +558,7 @@ impl App {
             settings,
             rep_defaults,
             settings_dialog: None,
+            side_panel_collapsed: false,
             last_settings_page: SettingsPage::default(),
             last_render_camera: None,
             last_size: [0, 0],
