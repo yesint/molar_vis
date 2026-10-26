@@ -830,3 +830,8 @@
   pickers use its entries as presets. These controls replace the fixed scheme ramps
   and Solid swatch grid described in earlier milestones. Changes apply live, settings
   Save persists them on native and browser builds, and sessions retain the active colors.
+  A **Remove colors...** toggle shows **×** symbols on discrete palette swatches;
+  clicking a swatch removes its color while keeping at least one entry. Turning
+  the toggle off restores color editing.
+  Shared color pickers show the active discrete palette on the right for quick
+  color selection, including settings colors, background, accent, and Solid coloring.

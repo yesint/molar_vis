@@ -605,7 +605,7 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   does not change the configured background colors.
   The surface decode + tier-1/GI shading are factored into shared shader fns
   (`surface_at`/`shadow_at`/`shade_tier1`/`shade_gi`). GI applies to **both** the Save-image render
-  **and the R-key still** (both read `Camera::gi`); the Lighting-tab **Global illumination slider** +
+  **and the R-key still** (both read `Camera::gi`); the Lighting-tab **Illumination slider** +
   `MOLAR_VIS_DEBUG_GI=<strength>` drive it. Default **0 (off)** — GI is the heaviest trace (more
   iterations), so it's opt-in via the slider.
   **Transparency (weighted OIT):** primary rays accumulate transparent layers in front of

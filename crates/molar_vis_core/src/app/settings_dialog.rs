@@ -23,18 +23,13 @@ fn swatch_ink(rgb: [u8; 4]) -> egui::Color32 {
     }
 }
 
-fn color_popup(response: &egui::Response, rgba: &mut [u8; 4]) -> bool {
+fn color_popup(response: &egui::Response, rgba: &mut [u8; 4], palette: &[[u8; 4]]) -> bool {
     let mut color = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
     let mut changed = false;
     egui::Popup::menu(response)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_width(230.0);
-            if egui::color_picker::color_picker_color32(
-                ui,
-                &mut color,
-                egui::color_picker::Alpha::Opaque,
-            ) {
+            if color_picker_with_palette(ui, &mut color, palette) {
                 *rgba = color.to_array();
                 changed = true;
             }
@@ -60,7 +55,7 @@ fn swatch_button(ui: &mut egui::Ui, rgba: [u8; 4], size: egui::Vec2) -> egui::Re
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn color_cell(ui: &mut egui::Ui, label: &str, rgba: &mut [u8; 4], size: egui::Vec2) -> bool {
+fn color_cell(ui: &mut egui::Ui, label: &str, rgba: &mut [u8; 4], size: egui::Vec2, palette: &[[u8; 4]]) -> bool {
     let response = swatch_button(ui, *rgba, size);
     ui.painter().text(
         response.rect.center(),
@@ -69,10 +64,10 @@ fn color_cell(ui: &mut egui::Ui, label: &str, rgba: &mut [u8; 4], size: egui::Ve
         egui::FontId::proportional(14.0),
         swatch_ink(*rgba),
     );
-    color_popup(&response, rgba)
+    color_popup(&response, rgba, palette)
 }
 
-fn ss_icon(ui: &mut egui::Ui, index: usize, color: &mut [u8; 4]) {
+fn ss_icon(ui: &mut egui::Ui, index: usize, color: &mut [u8; 4], palette: &[[u8; 4]]) {
     let response = swatch_button(ui, *color, egui::vec2(44.0, 30.0));
     let rect = response.rect.shrink(6.0);
     let painter = ui.painter();
@@ -104,7 +99,7 @@ fn ss_icon(ui: &mut egui::Ui, index: usize, color: &mut [u8; 4]) {
             stroke,
         ));
     }
-    color_popup(&response, color);
+    color_popup(&response, color, palette);
 }
 
 fn gradient_editor(
@@ -113,6 +108,7 @@ fn gradient_editor(
     title: &str,
     labels: [&str; 3],
     gradient: &mut crate::color::Gradient,
+    palette: &[[u8; 4]],
 ) {
     ui.push_id(id, |ui| {
         if !title.is_empty() {
@@ -203,7 +199,7 @@ fn gradient_editor(
                 } else {
                     egui::CursorIcon::PointingHand
                 });
-            color_popup(&response, &mut gradient.stops[i]);
+            color_popup(&response, &mut gradient.stops[i], palette);
         }
         ui.horizontal(|ui| {
             ui.label(labels[0]);
@@ -240,7 +236,7 @@ fn settings_page_colors(ui: &mut egui::Ui, settings: &mut Settings) {
         ] {
             ui.push_id(number, |ui| {
                 let mut rgba = colors.element(number);
-                if color_cell(ui, symbol, &mut rgba, egui::vec2(34.0, 30.0)) {
+                if color_cell(ui, symbol, &mut rgba, egui::vec2(34.0, 30.0), colors.discrete_palette()) {
                     colors.elements.insert(number, rgba);
                 }
             });
@@ -277,7 +273,7 @@ fn settings_page_colors(ui: &mut egui::Ui, settings: &mut Settings) {
         .show(ui, |ui| {
             for (index, label) in LABELS.iter().enumerate() {
                 ui.push_id(index, |ui| {
-                    ss_icon(ui, index, &mut colors.secondary[index]);
+                    ss_icon(ui, index, &mut colors.secondary[index], &colors.categorical);
                     ui.label(*label);
                 });
                 if index % 3 == 2 {
@@ -293,6 +289,7 @@ fn settings_page_colors(ui: &mut egui::Ui, settings: &mut Settings) {
         "",
         ["0", "Midpoint", "1"],
         &mut colors.continuous,
+        &colors.categorical,
     );
     ui.add_space(10.0);
     categorical_editor(ui, &mut colors.categorical);
@@ -328,18 +325,40 @@ fn color_preset_selector(ui: &mut egui::Ui, colors: &mut crate::color::ColorPref
 
 fn categorical_editor(ui: &mut egui::Ui, palette: &mut Vec<[u8; 4]>) {
     ui.label(bold_name(ui, "Discrete palette"));
+    let remove_mode_id = ui.make_persistent_id("categorical_palette_remove_mode");
+    let mut remove_mode = ui.ctx().data_mut(|data| {
+        data.get_temp::<bool>(remove_mode_id).unwrap_or(false)
+    });
+    let presets = palette.clone();
     let removable = palette.len() > 1;
     let mut remove = None;
     egui::Grid::new("categorical_palette_colors")
-        .num_columns(16)
+        .num_columns(8)
         .min_col_width(0.0)
         .spacing([4.0, 6.0])
         .show(ui, |ui| {
             for (index, color) in palette.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
-                    color_cell(ui, &(index + 1).to_string(), color, egui::vec2(34.0, 30.0));
-                    if ui.add_enabled(removable, egui::Button::new("×").small()).on_hover_text("Remove color").clicked() {
-                        remove = Some(index);
+                    if remove_mode {
+                        ui.add_enabled_ui(removable, |ui| {
+                            let response = swatch_button(ui, *color, egui::vec2(34.0, 30.0));
+                            ui.painter().text(
+                                response.rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "×",
+                                egui::FontId::proportional(20.0),
+                                swatch_ink(*color),
+                            );
+                            if response.on_hover_text(if removable {
+                                "Remove color"
+                            } else {
+                                "Keep at least one color"
+                            }).clicked() {
+                                remove = Some(index);
+                            }
+                        });
+                    } else {
+                        color_cell(ui, &(index + 1).to_string(), color, egui::vec2(34.0, 30.0), &presets);
                     }
                 });
                 if index % 8 == 7 { ui.end_row(); }
@@ -348,9 +367,13 @@ fn categorical_editor(ui: &mut egui::Ui, palette: &mut Vec<[u8; 4]>) {
     if let Some(index) = remove {
         palette.remove(index);
     }
-    if ui.button("Add color").clicked() {
-        palette.push(crate::color::categorical(palette.len()));
-    }
+    ui.horizontal(|ui| {
+        if ui.button("Add color").clicked() {
+            palette.push(crate::color::categorical(palette.len()));
+        }
+        ui.toggle_value(&mut remove_mode, "Remove colors...");
+    });
+    ui.ctx().data_mut(|data| data.insert_temp(remove_mode_id, remove_mode));
 }
 
 fn periodic_table(ui: &mut egui::Ui, colors: &mut crate::color::ColorPreferences) {
@@ -404,6 +427,7 @@ fn periodic_table(ui: &mut egui::Ui, colors: &mut crate::color::ColorPreferences
                                 SYMBOLS[number as usize - 1],
                                 &mut rgba,
                                 egui::vec2(34.0, 30.0),
+                                colors.discrete_palette(),
                             ) {
                                 colors.elements.insert(number, rgba);
                             }
@@ -443,7 +467,7 @@ pub(super) fn settings_page_appearance(ui: &mut egui::Ui, s: &mut Settings) {
             };
             ui.add_enabled(accent_enabled, egui::Label::new("Accent color"));
             ui.add_enabled_ui(accent_enabled, |ui| {
-                color_submenu(ui, "set_accent", &mut a.accent);
+                color_submenu(ui, "set_accent", &mut a.accent, s.colors.discrete_palette());
             });
             ui.end_row();
         });
@@ -500,6 +524,7 @@ pub(super) fn settings_page_view(
     page: &mut ViewPage,
     ray_supported: bool,
     scene_tex: Option<egui::TextureId>,
+    palette: &[[u8; 4]],
 ) {
     tab_bar(
         ui,
@@ -607,7 +632,7 @@ pub(super) fn settings_page_view(
             ui.label(bold_name(ui, "Ray tracing")).on_hover_text(if ray_supported { "Press R in the viewport to ray-trace the view." } else { "Ray tracing is unavailable on this device." });
             ui.add_enabled_ui(ray_supported, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Global illumination");
+                    ui.label("Illumination");
                     slider_with_edit(ui, &mut v.gi, 0.0..=1.0, true);
                 });
             });
@@ -622,13 +647,13 @@ pub(super) fn settings_page_view(
             ui.horizontal(|ui| match v.background.kind {
                 BgKind::Solid => {
                     ui.label("Color");
-                    color_submenu(ui, "set_bg", &mut v.background.color);
+                    color_submenu(ui, "set_bg", &mut v.background.color, palette);
                 }
                 BgKind::Gradient => {
                     ui.label("Top");
-                    color_submenu(ui, "set_bg_top", &mut v.background.top);
+                    color_submenu(ui, "set_bg_top", &mut v.background.top, palette);
                     ui.label("Bottom");
-                    color_submenu(ui, "set_bg_bot", &mut v.background.bottom);
+                    color_submenu(ui, "set_bg_bot", &mut v.background.bottom, palette);
                 }
             });
 
@@ -1063,6 +1088,7 @@ impl App {
                         &mut dialog.view_page,
                         self.renderer.raytrace_supported(),
                         Some(self.renderer.texture_id()),
+                        current.colors.discrete_palette(),
                     ),
                     SettingsPage::Representations => settings_page_reps(ui, &mut current),
                     SettingsPage::Styles => settings_page_styles(ui, &mut current, &mut dialog.style_page, dialog.preview.as_mut()),
@@ -2256,10 +2282,18 @@ mod colors_ui_tests {
             events,
             ..Default::default()
         };
-        for (label, expected_len) in [("Add color", 19), ("×", 18)] {
+        for (label, expected_len) in [
+            ("Add color", 19),
+            ("Remove colors...", 19),
+            ("×", 18),
+            ("Remove colors...", 18),
+        ] {
             let mut center = None;
             for _ in 0..3 {
                 let output = ctx.run_ui(input(vec![]), |ui| categorical_editor(ui, &mut palette));
+                let has_remove_symbols = output.shapes.iter().any(|shape|
+                    matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "×"));
+                assert_eq!(has_remove_symbols, label == "×" || (label == "Remove colors..." && expected_len == 18));
                 center = output.shapes.iter().find_map(|shape| match &shape.shape {
                     egui::Shape::Text(text) if text.galley.job.text == label => {
                         Some(text.pos + text.galley.size() * 0.5)
@@ -2283,6 +2317,7 @@ mod colors_ui_tests {
                 );
             }
             assert_eq!(palette.len(), expected_len);
+            assert!(!egui::Popup::is_any_open(&ctx));
         }
         let output = ctx.run_ui(input(vec![]), |ui| categorical_editor(ui, &mut palette));
         let pos = output
@@ -2334,6 +2369,7 @@ mod colors_ui_tests {
                     "Test gradient",
                     ["Low", "Midpoint", "High"],
                     &mut ramp,
+                    &crate::color::PALETTE,
                 )
             });
             center = output.shapes.iter().find_map(|shape| match &shape.shape {
@@ -2374,6 +2410,7 @@ mod colors_ui_tests {
                     "Test gradient",
                     ["Low", "Midpoint", "High"],
                     &mut ramp,
+                    &crate::color::PALETTE,
                 )
             });
         }
@@ -2400,7 +2437,7 @@ mod colors_ui_tests {
         };
         let mut center = egui::Pos2::ZERO;
         for _ in 0..3 {
-            let output = ctx.run_ui(input(vec![]), |ui| ss_icon(ui, 0, &mut color));
+            let output = ctx.run_ui(input(vec![]), |ui| ss_icon(ui, 0, &mut color, &crate::color::PALETTE));
             center = output
                 .shapes
                 .iter()
@@ -2424,7 +2461,7 @@ mod colors_ui_tests {
                         modifiers: egui::Modifiers::NONE,
                     },
                 ]),
-                |ui| ss_icon(ui, 0, &mut color),
+                |ui| ss_icon(ui, 0, &mut color, &crate::color::PALETTE),
             );
         }
         assert!(egui::Popup::is_any_open(&ctx));

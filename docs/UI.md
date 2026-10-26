@@ -31,7 +31,7 @@ next frame). The menus —
   `<a download>`). **On a compute-capable device (WebGPU/native) this is a full GPU ray trace**
   (ray-traced AO + shadows + Blinn-Phong, all rep types — see the `render/raytrace.rs` bullet),
   **frame-pumped with a "Saving…" overlay so the UI stays responsive** (no freeze); **WebGL2 falls
-  back to a high-res capture of the rasterized view**. With the View-settings **Global illumination**
+  back to a high-res capture of the rasterized view**. With the View-settings **Illumination**
   slider > 0, the trace is **path-traced GI** (soft sky-dome ambient + indirect colour bleeding, ACES
   tonemap — see the GI bullet under `render/raytrace.rs`). Separately, pressing **R** in the viewport
   ray-traces the current view in place (PyMOL-`ray` style; honors AO/shadows + GI) and holds it until
@@ -190,11 +190,15 @@ turn, bend, polyproline, and coil. The **Continuous palette** has editable endpo
 and middle colors and a movable midpoint. It controls Index, B-factor, and Charge.
 B-factor and Charge endpoint readouts use the selected representation's atom selection;
 Charge also uses its Partial/Formal setting. The **Discrete palette** starts with 18
-colors, supports **Add color** and per-entry **×** removal, and keeps at least one
+colors, supports **Add color** and a **Remove colors...** toggle that shows clickable
+**×** symbols on the swatches, and keeps at least one
 entry. Chain, ResID, ResName, and color-picker presets use this palette. **Reset colors**
 resets only this page's colors. The shared Default / Revert / Save footer retains its
 usual all-settings behavior. Sessions store the active palette independently of saved
 startup defaults; older sessions without colors keep the active startup preferences.
+All color pickers show the active discrete palette as clickable swatches on the
+right, including element, secondary-structure, gradient, Solid, background, and
+accent colors. Selecting a swatch applies its color and keeps the picker open.
 
 Toolbar buttons use the **`overlay_button` helper** (a fixed-height framed button, glyph **centered
 by ink bounds** `Galley::mesh_bounds`, not the font line-box); the **`toolbar_label`** helper draws

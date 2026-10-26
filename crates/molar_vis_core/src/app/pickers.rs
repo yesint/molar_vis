@@ -373,9 +373,10 @@ pub(super) fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bo
         .clicked()
 }
 
-fn solid_presets(ui: &mut egui::Ui, palette: &[[u8; 4]], current: &mut [u8; 4]) -> bool {
+pub(super) fn solid_presets(ui: &mut egui::Ui, palette: &[[u8; 4]], current: &mut [u8; 4]) -> bool {
     let mut changed = false;
     egui::Grid::new("solid_presets")
+        .min_col_width(0.0)
         .spacing(egui::vec2(3.0, 3.0))
         .show(ui, |ui| {
             for (index, &color) in palette.iter().enumerate() {
@@ -383,7 +384,7 @@ fn solid_presets(ui: &mut egui::Ui, palette: &[[u8; 4]], current: &mut [u8; 4]) 
                     *current = color;
                     changed = true;
                 }
-                if (index + 1) % 6 == 0 {
+                if (index + 1) % 4 == 0 {
                     ui.end_row();
                 }
             }
@@ -431,20 +432,13 @@ pub(super) fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
             .config(MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
             .show(ui, &header, |ui| {
                 let mut cur = current_solid(rep.color);
-                let mut changed = false;
-                ui.label(egui::RichText::new("Presets").weak().small());
-                changed |= solid_presets(ui, rep.color_preferences.discrete_palette(), &mut cur);
-                ui.separator();
                 let mut col = egui::Color32::from_rgb(cur[0], cur[1], cur[2]);
-                if egui::color_picker::color_picker_color32(
+                if super::widgets::color_picker_with_palette(
                     ui,
                     &mut col,
-                    egui::color_picker::Alpha::Opaque,
+                    rep.color_preferences.discrete_palette(),
                 ) {
                     cur = [col.r(), col.g(), col.b(), 255];
-                    changed = true;
-                }
-                if changed {
                     rep.color = ColorMethod::Solid(cur);
                     rep.geom_dirty = true;
                 }
@@ -746,10 +740,10 @@ mod discrete_preset_tests {
     use super::*;
 
     #[test]
-    fn preset_swatches_follow_palette_edits_and_select_the_edited_color() {
+    fn shared_picker_shows_active_palette_on_right_and_selects_edited_color() {
         let ctx = egui::Context::default();
         let mut preferences = crate::color::ColorPreferences::default();
-        let mut current = crate::color::DEFAULT_SOLID;
+        let mut current = egui::Color32::from_rgb(100, 100, 100);
         let input = |events| egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -774,7 +768,7 @@ mod discrete_preset_tests {
         };
         for _ in 0..3 {
             let output = ctx.run_ui(input(vec![]), |ui| {
-                solid_presets(ui, preferences.discrete_palette(), &mut current);
+                super::super::widgets::color_picker_with_palette(ui, &mut current, preferences.discrete_palette());
             });
             assert_eq!(
                 swatches(&output)
@@ -789,13 +783,20 @@ mod discrete_preset_tests {
         preferences.categorical.remove(1);
         preferences.categorical.push([42, 70, 190, 255]);
         let output = ctx.run_ui(input(vec![]), |ui| {
-            solid_presets(ui, preferences.discrete_palette(), &mut current);
+            super::super::widgets::color_picker_with_palette(ui, &mut current, preferences.discrete_palette());
         });
         let drawn = swatches(&output);
         assert_eq!(
             drawn.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
             preferences.categorical
         );
+        assert!(drawn.iter().all(|(pos, _)| pos.x > ctx.global_style().spacing.slider_width));
+        assert!((drawn[1].0.x - drawn[0].0.x - 23.0).abs() < 0.1);
+        assert!((drawn[4].0.x - drawn[0].0.x).abs() < 0.1);
+        assert!((drawn[4].0.y - drawn[0].0.y - 23.0).abs() < 0.1);
+        assert!(!output.shapes.iter().any(|shape|
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Discrete palette")));
+        assert!(drawn.iter().all(|(pos, _)| pos.x < 300.0));
         let position = drawn[0].0;
         let mut changed = false;
         for pressed in [true, false] {
@@ -810,11 +811,11 @@ mod discrete_preset_tests {
                     },
                 ]),
                 |ui| {
-                    changed |= solid_presets(ui, preferences.discrete_palette(), &mut current);
+                    changed |= super::super::widgets::color_picker_with_palette(ui, &mut current, preferences.discrete_palette());
                 },
             );
         }
         assert!(changed);
-        assert_eq!(current, edited);
+        assert_eq!(current.to_array(), edited);
     }
 }

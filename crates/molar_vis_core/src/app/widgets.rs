@@ -406,26 +406,50 @@ pub(super) fn slider_with_edit(
     });
 }
 
-/// A color "selector": a swatch button that opens (on click, downward) a popup
-/// holding a full color picker. A nested `Popup::menu` so it stays within the parent
-/// `CloseOnClickOutside` menu's hierarchy, and `CloseOnClickOutside` itself so
-/// dragging the picker doesn't dismiss it. `c` is linear RGBA 0..1; the picker works
-/// in sRGB `Color32`, converted through `egui::Rgba` so the swatch is WYSIWYG.
-pub(super) fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4]) {
+/// Shared opaque color picker with the active discrete palette on its right.
+pub(super) fn color_picker_with_palette(
+    ui: &mut egui::Ui,
+    color: &mut egui::Color32,
+    palette: &[[u8; 4]],
+) -> bool {
+    let mut changed = false;
+    // The RGB input row spans the top. Place presets beside the square below
+    // that row, so the row's width does not create an empty column in the picker.
+    let origin = ui.next_widget_position();
+    let palette_origin = origin + egui::vec2(
+        ui.spacing().slider_width + ui.spacing().item_spacing.x,
+        ui.spacing().interact_size.y + ui.spacing().item_spacing.y,
+    );
+    let picker = ui.scope(|ui| {
+        changed |= egui::color_picker::color_picker_color32(
+            ui, color, egui::color_picker::Alpha::Opaque,
+        );
+    });
+    let mut presets_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("color_picker_palette")
+            .max_rect(egui::Rect::from_min_size(palette_origin, egui::vec2(89.0, 0.0)))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    let mut rgba = color.to_array();
+    if super::pickers::solid_presets(&mut presets_ui, palette, &mut rgba) {
+        *color = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
+        changed = true;
+    }
+    ui.advance_cursor_after_rect(picker.response.rect.union(presets_ui.min_rect()));
+    changed
+}
+
+/// Swatch popup for a linear RGBA color, converted to sRGB for editing.
+/// Keep the nested menu open during picker drags and preset selection.
+pub(super) fn color_submenu(ui: &mut egui::Ui, _id: &str, c: &mut [f32; 4], palette: &[[u8; 4]]) {
     let mut col: egui::Color32 =
         egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], 1.0).into();
     let header = ui.add(egui::Button::new("").fill(col).min_size(egui::vec2(30.0, 16.0)));
     egui::Popup::menu(&header)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            // Fixed width so the picker doesn't resize as its contents change.
-            ui.set_min_width(230.0);
-            ui.set_max_width(230.0);
-            if egui::color_picker::color_picker_color32(
-                ui,
-                &mut col,
-                egui::color_picker::Alpha::Opaque,
-            ) {
+            if color_picker_with_palette(ui, &mut col, palette) {
                 let lin = egui::Rgba::from(col);
                 *c = [lin.r(), lin.g(), lin.b(), 1.0];
             }
