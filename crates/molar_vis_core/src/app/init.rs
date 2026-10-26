@@ -52,10 +52,14 @@ impl App {
         // New-representation defaults come from the settings; VMD's default style is
         // Lines. MOLAR_VIS_DEBUG_REP=vdw|licorice|… still overrides the kind for
         // headless checks.
+        super::widgets::set_color_picker_palette(&cc.egui_ctx, settings.colors.discrete_palette());
         let rep_defaults = Self::effective_rep_defaults(&settings);
         let bond_params = settings.behavior.bond_params();
 
         let mut scene = Scene::default();
+        if let RepParams::Interactions { settings: interactions } = settings.reps.style_params(RepKind::Interactions) {
+            scene.interaction_settings = interactions;
+        }
         let mut status = String::new();
         // VMD-style command-line grouping: each `launch.files` entry is one molecule's
         // file list — the first file is the structure (topology + frame 0) and any
@@ -261,7 +265,9 @@ impl App {
                 }
                 (mol.source.clone(), 0usize, "resid 1:99".to_string())
             };
-            let mut rep = Representation::new(RepKind::Interactions);
+            let mut rep = Representation::from_defaults(&RepDefaults {
+                kind: RepKind::Interactions, ..rep_defaults.clone()
+            });
             rep.sel_text = self_sel;
             rep.sel_dirty = true;
             rep.partner = Some((partner_src, partner_rep));
@@ -457,7 +463,7 @@ impl App {
         // fit that selection of mol 0 (exercises the zoom-to-selection path).
         if let Ok(sel_text) = std::env::var("MOLAR_VIS_DEBUG_FOCUS") {
             if let Some(mol) = scene.molecules.first() {
-                if let Ok((_, sel)) = mol.data.evaluate(&sel_text) {
+                if let Ok(sel) = scene.select(0, &sel_text) {
                     let (min, max) = mol.sel_bbox(&sel);
                     camera.focus_bbox(min, max);
                 }
@@ -488,7 +494,7 @@ impl App {
                 if !mol.visible {
                     continue;
                 }
-                let Ok((_, sel)) = mol.data.evaluate(&sel_text) else { continue };
+                let Ok(sel) = scene.select(mi, &sel_text) else { continue };
                 let atoms: Vec<usize> =
                     mol.data.bind(&sel).iter_particle().map(|p| p.id).collect();
                 if atoms.is_empty() {
@@ -576,7 +582,6 @@ impl App {
             align_dialog: None,
             themed_bg: None,
             charge_status: None,
-            interactions_dialog: None,
             last_lens_ndc: None,
             #[cfg(not(target_arch = "wasm32"))]
             hover_pick: None,
@@ -596,12 +601,23 @@ impl App {
             mesh_rx,
             draw: None,
             last_gray_active: None,
-            #[cfg(feature = "scripting")]
-            console: Console::default(),
             jobs_rx: None,
+            preview: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            movie_job: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            background_movie: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            movie_dialog: None,
             #[cfg(not(target_arch = "wasm32"))]
             render_state: cc.wgpu_render_state.clone(),
         };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(docking) = &launch.docking {
+            app.status = app.load_docking(&docking.receptor, &docking.ligands)?;
+            log::info!("{}", app.status);
+        }
 
         // Verification hook: MOLAR_VIS_DEBUG_AXES=1 shows the orientation-axes gizmo.
         app.camera.axes_on = std::env::var("MOLAR_VIS_DEBUG_AXES").is_ok();
@@ -708,6 +724,18 @@ impl App {
             log::info!("debug docking: pose={pose:?} receptor_frame={frame:?}");
         }
 
+        // Exercise glowing interaction paths on the CLI docking scene before capture.
+        if std::env::var("MOLAR_VIS_DEBUG_GLOWING_PATH").is_ok() {
+            for mol in &mut app.scene.molecules {
+                for rep in &mut mol.reps {
+                    if let RepParams::Interactions { settings } = &mut rep.params {
+                        settings.glowing_path = true;
+                        rep.geom_dirty = true;
+                    }
+                }
+            }
+        }
+
         // Verification hooks: MOLAR_VIS_DEBUG_ALIGN_DIALOG=1 opens the Analysis ▸ Align
         // window; MOLAR_VIS_DEBUG_ALIGN=<spec> also runs it (see `App::debug_align`).
         // Ahead of the offscreen-render hooks, so a moved molecule lands in a
@@ -724,26 +752,6 @@ impl App {
         }
         if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_ALIGN") {
             app.debug_align(&spec);
-        }
-
-        // Verification hook: MOLAR_VIS_DEBUG_SCRIPT=<source | @path> runs a Rhai
-        // script at startup through the same path the console uses, so a command's
-        // effect (e.g. `mol(0).rep(0).set_color("chain")`) can be screenshot headlessly.
-        // Ahead of the offscreen-render hooks below, so the effect lands in a
-        // MOLAR_VIS_DEBUG_SAVE_IMAGE render and not just in a window screenshot.
-        #[cfg(feature = "scripting")]
-        if let Ok(src) = std::env::var("MOLAR_VIS_DEBUG_SCRIPT") {
-            #[cfg(not(target_arch = "wasm32"))]
-            let src = match src.strip_prefix('@') {
-                Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
-                    log::error!("debug script file: {e}");
-                    String::new()
-                }),
-                None => src,
-            };
-            app.run_script(&src);
-            app.console.open = true; // show the console (echo + output) for the screenshot
-            app.console.ui.focus_input = true;
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>] opens that rep in Draw
@@ -770,16 +778,7 @@ impl App {
                 }
                 // Selections aren't evaluated until the first `rebuild_dirty`, and the
                 // button works off `rep.sel` — so resolve it here as that frame would.
-                {
-                    let mol = &mut app.scene.molecules[mi];
-                    if mol.reps[0].sel.is_none() {
-                        let text = mol.reps[0].sel_text.clone();
-                        if let Ok((expr, sel)) = mol.data.evaluate(&text) {
-                            mol.reps[0].expr = Some(expr);
-                            mol.reps[0].sel = Some(sel);
-                        }
-                    }
-                }
+                app.scene.refresh_selections();
                 app.compute_rep_charges(mi, 0);
                 match app.charge_status.as_ref() {
                     Some((_, m)) if m.starts_with('!') => {
@@ -799,6 +798,9 @@ impl App {
         {
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_LOAD_SESSION") {
                 app.load_session_from(std::path::Path::new(&path));
+            }
+            if let Ok(seconds) = std::env::var("MOLAR_VIS_DEBUG_PATH_TIME") {
+                if let Ok(seconds) = seconds.parse::<f64>() { app.renderer.set_interaction_animation_time(seconds); }
             }
             if let Ok(path) = std::env::var("MOLAR_VIS_DEBUG_SAVE_SESSION") {
                 app.save_session_to(std::path::Path::new(&path));
@@ -934,6 +936,7 @@ impl App {
                 "render" | "rendering" => SettingsPage::Rendering,
                 "styles" => SettingsPage::Styles,
                 "materials" => SettingsPage::Materials,
+                "interactions" => SettingsPage::Interactions,
                 "colors" => SettingsPage::Colors,
                 "view" | "view-defaults" | "view-lighting" | "view-scene" => SettingsPage::View,
                 "reps" | "representations" => SettingsPage::Representations,
@@ -953,32 +956,9 @@ impl App {
             }
         }
 
-        // Verification hook: MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG=[type] opens the
-        // Interactions settings dialog (on mol 0's Interactions rep, if any) at the
-        // given type tab, so the tabbed dialog can be screenshot headlessly. Pair with
-        // MOLAR_VIS_DEBUG_INTERACTIONS=1.
-        if let Ok(tab) = std::env::var("MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG") {
-            if let Some(mol) = app.scene.molecules.first() {
-                if let Some(ri) = mol
-                    .reps
-                    .iter()
-                    .position(|r| matches!(r.kind, RepKind::Interactions))
-                {
-                    use crate::interactions::InteractionKind as K;
-                    app.interactions_dialog = Some(InteractionsDialog {
-                        mol: mol.id,
-                        rep: ri,
-                        tab: match tab.to_ascii_lowercase().as_str() {
-                            "hydrophobic" => K::Hydrophobic,
-                            "salt" | "saltbridge" => K::SaltBridge,
-                            "pistacking" | "pi-stack" | "pistack" => K::PiStacking,
-                            "pication" | "pi-cation" => K::PiCation,
-                            "halogen" => K::Halogen,
-                            _ => K::HBond,
-                        },
-                    });
-                }
-            }
+        // Legacy screenshot hook now opens the persistent Interactions settings page.
+        if std::env::var("MOLAR_VIS_DEBUG_INTERACTIONS_DIALOG").is_ok() {
+            app.open_settings(SettingsPage::Interactions);
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_EXPAND_COLOR=1 expands mol 0's first rep
@@ -1011,8 +991,11 @@ impl App {
 
         // Start the same asynchronous search as the rep magnifier for hidden UI capture.
         #[cfg(not(target_arch = "wasm32"))]
-        if std::env::var_os("MOLAR_VIS_DEBUG_UNOBSTRUCTED").is_some() {
-            if let Err(e) = app.start_unobstructed_view(0, 0, &cc.egui_ctx) {
+        if let Ok(target) = std::env::var("MOLAR_VIS_DEBUG_UNOBSTRUCTED") {
+            let (mi, ri) = target.split_once(':')
+                .and_then(|(mi, ri)| Some((mi.parse().ok()?, ri.parse().ok()?)))
+                .unwrap_or((0, 0));
+            if let Err(e) = app.start_unobstructed_view(mi, ri, &cc.egui_ctx) {
                 log::error!("debug unobstructed view: {e}");
             }
         }

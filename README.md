@@ -107,7 +107,9 @@ and inspect the result in one Python or Jupyter session.
 
 Load a multi-record SDF file as a molecular group and browse its members using a
 shared set of representations. The docking loader brings a receptor and ligand
-poses into the same scene and sets up an interaction representation. Flexible
+poses into the same scene and sets up an interaction representation. Creating
+interactions also adds receptor pocket lines within 0.6 nm of the ligand, excluding apolar
+hydrogens. The pocket follows the displayed ligand pose. Flexible
 docking results can pair each ligand pose with its corresponding receptor
 conformation.
 
@@ -196,7 +198,21 @@ molar_vis system.gro trajectory.xtc
 molar_vis -m system.gro trajectory.xtc -m ligand.sdf
 ```
 
-Dependencies come from crates.io; no sibling repository checkouts are required.
+Load docking results with `-r` for the receptor and `-l` for ligand poses:
+
+```sh
+molar_vis -r receptor.pdb -l poses.sd
+molar_vis -r receptor.pdb receptor.xtc -l pose1.pdb pose2.pdb
+```
+
+Each flag accepts one or more files. Receptor files form its structure and
+trajectory; ligand files become poses in one group. This uses the docking setup
+with interactions and receptor pocket lines. Both flags are required, in either
+order, and cannot be combined with ordinary molecule arguments. `--receptor` and
+`--ligand` are equivalent long options.
+
+Dependencies come from crates.io and a pinned molar Git revision for the new selection
+resolver API; no sibling repository checkouts are required.
 Supported molecular formats are provided by MolAR, including PDB, GRO, XYZ,
 SDF/MOL and trajectory formats such as XTC, TRR and DCD. Availability of some
 formats depends on the platform and enabled MolAR features.
@@ -246,8 +262,8 @@ reference, including meshes, colors and camera controls. The
 [JavaScript API](https://github.com/yesint/molar_vis/blob/main/crates/molar_vis_js/README.md) exposes browser viewer controls;
 it does not expose MolAR's full analysis API or live coordinate editing.
 
-An optional in-app [Rhai](https://rhai.rs) console is available when building with
-`--features scripting`.
+Camera controls support animated transitions. Native movie export streams frames to an
+external FFmpeg process. See [animation and video export](docs/ANIMATION.md).
 
 ## Selections
 
@@ -261,7 +277,20 @@ resid 1:50 and name CA
 resname ALA GLY
 water
 within 0.5 of (resname LIG)
+within 0.5 of m1:(name CA)
+within 0.5 of m0.r1
+within 0.5 of m1[0]
+within 0.5 of m0.r2[3]
 ```
+
+A source reference supplies atoms and coordinates from another source.
+`mN` matches the top-level molecule or group label in the tree; for a group it
+follows the displayed member. `mN[I]` selects member I explicitly. `.rR` selects
+representation R; `[F]` after a representation selects loaded frame F. All indices
+start at zero. Without an explicit frame, references use displayed coordinates.
+A bare reference uses its complete atom domain; `:(selection)` filters that source.
+The trailing colon remains accepted. Results belong to the molecule whose selection
+you edit. See [source-reference rules](docs/MOLAR.md#scene-selection-variables).
 
 Distances are in nanometers. See the
 [selection language reference](https://yesint.github.io/molar_vis/selection-language.html)

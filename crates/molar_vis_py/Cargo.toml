@@ -14,11 +14,6 @@ description = "Native Python module driving the molar_vis viewer from pymolar (z
 name = "molar_vis"
 crate-type = ["cdylib"]
 
-[features]
-# Pass-through for the core's in-app Rhai scripting console (off by default — see
-# `molar_vis_core`'s own `scripting` feature). Build with `--features scripting` to get it.
-scripting = ["molar_vis_core/scripting"]
-
 [dependencies]
 pyo3 = { version = "0.27", features = ["extension-module"] }
 # pymolar as an rlib: its pyclasses (System/Sel) cross the FFI boundary into the
@@ -33,3 +28,5 @@ molar_vis_core = { version = "0.2.2", path = "../molar_vis_core" }
 # loop on a background thread so the Python REPL stays responsive.
 winit = "0.30"
 log = { workspace = true }
+
+serde_json.workspace = true

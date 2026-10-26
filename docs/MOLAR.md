@@ -7,7 +7,10 @@
 ### Pinned molar 2.3 API
 
 The workspace pins the crates.io packages molar, molar_python, and molar_ff to
-version `2.3.0` in `Cargo.toml`. Molar 2.3 retains the **struct-of-arrays** storage introduced in
+version `2.3.0` in `Cargo.toml`. The resolver API is currently supplied by the
+`[patch.crates-io]` entry pointing to the adjacent `../molar/molar` checkout during
+development of the foreign-selection API. Both repositories must be present. This
+local patch can return to a Git revision after the API is published upstream. Molar 2.3 retains the **struct-of-arrays** storage introduced in
 2.0/2.1. `molar_ff` now supplies a fixed Espaloma charge kernel without a general ONNX
 runtime or an `espaloma` feature flag. The viewer still gates charge computation to
 native builds. The storage API details that matter here:
@@ -114,3 +117,77 @@ native builds. The storage API details that matter here:
   either way (wrapping bonds are then rendered as dashed PBC half-bonds — see `geometry.rs`).
 - Secondary structure for M6 cartoon: `molar::Dssp` (10-variant `SS` enum).
 
+
+
+### Foreign selections
+
+Molar's PEG parser calls `SelectionResolver::parse_atom` for foreign reference
+operands and `parse_prefix` for foreign unary operation heads. The hooks are pure:
+they return an exclusive input offset and an opaque descriptor, or decline the
+input. Only the committed AST is prepared. The viewer owns the `mN[I].rR[F]`
+reference grammar and `interacts with` prefix; molar owns parentheses, Boolean
+operators, precedence, and nested operands. No braces or text substitution are used.
+
+| Selection operand | Source |
+|---|---|
+| `m0` | Top-level molecule or group 0, displayed member/frame |
+| `m1:(name CA)` | CA atoms of molecule or group 1 |
+| `m0.r1` | Representation 1 of molecule 0 |
+| `m1[0]` | Explicit member 0 of group 1 |
+| `m0.r2[3]` | Representation 2 at loaded frame 3 |
+| `m1[0].r2[3]` | Representation/frame on an explicit group member |
+| `interacts with m1.r0` | Current-source atoms in contacts with the referenced rep |
+
+`protein and interacts with m1.r0` selects receptor contact atoms;
+`same residue as (interacts with m1.r0)` selects their whole residues.
+`interacts with (m1.r0 or name CA)` combines foreign and local partner sets.
+The prefix binds like `within`: `interacts with m1.r0 or name CA` applies the
+operation only to `m1.r0`. Use parentheses to include the union in its operand.
+Intermediate sets retain source identity; final results containing any foreign
+source are hard errors. Indices are never silently imported or discarded.
+
+The operation uses all enabled interaction kinds and active global detection
+thresholds, independent of rendering style or visibility. Ring and charge-group
+contacts include all participant atoms; explicit H-bonds include participating
+hydrogens. Coordinate, selection and detection-setting changes invalidate results
+through the same scene refresh mechanism as interaction drawing. Dependencies and
+cycles are checked before detection. Existing bare-reference sessions remain valid.
+
+All numbers are zero-based. `mN` labels count top-level tree entries, with each group
+occupying one entry. A group reference follows its displayed member; `mN[I]` stays
+bound to member I. A reference without a filter uses the full source domain. The Rust/Python molecule handles still use flat scene indices. References are positional, so list
+reordering or deletion can change what a number denotes. Each evaluation looks
+up the current scene. A missing molecule, member, rep or frame is a positioned
+selection error. Frame 0 is also available for a static molecule without a loaded
+trajectory; other explicit frames must be loaded. Smoothing and periodic display
+copies are not part of the referenced coordinate source.
+
+Current-frame representation references use the membership displayed by static
+representations. Dynamic reps evaluate against their displayed frame. Explicit
+frame references evaluate the representation expression at that frame, without
+changing playback or swapping state into the molecule. Shared group reps can be
+referenced on unshown members: their definition is taken from the shown member
+and evaluated against the requested member's data. Own reps follow the shared
+prefix in group-member references (`mN[I].rR`), matching the member's r badges.
+
+
+Before geometry construction, a scene-wide pass evaluates dirty representations
+and their dependencies. It binds current source views through an adapter retaining
+the preparation table's identity. Dependency atom domains are evaluated first and
+cached for the pass, including separate keys for explicit frames. The pass detects
+representation cycles and reports the reference path. Empty intermediate domains
+are valid. Invalid selections retain their previous geometry; final empty selections
+clear geometry and retain the compiled expression for later recovery.
+
+Referencing selections refresh after source coordinate or selection edits, playback,
+shared-source version changes, group changes, and scene reordering/addition/deletion.
+The change snapshot is global scene metadata plus existing dirty flags; it is not a
+registry of live variables. Views are rebound for each evaluation. Unchanged atom
+membership avoids unnecessary geometry rebuilds. Glow uses evaluated representation
+membership rather than re-parsing the selection with a one-molecule evaluator.
+
+The default source is the edited molecule's displayed state. Selection results contain
+only that molecule's atom indices. `within` may consume foreign reference sets, including
+unions; geometric centers use their reference source. Distances use nanometers and
+sources must share a coordinate frame. Periodic `within` uses the selected molecule's
+box. `same residue as` and `same chain as` require the current source.

@@ -163,14 +163,14 @@ pub(super) fn sel_text_edit(
 /// The one thing a rep row asked for this frame.
 ///
 /// A single `Option<RepAction>` rather than the eleven independent `Option`s this used to be,
-/// because four of these variants — `Reorder`, `Duplicate`, `CloneForInteractions`, `Delete` —
+/// because three of these variants — `Duplicate`, `CloneForInteractions`, `Delete` —
 /// mutate the rep list **by index**. Applying two in one frame would leave the second one's
 /// index pointing at the wrong rep. With separate slots that only held because at most one
 /// button can be clicked per pointer per frame, an unenforced invariant whose failure mode is
 /// silent (the neighbouring rep deleted). As one slot it is enforced by the type, and the
 /// apply site is a single exhaustive `match` whose arm order no longer matters.
 ///
-/// The rep-list surgery itself lives on [`Molecule`] (`reorder_rep`, `duplicate_rep`,
+/// The rep-list surgery itself lives on [`Molecule`] (`duplicate_rep`,
 /// `insert_rep_above`, `delete_rep`), where it is unit-tested — see `scene::rep_surgery_tests`.
 ///
 /// Note what is deliberately *not* here: `view_dirty`. It legitimately accumulates from many
@@ -179,7 +179,9 @@ pub(super) fn sel_text_edit(
 /// outcome is `{ view_dirty: bool, action: Option<A> }`: the flag is additive, the action is
 /// exclusive (see [`RepParamsOutcome`], [`GroupOutcome`](super::panels::GroupOutcome)).
 pub(super) enum RepAction {
-    /// Drag-reorder: move rep `from` into the gap before position `to`.
+    /// Pick up rep `j`; the next click in this list places it.
+    Rearrange(usize),
+    /// Move a picked-up rep to an insertion boundary.
     Reorder { from: usize, to: usize },
     /// Open rep `j` in the drawing editor (Draw mode scoped to its selection).
     Edit(usize),
@@ -203,8 +205,8 @@ pub(super) enum RepAction {
     FocusPartner(MoleculeSource, usize),
     /// A rep row was clicked *while* choosing a partner → assign it as the partner.
     ChoosePartner(usize),
-    /// Open the per-type Interactions settings dialog for rep `j`.
-    OpenInteractionSettings(usize),
+    /// Open the persistent Interactions page in the general settings dialog.
+    OpenInteractionSettings,
     /// Run espaloma partial-charge prediction on rep `j`'s selection.
     ComputeCharges(usize),
     /// Write rep `j`'s selected atoms to a structure file. Native only — molar writes to the
@@ -284,7 +286,7 @@ pub(super) fn draw_rep_params(
         };
         ui.horizontal(|ui| {
             ui.label("SS algorithm");
-            egui::ComboBox::from_id_salt("ss_algo")
+            fixed_combo(ui, "ss_algo", ["DSSP", "DSSP (gmx)", "dss (PyMOL)"].into_iter())
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -366,8 +368,7 @@ impl App {
             } else {
                 sel_text
                     .as_deref()
-                    .and_then(|text| self.scene.molecules[*t].data.evaluate(text).ok())
-                    .map(|(_, sel)| sel)
+                    .and_then(|text| self.scene.select(*t, text).ok())
             };
             let Some(sel) = sel else {
                 failed += 1;
@@ -860,21 +861,16 @@ pub(super) fn draw_group_bar(ui: &mut egui::Ui, names: &[String], current: usize
 }
 impl App {
 
-    /// Representations of the selected molecule as rich rows: a drag handle
-    /// (reorder by dragging), the selection text field, a drawn style-icon dropdown,
-    /// and a right-justified action group (eye, zoom, and a `⋮` menu with
-    /// edit/duplicate/save/delete). An "Add" button precedes the list.
-    /// The representations of molecule `mi`, nested under it: rich two-row blocks
-    /// (drag handle · selection · actions / style · color · gear) with
-    /// drag-reorder. The "add representation" control lives in the molecule's
-    /// header row, not here.
+    /// Representations of molecule `mi` as two-row blocks: a framed index, selection,
+    /// and actions above the style/color/material controls. New representations are
+    /// added from the molecule header.
     ///
     /// Draws only reps in `[start, end)`. For an ordinary molecule that's the whole
     /// list (`0..len`, `is_shared = false`). For a [`MolGroup`] the prefix
     /// `0..n_shared` of the shown member is drawn as the **shared** reps under the
     /// group header (`is_shared = true`), and each member's own reps `n_shared..len`
     /// below it. `is_shared` keeps the member's `n_shared` boundary correct as shared
-    /// reps are added/removed/reordered, and suppresses the pending-selection UI
+    /// reps are added/removed, and suppresses the pending-selection UI
     /// (which belongs to a member, not the shared document).
     pub(super) fn draw_reps_for(
         &mut self,
@@ -901,8 +897,9 @@ impl App {
                 end.min(mol.reps.len()),
             )
         };
+        let source_rep_offset = self.scene.source_rep_offset(mi);
         // For each Interactions rep, resolve its partner into a display label
-        // ("Mol N: Rep M" / "(none)" / "(partner lost)") + whether it's a live,
+        // ("mN rN" / "(none)" / "(partner lost)") + whether it's a live,
         // clickable (focusable) reference. Done here because it reads other molecules.
         let partner_info: Vec<Option<(String, bool)>> = (start..end)
             .map(|j| {
@@ -915,7 +912,7 @@ impl App {
                     // Group-aware resolution (follows the group's shown member), so the
                     // label matches what's actually detected against.
                     Some(_) => match super::build::partner_index(&self.scene, rep) {
-                        Some((pmi, pr)) => (format!("Mol {}: Rep {}", pmi + 1, pr + 1), true),
+                        Some((pmi, pr)) => (format!("{} r{}", self.scene.source_address(pmi), pr + self.scene.source_rep_offset(pmi)), true),
                         None => ("(partner lost)".to_string(), false),
                     },
                 })
@@ -951,6 +948,19 @@ impl App {
         // closures (which hold `&mut mol`), applied once they have all ended.
         let mut action: Option<RepAction> = None;
 
+        let rearrange_id = egui::Id::new(("rearrange_rep", mol_id, is_shared));
+        let mut rearranging = ui.ctx().data_mut(|data| {
+            data.get_temp::<crate::scene::RepId>(rearrange_id)
+        });
+        if ui.input(|i| i.key_pressed(egui::Key::Escape) || i.pointer.secondary_clicked()) {
+            rearranging = None;
+        }
+        let dragged = rearranging.and_then(|id| (start..end).find(|&j| mol.reps[j].id == id));
+        if dragged.is_none() {
+            rearranging = None;
+        }
+        let mut row_rects = Vec::new();
+
         let continuous_palette = self.settings.colors.continuous;
         for j in start..end {
             let sel_id = egui::Id::new(("rep_sel", mol_id, j));
@@ -966,151 +976,142 @@ impl App {
             let rep = &mut mol.reps[j];
             // Whether the selection is valid but empty (0 atoms) — flags the field.
             let sel_empty = rep.sel_empty;
-            // Read before the row is laid out: the two `Sides` closures can't both hold
-            // `&mut rep`, so the action side works from a copy and reports its clicks back.
-            let rep_visible = rep.visible;
-
-            // Each rep is two rows, grouped: row 1 = handle | selection | actions,
-            // row 2 = style | color | gear. The whole block is the reorder target.
-            // Row 2 is indented by the drag-handle width so it aligns under the
-            // selection field rather than under the handle.
+            // Keep the settings expander and selection errors aligned with the index badge.
             let mut row2_indent = 0.0_f32;
             let block = ui
                 .vertical(|ui| {
-                    // Row 1: drag handle | selection | eye · update · copy · delete
+                    if dragged.is_some() {
+                        ui.disable();
+                    }
+                    if dragged == Some(j) {
+                        ui.multiply_opacity(0.35);
+                    }
+                    // Row 1: representation index | selection | actions
                     ui.horizontal(|ui| {
-                        let handle = ui
-                            .dnd_drag_source(egui::Id::new(("rep_drag", mol_id, j)), j, |ui| {
-                                ui.add(egui::Label::new(icon::DOTS_SIX_VERTICAL).selectable(false));
-                            })
-                            .response
-                            .on_hover_cursor(egui::CursorIcon::Grab)
-                            .on_hover_text("Drag to reorder");
-                        row2_indent = handle.rect.width();
+                        let badge = index_badge(ui, "r", j + source_rep_offset, rep.visible);
+                        row2_indent = badge.rect.width();
+                        if badge.clicked() {
+                            rep.visible = !rep.visible;
+                            view_dirty = true;
+                        }
 
                         // Selection field on the left, actions on the right.
                         // `Sides::shrink_left` measures the (compact) action group and bounds the
                         // field's Ui with the width that's left, so the field fills the rest of the
                         // row. Both closures are built before either runs, so only one may hold
-                        // `&mut rep`: the actions report their clicks back, and the eye toggle is
-                        // applied after.
-                        let (_, toggle_eye) = egui::containers::Sides::new()
-                                .shrink_left()
-                                .spacing(COMPACT_SPACING)
-                                .show(
-                                    ui,
-                                    |ui| {
-                                        // The field's max rect is bounded by `Sides`, so it just
-                                        // asks for everything (`INFINITY`).
-                                        let resp = sel_text_edit(
-                                            ui,
-                                            &mut rep.sel_text,
-                                            sel_id,
-                                            f32::INFINITY,
-                                            rep.sel_error_span.clone(),
-                                        );
-                                        if resp.changed() {
-                                            clear_sel_feedback(rep);
-                                        }
-                                        if sel_empty && !resp.changed() {
-                                            mark_empty_selection(ui, resp.rect);
-                                        }
-                                        // Committing the edit (blur) re-evaluates the selection.
-                                        if resp.lost_focus() {
-                                            rep.sel_dirty = true;
-                                        }
-                                    },
-                                    |ui| {
-                                        compact_actions(ui);
-                                        // Per-rep hamburger: the less-frequent actions
-                                        // (edit · duplicate · save · delete) live here so
-                                        // the row stays uncluttered; eye + zoom stay inline.
-                                        ui.menu_button(icon::LIST, |ui| {
-                                            let editing = draw_target_rep == Some(j);
-                                            if ui
-                                                .selectable_label(
-                                                    editing,
-                                                    format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
-                                                )
-                                                .on_hover_text(
-                                                    "Edit this selection in draw mode — sketch atoms/bonds within it",
-                                                )
-                                                .clicked()
-                                            {
-                                                action = Some(RepAction::Edit(j));
-                                                ui.close();
-                                            }
-                                            if ui
-                                                .button(format!("{}  Duplicate", icon::COPY))
-                                                .clicked()
-                                            {
-                                                action = Some(RepAction::Duplicate(j));
-                                                ui.close();
-                                            }
-                                            // Save just the selected atoms to a structure
-                                            // file. Native only (molar writes to disk).
-                                            #[cfg(not(target_arch = "wasm32"))]
-                                            if ui
-                                                .button(format!(
-                                                    "{}  Save selection…",
-                                                    icon::FLOPPY_DISK
-                                                ))
-                                                .clicked()
-                                            {
-                                                action = Some(RepAction::SaveSelection(j));
-                                                ui.close();
-                                            }
-                                            ui.separator();
-                                            if ui
-                                                .button(format!("{}  Delete", icon::TRASH))
-                                                .clicked()
-                                            {
-                                                action = Some(RepAction::Delete(j));
-                                                ui.close();
-                                            }
-                                        })
-                                        .response
-                                        .on_hover_text("Representation menu");
-                                        // (Update-every-frame moved to Settings ▸ Traj.)
-                                        // Eye: open when shown, crossed when hidden.
-                                        let eye = if rep_visible {
-                                            icon::EYE
-                                        } else {
-                                            icon::EYE_SLASH
-                                        };
-                                        let toggle = ui
-                                            .selectable_label(rep_visible, eye)
-                                            .on_hover_text(match rep_visible {
-                                                true => "Hide",
-                                                false => "Show",
-                                            })
-                                            .clicked();
-                                        // Frame this selection: unobstructed view (default)
-                                        // or a plain zoom-to-fit (see the behavior setting).
-                                        if icon_button(
-                                            ui,
-                                            icon::MAGNIFYING_GLASS_PLUS,
-                                            if zoom_unobstructed {
-                                                "Unobstructed view of selection"
-                                            } else {
-                                                "Zoom to selection"
-                                            },
-                                        )
-                                        .clicked()
+                        // `&mut rep`: the actions report their clicks back.
+                        egui::containers::Sides::new()
+                            .shrink_left()
+                            .spacing(COMPACT_SPACING)
+                            .show(
+                                ui,
+                                |ui| {
+                                    // The field's max rect is bounded by `Sides`, so it just
+                                    // asks for everything (`INFINITY`).
+                                    let resp = sel_text_edit(
+                                        ui,
+                                        &mut rep.sel_text,
+                                        sel_id,
+                                        f32::INFINITY,
+                                        rep.sel_error_span.clone(),
+                                    );
+                                    if resp.changed() {
+                                        clear_sel_feedback(rep);
+                                    }
+                                    if sel_empty && !resp.changed() {
+                                        mark_empty_selection(ui, resp.rect);
+                                    }
+                                    // Committing the edit (blur) re-evaluates the selection.
+                                    if resp.lost_focus() {
+                                        rep.sel_dirty = true;
+                                    }
+                                },
+                                |ui| {
+                                    compact_actions(ui);
+                                    // Per-rep hamburger: the less-frequent actions
+                                    // (edit · rearrange · duplicate · save · delete) live here so
+                                    // the row stays uncluttered; zoom stays inline.
+                                    ui.menu_button(icon::LIST, |ui| {
+                                        let editing = draw_target_rep == Some(j);
+                                        if ui
+                                            .selectable_label(
+                                                editing,
+                                                format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
+                                            )
+                                            .on_hover_text(
+                                                "Edit this selection in draw mode — sketch atoms/bonds within it",
+                                            )
+                                            .clicked()
                                         {
-                                            action = Some(RepAction::ZoomTo(j));
+                                            action = Some(RepAction::Edit(j));
+                                            ui.close();
                                         }
-                                        toggle
-                                    },
-                                );
-                        if toggle_eye {
-                            rep.visible = !rep_visible;
-                            view_dirty = true;
-                        }
+                                        if ui
+                                            .add_enabled(
+                                                end - start > 1,
+                                                egui::Button::new(format!(
+                                                    "{}  Rearrange...", icon::ARROWS_DOWN_UP,
+                                                )),
+                                            )
+                                            .on_hover_text("Pick up this representation, then click to place it; Esc cancels")
+                                            .clicked()
+                                        {
+                                            action = Some(RepAction::Rearrange(j));
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .button(format!("{}  Duplicate", icon::COPY))
+                                            .clicked()
+                                        {
+                                            action = Some(RepAction::Duplicate(j));
+                                            ui.close();
+                                        }
+                                        // Save just the selected atoms to a structure
+                                        // file. Native only (molar writes to disk).
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        if ui
+                                            .button(format!(
+                                                "{}  Save selection…",
+                                                icon::FLOPPY_DISK
+                                            ))
+                                            .clicked()
+                                        {
+                                            action = Some(RepAction::SaveSelection(j));
+                                            ui.close();
+                                        }
+                                        ui.separator();
+                                        if ui
+                                            .button(format!("{}  Delete", icon::TRASH))
+                                            .clicked()
+                                        {
+                                            action = Some(RepAction::Delete(j));
+                                            ui.close();
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text("Representation menu");
+                                    // (Update-every-frame moved to Settings ▸ Traj.)
+                                    // Frame this selection: unobstructed view (default)
+                                    // or a plain zoom-to-fit (see the behavior setting).
+                                    if icon_button(
+                                        ui,
+                                        icon::MAGNIFYING_GLASS_PLUS,
+                                        if zoom_unobstructed {
+                                            "Unobstructed view of selection"
+                                        } else {
+                                            "Zoom to selection"
+                                        },
+                                    )
+                                    .clicked()
+                                    {
+                                        action = Some(RepAction::ZoomTo(j));
+                                    }
+                                },
+                            );
                     });
 
                     // Selection errors appear immediately below the selection field,
-                    // aligned under it (indented past the drag handle).
+                    // aligned under it (indented past the index badge).
                     if let Some(err) = &rep.sel_error {
                         ui.horizontal(|ui| {
                             ui.add_space(row2_indent);
@@ -1120,7 +1121,7 @@ impl App {
                     }
 
                     // Row 2: [settings expander] style | color | material. The caret
-                    // sits where the drag handle is in row 1 (so the style dropdown
+                    // sits under the index badge in row 1 (so the style dropdown
                     // lines up under the selection field) and toggles the settings.
                     ui.horizontal(|ui| {
                         let caret = if rep.params_open {
@@ -1132,11 +1133,24 @@ impl App {
                         // the ▸/▾ glyph already signals expanded/collapsed; passing
                         // `false` keeps just the hover feedback.
                         if ui
-                            .selectable_label(false, caret)
+                            .add_sized([row2_indent, dropdown_height(ui)], egui::Button::selectable(false, caret))
                             .on_hover_text("Representation settings")
                             .clicked()
                         {
                             rep.params_open = !rep.params_open;
+                        }
+                        let picker_widths = representation_picker_widths(ui);
+                        if rep.kind == RepKind::Interactions {
+                            let label = partner_info.get(j - start).and_then(|entry| entry.as_ref())
+                                .map(|(label, _)| label.as_str()).unwrap_or("(none)");
+                            let choose = format!("{}  Choose…", icon::CROSSHAIR_SIMPLE);
+                            let reserved = max_label_width(ui, [label].into_iter())
+                                + max_label_width(ui, [choose.as_str()].into_iter())
+                                + 2.0 * ui.spacing().button_padding.x
+                                + 2.0 * ui.spacing().item_spacing.x;
+                            ui.spacing_mut().combo_width = (ui.available_width() - reserved).max(100.0);
+                        } else {
+                            ui.spacing_mut().combo_width = picker_widths[0];
                         }
                         if let Some(clone) = style_picker(ui, rep, &self.rep_defaults) {
                             // Switched to Interactions → keep the old-style rep (below).
@@ -1182,7 +1196,9 @@ impl App {
                                 }
                             }
                         } else {
+                            ui.spacing_mut().combo_width = picker_widths[1];
                             color_picker(ui, rep);
+                            ui.spacing_mut().combo_width = picker_widths[2];
                             material_picker(ui, rep, &self.rep_defaults);
                         }
                     });
@@ -1193,28 +1209,34 @@ impl App {
             if rep.params_open {
                 view_dirty |= ui
                     .indent(egui::Id::new(("rep_params", mol_id, j)), |ui| {
-                        // Interactions reps: a single line-width slider (applies to all
-                        // types) + the button opening the per-type settings dialog. Every
+                        if dragged.is_some() {
+                            ui.disable();
+                        }
+                        // Interactions reps: width and animation controls (all types)
+                        // + the button opening the general settings dialog. Every
                         // other style uses the normal params grid. (The Partner picker is
                         // on the style row above.)
                         if matches!(rep.kind, RepKind::Interactions) {
                             let mut w_changed = false;
                             if let RepParams::Interactions { settings } = &mut rep.params {
                                 ui.horizontal(|ui| {
-                                    ui.label("Line width");
+                                    ui.label(if settings.glowing_path { "Tube width" } else { "Line width" });
                                     w_changed = ui
-                                        .add(egui::Slider::new(&mut settings.line_width, 1.0..=6.0))
+                                        .add(egui::Slider::new(&mut settings.line_width, 1.0..=20.0))
                                         .changed();
                                     if ui
                                         .button(format!("{}  Settings…", icon::GEAR_SIX))
                                         .on_hover_text(
-                                            "Choose which interaction types to show + tune their cutoffs",
+                                            "Edit interaction defaults for all representations; Save keeps them for new sessions",
                                         )
                                         .clicked()
                                     {
-                                        action = Some(RepAction::OpenInteractionSettings(j));
+                                        action = Some(RepAction::OpenInteractionSettings);
                                     }
                                 });
+                                if settings.glowing_path {
+                                    w_changed |= ui.checkbox(&mut settings.animate_glowing_path, "Animate glowing paths").changed();
+                                }
                             }
                             if w_changed {
                                 rep.geom_dirty = true;
@@ -1237,12 +1259,16 @@ impl App {
                     })
                     .inner;
             }
+            row_rects.push(block.rect.union(egui::Rect::from_min_max(
+                block.rect.min,
+                egui::pos2(block.rect.right(), ui.cursor().top()),
+            )));
 
             // While choosing an interaction partner, the whole rep block is a click
             // target: hovering tints it, clicking selects it as the partner. (An
             // overlay interact registered after the row, so it wins the click over the
             // row's own buttons.)
-            if picking_partner {
+            if picking_partner && dragged.is_none() {
                 let pick = ui.interact(
                     block.rect,
                     egui::Id::new(("partner_target", mol_id, j)),
@@ -1267,34 +1293,6 @@ impl App {
                 ui.scroll_to_rect(block.rect, Some(egui::Align::Center));
             }
 
-            // Reorder drop target spans the whole two-row block (disabled while
-            // choosing a partner, where the block is a partner-pick target instead).
-            if !picking_partner {
-                if let (Some(ptr), Some(_)) = (
-                    ui.input(|i| i.pointer.interact_pos()),
-                    block.dnd_hover_payload::<usize>(),
-                ) {
-                    let before = ptr.y < block.rect.center().y;
-                    let y = if before { block.rect.top() } else { block.rect.bottom() };
-                    ui.painter().hline(
-                        block.rect.x_range(),
-                        y,
-                        egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill),
-                    );
-                    if let Some(src) = block.dnd_release_payload::<usize>() {
-                        // Confine reorder to this drawn region (shared vs own): ignore a
-                        // drag that originated in the other list (their payloads share the
-                        // `usize` type), so the `n_shared` boundary can't be crossed.
-                        if (start..end).contains(&*src) {
-                            action = Some(RepAction::Reorder {
-                                from: *src,
-                                to: if before { j } else { j + 1 },
-                            });
-                        }
-                    }
-                }
-            }
-
             // A horizontal delimiter line between consecutive reps, so where one rep ends and
             // the next begins reads at a glance. The last rep just gets trailing space (before
             // the pending stub / next molecule), not a dangling line.
@@ -1304,6 +1302,61 @@ impl App {
                 ui.add_space(6.0);
             }
         }
+
+        if let Some(from) = dragged {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if let Some(pos) = ui.ctx().pointer_hover_pos() {
+                // Only this list accepts the drop: shared and member-specific reps
+                // must never cross their membership boundary.
+                if let (Some(first), Some(last)) = (row_rects.first(), row_rects.last()) {
+                    let list_rect = first.union(*last)
+                        .expand2(egui::vec2(0.0, 6.0))
+                        .intersect(ui.clip_rect());
+                    if list_rect.contains(pos) {
+                        let offset = row_rects.iter()
+                            .position(|rect| pos.y < rect.center().y)
+                            .unwrap_or(row_rects.len());
+                        let y = row_rects.get(offset).map_or(last.bottom(), |rect| rect.top());
+                        // The selection stroke is chosen for contrast against the
+                        // selection fill, so it can disappear against the panel.
+                        // Outline the accent with the theme's normal text colour.
+                        let outline = ui.visuals().text_color();
+                        let accent = ui.visuals().selection.bg_fill;
+                        let painter = ui.painter();
+                        painter.hline(first.x_range(), y, egui::Stroke::new(6.0_f32, outline));
+                        painter.hline(first.x_range(), y, egui::Stroke::new(3.0_f32, accent));
+                        for x in [first.left(), first.right()] {
+                            let tip = egui::pos2(x, y);
+                            painter.circle_filled(tip, 5.0, outline);
+                            painter.circle_filled(tip, 3.0, accent);
+                        }
+                        if ui.input(|i| i.pointer.primary_clicked()) {
+                            action = Some(RepAction::Reorder { from, to: start + offset });
+                            rearranging = None;
+                        }
+                    }
+                }
+                egui::Area::new(rearrange_id.with("preview"))
+                    .order(egui::Order::Tooltip)
+                    .interactable(false)
+                    .fixed_pos(pos + egui::vec2(12.0, 12.0))
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("r{}", from + source_rep_offset));
+                                ui.label(&mol.reps[from].sel_text);
+                            });
+                        });
+                    });
+            }
+        }
+        ui.ctx().data_mut(|data| {
+            if let Some(id) = rearranging {
+                data.insert_temp(rearrange_id, id);
+            } else {
+                data.remove::<crate::scene::RepId>(rearrange_id);
+            }
+        });
 
         // The active (pending) selection — e.g. just captured by a lasso — appears below the
         // reps as the glow-coloured [`pending_stub`]: the atom count plus accept (commit as a
@@ -1335,6 +1388,12 @@ impl App {
         // is what lets the `&mut Molecule` arms and the `&mut self` arms share one match.
         if let Some(action) = action {
             match action {
+                RepAction::Rearrange(j) => {
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(rearrange_id, self.scene.molecules[mi].reps[j].id);
+                    });
+                    ui.ctx().request_repaint();
+                }
                 RepAction::Reorder { from, to } => {
                     view_dirty |= self.scene.molecules[mi].reorder_rep(from, to);
                 }
@@ -1344,6 +1403,11 @@ impl App {
                 }
                 RepAction::CloneForInteractions { at, clone } => {
                     self.scene.molecules[mi].insert_rep_above(at, *clone, is_shared);
+                    if let Some((partner_mol, _)) = super::build::partner_index(
+                        &self.scene, &self.scene.molecules[mi].reps[at + 1],
+                    ) {
+                        self.scene.show_interaction_pocket(mi, at + 1, partner_mol, &self.rep_defaults);
+                    }
                     view_dirty = true;
                 }
                 RepAction::Delete(j) => {
@@ -1379,7 +1443,7 @@ impl App {
                         let mol = &self.scene.molecules[mi];
                         if let Some(sel) = mol.reps.get(j).and_then(|r| r.sel.as_ref()) {
                             let (min, max) = mol.sel_bbox(sel);
-                            self.camera.focus_bbox(min, max);
+                            self.focus_camera_bounds(min, max);
                             view_dirty = true;
                         }
                     }
@@ -1387,12 +1451,8 @@ impl App {
                 RepAction::StartPartnerPick(j) => {
                     self.rep_pick = Some(RepPick::Partner(mol_id, j))
                 }
-                RepAction::OpenInteractionSettings(j) => {
-                    self.interactions_dialog = Some(InteractionsDialog {
-                        mol: mol_id,
-                        rep: j,
-                        tab: crate::interactions::InteractionKind::HBond,
-                    });
+                RepAction::OpenInteractionSettings => {
+                    self.open_settings(SettingsPage::Interactions);
                 }
                 // A rep row clicked while choosing a partner → assign it.
                 RepAction::ChoosePartner(j) => self.choose_rep(mi, j),
@@ -1406,7 +1466,7 @@ impl App {
                         .find(|m| m.source == src)
                         .and_then(|pmol| Some(pmol.sel_bbox(pmol.reps.get(pr)?.sel.as_ref()?)));
                     if let Some((min, max)) = bbox {
-                        self.camera.focus_bbox(min, max);
+                        self.focus_camera_bounds(min, max);
                         view_dirty = true;
                     }
                 }
@@ -1424,173 +1484,7 @@ impl App {
         view_dirty
     }
 
-    /// The Interactions **Settings** dialog (a movable `egui::Window`): a tab per
-    /// interaction type, each exposing that type's full parameter set (enable + all
-    /// cutoffs/angles), plus a shared line-width + Defaults footer, for the rep in
-    /// [`App::interactions_dialog`]. Any edit marks the rep `geom_dirty` so its contacts
-    /// rebuild. Closed via the window ✕ or when the target rep vanishes.
-    pub(super) fn draw_interactions_dialog(&mut self, ctx: &egui::Context) {
-        use crate::interactions::InteractionKind as K;
-        // Taken out for the duration, so the tab can be edited by `&mut` while the closure
-        // also borrows `self.scene` — and put back below unless the dialog was closed.
-        let Some(mut dialog) = self.interactions_dialog.take() else {
-            return;
-        };
-        let (mol_id, ri) = (dialog.mol, dialog.rep);
-        let Some(mi) = self.scene.mol_index(mol_id) else {
-            return; // the rep's molecule is gone → the dialog closes with it
-        };
-        let mut open = true;
-        egui::Window::new("Interaction settings")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(320.0)
-            .open(&mut open)
-            .show(ctx, |ui| {
-                // A tab per interaction type (a colored dot marks each type's line color).
-                tab_bar(
-                    ui,
-                    &mut dialog.tab,
-                    &[
-                        (K::HBond, "H-bonds"),
-                        (K::Hydrophobic, "Hydrophobic"),
-                        (K::SaltBridge, "Salt bridges"),
-                        (K::PiStacking, "π-stack"),
-                        (K::PiCation, "π-cation"),
-                        (K::Halogen, "Halogen"),
-                    ],
-                );
-                ui.separator();
-                let tab = dialog.tab;
-                let Some(rep) = self.scene.molecules.get_mut(mi).and_then(|m| m.reps.get_mut(ri))
-                else {
-                    return;
-                };
-                let mut changed = false;
-                if let RepParams::Interactions { settings: s } = &mut rep.params {
-                    // A legend swatch + the enable checkbox for the active type.
-                    let swatch = |ui: &mut egui::Ui, kind: K| {
-                        let c = geometry::interaction_color(kind);
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                        ui.painter()
-                            .rect_filled(rect, 3.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
-                    };
-                    let slider = |ui: &mut egui::Ui,
-                                  on: bool,
-                                  label: &str,
-                                  v: &mut f32,
-                                  range: std::ops::RangeInclusive<f32>,
-                                  suffix: &str|
-                     -> bool {
-                        ui.label(label);
-                        let c = ui
-                            .add_enabled(on, egui::Slider::new(v, range).suffix(suffix.to_string()))
-                            .changed();
-                        ui.end_row();
-                        c
-                    };
-                    match tab {
-                        K::HBond => {
-                            ui.horizontal(|ui| {
-                                swatch(ui, K::HBond);
-                                changed |= ui.checkbox(&mut s.hbonds, "Detect hydrogen bonds").changed();
-                            });
-                            let on = s.hbonds;
-                            egui::Grid::new("hb_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                changed |= slider(ui, on, "Donor–acceptor distance", &mut s.hbond_dist, 0.25..=0.50, " nm");
-                                changed |= slider(ui, on, "D–A distance (with H)", &mut s.hbond_dist_h, 0.25..=0.50, " nm");
-                                changed |= slider(ui, on, "Min D–H···A angle", &mut s.hbond_angle, 90.0..=180.0, "°");
-                            });
-                            ui.add_space(4.0);
-                            ui.small("With an explicit hydrogen on the donor the distance-with-H + angle test is used; otherwise the heavy-atom donor–acceptor distance.");
-                        }
-                        K::Hydrophobic => {
-                            ui.horizontal(|ui| {
-                                swatch(ui, K::Hydrophobic);
-                                changed |= ui.checkbox(&mut s.hydrophobic, "Detect hydrophobic contacts").changed();
-                            });
-                            let on = s.hydrophobic;
-                            egui::Grid::new("hy_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                changed |= slider(ui, on, "Max C···C distance", &mut s.hydrophobic_dist, 0.30..=0.55, " nm");
-                            });
-                            ui.add_space(4.0);
-                            ui.small("Carbons whose only neighbours are C/H. One contact is kept per residue pair.");
-                        }
-                        K::SaltBridge => {
-                            ui.horizontal(|ui| {
-                                swatch(ui, K::SaltBridge);
-                                changed |= ui.checkbox(&mut s.salt_bridges, "Detect salt bridges").changed();
-                            });
-                            let on = s.salt_bridges;
-                            egui::Grid::new("sb_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                changed |= slider(ui, on, "Max charge-centre distance", &mut s.salt_bridge_dist, 0.40..=0.70, " nm");
-                            });
-                            ui.add_space(4.0);
-                            ui.small("Charged groups: Arg/Lys/His (+), Asp/Glu (−), and ligand carboxylate / guanidinium / phosphate.");
-                        }
-                        K::PiStacking => {
-                            ui.horizontal(|ui| {
-                                swatch(ui, K::PiStacking);
-                                changed |= ui.checkbox(&mut s.pi_stacking, "Detect π-stacking").changed();
-                            });
-                            let on = s.pi_stacking;
-                            egui::Grid::new("ps_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                changed |= slider(ui, on, "Max ring-centre distance", &mut s.pi_stacking_dist, 0.40..=0.70, " nm");
-                                changed |= slider(ui, on, "Plane angle tolerance", &mut s.pi_stacking_angle, 10.0..=45.0, "°");
-                                changed |= slider(ui, on, "Max offset (parallel)", &mut s.pi_stacking_offset, 0.0..=0.40, " nm");
-                            });
-                            ui.add_space(4.0);
-                            ui.small("Aromatic rings that are near-parallel (within the tolerance, and overlapping) or T-shaped.");
-                        }
-                        K::PiCation => {
-                            ui.horizontal(|ui| {
-                                swatch(ui, K::PiCation);
-                                changed |= ui.checkbox(&mut s.pi_cation, "Detect π-cation").changed();
-                            });
-                            let on = s.pi_cation;
-                            egui::Grid::new("pc_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                changed |= slider(ui, on, "Max ring–cation distance", &mut s.pi_cation_dist, 0.40..=0.75, " nm");
-                                changed |= slider(ui, on, "Max offset from ring axis", &mut s.pi_cation_offset, 0.0..=0.40, " nm");
-                            });
-                            ui.add_space(4.0);
-                            ui.small("A cationic group sitting over an aromatic ring face.");
-                        }
-                        K::Halogen => {
-                            ui.horizontal(|ui| {
-                                swatch(ui, K::Halogen);
-                                changed |= ui.checkbox(&mut s.halogen, "Detect halogen bonds").changed();
-                            });
-                            let on = s.halogen;
-                            egui::Grid::new("hx_grid").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                changed |= slider(ui, on, "Max X···acceptor distance", &mut s.halogen_dist, 0.30..=0.50, " nm");
-                                changed |= slider(ui, on, "Min C–X···A angle", &mut s.halogen_angle, 120.0..=180.0, "°");
-                            });
-                            ui.add_space(4.0);
-                            ui.small("Cl/Br/I bonded to carbon donating to an O/N/S acceptor along the σ-hole.");
-                        }
-                    }
-                    ui.separator();
-                    // (Line width is a rep-level control, shown inline in the rep panel —
-                    // it applies to all interaction types — so it's not in this dialog.)
-                    if ui
-                        .button(format!("{}  Reset all to defaults", icon::ARROW_COUNTER_CLOCKWISE))
-                        .clicked()
-                    {
-                        let lw = s.line_width; // keep the (inline-edited) line width
-                        *s = crate::interactions::InteractionSettings::default();
-                        s.line_width = lw;
-                        changed = true;
-                    }
-                }
-                if changed {
-                    rep.geom_dirty = true;
-                }
-            });
-        if open {
-            self.interactions_dialog = Some(dialog); // still open — keep the active tab
-        }
-    }
+
 }
 
 
@@ -1804,19 +1698,9 @@ mod rep_panel_tests {
         }
     }
 
-    /// A picker button must be **the same width whatever is selected**.
-    ///
-    /// That is the entire point of [`max_label_width`]: the button reserves the *widest*
-    /// option's label, so choosing "Ball and stick" after "Lines" cannot grow the button, shove
-    /// its neighbours along and reflow the panel. It is also why an egui `sizing_pass` could
-    /// not replace it — a sizing pass measures the current content, not the max over options.
-    ///
-    /// This exercises the same two lines each of the three pickers opens with
-    /// (`max_label_width` over the enum's `ALL`, then `picker_button`), because the pickers
-    /// return their selection rather than their button's rect. Checked in both themes, since
-    /// the reservation is measured in the themed font.
+    /// Standard height and readable labels, with compact widths that stay fixed across selections.
     #[test]
-    fn picker_button_width_does_not_depend_on_the_selection() {
+    fn picker_buttons_keep_fixed_widths_at_standard_height() {
         use std::cell::RefCell;
         // (group, label) pairs covering all three pickers' option lists.
         let groups: [(&str, Vec<&str>); 3] = [
@@ -1828,11 +1712,17 @@ mod rep_panel_tests {
             let seen: RefCell<Vec<(&str, &str, f32)>> = RefCell::new(Vec::new());
             run(theme, |ui| {
                 seen.borrow_mut().clear();
+                let standard_height = egui::ComboBox::from_id_salt("standard_dropdown_probe")
+                    .selected_text("Lines")
+                    .show_ui(ui, |_| {})
+                    .response.rect.height();
                 for (group, labels) in &groups {
-                    let lw = max_label_width(ui, labels.iter().copied());
+                    let label_width = max_label_width(ui, labels.iter().copied());
                     for label in labels {
-                        let w = picker_button(ui, label, lw, |_, _| {}).rect.width();
-                        seen.borrow_mut().push((group, label, w));
+                        let rect = picker_button(ui, label, label_width, |_, _| {}).rect;
+                        assert!((rect.height() - standard_height).abs() < 0.01,
+                            "{theme:?}: {group} picker height {} must match standard {standard_height}", rect.height());
+                        seen.borrow_mut().push((group, label, rect.width()));
                     }
                 }
             });
@@ -1843,15 +1733,10 @@ mod rep_panel_tests {
                     .filter(|(g, _, _)| g == group)
                     .map(|(_, l, w)| (*l, *w))
                     .collect();
-                let (_, first) = ws[0];
-                for (label, w) in &ws {
-                    assert!(
-                        (w - first).abs() < 0.01,
-                        "{theme:?}: the {group} picker is {w} wide for {label:?} but {first} \
-                         for {:?} — its width must not follow the selection",
-                        ws[0].0
-                    );
-                }
+                let narrow = ws.iter().map(|(_, width)| *width).fold(f32::INFINITY, f32::min);
+                let wide = ws.iter().map(|(_, width)| *width).fold(0.0_f32, f32::max);
+                assert!((wide - narrow).abs() < 0.1,
+                    "{theme:?}: {group} must keep the same width for every selection");
             }
         }
     }
@@ -1877,19 +1762,29 @@ mod picker_panel_fit_tests {
                     ..Default::default()
                 }, |ui| {
                     let panel = egui::Panel::left("controls_panel").resizable(true)
-                        .default_size(300.0).size_range(egui::Rangef::new(220.0, 520.0))
+                        .default_size(300.0).size_range(egui::Rangef::new(220.0, 640.0))
                         .show_inside(ui, |ui| {
                             painted_right = ui.clip_rect().right();
                             ui.style_mut().spacing.scroll.floating = false;
                             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                                 ui.indent("reps", |ui| {
-                                    ui.horizontal(|ui| {
-                                        let _ = ui.selectable_label(false, icon::CARET_RIGHT);
+                                    let badge_width = index_badge(ui, "r", 0, true).rect.width();
+                                    let row = ui.horizontal(|ui| {
+                                        let _ = ui.add_sized([badge_width, dropdown_height(ui)],
+                                            egui::Button::selectable(false, icon::CARET_RIGHT));
                                         let mut rep = Representation::new(RepKind::Vdw);
+                                        let widths = representation_picker_widths(ui);
+                                        ui.spacing_mut().combo_width = widths[0];
                                         style_picker(ui, &mut rep, &RepDefaults::default());
+                                        ui.spacing_mut().combo_width = widths[1];
                                         color_picker(ui, &mut rep);
+                                        ui.spacing_mut().combo_width = widths[2];
                                         material_picker(ui, &mut rep, &RepDefaults::default());
                                     });
+                                    assert!(row.response.rect.width() <= 460.0,
+                                        "{theme:?}: common representation dropdowns should fit a compact row");
+                                    assert!(row.response.rect.height() <= dropdown_height(ui) + 0.5,
+                                        "{theme:?}: representation dropdowns must stay on one row");
                                 });
                             });
                         });
@@ -1981,7 +1876,7 @@ pub(super) fn draw_style_options(ui: &mut egui::Ui, params: &mut RepParams) -> b
                 changed |= ui.add(egui::Slider::new(smoothing, 0..=5)).changed();
                 ui.end_row();
             }
-            // Interactions params are edited in a separate dialog (Partner row +
+            // Interactions params are edited in the general settings dialog (Partner row +
             // Settings button drawn by the caller), so nothing inline here.
             RepParams::Interactions { .. } => {}
         });

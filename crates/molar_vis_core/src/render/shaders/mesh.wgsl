@@ -11,6 +11,7 @@ struct Camera {
     // Selection-glow color (rgb), chosen on the CPU from the viewport background so the
     // glow and the cues egui draws over the scene are one decision. See `theme::glow_color`.
     glow_color: vec4<f32>,
+    path_animation: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -35,6 +36,7 @@ struct VsOut {
     @location(1) color: vec4<f32>, // rgb + opacity
     @location(2) view_pos: vec3<f32>,
     @location(3) @interpolate(flat) mat: u32, // packed material lighting
+    @location(4) @interpolate(flat) path_radius: f32,
 };
 
 fn unpack_color(c: u32) -> vec4<f32> {
@@ -63,10 +65,14 @@ fn vs_main(v: VsIn) -> VsOut {
     let view_pos = camera.view * vec4<f32>(v.pos, 1.0);
     out.clip = camera.proj * view_pos;
     // view is rigid (rotation + translation); w=0 applies only the rotation.
-    out.normal_eye = (camera.view * vec4<f32>(v.normal, 0.0)).xyz;
+    out.normal_eye = (camera.view * vec4<f32>(v.normal, select(0.0, 1.0, is_glowing_path(v.mat)))).xyz;
     out.color = unpack_color(v.color);
     out.view_pos = view_pos.xyz;
     out.mat = v.mat;
+    out.path_radius = 0.0;
+    if (is_glowing_path(v.mat)) {
+        out.path_radius = glowing_path_radius_from_bound(v.pos, v.normal, glowing_path_axis(v.mat), v.mat);
+    }
     return out;
 }
 
@@ -84,6 +90,10 @@ fn shade(in: VsOut) -> vec4<f32> {
     // are lit rather than dark.
     if (dot(n, view_dir) < 0.0) {
         n = -n;
+    }
+    if (is_glowing_path(in.mat)) {
+        let sample = path_sample_eye(in);
+        return glowing_path_color(in.color.rgb, sample.radius2, in.color.a * sample.intensity, camera.fog_color.rgb);
     }
     var lit = shade_material(in.color.rgb, n, view_dir, unpack_mat(in.mat), true, in.mat);
     lit = apply_outline(lit, n, view_dir, in.mat);
@@ -108,7 +118,8 @@ fn fs_shadow(in: VsOut) {
 fn fs_shadow_open(in: VsOut) {}
 
 @fragment
-fn fs_main(in: VsOut) -> OpaqueOut {
+fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> OpaqueOut {
+    if (is_glowing_path(in.mat) && !front) { discard; }
     let nlen = length(in.normal_eye);
     var n = select(vec3<f32>(0.0, 0.0, 1.0), in.normal_eye / max(nlen, 1e-12), nlen > 1e-6);
     let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-in.view_pos), camera.params.x > 0.5);
@@ -144,11 +155,57 @@ struct OitOut {
 };
 
 @fragment
-fn fs_oit(in: VsOut) -> OitOut {
+fn fs_oit(in: VsOut, @builtin(front_facing) front: bool) -> OitOut {
+    if (is_glowing_path(in.mat) && !front) { discard; }
     let c = shade(in);
     let w = oit_weight(in.view_pos.z, c.a);
     var out: OitOut;
     out.accum = vec4<f32>(c.rgb * c.a, c.a) * w;
     out.reveal = c.a;
     return out;
+}
+
+// Path-only entries write centerline depth. Ordinary mesh entries retain their
+// hardware depth and early testing without an analytic fragment-depth output.
+fn path_sample_eye(in: VsOut) -> GlowingPathSample {
+    let view_dir = select(vec3<f32>(0.0, 0.0, 1.0), normalize(-in.view_pos), camera.params.x > 0.5);
+    let axis = glowing_path_axis(in.mat);
+    let axis_eye = (camera.view * vec4<f32>(axis, 0.0)).xyz;
+    let u_eye = (camera.view * vec4<f32>(glowing_path_u(axis), 0.0)).xyz;
+    return glowing_path_sample(in.view_pos, in.normal_eye, view_dir, axis_eye, u_eye, in.mat, in.path_radius, camera.path_animation);
+}
+
+fn path_depth(p: vec3<f32>) -> f32 {
+    let clip = camera.proj * vec4<f32>(p, 1.0);
+    if (clip.z < 0.0 || clip.z > clip.w) { discard; }
+    return clip.z / clip.w;
+}
+
+struct PathOpaqueOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+@fragment
+fn fs_path_main(in: VsOut, @builtin(front_facing) front: bool) -> PathOpaqueOut {
+    if (!front) { discard; }
+    let sample = path_sample_eye(in);
+    let color = glowing_path_color(in.color.rgb, sample.radius2, in.color.a * sample.intensity, camera.fog_color.rgb);
+    return PathOpaqueOut(color, vec4<f32>(0.0, 0.0, 1.0, 0.0), path_depth(sample.depth_point));
+}
+
+struct PathOitOut {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: f32,
+    @builtin(frag_depth) depth: f32,
+};
+
+@fragment
+fn fs_path_oit(in: VsOut, @builtin(front_facing) front: bool) -> PathOitOut {
+    if (!front) { discard; }
+    let sample = path_sample_eye(in);
+    let c = glowing_path_color(in.color.rgb, sample.radius2, in.color.a * sample.intensity, camera.fog_color.rgb);
+    let w = oit_weight(sample.depth_point.z, c.a);
+    return PathOitOut(vec4<f32>(c.rgb * c.a, c.a) * w, c.a, path_depth(sample.depth_point));
 }

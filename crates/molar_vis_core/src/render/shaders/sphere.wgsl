@@ -13,6 +13,7 @@ struct Camera {
     // Selection-glow color (rgb), chosen on the CPU from the viewport background so the
     // glow and the cues egui draws over the scene are one decision. See `theme::glow_color`.
     glow_color: vec4<f32>,
+    path_animation: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -80,6 +81,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
         vec2<f32>( 1.0,  1.0),
     );
     let corner = corners[vidx];
+    let radius = inst.radius;
 
     let view_center = (camera.view * vec4<f32>(inst.center, 1.0)).xyz;
     // Oversize slightly so the perspective silhouette is fully covered; extra
@@ -87,7 +89,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     // plane — the *original* placement, so screen coverage and near-plane clipping are
     // byte-for-byte unchanged (moving it toward the camera altered both at the frame
     // edge in perspective close-ups).
-    let r = inst.radius * 1.25;
+    let r = radius * 1.25;
     let view_pos = view_center + vec3<f32>(corner * r, 0.0);
 
     var out: VsOut;
@@ -117,7 +119,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     out.clip.z = clamp(z_ndc_near, 0.0, 1.0) * out.clip.w;
     out.view_pos = view_pos;
     out.view_center = view_center;
-    out.radius = inst.radius;
+    out.radius = radius;
     out.color = unpack_color(inst.color);
     out.mat = inst.mat;
     out.pick = inst.pick;

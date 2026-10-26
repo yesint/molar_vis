@@ -2,6 +2,14 @@
 
 > Reference doc for [molar_vis](../CLAUDE.md). Split out of the master `CLAUDE.md` for on-demand reading — see it for the project overview, build quick-start, and the full docs index.
 
+- Velvet material: fast single-surface matte shading with broad, tinted sheen.
+  Replaces the sampled density layer to remove its geometry and transparency cost.
+  Edge softness reduces normal contrast near the silhouette; Sheen controls the
+  highlight strength and Roughness its width. Hard-surface AO/shadows are skipped
+  to avoid a dark contour. Raster rendering, ray tracing, and picker previews
+  share the same lighting. Saved `hairiness` values now control Edge softness.
+  Available through `material="Velvet"` in the external APIs.
+
 ## Milestone status
 
 - ✅ M0 scaffold + offscreen triangle
@@ -341,27 +349,9 @@
   molar's `Vec<Bond>` carries `BondOrder`, and Double/Triple/Aromatic render as parallel/dashed
   screen-space strands. `MOLAR_VIS_DEBUG_DRAW=methane|ethane|water|benzene` builds + relaxes a preset
   headlessly. (Documented in detail in the `app.rs` / `minimize.rs` sections above.)
-- ✅ M24 **In-app scripting console (Rhai)** — the first slice of the scripting roadmap (the data
-  layer was already Python-scriptable via molar's published `pymolar` PyO3 bindings; PyO3 can't
-  target `wasm32-unknown-unknown`, so the *portable* surface is a pure-Rust embedded language).
-  **Decision: Rhai** (pure-Rust, WASM-proven, best API-binding ergonomics, sandboxable) driven from
-  an **in-app console window** (works in the browser too); external-terminal / Python-driver
-  transports deferred behind a transport-agnostic command core. **Fluent OO surface** (per user
-  feedback — the first flat-function cut, `color("chain")`, was "lame"): `mol(i).rep(j).set_style(…)
-  .set_color(…).select(…)`, `mol(i).add_rep("cartoon").set_color("ss")`, `mol(i).show()/hide()/
-  frame(n)/play()/focus(sel)`. `script.rs` (+ `script/{command,console}.rs`): lightweight
-  `MolHandle`/`RepHandle` (index + `RepRef{Index,Last}` + shared command queue) whose methods push a
-  `Command`; `evaluate_script` (Rhai fns push commands, no scene access) + `apply_scene_command`
-  (GPU-free, testable; same field-set + dirty-flag the GUI does → converges on `rebuild_dirty`, no
-  new render branch) + `App::{run_script,execute_command,draw_console}`. Free fns: `mol(i)`,
-  `load(path)` (native), `list()`, plus Rhai's `print`. One undo checkpoint per script run. Console
-  is a resizable bottom panel toggled from the **View menu** (`[x] Console`); `MOLAR_VIS_DEBUG_SCRIPT` runs a script
-  at startup for headless verification. See the `script.rs` module bullet. Verified: 5 unit tests
-  (62 total), native+wasm green, and a headless screenshot of `mol(0).rep(0).set_style("vdw")
-  .set_color("resid"); mol(0).add_rep("cartoon")` (rep 0 → rainbow VDW spheres + a new Cartoon rep,
-  in the console + rep list). Deferred: property setters (`rep.style = …`) + indexing (`mol[0]`,
-  declined by the user), camera/background scripting, autocompletion, multi-line editor, `.rhai`
-  file open/save, external/Python transports.
+- ✅ M24 **Shared scene commands** — `Command` / `apply_scene_command` provide a
+  GPU-free mutation layer used by the app and the Python/JavaScript hosts.
+
 - ✅ M25 **`app.rs` modularization** — the 7276-line `app.rs` (4× the next file) was split into a
   thin root (~690 lines: `App` struct + enums + `ui` loop + `rebuild_dirty` + IME tests) plus **14
   `app/` submodules** by concern (see the `app.rs` + `app/` module bullet). Pure no-behavior-change
@@ -588,7 +578,7 @@
   session round-trip reloads the edited coords). Deferred: persisting edits of *grouped* members
   (they still reload from the SDF by index); edge-on-axis drag is ill-conditioned (freezes rather
   than jumps).
-- ✅ M31 **molar 2.1 migration + charge coloring (espaloma) + optional scripting** — four coupled
+- ✅ M31 **molar 2.1 migration + charge coloring (espaloma)** — four coupled
   changes.
   **(1) molar 2.1** (SoA atom + columnar bond storage): every atom property read became an
   `AtomLike::get_*()` call on the `AtomRef`/`AtomRefMut` proxies (there is no `&Atom`/`&Bond` to
@@ -612,12 +602,7 @@
   prediction on demand recorded as an undoable `StructEdit::Charges`. Also capped the multi-order bond
   strand radius at Ball-and-Stick's — with SDF orders now surviving, Licorice's double bonds were
   twice as thick *and* twice as splayed.
-  **(4) `scripting` feature** (non-default): Rhai + the console UI moved behind it, split along the
-  seam that already existed — the `Command`/`apply_scene_command` layer the app's menus and the
-  Python/JS hosts use stays always-compiled in `script.rs`; everything Rhai-specific moved to
-  `script/engine.rs`.
-  Verified: **96 tests** with `--features scripting`, 92 without (16 new across the four changes),
-  all five crates building for native + wasm32 in **both** configurations with no warnings, clippy
+  Verified native and wasm32 builds, unit tests, clippy,
   clean, a byte-identical session round-trip, and headless renders of the charge scheme on aspirin
   (21 atoms, −0.683…+0.830 e, carbonyl O red / their C blue), the SS/B-factor/ResID schemes, the four
   rep styles, and the fixed Licorice double bonds (Ball-and-Stick byte-identical to before). molar
@@ -644,7 +629,7 @@
   (not in git; see `tests/README.md`). Verified: 13 unit tests over the three pure decisions
   (mode from frame counts, whether the structure file's own frame is a pose, which side to drive
   — first reconcile, either direction, playback,
-  both-moved precedence, idle), 103 tests total (107 with `scripting`), all crates green for
+  both-moved precedence, idle), 103 tests total, all crates green for
   native + wasm32 in both feature configurations with no warnings, and headless offscreen checks
   of the dialog, the loaded result (pose in the site with green H-bond dashes, receptor at 26
   frames), both coupling directions at several indices, rigid mode staying decoupled, and the
@@ -668,7 +653,7 @@
   refusal and the name-paired path; a <3-atom fit refused; **undo restores the pre-align
   coordinates**; `Move whole molecule` off moving only the selection; both label shapes; a 20-member
   SDF group listed as **one** dropdown row with its members inside), 137
-  tests total (141 with `scripting`), native + wasm32 +
+  tests total, native + wasm32 +
   `molar_vis_py` green with no warnings, clippy clean, and headless checks: an identical-pair RMSD of
   0.000, the count-mismatch message, a 27-frame `same as source` trajectory fit
   (`0.036 nm — mean of 27 frames (min 0.000, max 0.061)`, min 0 being the reference frame fitting
@@ -835,3 +820,115 @@
   the toggle off restores color editing.
   Shared color pickers show the active discrete palette on the right for quick
   color selection, including settings colors, background, accent, and Solid coloring.
+
+- Camera animation and native movie export: shared explicit-time camera paths for
+  Rust/Python/JavaScript, full-turn rotation and pivot support, multiplicative zoom,
+  saved views, animated unobstructed framing, sequences, holds, seek/preview and
+  discrete trajectory tracks. Native exports stream RGBA through a bounded queue to
+  external FFmpeg, or save PNG sequences. Raster and frame-pumped ray tracing share
+  the evaluator. Task handles expose progress/cancel/completion; export restores
+  camera and trajectory state. Render → Movie provides explicit Trajectory and Fly around modes, a film-strip
+  icon, and a viewport preview of rendered frames with a compact progress overlay. The
+  embedded language and console were removed; shared scene commands remain.
+  See [ANIMATION.md](ANIMATION.md).
+
+- Settings → Rendering now includes **Camera transition animation [ms]**, default 0.
+  GUI and Rust/Python/JavaScript navigation inherit it for zoom, focus, unobstructed
+  view, reset, rotation, pan and docking focus. Explicit durations override it, and
+  movie timing and direct mouse navigation remain independent.
+
+- Native **Background render** captures an independent scene and required trajectory
+  frames, then renders with its own GPU resources on a worker. The viewer stays
+  editable; deleting objects or starting a new session does not change the movie.
+  A compact progress/Cancel panel has an optional preview. The checkbox shows
+  `requires ~X Mb additional RAM`, estimated from snapshot data, smoothing frames,
+  geometry, frame buffers and encoding. Shared Python data is copied under the GIL.
+
+- Python exposes native molecular groups through `vis.load_group`, `vis.groups`,
+  member selection and shared representations. One shared interaction representation
+  follows the shown member; existing representation handles stay valid after switches.
+  Movie steps can switch a group member and animate its unobstructed view in one
+  continuous render. Seeking works in both directions, and export restores the original
+  member on success, failure or cancellation. The JAK2 example uses this API for ten
+  inhibitors, with one shared contact representation and no holds between members.
+  Python can load a saved session, and the example's `--session` option keeps its
+  display settings while applying the programmed camera sequence in the foreground.
+
+- Unobstructed ligand views now score finite rendered geometry rather than atom
+  centres. The fixed-scale area score includes ligand self-overlap, receptor ribbon
+  meshes, solid bonds and screen-width lines. Clear solid-receptor openings take
+  priority, with a small silhouette guard to prevent grazing overlaps. Covered
+  pixels also have an extra cost while maximizing readable ligand area. The
+  pre-October-14 sphere-proxy search was replayed on ten JAK2 inhibitors and still
+  produced obstructed views. The replacement is checked with rendered ligand masks
+  against receptor-hidden references, plus finite-bond, wide-line and ring tests.
+
+### Glowing interaction paths
+
+Settings → Interactions has an opt-in **Glowing path** option. All enabled interaction types connect
+interacting atoms with a translucent glowing helix of uniform tube width. One mesh
+surface per contact uses shader emission for the bright core and soft halo; no
+nested transparent shells or extra glow buffers. H-bonds, hydrophobic contacts,
+salt bridges, π-stacking, π-cation and halogen bonds use their configured type colors.
+Disabling the option restores dashed lines. The option persists in settings, sessions and undo/redo; older
+settings retain dashed rendering. Live rendering, captures and ray tracing use
+the same path geometry and emission profile. The saturated, nonreflective core
+peaks in intensity at the bond center and fades toward the atoms; core and halo darken on
+light backgrounds. One enclosing capsule evaluates a continuous ray-to-path
+glow field once per pixel. The soft end-on glow and wavy side view have no
+separate visible cap or wall contributions. Occlusion uses the path centerline
+depth, allowing connected atoms to cover the core and halo at attachment points
+in both live and ray-traced rendering. The path follows a small six-turn spiral
+(up to 0.009 nm amplitude), fixed in world space and smoothly anchored at both atoms.
+
+The interaction width control also scales the glowing tube's core and halo;
+3 preserves the original thickness. Helix amplitude, turn count and the axial
+intensity profile are independent of width. The enclosing capsule grows with
+the tube, retaining soft edges at larger widths in both rendering modes.
+
+Unobstructed view treats interaction representations as annotations, excluding
+both dashed and glowing geometry from obstacle scoring and framing. Interaction
+reps included in a combined target list are ignored; selecting only interactions
+reports that an atom representation is needed.
+
+Ligand unobstructed-view scoring builds one spatial hierarchy for receptor mesh
+triangles and clips blocker rasterization to the ligand silhouette plus its
+one-pixel clearance guard band. Regions behind the target or outside its projected
+bounds are skipped. The 192×192 scoring grid, candidate directions and readability
+objective remain unchanged; large-target atom scoring retains its existing path.
+
+### Foreign selection parser hooks
+
+Molar's PEG parser has external atom and unary-prefix hooks through its resolver
+trait. molar_vis supplies scene references such as `m0.r1` and `interacts with`;
+molar parses their nested operands and ordinary operators. `interacts with
+(m1.r0 or name CA)` evaluates a union of source-aware partner sets and returns
+only current-source participant atoms. Foreign sources in final results are hard
+errors. Existing bare-reference sessions need no migration. Prefix calls evaluate
+per AST occurrence, so different operands never share results just because their
+operation head is identical. Detection results retain atom identities, full
+ring/charge-group members and explicit donor H atoms. Active settings, dependency
+cycles, missing references, empty matches and refresh use the scene selection pass.
+
+Docking results create receptor Lines with `not apolh and same residue as
+interacts with mN.rR`, targeting the matching ligand geometry representation.
+The pocket contains whole contacting residues, follows the displayed ligand
+member, and updates with active detection settings instead of a distance shell.
+
+Settings → Interactions and each glowing interaction rep's parameter panel have
+an opt-in **Animate glowing paths** option. Animated helices keep six turns and
+rotate around their axes once every two seconds. The shader uses the existing
+single capsule; only a small frame uniform changes, with no geometry rebuild or
+extra surfaces.
+Static paths retain six turns. Live views repaint only while an animated path is
+visible; ray-traced stills freeze their phase. Raster and ray-traced captures share
+the same phase, and movie exports use the movie timeline. The flag persists in
+settings, sessions and undo/redo; older files keep static paths.
+
+Glowing-path close-ups bound the helix search to the intervals that can contribute
+to each pixel. A conservative projected-cylinder bound rejects empty rays and
+skips distant turns; near-axial views retain the full search. This applies to
+both raster and ray tracing without reducing the helix resolution. On the JAK2
+fancy-session close-up, the live OIT pass decreased from 9.4 to 4.4 ms; a fixed
+1000×800 capture was pixel-identical. A GPU regression compares 8,192 rays with
+the full search across viewing angles, widths, lengths and animation phases.

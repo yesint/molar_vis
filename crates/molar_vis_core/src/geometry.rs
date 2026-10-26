@@ -183,6 +183,14 @@ impl RepKind {
 }
 
 impl RepParams {
+    pub(crate) fn has_glowing_path(&self) -> bool {
+        matches!(self, Self::Interactions { settings } if settings.glowing_path)
+    }
+
+    pub(crate) fn has_animated_glowing_path(&self) -> bool {
+        matches!(self, Self::Interactions { settings } if settings.glowing_path && settings.animate_glowing_path)
+    }
+
     pub fn kind(self) -> RepKind {
         match self {
             Self::Vdw { .. } => RepKind::Vdw, Self::Licorice { .. } => RepKind::Licorice,
@@ -469,17 +477,84 @@ pub fn interaction_color(kind: crate::interactions::InteractionKind) -> [u8; 4] 
 /// by kind. Reuses the same dash cadence as PBC half-bonds via [`dashes`].
 pub fn interaction_lines(
     interactions: &[crate::interactions::Interaction],
-    width: f32,
+    settings: &crate::interactions::InteractionSettings,
 ) -> Vec<LineVertex> {
+    if settings.glowing_path { return Vec::new(); }
     let mut out = Vec::new();
     for it in interactions {
-        let color = crate::color::pack_rgba8(interaction_color(it.kind));
+        let color = crate::color::pack_rgba8(settings.color(it.kind));
         for (s, e) in dashes(it.a.to_array(), it.b.to_array()) {
-            out.push(LineVertex { pos: s, color, width, offset_px: 0.0 });
-            out.push(LineVertex { pos: e, color, width, offset_px: 0.0 });
+            out.push(LineVertex { pos: s, color, width: settings.line_width, offset_px: 0.0 });
+            out.push(LineVertex { pos: e, color, width: settings.line_width, offset_px: 0.0 });
         }
     }
     out
+}
+
+/// Shared live/capture/trace builder, preserving each interaction type’s color.
+pub fn interaction_geometry(
+    interactions: &[crate::interactions::Interaction],
+    settings: &crate::interactions::InteractionSettings,
+) -> GeometryData {
+    let mut data = GeometryData {
+        lines: interaction_lines(interactions, settings),
+        ..Default::default()
+    };
+    if !settings.glowing_path { return data; }
+    for it in interactions {
+        let delta = it.b - it.a;
+        let length = delta.length();
+        if !length.is_finite() || length < 1e-5 { continue; }
+        let axis = delta / length;
+        let rgba = settings.color(it.kind);
+        let mut path_material = crate::material::glowing_path_word(axis, length);
+        if settings.animate_glowing_path {
+            path_material |= crate::material::GLOWING_PATH_ANIMATION_BIT;
+        }
+        let (axis, length) = crate::material::glowing_path_frame(path_material);
+        let u = axis.any_orthonormal_vector();
+        let v = axis.cross(u);
+        let center = (it.a + it.b) * 0.5;
+        let color = crate::color::pack_rgba8([rgba[0], rgba[1], rgba[2], (rgba[3] as f32 * 0.9) as u8]);
+        // One convex capsule bounds the analytic glow. Its boundary lies outside
+        // the nonzero emission, so neither a silhouette nor a cap join can show.
+        const SIDES: usize = 32;
+        const CAP_STEPS: usize = 8;
+        let tube_radius = 0.04 * settings.line_width.clamp(1.0, 20.0) / 3.0;
+        let amplitude = (length * 0.03).min(0.009);
+        let bound_radius = tube_radius + amplitude + 0.01;
+        let base = data.mesh.vertices.len() as u32;
+        let mut rings = Vec::new();
+        for j in 0..=CAP_STEPS {
+            let angle = std::f32::consts::FRAC_PI_2 * j as f32 / CAP_STEPS as f32;
+            rings.push((-length * 0.5 - bound_radius * angle.cos(), bound_radius * angle.sin()));
+        }
+        for j in 0..=CAP_STEPS {
+            let angle = std::f32::consts::FRAC_PI_2 * j as f32 / CAP_STEPS as f32;
+            rings.push((length * 0.5 + bound_radius * angle.sin(), bound_radius * angle.cos()));
+        }
+        for &(along, radius) in &rings {
+            for k in 0..SIDES {
+                let angle = std::f32::consts::TAU * k as f32 / SIDES as f32;
+                let radial = u * angle.cos() + v * angle.sin();
+                data.mesh.vertices.push(MeshVertex {
+                    pos: (center + axis * along + radial * radius).to_array(),
+                    normal: center.to_array(), // analytic path center, not a lighting normal
+                    color, mat: path_material,
+                });
+            }
+        }
+        for j in 0..rings.len() - 1 {
+            for k in 0..SIDES {
+                let a = base + (j * SIDES + k) as u32;
+                let b = base + (j * SIDES + (k + 1) % SIDES) as u32;
+                let c = a + SIDES as u32;
+                let d = b + SIDES as u32;
+                data.mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+            }
+        }
+    }
+    data
 }
 
 /// The 12 edges of the periodic box as a line list (24 vertices). The box is the
@@ -770,7 +845,7 @@ fn wrap_thresh2(b: &PeriodicBox) -> f32 {
 
 /// Split `p0 → p1` into dash segments (`DASH_LEN` on, `DASH_GAP` off). Always
 /// emits at least one segment.
-fn dashes(p0: [f32; 3], p1: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
+pub(crate) fn dashes(p0: [f32; 3], p1: [f32; 3]) -> Vec<([f32; 3], [f32; 3])> {
     let d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
     let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     if len < 1e-6 {

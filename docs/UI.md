@@ -36,6 +36,11 @@ next frame). The menus —
   tonemap — see the GI bullet under `render/raytrace.rs`). Separately, pressing **R** in the viewport
   ray-traces the current view in place (PyMOL-`ray` style; honors AO/shadows + GI) and holds it until
   the camera moves; see `render/raytrace.rs`.
+- **Render → Movie…** (native, `FILM_STRIP`) offers explicit **Trajectory** and **Fly around**
+  modes. Trajectory selects a visible molecule, inclusive frame range and playback rate;
+  Fly around selects camera rotation, duration and zoom. During export, actual completed
+  frames appear in the viewport with a compact progress/Cancel overlay. **Background render**
+  keeps the viewer editable and shows estimated additional RAM directly below the checkbox. See [ANIMATION.md](ANIMATION.md).
 - **Help → Selection language** — opens the [colored selection reference](https://yesint.github.io/molar_vis/selection-language.html) in the browser. The static page has copyable examples, syntax colors, light/dark themes, and a responsive layout. It is also accessible from the web build.
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
   `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
@@ -85,10 +90,6 @@ next frame). The menus —
     coordinates) and without moving anything for [RMSD]; over several frames it reads
     `mean of N frames (min …, max …)`, since one number for a fitted trajectory can't say whether
     it is uniformly close or has outlier frames.
-- **View** — **`[x] Console`** (a `CHECK_SQUARE`/`SQUARE`-marked toggle of `console_open` — the Rhai
-  scripting console bottom panel; opening it sets `console.focus_input` so the input grabs focus; see
-  `script/engine.rs` / M24). This is the menu's only entry, so the **whole View menu is behind the
-  `scripting` feature** (M31) and absent from a default build.
 
 Then one **molecule row** each:
 expand-caret + **name** (**bold** via `widgets::bold_name` — the embedded Ubuntu Bold; see
@@ -121,8 +122,9 @@ the viewport — a real panel, **not** a floating `Area` over the 3D image; span
 area right of the left panel, added in `ui()` between the left panel and `draw_viewport`).
 Left-aligned **selection controls**, then a right-aligned (`Layout::right_to_left`) **hamburger**
 opening the compact view-settings popup:
-**selection** — a **`Selection mode`-labelled pick-mode dropdown** (`Off` default / `Click` / `Lasso` —
-see `pick.rs` / M11; **`Click`** hovers to show the atom's identity/glow (as before) and **on click
+**selection** — a **`Selection mode`-labelled pick-mode dropdown** (`Off` default / `Info` / `Click` / `Lasso` —
+see `pick.rs` / M11; **`Info`** highlights hovered atoms/residues without selecting them.
+Hover info includes the sidebar molecule/rep address (such as `m0:r1`). **`Click`** hovers to show the atom's identity/glow and **on click
 selects** the hovered atom/residue — merging it into the molecule's **active (pending) selection**
 via the same op as the lasso (plain = replace, **Shift** = add, **Ctrl/⌘** = subtract;
 `merge_into_pending`), expanded per the `Atoms`/`Residues` scope; in `Lasso` an LMB drag accumulates
@@ -131,10 +133,14 @@ drawn as a cyan polyline, and on release `finish_lasso` stages the enclosed atom
 the same `Molecule::pending` (*not* a rep yet) glowing highlight + minimal accept/discard UI;
 **two-step**, so accepting is the only undoable part) and — **only when the selection mode isn't
 `Off`** — a **`Scope` dropdown** (`Atoms`/`Residues`/`Bound H` — how a hit expands;
-`App::selection_mode`, see `pick::expand_selection`; `Bound H` is lasso-only, hidden in `Click`). In
+`App::selection_mode`, see `pick::expand_selection`; `Bound H` is lasso-only, hidden in `Info`/`Click`). In
 `Click`/`Lasso` mode, while a modifier is held a **modifier hint** (add/subtract, + rotate for
 Lasso-Alt) is drawn as a **floating overlay on the 3D viewport** (a top-center pill,
 `draw_modifier_hint_overlay` in `draw_viewport`) — *not* a toolbar row, so it never resizes the view.
+In `Info`/`Click`, interaction dashes also highlight on hover and report their type, distance
+(nm), and applicable angles (degrees) or lateral ring offsets. Hydrogen bonds detected by the
+heavy-atom fallback report that no H angle is available. Hovering or clicking a dash does not
+change the atom selection.
 **centre of rotation** (`GPS_FIX` button, or the **C** key outside Draw mode / text fields) — VMD's
 `c` pick: arms the one-shot `App::center_pick`; the cursor becomes a crosshair, the hovered atom gets
 the pick ring, and a click makes it the rotation centre (`Camera::set_center` → `Camera::pivot`). The
@@ -157,6 +163,10 @@ show Custom; sessions and saved startup settings retain the chosen colors.
 Styles edits geometry defaults for every style (including
 interaction detection), while Materials uses the same preview-asset picker as the
 representation row. Relevant shader sliders sit beside a live glycine VdW preview colored by element.
+Velvet uses a single surface with matte lighting and a broad, tinted sheen.
+Edge softness (0–1, stored as `hairiness`) reduces shading contrast near grazing
+angles. Sheen controls its strength; Roughness controls its width. It adds no
+layers or transparency and skips hard-surface AO/shadows to keep edges muted.
 Styles also shows a live preview using the viewport renderer: glycine (C, N, O, H) for atom/bond
 styles and the small crambin protein (PDB 1CRN) for Cartoon and Surface. Drag either preview
 to rotate at fixed zoom; its camera fits a rotation-invariant envelope of the
@@ -281,3 +291,8 @@ via `dnd_hover_payload`/`dnd_release_payload`):
 History labels via `describe_change` ("edit selection", "change coloring",
 "reorder representations", …). FPS in the footer.
 
+
+Shift+RMB moves the scene through the front clipping plane. The far clipping plane
+automatically covers the visible scene, including when a small selection is framed.
+**Render → Reset clipping** fits the visible scene and clears the clipping offset
+while preserving the viewing orientation.

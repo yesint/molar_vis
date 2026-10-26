@@ -34,6 +34,263 @@ use molar_vis_core::{
 };
 
 use pyo3::exceptions::PyValueError;
+use molar_vis_core::{
+    AnimationHandle as CoreAnimation, Easing, Movie as CoreMovie, PreparedMovie, TrajectoryTrack,
+    VideoOptions, ViewAction, ViewStep,
+};
+
+#[pyclass(name = "Animation")]
+struct Animation {
+    handle: CoreAnimation,
+}
+#[pymethods]
+impl Animation {
+    fn cancel(&self) {
+        self.handle.cancel();
+    }
+    #[getter]
+    fn done(&self) -> bool {
+        self.handle.is_done()
+    }
+    #[getter]
+    fn state(&self) -> String {
+        format!("{:?}", self.handle.progress().state).to_lowercase()
+    }
+    #[getter]
+    fn completed(&self) -> u64 {
+        self.handle.progress().completed
+    }
+    #[getter]
+    fn total(&self) -> u64 {
+        self.handle.progress().total
+    }
+    #[getter]
+    fn error(&self) -> Option<String> {
+        self.handle.progress().error
+    }
+    fn wait(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.handle.wait())
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    }
+}
+
+fn schedule_view(jobs: &Sender<AppJob>, py: Python<'_>, action: ViewAction, duration: Option<f64>, easing: &str) -> PyResult<Animation> {
+    action.validate().map_err(PyValueError::new_err)?;
+    if duration.is_some_and(|d| !d.is_finite() || d < 0.0) { return Err(PyValueError::new_err("duration must be finite and non-negative")); }
+    let easing = Easing::parse(easing).map_err(PyValueError::new_err)?;
+    query_job(jobs, py, move |app| app.program_view(action, duration, easing)).map(|handle| Animation { handle })
+}
+
+#[pyclass(name = "Movie")]
+struct Movie {
+    jobs: Sender<AppJob>,
+    recipe: CoreMovie,
+    prepared: Option<PreparedMovie>,
+}
+impl Movie {
+    fn push(&mut self, action: ViewAction, duration: f64, easing: &str) -> PyResult<()> {
+        let step = ViewStep {
+            action,
+            duration,
+            easing: Easing::parse(easing).map_err(PyValueError::new_err)?,
+        };
+        step.validate().map_err(PyValueError::new_err)?;
+        self.recipe.steps.push(step);
+        self.prepared = None;
+        Ok(())
+    }
+    fn prepare(&mut self, py: Python<'_>) -> PyResult<PreparedMovie> {
+        if let Some(movie) = &self.prepared {
+            return Ok(movie.clone());
+        }
+        let recipe = self.recipe.clone();
+        let movie = query_job(&self.jobs, py, move |app| {
+            app.prepare_movie_viewport(&recipe)
+        })?;
+        self.prepared = Some(movie.clone());
+        Ok(movie)
+    }
+}
+#[pymethods]
+impl Movie {
+    #[pyo3(signature = (yaw, pitch=0.0, duration=1.0, easing="smooth"))]
+    fn rotate(&mut self, yaw: f32, pitch: f32, duration: f64, easing: &str) -> PyResult<()> {
+        self.push(ViewAction::rotation(yaw, pitch), duration, easing)
+    }
+    #[pyo3(signature = (factor, duration=1.0, easing="smooth"))]
+    fn zoom(&mut self, factor: f32, duration: f64, easing: &str) -> PyResult<()> {
+        self.push(ViewAction::zoom(factor), duration, easing)
+    }
+    #[pyo3(signature = (duration, yaw=0.0, pitch=0.0, roll=0.0, zoom=1.0, pan=(0.0,0.0), easing="smooth"))]
+    #[allow(clippy::too_many_arguments)] // Python keyword arguments keep export recipes readable.
+    fn move_view(
+        &mut self,
+        duration: f64,
+        yaw: f32,
+        pitch: f32,
+        roll: f32,
+        zoom: f32,
+        pan: (f32, f32),
+        easing: &str,
+    ) -> PyResult<()> {
+        self.push(
+            ViewAction::Move {
+                yaw,
+                pitch,
+                roll,
+                zoom,
+                pan: [pan.0, pan.1],
+            },
+            duration,
+            easing,
+        )
+    }
+    fn hold(&mut self, duration: f64) -> PyResult<()> {
+        self.push(ViewAction::Hold, duration, "linear")
+    }
+    #[pyo3(signature = (rep, duration=1.0, zoom_out=1.0, resolution=256, easing="smooth"))]
+    fn unobstructed_view(
+        &mut self,
+        rep: &RepHandle,
+        duration: f64,
+        zoom_out: f32,
+        resolution: usize,
+        easing: &str,
+    ) -> PyResult<()> {
+        self.push(
+            ViewAction::Unobstructed {
+                targets: vec![(rep.mol, rep.rep)],
+                zoom_out,
+                resolution,
+            },
+            duration,
+            easing,
+        )
+    }
+    #[pyo3(signature = (reps, duration=1.0, zoom_out=1.0, resolution=256, easing="smooth"))]
+    fn unobstructed_view_multi(
+        &mut self,
+        reps: Vec<PyRef<'_, RepHandle>>,
+        duration: f64,
+        zoom_out: f32,
+        resolution: usize,
+        easing: &str,
+    ) -> PyResult<()> {
+        self.push(
+            ViewAction::Unobstructed {
+                targets: reps.iter().map(|r| (r.mol, r.rep)).collect(),
+                zoom_out,
+                resolution,
+            },
+            duration,
+            easing,
+        )
+    }
+    #[pyo3(signature = (mol, selection, duration=1.0, easing="smooth"))]
+    fn focus(
+        &mut self,
+        mol: &MolHandle,
+        selection: String,
+        duration: f64,
+        easing: &str,
+    ) -> PyResult<()> {
+        self.push(
+            ViewAction::Focus {
+                mol: mol.mol,
+                selection,
+            },
+            duration,
+            easing,
+        )
+    }
+    #[pyo3(signature = (duration=1.0, easing="smooth"))]
+    fn reset_view(&mut self, duration: f64, easing: &str) -> PyResult<()> {
+        self.push(ViewAction::Reset, duration, easing)
+    }
+    #[pyo3(signature = (view_json, duration=1.0, easing="smooth"))]
+    fn go_to_view(&mut self, view_json: &str, duration: f64, easing: &str) -> PyResult<()> {
+        let view =
+            serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.push(ViewAction::To { view }, duration, easing)
+    }
+    fn trajectory(&mut self, mol: &MolHandle, start: usize, end: usize, fps: f64) -> PyResult<()> {
+        if !fps.is_finite() || fps <= 0.0 {
+            return Err(PyValueError::new_err(
+                "trajectory fps must be finite and positive",
+            ));
+        }
+        self.recipe.trajectories.retain(|t| t.mol != mol.mol);
+        self.recipe.trajectories.push(TrajectoryTrack {
+            mol: mol.mol,
+            start,
+            end,
+            fps,
+        });
+        self.prepared = None;
+        Ok(())
+    }
+
+    /// Switch a group's shown molecule at the start of this camera transition.
+    #[pyo3(signature = (group, member, duration=1.0, zoom_out=1.0, resolution=256, easing="smooth"))]
+    fn unobstructed_group_member(
+        &mut self, group: &MolGroup, member: usize, duration: f64,
+        zoom_out: f32, resolution: usize, easing: &str,
+    ) -> PyResult<()> {
+        self.push(ViewAction::GroupUnobstructed {
+            group: group.id, member, zoom_out, resolution,
+        }, duration, easing)
+    }
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.recipe.duration()
+    }
+    fn preview(&mut self, py: Python<'_>) -> PyResult<Animation> {
+        let movie = self.prepare(py)?;
+        query_job(&self.jobs, py, move |app| app.preview_movie(movie))
+            .map(|handle| Animation { handle })
+    }
+    fn seek(&mut self, py: Python<'_>, time: f64) -> PyResult<()> {
+        let movie = self.prepare(py)?;
+        query_job(&self.jobs, py, move |app| {
+            app.cancel_animation();
+            app.seek_movie(&movie, time)
+        })
+    }
+    #[pyo3(signature = (path, width=1920, height=1080, fps=30, raytrace=false, samples=128, crf=18, ffmpeg="ffmpeg", png_sequence=false, background=false))]
+    #[allow(clippy::too_many_arguments)] // Export options are Python keyword arguments.
+    fn render(
+        &self,
+        py: Python<'_>,
+        path: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        raytrace: bool,
+        samples: u32,
+        crf: u8,
+        ffmpeg: &str,
+        png_sequence: bool,
+        background: bool,
+    ) -> PyResult<Animation> {
+        let options = VideoOptions {
+            width,
+            height,
+            fps,
+            raytrace,
+            samples,
+            crf,
+            ffmpeg: ffmpeg.into(),
+            png_sequence,
+            background,
+        };
+        options.validate().map_err(PyValueError::new_err)?;
+        let movie = self.recipe.clone();
+        query_job(&self.jobs, py, move |app| {
+            app.render_movie(&movie, path.into(), options)
+        })
+        .map(|handle| Animation { handle })
+    }
+}
 
 /// A [`SharedSource`] backed by a pymolar `System` — the viewer renders its topology
 /// and live coordinates **by reference**.
@@ -75,6 +332,17 @@ impl PySystemSource {
 }
 
 impl SharedSource for PySystemSource {
+    fn snapshot(&self) -> Result<(Topology, State), String> {
+        Python::attach(|py| {
+            let system = self.sys.bind(py).get();
+            let state = system.r_st();
+            Ok((system.r_top().clone(), State {
+                coords: state.coords.clone(), time: state.time, pbox: state.pbox.clone(),
+                ..Default::default()
+            }))
+        })
+    }
+
     fn topology(&self) -> &Topology {
         // SAFETY: see the struct docs — GIL-guarded, kept alive by `self.sys`.
         unsafe { &*self.top }
@@ -139,6 +407,22 @@ struct Visualizer {
 
 #[pymethods]
 impl Visualizer {
+    /// Load a saved session, including representations, colors and view settings.
+    fn load_session(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        query_job(&self.jobs, py, move |app| app.load_session_file(std::path::Path::new(&path)))
+    }
+
+    /// Load a multi-record SD/MOL file as one group with shared representations.
+    fn load_group(&self, py: Python<'_>, path: String) -> PyResult<MolGroup> {
+        let id = query_job(&self.jobs, py, move |app| app.load_group(&path))?;
+        Ok(MolGroup { id, jobs: self.jobs.clone() })
+    }
+
+    #[getter]
+    fn groups(&self, py: Python<'_>) -> PyResult<Vec<MolGroup>> {
+        let ids = query_job(&self.jobs, py, |app| Ok(app.group_ids()))?;
+        Ok(ids.into_iter().map(|id| MolGroup { id, jobs: self.jobs.clone() }).collect())
+    }
     /// Set the camera orbit pivot (x, y, z) in nanometers.
     fn rotation_center(&self, x: f32, y: f32, z: f32) -> PyResult<()> {
         if ![x, y, z].iter().all(|v| v.is_finite()) { return Err(PyValueError::new_err("rotation center must be finite")); }
@@ -363,29 +647,103 @@ impl Visualizer {
 
     // --- View controls (mirror the view-settings UI). All apply live. ---
 
-    /// Orbit the camera by absolute angles in degrees (yaw about up, pitch about right).
-    fn rotate(&self, yaw: f32, pitch: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.rotate_view(yaw, pitch)))
+    /// Build a sequence for preview, seeking, or native video export.
+    fn movie(&self) -> Movie {
+        Movie {
+            jobs: self.jobs.clone(),
+            recipe: CoreMovie::default(),
+            prepared: None,
+        }
     }
-
-    /// Roll the camera about the view axis by an angle in degrees.
-    fn roll(&self, angle: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.roll_view(angle)))
+    fn view_json(&self, py: Python<'_>) -> PyResult<String> {
+        query_job(&self.jobs, py, |app| {
+            serde_json::to_string(&app.view_pose()).map_err(|e| e.to_string())
+        })
     }
-
-    /// Pan by a fraction of the viewport height (`+x` right, `+y` up).
-    fn pan(&self, dx: f32, dy: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.pan_view(dx, dy)))
+    #[pyo3(signature = (yaw, pitch=0.0, duration=None, easing="smooth"))]
+    fn rotate(
+        &self,
+        py: Python<'_>,
+        yaw: f32,
+        pitch: f32,
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
+        schedule_view(
+            &self.jobs,
+            py,
+            ViewAction::rotation(yaw, pitch),
+            duration,
+            easing,
+        )
     }
-
-    /// Zoom by a factor (`>1` closer, `<1` farther).
-    fn zoom(&self, factor: f32) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(move |app| app.zoom_view(factor)))
+    #[pyo3(signature = (angle, duration=None, easing="smooth"))]
+    fn roll(&self, py: Python<'_>, angle: f32, duration: Option<f64>, easing: &str) -> PyResult<Animation> {
+        schedule_view(
+            &self.jobs,
+            py,
+            ViewAction::Move {
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: angle,
+                zoom: 1.0,
+                pan: [0.0; 2],
+            },
+            duration,
+            easing,
+        )
     }
-
-    /// Re-frame all molecules (zoom-to-fit), keeping projection/background/lighting.
-    fn reset_view(&self) -> PyResult<()> {
-        send_job(&self.jobs, Box::new(|app| app.reset_view()))
+    #[pyo3(signature = (dx, dy, duration=None, easing="smooth"))]
+    fn pan(
+        &self,
+        py: Python<'_>,
+        dx: f32,
+        dy: f32,
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
+        schedule_view(
+            &self.jobs,
+            py,
+            ViewAction::Move {
+                yaw: 0.0,
+                pitch: 0.0,
+                roll: 0.0,
+                zoom: 1.0,
+                pan: [dx, dy],
+            },
+            duration,
+            easing,
+        )
+    }
+    #[pyo3(signature = (factor, duration=None, easing="smooth"))]
+    fn zoom(
+        &self,
+        py: Python<'_>,
+        factor: f32,
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
+        schedule_view(&self.jobs, py, ViewAction::zoom(factor), duration, easing)
+    }
+    #[pyo3(signature = (duration=None, easing="smooth"))]
+    fn reset_view(&self, py: Python<'_>, duration: Option<f64>, easing: &str) -> PyResult<Animation> {
+        schedule_view(&self.jobs, py, ViewAction::Reset, duration, easing)
+    }
+    #[pyo3(signature = (view_json, duration=None, easing="smooth"))]
+    fn go_to_view(
+        &self,
+        py: Python<'_>,
+        view_json: &str,
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
+        let view =
+            serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        schedule_view(&self.jobs, py, ViewAction::To { view }, duration, easing)
+    }
+    fn cancel_animation(&self) -> PyResult<()> {
+        send_job(&self.jobs, Box::new(|app| app.cancel_animation()))
     }
 
     /// Set the projection: `"perspective"` or `"orthographic"`.
@@ -487,50 +845,81 @@ impl Visualizer {
 
     /// Zoom the camera to fit `sel` (a pymolar `Sel`) of the molecule `mol`
     /// (a [`MolHandle`]) — VMD-style zoom-to-selection.
-    fn focus(&self, py: Python<'_>, mol: &MolHandle, sel: Py<PySel>) -> PyResult<()> {
+    #[pyo3(signature = (mol, sel, duration=None, easing="smooth"))]
+    fn focus(
+        &self,
+        py: Python<'_>,
+        mol: &MolHandle,
+        sel: Py<PySel>,
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
         let indices = sel.bind(py).get().index().to_vec();
-        let m = mol.mol;
-        query_job(&self.jobs, py, move |app| { let mi = app.resolve_molecule(m)?; app.focus_selection(mi, &indices) })
+        if indices.is_empty() {
+            return Err(PyValueError::new_err("selection is empty"));
+        }
+        let selection = format!(
+            "index {}",
+            indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        schedule_view(
+            &self.jobs,
+            py,
+            ViewAction::Focus {
+                mol: mol.mol,
+                selection,
+            },
+            duration,
+            easing,
+        )
     }
-
-    /// Rotate and scale the view to show `rep` (a [`RepHandle`]) with the least
-    /// obstruction: it turns the camera to the direction that keeps the most of that
-    /// rep's atoms directly on screen (front-most, hidden by neither another rep nor
-    /// another atom of the same rep), then frames the rep. Every *other* visible rep is
-    /// treated as an occluder. Applies live, like the other view controls.
-    ///
-    /// `zoom_out` keeps that orientation but widens the framing about the rep's centre —
-    /// `1.0` frames the rep tightly (default), `2.0` shows twice its extent for a broader
-    /// view of the surroundings (front/back context is not clipped). `resolution` is the
-    /// number of directions in the coarse search (default 256; higher = more thorough but
-    /// slower).
-    #[pyo3(signature = (rep, zoom_out=1.0, resolution=256))]
-    fn unobstructed_view(&self, py: Python<'_>, rep: &RepHandle, zoom_out: f32, resolution: usize) -> PyResult<()> {
-        let (mol, r) = (rep.mol, rep.rep);
-        query_job(&self.jobs, py, move |app| { let (mi, ri) = app.resolve_rep(mol, r)?; app.unobstructed_view(mi, ri, zoom_out, resolution) })
+    #[pyo3(signature = (rep, zoom_out=1.0, resolution=256, duration=None, easing="smooth"))]
+    fn unobstructed_view(
+        &self,
+        py: Python<'_>,
+        rep: &RepHandle,
+        zoom_out: f32,
+        resolution: usize,
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
+        schedule_view(
+            &self.jobs,
+            py,
+            ViewAction::Unobstructed {
+                targets: vec![(rep.mol, rep.rep)],
+                zoom_out,
+                resolution,
+            },
+            duration,
+            easing,
+        )
     }
-
-    /// Like [`Visualizer::unobstructed_view`], but for a list of reps treated as **one**
-    /// target: the camera is oriented and scaled so the most of the *combined* atom set
-    /// is directly on screen. The reps may come from different molecules. Every visible
-    /// rep that is not in the list is treated as an occluder. `zoom_out` and `resolution`
-    /// behave as in `unobstructed_view`.
-    #[pyo3(signature = (reps, zoom_out=1.0, resolution=256))]
+    #[pyo3(signature = (reps, zoom_out=1.0, resolution=256, duration=None, easing="smooth"))]
     fn unobstructed_view_multi(
         &self,
         py: Python<'_>,
         reps: Vec<PyRef<'_, RepHandle>>,
         zoom_out: f32,
         resolution: usize,
-    ) -> PyResult<()> {
-        if reps.is_empty() {
-            return Err(PyValueError::new_err("reps must not be empty"));
-        }
-        let ids: Vec<(u64, u64)> = reps.iter().map(|r| (r.mol, r.rep)).collect();
-        query_job(&self.jobs, py, move |app| {
-            let targets = ids.iter().map(|&(m,r)| app.resolve_rep(m,r)).collect::<Result<Vec<_>,_>>()?;
-            app.unobstructed_view_multi(&targets, zoom_out, resolution)
-        })
+        duration: Option<f64>,
+        easing: &str,
+    ) -> PyResult<Animation> {
+        schedule_view(
+            &self.jobs,
+            py,
+            ViewAction::Unobstructed {
+                targets: reps.iter().map(|r| (r.mol, r.rep)).collect(),
+                zoom_out,
+                resolution,
+            },
+            duration,
+            easing,
+        )
     }
 
     /// Render the current scene **offscreen** to a PNG at `path`, at a window-independent
@@ -578,6 +967,73 @@ impl Visualizer {
     }
 }
 
+/// Handle to one molecular group. Shared representations follow its shown member.
+#[pyclass]
+struct MolGroup {
+    id: u64,
+    jobs: Sender<AppJob>,
+}
+
+#[pymethods]
+impl MolGroup {
+    #[getter]
+    fn members(&self, py: Python<'_>) -> PyResult<Vec<MolHandle>> {
+        let id = self.id;
+        let ids = query_job(&self.jobs, py, move |app| app.group_members(id))?;
+        Ok(ids.into_iter().map(|mol| MolHandle { mol, jobs: self.jobs.clone() }).collect())
+    }
+
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        let id = self.id;
+        query_job(&self.jobs, py, move |app| app.group_members(id).map(|m| m.len()))
+    }
+
+    #[getter]
+    fn current(&self, py: Python<'_>) -> PyResult<usize> {
+        let id = self.id;
+        query_job(&self.jobs, py, move |app| app.group_current(id))
+    }
+
+    #[setter]
+    fn set_current(&self, py: Python<'_>, member: usize) -> PyResult<()> {
+        let id = self.id;
+        query_job(&self.jobs, py, move |app| app.show_group_member(id, member))
+    }
+
+    #[getter]
+    fn reps(&self, py: Python<'_>) -> PyResult<Vec<RepHandle>> {
+        let id = self.id;
+        let (mol, reps) = query_job(&self.jobs, py, move |app| app.group_rep_ids(id))?;
+        Ok(reps.into_iter().map(|rep| RepHandle { mol, rep, jobs: self.jobs.clone() }).collect())
+    }
+
+    /// Add one shared interaction representation, following the group's member.
+    fn add_interactions(&self, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
+        let (partner_mol, partner_rep) = partner_ids(&self.jobs, py, partner)?;
+        let group = self.id;
+        let rep = molar_vis_core::reserve_rep_id().0;
+        let mol = query_job(&self.jobs, py, move |app| {
+            app.add_group_interactions_with_id(group, rep, partner_mol, partner_rep)?;
+            app.group_rep_ids(group).map(|(mol, _)| mol)
+        })?;
+        Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
+    }
+}
+
+fn partner_ids(jobs: &Sender<AppJob>, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<(u64, u64)> {
+    if let Ok(r) = partner.cast::<RepHandle>() {
+        let r = r.borrow();
+        Ok((r.mol, r.rep))
+    } else if let Ok(m) = partner.cast::<MolHandle>() {
+        let mol = m.borrow().mol;
+        let first = query_job(jobs, py, move |app| app.rep_ids(mol))?.into_iter().next()
+            .ok_or_else(|| PyValueError::new_err("partner molecule has no representations"))?;
+        Ok((mol, first))
+    } else {
+        Err(PyValueError::new_err("partner must be a RepHandle or a MolHandle"))
+    }
+}
+
 /// Handle to a molecule in the viewer.
 #[pyclass]
 struct MolHandle {
@@ -587,6 +1043,25 @@ struct MolHandle {
 
 #[pymethods]
 impl MolHandle {
+    /// Whether this molecule is shown.
+    #[getter]
+    fn visible(&self, py: Python<'_>) -> PyResult<bool> {
+        let mol = self.mol;
+        query_job(&self.jobs, py, move |app| {
+            let mi = app.resolve_molecule(mol)?;
+            app.molecule_visible(mi)
+        })
+    }
+
+    #[setter]
+    fn set_visible(&self, py: Python<'_>, visible: bool) -> PyResult<()> {
+        let mol = self.mol;
+        query_job(&self.jobs, py, move |app| {
+            let mi = app.resolve_molecule(mol)?;
+            app.set_molecule_visible(mi, visible)
+        })
+    }
+
     /// Import a molecule-owned PLY mesh from memory. Coordinates are in nanometers.
     fn add_mesh_ply(&self, py: Python<'_>, name: String, bytes: &[u8]) -> PyResult<MeshHandle> {
         molar_vis_core::import_ply(bytes).map_err(PyValueError::new_err)?;
@@ -679,19 +1154,7 @@ impl MolHandle {
     /// `partner` — a [`RepHandle`] (its rep) or a [`MolHandle`] (that molecule's first rep).
     /// Returns a handle to the new rep.
     fn add_interactions(&self, py: Python<'_>, partner: &Bound<'_, PyAny>) -> PyResult<RepHandle> {
-        let (partner_mol, partner_rep) = if let Ok(r) = partner.cast::<RepHandle>() {
-            let r = r.borrow();
-            (r.mol, r.rep)
-        } else if let Ok(m) = partner.cast::<MolHandle>() {
-            let mol = m.borrow().mol;
-            let first = query_job(&self.jobs, py, move |app| app.rep_ids(mol))?.into_iter().next()
-                .ok_or_else(|| PyValueError::new_err("partner molecule has no representations"))?;
-            (mol, first)
-        } else {
-            return Err(PyValueError::new_err(
-                "partner must be a RepHandle or a MolHandle",
-            ));
-        };
+        let (partner_mol, partner_rep) = partner_ids(&self.jobs, py, partner)?;
         let rep = molar_vis_core::reserve_rep_id().0;
         let mol = self.mol;
         query_job(&self.jobs, py, move |app| app.add_interactions_rep_with_id(mol, rep, partner_mol, partner_rep))?;
@@ -957,7 +1420,10 @@ fn molar_vis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // they live in this module with a consistent PyO3 type identity.
     molar_python::register_molar(m)?;
     m.add_class::<Visualizer>()?;
+    m.add_class::<Animation>()?;
+    m.add_class::<Movie>()?;
     m.add_class::<MolHandle>()?;
+    m.add_class::<MolGroup>()?;
     m.add_class::<RepHandle>()?;
     m.add_class::<MeshHandle>()?;
     m.add_function(wrap_pyfunction!(spawn, m)?)?;

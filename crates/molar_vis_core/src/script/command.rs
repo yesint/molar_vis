@@ -1,14 +1,4 @@
-//! The command vocabulary a script line produces. The Rhai handle methods (in
-//! [`super::evaluate_script`] — `mol(i)` → [`MolHandle`](super::MolHandle), `.rep(j)`
-//! → [`RepHandle`](super::RepHandle)) **push** these; [`super::apply_scene_command`]
-//! applies them against the live scene.
-//!
-//! Targets are explicit (the handle carries the molecule index + a [`RepRef`]).
-//! `RepRef::Last` lets a freshly `add_rep`'d representation be chained
-//! (`mol(0).add_rep("cartoon").set_color("ss")`) — it resolves to the molecule's
-//! last rep at apply time. Enum-valued arguments (color method, style kind,
-//! material) ride as **raw strings** and are parsed in `apply_scene_command`, so a
-//! bad value surfaces exactly one clean console error.
+//! Scene-command vocabulary shared by the app and external hosts.
 
 use std::path::PathBuf;
 
@@ -18,10 +8,7 @@ use crate::color::{ColorMethod, DEFAULT_SOLID};
 use crate::material::Material;
 
 /// Which representation of a molecule a command targets.
-// The vocabulary is deliberately complete: which variants have an in-crate constructor
-// depends on which front ends are compiled in — the Rhai console (the `scripting` feature)
-// builds all of them, the app's menu actions and the Python/JS hosts a subset — so
-// dead-code analysis here would only track the build configuration.
+// Some commands are reserved for external hosts.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepRef {

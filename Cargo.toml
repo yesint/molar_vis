@@ -37,9 +37,6 @@ egui-stylesheet = "0.1"
 molar = { version = "=2.3.0", default-features = false }
 molar_python = { version = "=2.3.0" }
 molar_ff = { version = "=2.3.0", default-features = false }
-# Pure-Rust embedded scripting language for the in-app command console (native + wasm).
-# default-features=false + "std" == Rhai's own default; single-threaded (no "sync"), no time deps.
-rhai = { version = "1", default-features = false, features = ["std"] }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]
@@ -47,3 +44,7 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Foreign selections require this molar revision until its next release.
+[patch.crates-io]
+molar = { git = "https://github.com/yesint/molar.git", rev = "ba71a1d5744a03119955b7481f4443c0dd41c5d8" }

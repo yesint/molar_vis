@@ -69,7 +69,7 @@ next implementation. Preserve the current rendering quality by default.
 
 ### Final validation for this implementation
 
-- Native library: 195 passed; scripting: 199 passed. Each configuration has 27 ignored
+- Native library: 195 passed. Each configuration has 27 ignored
   GPU/manual tests, which are selected separately rather than included in these totals.
 - Native workspace compile check and wasm32 core compile check pass. The browser check
   reports the three existing loader/trajectory dead-code/unreachable-code warnings.
@@ -423,7 +423,7 @@ cost in each change. Update `ARCHITECTURE.md` when cache ownership or pass depen
 
 ```bash
 CARGO_TARGET_DIR=/tmp/molar-vis-audit-target cargo test -p molar_vis_core --offline --lib
-CARGO_TARGET_DIR=/tmp/molar-vis-audit-target cargo test -p molar_vis_core --offline --lib --features scripting
+CARGO_TARGET_DIR=/tmp/molar-vis-audit-target cargo test -p molar_vis_core --offline --lib
 CARGO_TARGET_DIR=/tmp/molar-vis-wasm-check cargo check -p molar_vis_core --offline --target wasm32-unknown-unknown
 CARGO_TARGET_DIR=/tmp/molar-vis-audit-target cargo test -p molar_vis_core --offline benchmark_coordinate_cache -- --ignored --nocapture
 ```

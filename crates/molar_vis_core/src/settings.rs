@@ -83,7 +83,7 @@ impl Default for AppearanceSettings {
     }
 }
 
-/// Offscreen render quality (render.rs).
+/// Render quality and programmed camera navigation.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RenderingSettings {
@@ -91,11 +91,13 @@ pub struct RenderingSettings {
     pub ssaa: u32,
     /// Cast-shadow depth-map resolution (square), e.g. 1024 / 2048 / 4096.
     pub shadow_res: u32,
+    /// Default duration for programmed camera navigation; zero applies immediately.
+    pub camera_transition_ms: u32,
 }
 
 impl Default for RenderingSettings {
     fn default() -> Self {
-        Self { ssaa: 2, shadow_res: 2048 }
+        Self { ssaa: 2, shadow_res: 2048, camera_transition_ms: 0 }
     }
 }
 
@@ -106,6 +108,7 @@ impl RenderingSettings {
         Self {
             ssaa: self.ssaa.clamp(1, 4),
             shadow_res: self.shadow_res.clamp(256, 8192),
+            camera_transition_ms: self.camera_transition_ms,
         }
     }
 }
@@ -258,11 +261,14 @@ pub struct BehaviorSettings {
     /// by default** — it's a niche aid and adds a per-hover grid query + rebuild. A
     /// behavior setting (applies live).
     pub hover_detail_lens: bool,
-    /// The per-rep magnifier button rotates **and** scales the camera to show that rep
+    /// Rep and group magnifier buttons rotate **and** scale the camera to show the target
     /// with the least obstruction by other reps (the unobstructed view) instead of only
     /// zooming to fit its selection at the current orientation. **On by default.** A
     /// behavior setting (applies live — read when the button is clicked).
     pub rep_zoom_unobstructed: bool,
+    /// Re-center the camera when switching molecules in a group. Off by default;
+    /// applies live to the cycle controls, member names, and docking pose sync.
+    pub group_switch_zoom: bool,
 }
 
 impl Default for BehaviorSettings {
@@ -282,6 +288,7 @@ impl Default for BehaviorSettings {
             dashed_pbc_bonds: true,
             hover_detail_lens: false,
             rep_zoom_unobstructed: true,
+            group_switch_zoom: false,
         }
     }
 }
@@ -420,6 +427,7 @@ mod tests {
         // Rendering
         assert_eq!(s.rendering.ssaa, 2);
         assert_eq!(s.rendering.shadow_res, 2048);
+        assert_eq!(s.rendering.camera_transition_ms, 0);
         // Representation defaults
         assert_eq!(s.reps.kind, RepKind::Lines);
         assert_eq!(s.reps.color, ColorMethod::Element);
@@ -468,6 +476,17 @@ mod tests {
         assert_eq!(defaults.gi, 0.0);
         assert!(!defaults.axes_on);
         assert_eq!(defaults.axes_corner, Corner::default());
+    }
+
+    #[test]
+    fn camera_transition_duration_defaults_and_persists() {
+        let old: Settings = serde_json::from_str(r#"{"rendering":{"ssaa":4,"shadow_res":1024}}"#).unwrap();
+        assert_eq!(old.rendering.camera_transition_ms, 0);
+        let mut settings = Settings::default();
+        settings.rendering.camera_transition_ms = 375;
+        let restored: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.rendering.camera_transition_ms, 375);
+        assert_eq!(restored.rendering.sanitized().camera_transition_ms, 375);
     }
 
     #[test]
@@ -525,6 +544,20 @@ mod shader_style_persistence_tests {
         settings.reps.styles = RepKind::ALL.iter().map(|&kind| RepParams::for_kind(kind)).collect();
         settings.reps.styles.retain(|p| p.kind() != RepKind::Licorice);
         settings.reps.styles.push(RepParams::Licorice { bond_radius: 0.08, bond_color_blend: 0.65 });
+        settings.reps.styles.retain(|params| params.kind() != RepKind::Interactions);
+        settings.reps.styles.push(RepParams::Interactions {
+            settings: crate::interactions::InteractionSettings {
+                colors: [[31, 72, 110, 255], [55, 122, 210, 255], [11, 44, 88, 255],
+                    [220, 42, 11, 255], [91, 222, 12, 255], [144, 71, 33, 255]],
+                hbonds: false, hbond_dist: 0.45, hbond_dist_h: 0.48, hbond_angle: 125.0,
+                hydrophobic: false, hydrophobic_dist: 0.50,
+                salt_bridges: false, salt_bridge_dist: 0.65,
+                pi_stacking: false, pi_stacking_dist: 0.70, pi_stacking_angle: 40.0,
+                pi_stacking_offset: 0.30, pi_cation: false, pi_cation_dist: 0.72,
+                pi_cation_offset: 0.35, halogen: false, halogen_dist: 0.48,
+                halogen_angle: 165.0, line_width: 5.0, glowing_path: true, animate_glowing_path: true,
+            },
+        });
         settings.reps.ss_algo = molar::prelude::SsAlgorithm::Dss;
         for material in Material::ALL {
             let mut options = material.options();

@@ -137,8 +137,8 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 
 /// Compile every lit renderer with the same material lighting implementation.
 fn lit_shader_source(src: &str) -> String {
-    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\n",
-        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD);
+    let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\nconst MATERIAL_VELVET: u32 = {}u;\nconst MATERIAL_GLOWING_PATH: u32 = {}u;\nconst MATERIAL_PATH_ANIMATION_BIT: u32 = {}u;\n",
+        crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD, crate::material::VELVET_WORD, crate::material::GLOWING_PATH_WORD, crate::material::GLOWING_PATH_ANIMATION_BIT);
     format!("{}\n{}\n{}\n{}\n{}", constants, envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
 }
 
@@ -380,6 +380,7 @@ pub struct CaptureReadback {
     /// drives the map with a blocking `device.poll(Wait)` instead.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl CaptureReadback {
@@ -388,6 +389,8 @@ impl CaptureReadback {
     pub fn is_ready(&self) -> bool {
         self.ready.load(std::sync::atomic::Ordering::Acquire)
     }
+
+    pub fn error(&self) -> Option<String> { self.error.lock().unwrap().clone() }
 
     /// De-pad the readback rows, swizzle BGRA→RGBA if needed, and downsample the
     /// supersampled render to the requested output size. Consumes the readback (unmaps
@@ -637,7 +640,7 @@ impl ShadowKey {
                 continue;
             }
             for (index, rep) in mol.reps.iter().enumerate() {
-                if !rep.visible || rep.material.is_transparent() {
+                if !rep.visible || rep.material.is_transparent() || rep.params.has_glowing_path() {
                     continue;
                 }
                 if rep.geometry_revision == 0
@@ -680,6 +683,7 @@ pub struct SceneRenderer {
     /// coincident-depth tie against the (grayed) context reps of the same atoms — the freshly
     /// created edit rep is appended last, so without this it z-loses and hides behind them.
     edit_active: Option<(crate::scene::MolId, usize)>,
+    path_animation: [f32; 4],
 
     camera_bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
@@ -700,6 +704,7 @@ pub struct SceneRenderer {
     line_pipeline: [wgpu::RenderPipeline; 3],
     point_pipeline: [wgpu::RenderPipeline; 3],
     mesh_pipeline: [wgpu::RenderPipeline; 3],
+    path_mesh_pipeline: [wgpu::RenderPipeline; 3],
     sphere_shadow_pipeline: wgpu::RenderPipeline,
     cylinder_shadow_pipeline: wgpu::RenderPipeline,
     mesh_shadow_pipeline: wgpu::RenderPipeline,
@@ -933,6 +938,10 @@ impl SceneRenderer {
         let mesh_pipeline = triple(&|t, dw, dc, fs| {
             mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
         });
+        let path_mesh_pipeline = triple(&|t, dw, dc, fs| {
+            let entry = match fs { "fs_main" => "fs_path_main", "fs_oit" => "fs_path_oit", _ => fs };
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, entry)
+        });
         let sphere_shadow_pipeline = sphere::build_pipeline(
             device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), &[], true, less,
             "fs_shadow", early_z,
@@ -1081,6 +1090,7 @@ impl SceneRenderer {
             // Overwritten from the theme before the first render; this is the dark-backdrop cyan.
             glow_color: [0.51, 0.84, 1.0, 1.0],
             edit_active: None,
+            path_animation: crate::interactions::glowing_path_animation(0.0),
             camera_bgl,
             camera_buf,
             camera_bind_group,
@@ -1092,6 +1102,7 @@ impl SceneRenderer {
             line_pipeline,
             point_pipeline,
             mesh_pipeline,
+            path_mesh_pipeline,
             sphere_shadow_pipeline,
             cylinder_shadow_pipeline,
             mesh_shadow_pipeline,
@@ -1562,6 +1573,10 @@ impl SceneRenderer {
             crate::performance::counters("shadow-cache", serde_json::json!({"reused": reuse_shadow}));
         }
 
+        // Motion never changes shadow casters. Set this after computing the
+        // shadow key so the cached shadow map remains reusable while paths animate.
+        for camera in &mut cameras { camera.path_animation = self.path_animation; }
+
         // Grow the dynamic camera buffer if needed, then upload all entries
         // (each padded to CAMERA_STRIDE so dynamic offsets stay aligned).
         if cameras.len() as u32 > self.camera_capacity {
@@ -1588,7 +1603,7 @@ impl SceneRenderer {
         // device can't do OIT (WebGL2), transparent reps are drawn in the opaque pass
         // with plain alpha blending instead, so the dedicated OIT pass never runs.
         let has_transparent = scene.molecules.iter().any(|m| {
-            m.visible && (m.reps.iter().any(|r| r.visible && r.material.is_transparent())
+            m.visible && (m.reps.iter().any(|r| r.visible && (r.material.is_transparent() || r.params.has_glowing_path()))
                 || m.meshes.iter().any(|s| s.state.visible && s.transparent()))
         });
         let use_oit = has_transparent && self.oit_enabled;
@@ -1981,16 +1996,17 @@ impl SceneRenderer {
 
         let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = ready.clone();
+        let error = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let map_error = error.clone();
         buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if res.is_ok() {
-                flag.store(true, std::sync::atomic::Ordering::Release);
-            }
+            if let Err(e) = res { *map_error.lock().unwrap() = Some(format!("GPU readback failed: {e}")); }
+            flag.store(true, std::sync::atomic::Ordering::Release);
         });
         let bgra = matches!(
             self.color_format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
-        CaptureReadback { buffer, out, render, padded_bpr, bgra, ready }
+        CaptureReadback { buffer, out, render, padded_bpr, bgra, ready, error }
     }
 
     /// Large native searches use compute; small selections and unsupported devices
@@ -2033,6 +2049,10 @@ impl SceneRenderer {
     /// Set the color of the active-selection glow. The app derives it from the theme's
     /// `[extras]` and the *viewport background* (see `theme::glow_color`), so the shaders don't
     /// have to know either — and the egui-drawn cues can't drift away from the 3-D glow.
+    pub(crate) fn set_interaction_animation_time(&mut self, seconds: f64) {
+        self.path_animation = crate::interactions::glowing_path_animation(seconds);
+    }
+
     pub fn set_glow_color(&mut self, c: egui::Color32) {
         let f = |v: u8| v as f32 / 255.0;
         self.glow_color = [f(c.r()), f(c.g()), f(c.b()), 1.0];
@@ -2129,6 +2149,7 @@ impl SceneRenderer {
             fog_color: camera.background.fog_color(),
             dims: [w, h, samples.max(1), frame_seed],
             accum: [0, 0, 0, 0], // set by Raytracer::render
+            path_animation: crate::interactions::glowing_path_animation(0.0),
         }
     }
 
@@ -2149,7 +2170,8 @@ impl SceneRenderer {
             return None;
         }
         // The offline "Save image" render honors the GI (global-illumination) strength slider.
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi, self.shadow_res);
+        let mut uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi, self.shadow_res);
+        uniform.path_animation = self.path_animation;
         let tex = rs.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("rt-capture-color"),
             size: wgpu::Extent3d { width: out_w, height: out_h, depth_or_array_layers: 1 },
@@ -2220,7 +2242,8 @@ impl SceneRenderer {
         }
         let size = [size[0].max(1), size[1].max(1)];
         self.ensure_rt_color(rs, size);
-        let uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, camera.gi, self.shadow_res);
+        let mut uniform = Self::rt_uniform(camera, size[0], size[1], samples, 0, camera.gi, self.shadow_res);
+        uniform.path_animation = self.path_animation;
         self.raytracer.as_mut().unwrap().trace_begin(rs, size, uniform, samples);
     }
 
@@ -2242,6 +2265,7 @@ impl SceneRenderer {
 
     /// Abort an in-progress trace (the camera moved): stop issuing submits.
     pub fn rt_trace_cancel(&mut self) {
+        self.save_target = None;
         if let Some(rt) = self.raytracer.as_mut() {
             rt.trace_cancel();
         }
@@ -2280,7 +2304,8 @@ impl SceneRenderer {
             view_formats: &[],
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi, self.shadow_res);
+        let mut uniform = Self::rt_uniform(camera, out_w, out_h, samples, 0, camera.gi, self.shadow_res);
+        uniform.path_animation = self.path_animation;
         self.raytracer.as_mut().unwrap().trace_begin(rs, [out_w, out_h], uniform, samples);
         self.save_target = Some((tex, view));
         true
@@ -2334,7 +2359,7 @@ impl SceneRenderer {
                 }
             }
             for rep in &mol.reps {
-                if !rep.visible || rep.material.is_transparent() {
+                if !rep.visible || rep.material.is_transparent() || rep.params.has_glowing_path() {
                     continue;
                 }
                 if let Some(s) = &rep.gpu.spheres {
@@ -2471,38 +2496,43 @@ impl SceneRenderer {
             };
             for j in order {
                 let rep = &mol.reps[j];
-                if !rep.visible || rep.material.is_transparent() != transparent {
-                    continue;
-                }
+                let path = rep.params.has_glowing_path();
+                let draw_base = rep.material.is_transparent() == transparent;
+                let draw_mesh = (rep.material.is_transparent() || path) == transparent;
+                if !rep.visible || (!draw_base && !draw_mesh) { continue; }
                 for &cam in &images[mi][j] {
                     pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
                     self.bind_envelope(pass, rep.gpu.envelope.as_ref());
-                    if let Some(p) = &rep.gpu.points {
-                        pass.set_pipeline(&self.point_pipeline[i]);
-                        pass.set_vertex_buffer(0, p.buffer.slice(..));
-                        pass.draw(0..4, 0..p.count);
+                    if draw_base {
+                        if let Some(p) = rep.gpu.points.as_ref() {
+                            pass.set_pipeline(&self.point_pipeline[i]);
+                            pass.set_vertex_buffer(0, p.buffer.slice(..));
+                            pass.draw(0..4, 0..p.count);
+                        }
+                        if let Some(s) = &rep.gpu.spheres {
+                            pass.set_pipeline(&self.sphere_pipeline[i]);
+                            pass.set_vertex_buffer(0, s.buffer.slice(..));
+                            pass.draw(0..4, 0..s.count);
+                        }
+                        if let Some(c) = &rep.gpu.cylinders {
+                            pass.set_pipeline(&self.cylinder_pipeline[i]);
+                            pass.set_vertex_buffer(0, c.buffer.slice(..));
+                            pass.draw(0..4, 0..c.count);
+                        }
+                        if let Some(l) = rep.gpu.lines.as_ref() {
+                            // Instanced fat-line quads: one segment (2 verts) per instance.
+                            pass.set_pipeline(&self.line_pipeline[i]);
+                            pass.set_vertex_buffer(0, l.buffer.slice(..));
+                            pass.draw(0..4, 0..l.count / 2);
+                        }
                     }
-                    if let Some(s) = &rep.gpu.spheres {
-                        pass.set_pipeline(&self.sphere_pipeline[i]);
-                        pass.set_vertex_buffer(0, s.buffer.slice(..));
-                        pass.draw(0..4, 0..s.count);
-                    }
-                    if let Some(c) = &rep.gpu.cylinders {
-                        pass.set_pipeline(&self.cylinder_pipeline[i]);
-                        pass.set_vertex_buffer(0, c.buffer.slice(..));
-                        pass.draw(0..4, 0..c.count);
-                    }
-                    if let Some(l) = &rep.gpu.lines {
-                        // Instanced fat-line quads: one segment (2 verts) per instance.
-                        pass.set_pipeline(&self.line_pipeline[i]);
-                        pass.set_vertex_buffer(0, l.buffer.slice(..));
-                        pass.draw(0..4, 0..l.count / 2);
-                    }
-                    if let Some(m) = &rep.gpu.mesh {
-                        pass.set_pipeline(&self.mesh_pipeline[i]);
-                        pass.set_vertex_buffer(0, m.vertices.slice(..));
-                        pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..m.index_count, 0, 0..1);
+                    if draw_mesh {
+                        if let Some(m) = &rep.gpu.mesh {
+                            pass.set_pipeline(if path { &self.path_mesh_pipeline[i] } else { &self.mesh_pipeline[i] });
+                            pass.set_vertex_buffer(0, m.vertices.slice(..));
+                            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.draw_indexed(0..m.index_count, 0, 0..1);
+                        }
                     }
                 }
             }
@@ -2510,12 +2540,12 @@ impl SceneRenderer {
             self.bind_envelope(pass, None);
             for mesh in &mol.meshes {
                 if !mesh.state.visible || mesh.transparent() != transparent { continue; }
-                if let Some(points) = &mesh.gpu.points {
+                if let Some(points) = mesh.gpu.points.as_ref() {
                     pass.set_pipeline(&self.point_pipeline[i]);
                     pass.set_vertex_buffer(0, points.buffer.slice(..));
                     pass.draw(0..4, 0..points.count);
                 }
-                if let Some(lines) = &mesh.gpu.lines {
+                if let Some(lines) = mesh.gpu.lines.as_ref() {
                     pass.set_pipeline(&self.line_pipeline[i]);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..4, 0..lines.count / 2);

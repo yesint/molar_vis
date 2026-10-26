@@ -17,6 +17,8 @@ pub enum PickMode {
     /// Picking disabled (no per-hover cost).
     #[default]
     Off,
+    /// Hover to inspect and highlight atoms/residues without changing the selection.
+    Info,
     /// Hovering shows the atom's identity + glow (as before); **clicking** the hovered
     /// atom/residue adds it to the active selection (Shift = add, Ctrl/⌘ = subtract,
     /// plain = replace), expanded per the `Atoms`/`Residues` scope.
@@ -30,9 +32,14 @@ impl PickMode {
     pub fn label(self) -> &'static str {
         match self {
             PickMode::Off => "Off",
+            PickMode::Info => "Info",
             PickMode::Click => "Click",
             PickMode::Lasso => "Lasso",
         }
+    }
+
+    pub fn shows_hover_info(self) -> bool {
+        matches!(self, Self::Info | Self::Click)
     }
 }
 
@@ -157,6 +164,103 @@ pub struct PickHit {
     pub display: Vec3,
     /// Effective sphere radius of the rep at this atom, nm (drives the glow size).
     pub radius: f32,
+}
+
+/// CPU counterpart of the interaction geometry uploaded to the line renderer.
+pub(crate) struct InteractionGeometry {
+    pub contact: crate::interactions::Interaction,
+    pub segments: Vec<(Vec3, Vec3)>,
+}
+
+impl InteractionGeometry {
+    pub fn new(contact: crate::interactions::Interaction) -> Self {
+        let segments = crate::geometry::dashes(contact.a.to_array(), contact.b.to_array())
+            .into_iter().map(|(a, b)| (Vec3::from(a), Vec3::from(b))).collect();
+        Self { contact, segments }
+    }
+}
+
+pub(crate) struct InteractionHit<'a> {
+    pub mol: usize,
+    pub rep: usize,
+    pub geometry: &'a InteractionGeometry,
+    pub depth: f32,
+}
+
+/// Clip a line to the camera slab before projecting (WebGPU depth is 0..=1).
+pub(crate) fn project_segment(vp: Mat4, a: Vec3, b: Vec3) -> Option<(Vec3, Vec3)> {
+    let mut a = vp * a.extend(1.0);
+    let mut b = vp * b.extend(1.0);
+    for plane in 0..3 {
+        let distance = |v: glam::Vec4| match plane {
+            0 => v.z,
+            1 => v.w - v.z,
+            _ => v.w - 1e-6,
+        };
+        let (da, db) = (distance(a), distance(b));
+        if da < 0.0 && db < 0.0 { return None; }
+        if (da < 0.0) != (db < 0.0) {
+            let cut = a.lerp(b, da / (da - db));
+            if da < 0.0 { a = cut; } else { b = cut; }
+        }
+    }
+    Some((a.xyz() / a.w, b.xyz() / b.w))
+}
+
+/// Hit-test the actual dash segments in screen pixels, including their rendered width.
+pub(crate) fn pick_interaction<'a>(
+    scene: &'a Scene,
+    view: Mat4,
+    proj: Mat4,
+    ndc: Vec2,
+    viewport: Vec2,
+    atom_hit: Option<&PickHit>,
+) -> Option<InteractionHit<'a>> {
+    let vp = proj * view;
+    let pixel_scale = viewport * 0.5;
+    let mut best: Option<InteractionHit<'_>> = None;
+    let mut best_distance = f32::INFINITY;
+    for (mi, mol) in scene.molecules.iter().enumerate().filter(|(_, mol)| mol.visible) {
+        for (ri, rep) in mol.reps.iter().enumerate().filter(|(_, rep)| rep.visible) {
+            let RepParams::Interactions { settings } = &rep.params else { continue };
+            for geometry in &rep.interaction_cache {
+                if settings.color(geometry.contact.kind)[3] == 0 { continue; }
+                for &(a, b) in &geometry.segments {
+                    let Some((a, b)) = project_segment(vp, a, b) else { continue };
+                    let (pa, pb, cursor) = (a.truncate() * pixel_scale, b.truncate() * pixel_scale, ndc * pixel_scale);
+                    let delta = pb - pa;
+                    let t = if delta.length_squared() > 1e-12 {
+                        ((cursor - pa).dot(delta) / delta.length_squared()).clamp(0.0, 1.0)
+                    } else { 0.0 };
+                    let distance = cursor.distance(pa + t * delta);
+                    if distance > settings.line_width * 0.5 + 2.0 { continue; }
+                    let depth = a.z + t * (b.z - a.z);
+                    if best.as_ref().is_none_or(|hit| depth < hit.depth - 1e-6
+                        || ((depth - hit.depth).abs() <= 1e-6 && distance < best_distance)) {
+                        best = Some(InteractionHit { mol: mi, rep: ri, geometry, depth });
+                        best_distance = distance;
+                    }
+                }
+            }
+        }
+    }
+    let best = best?;
+    // The normal picker supplies the foremost visible rep. Use its actual mesh
+    // intersection (rather than its source atom's centre) to reject occluded dashes.
+    if let Some(hit) = atom_hit {
+        let (ro, rd) = cursor_ray(view, proj, ndc.x, ndc.y);
+        let rep = &scene.molecules[hit.mol].reps[hit.rep];
+        let t = if rep.kind.draws_mesh() {
+            rep.mesh_cache.as_ref().and_then(|cache| ray_mesh(&cache.mesh, ro, rd).map(|(t, _)| t))
+        } else {
+            ray_sphere(ro, rd, hit.display, hit.radius)
+        };
+        if let Some(t) = t {
+            let surface = vp * (ro + rd * t).extend(1.0);
+            if surface.w > 0.0 && surface.z / surface.w < best.depth - 1e-6 { return None; }
+        }
+    }
+    Some(best)
 }
 
 /// The small Ball-and-Stick sphere fraction of the van der Waals radius (matches
@@ -700,6 +804,56 @@ mod tests {
         rep.sel = Some(sel);
         build_mesh_caches(&mut scene);
         scene
+    }
+
+    #[test]
+    fn interaction_picking_matches_dashes_width_visibility_and_depth() {
+        use crate::interactions::{Interaction, InteractionKind};
+        let mut scene = scene_with_rep(RepKind::Interactions, "all");
+        let contact = Interaction { atoms: Default::default(),
+            kind: InteractionKind::Hydrophobic,
+            a: Vec3::new(0.0, 0.0, 0.5), b: Vec3::new(0.35, 0.0, 0.5),
+            angle: None, offset: None,
+        };
+        scene.molecules[0].reps[0].interaction_cache = vec![InteractionGeometry::new(contact.clone())];
+        let pick = |scene: &Scene, x, y| pick_interaction(
+            scene, Mat4::IDENTITY, Mat4::IDENTITY, Vec2::new(x, y), Vec2::splat(2000.0), None,
+        ).map(|hit| (hit.rep, hit.depth));
+        assert_eq!(pick(&scene, 0.01, 0.0), Some((0, 0.5)), "painted dash");
+        assert_eq!(pick(&scene, 0.0275, 0.0), None, "gap between dashes");
+        assert_eq!(pick(&scene, 0.01, 0.009), None, "outside narrow line");
+        if let RepParams::Interactions { settings } = &mut scene.molecules[0].reps[0].params {
+            settings.line_width = 20.0;
+        }
+        assert!(pick(&scene, 0.01, 0.009).is_some(), "wide lines stay pickable at their edges");
+        let mut nearer = Representation::new(RepKind::Interactions);
+        nearer.interaction_cache = vec![InteractionGeometry::new(Interaction { atoms: Default::default(),
+            a: Vec3::new(0.0, 0.0, 0.25), b: Vec3::new(0.35, 0.0, 0.25), ..contact
+        })];
+        scene.molecules[0].reps.push(nearer);
+        assert_eq!(pick(&scene, 0.01, 0.0), Some((1, 0.25)));
+        scene.molecules[0].reps[1].visible = false;
+        assert_eq!(pick(&scene, 0.01, 0.0), Some((0, 0.5)));
+        let mut blocker = hit_for_atom(&scene, 0, 0, 0).unwrap();
+        blocker.display = Vec3::new(0.01, 0.0, 0.1);
+        blocker.radius = 0.05;
+        assert!(pick_interaction(&scene, Mat4::IDENTITY, Mat4::IDENTITY,
+            Vec2::new(0.01, 0.0), Vec2::splat(2000.0), Some(&blocker)).is_none(),
+            "an opaque atom in front hides the interaction");
+        scene.molecules[0].visible = false;
+        assert_eq!(pick(&scene, 0.01, 0.0), None);
+    }
+
+    #[test]
+    fn interaction_segments_are_clipped_to_the_camera_slab() {
+        assert!(project_segment(Mat4::IDENTITY, Vec3::new(0.0, 0.0, -0.5),
+            Vec3::new(0.5, 0.0, -0.1)).is_none());
+        assert!(project_segment(Mat4::IDENTITY, Vec3::new(0.0, 0.0, 1.1),
+            Vec3::new(0.5, 0.0, 1.5)).is_none());
+        let (a, b) = project_segment(Mat4::IDENTITY, Vec3::new(0.0, 0.0, -0.5),
+            Vec3::new(0.5, 0.0, 0.5)).unwrap();
+        assert!((a - Vec3::new(0.25, 0.0, 0.0)).length() < 1e-6);
+        assert_eq!(b, Vec3::new(0.5, 0.0, 0.5));
     }
 
     /// Fill every mesh rep's `mesh_cache` the way `app::build` does (secondary structure,

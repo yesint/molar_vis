@@ -23,13 +23,13 @@ fn swatch_ink(rgb: [u8; 4]) -> egui::Color32 {
     }
 }
 
-fn color_popup(response: &egui::Response, rgba: &mut [u8; 4], palette: &[[u8; 4]]) -> bool {
+fn color_popup(response: &egui::Response, rgba: &mut [u8; 4], palette: Option<&[[u8; 4]]>) -> bool {
     let mut color = egui::Color32::from_rgb(rgba[0], rgba[1], rgba[2]);
     let mut changed = false;
     egui::Popup::menu(response)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            if color_picker_with_palette(ui, &mut color, palette) {
+            if color_picker_contents(ui, &mut color, palette) {
                 *rgba = color.to_array();
                 changed = true;
             }
@@ -64,7 +64,7 @@ fn color_cell(ui: &mut egui::Ui, label: &str, rgba: &mut [u8; 4], size: egui::Ve
         egui::FontId::proportional(14.0),
         swatch_ink(*rgba),
     );
-    color_popup(&response, rgba, palette)
+    color_popup(&response, rgba, Some(palette))
 }
 
 fn ss_icon(ui: &mut egui::Ui, index: usize, color: &mut [u8; 4], palette: &[[u8; 4]]) {
@@ -99,7 +99,7 @@ fn ss_icon(ui: &mut egui::Ui, index: usize, color: &mut [u8; 4], palette: &[[u8;
             stroke,
         ));
     }
-    color_popup(&response, color, palette);
+    color_popup(&response, color, Some(palette));
 }
 
 fn gradient_editor(
@@ -199,7 +199,7 @@ fn gradient_editor(
                 } else {
                     egui::CursorIcon::PointingHand
                 });
-            color_popup(&response, &mut gradient.stops[i], palette);
+            color_popup(&response, &mut gradient.stops[i], Some(palette));
         }
         ui.horizontal(|ui| {
             ui.label(labels[0]);
@@ -305,8 +305,7 @@ fn color_preset_selector(ui: &mut egui::Ui, colors: &mut crate::color::ColorPref
     let mut selected = current;
     ui.horizontal(|ui| {
         ui.label(bold_name(ui, "Preset"));
-        egui::ComboBox::from_id_salt("color_preset")
-            .width(180.0)
+        fixed_combo(ui, "color_preset", ColorPreset::ALL.iter().map(|preset| preset.name()).chain(["Custom"]))
             .selected_text(current.map_or("Custom", ColorPreset::name))
             .show_ui(ui, |ui| {
                 for preset in ColorPreset::ALL {
@@ -447,7 +446,7 @@ pub(super) fn settings_page_appearance(ui: &mut egui::Ui, s: &mut Settings) {
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             ui.label("Theme");
-            egui::ComboBox::from_id_salt("set_theme")
+            fixed_combo(ui, "set_theme", ThemeMode::ALL.iter().map(|mode| mode.label()))
                 .selected_text(a.theme.label())
                 .show_ui(ui, |ui| {
                     for t in ThemeMode::ALL {
@@ -489,7 +488,7 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             ui.label("Anti-aliasing").on_hover_text("Supersampling smooths the image at a cost proportional to this factor squared. Applies immediately.");
-            egui::ComboBox::from_id_salt("set_ssaa")
+            fixed_combo(ui, "set_ssaa", [1, 2, 3, 4].into_iter().map(ssaa_label))
                 .selected_text(ssaa_label(r.ssaa))
                 .show_ui(ui, |ui| {
                     for n in [1u32, 2, 3, 4] {
@@ -498,8 +497,13 @@ pub(super) fn settings_page_rendering(ui: &mut egui::Ui, s: &mut Settings) {
                 });
             ui.end_row();
 
+            ui.label("Camera transition animation [ms]")
+                .on_hover_text("Duration of programmed camera moves, including zoom, focus and unobstructed view. Zero applies immediately. Mouse navigation stays direct.");
+            ui.add(egui::DragValue::new(&mut r.camera_transition_ms).range(0..=u32::MAX).speed(25));
+            ui.end_row();
+
             ui.label("Shadow-map resolution").on_hover_text("Higher resolutions improve cast-shadow detail. Used when cast shadows are enabled; applies immediately.");
-            egui::ComboBox::from_id_salt("set_shadow_res")
+            fixed_combo(ui, "set_shadow_res", ["1024²", "2048²", "4096²"].into_iter())
                 .selected_text(format!("{}²", r.shadow_res))
                 .show_ui(ui, |ui| {
                     for n in [1024u32, 2048, 4096] {
@@ -548,7 +552,7 @@ pub(super) fn settings_page_view(
                 .spacing([16.0, 8.0])
                 .show(ui, |ui| {
                     ui.label("Projection");
-                    egui::ComboBox::from_id_salt("set_proj")
+                    fixed_combo(ui, "set_proj", [Projection::Orthographic, Projection::Perspective].into_iter().map(proj_label))
                         .selected_text(proj_label(v.projection))
                         .show_ui(ui, |ui| {
                             for p in [Projection::Orthographic, Projection::Perspective] {
@@ -573,7 +577,7 @@ pub(super) fn settings_page_view(
                 .show(ui, |ui| {
                     ui.add_enabled(cue_on, egui::Label::new("Falloff"));
                     ui.add_enabled_ui(cue_on, |ui| {
-                        egui::ComboBox::from_id_salt("set_cue_mode")
+                        fixed_combo(ui, "set_cue_mode", CueMode::ALL.iter().map(|mode| mode.label()))
                             .selected_text(v.depth_cue.mode.label())
                             .show_ui(ui, |ui| {
                                 for m in CueMode::ALL {
@@ -672,7 +676,7 @@ pub(super) fn settings_page_reps(ui: &mut egui::Ui, s: &mut Settings) {
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             ui.label("Style");
-            egui::ComboBox::from_id_salt("set_rep_kind")
+            fixed_combo(ui, "set_rep_kind", RepKind::ALL.iter().map(|kind| kind.label()))
                 .selected_text(r.kind.label())
                 .show_ui(ui, |ui| {
                     for k in RepKind::ALL {
@@ -682,7 +686,7 @@ pub(super) fn settings_page_reps(ui: &mut egui::Ui, s: &mut Settings) {
             ui.end_row();
 
             ui.label("Color");
-            egui::ComboBox::from_id_salt("set_rep_color")
+            fixed_combo(ui, "set_rep_color", ColorMethod::ALL.iter().map(|method| method.label()))
                 .selected_text(r.color.label())
                 .show_ui(ui, |ui| {
                     for c in ColorMethod::ALL {
@@ -727,16 +731,16 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             ui.label("Pick mode");
-            egui::ComboBox::from_id_salt("set_pick_mode")
+            fixed_combo(ui, "set_pick_mode", [PickMode::Off, PickMode::Info, PickMode::Click, PickMode::Lasso].into_iter().map(|mode| mode.label()))
                 .selected_text(b.pick_mode.label())
                 .show_ui(ui, |ui| {
-                    for m in [PickMode::Off, PickMode::Click, PickMode::Lasso] {
+                    for m in [PickMode::Off, PickMode::Info, PickMode::Click, PickMode::Lasso] {
                         ui.selectable_value(&mut b.pick_mode, m, m.label());
                     }
                 });
             ui.end_row();
             ui.label("Selection scope");
-            egui::ComboBox::from_id_salt("set_sel_mode")
+            fixed_combo(ui, "set_sel_mode", [SelectionMode::Atoms, SelectionMode::Residues, SelectionMode::BoundH].into_iter().map(|mode| mode.label()))
                 .selected_text(b.selection_mode.label())
                 .show_ui(ui, |ui| {
                     for m in [
@@ -749,20 +753,6 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
                 });
             ui.end_row();
         });
-    ui.add_space(8.0);
-    ui.label(bold_name(ui, "Interaction aids"));
-    ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
-        .on_hover_text(
-            "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
-             over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
-        );
-    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep magnifier does an unobstructed view")
-        .on_hover_text(
-            "The magnifier button on each representation rotates and scales the camera to show \
-             that rep with the least obstruction by the other reps (default). Off → it just \
-             zooms to fit the selection at the current orientation.",
-        );
-
     ui.add_space(8.0);
     ui.label(bold_name(ui, "Trajectory playback"));
     egui::Grid::new("set_behavior_traj")
@@ -802,7 +792,24 @@ pub(super) fn settings_page_behavior(ui: &mut egui::Ui, s: &mut Settings) {
              wrapped structure. Off (default) is much faster for large structures.",
         );
 
-
+    ui.add_space(8.0);
+    ui.label(bold_name(ui, "Misc"));
+    ui.checkbox(&mut b.hover_detail_lens, "Hover detail lens over cartoon/surface")
+        .on_hover_text(
+            "In pick/hover mode, reveal a faded ball-and-stick of the atoms under the cursor \
+             over a Cartoon or Surface rep (hints where the atoms are). Off by default.",
+        );
+    ui.checkbox(&mut b.rep_zoom_unobstructed, "Rep and group magnifiers do an unobstructed view")
+        .on_hover_text(
+            "Representation and molecule-group magnifiers rotate and scale the camera to show \
+             the target with the least obstruction (default). A group targets the shown member's \
+             visible representations. Off → zoom to fit at the current orientation.",
+        );
+    ui.checkbox(&mut b.group_switch_zoom, "Zoom when switching molecules in mol. group")
+        .on_hover_text(
+            "Re-center the camera on the shown molecule when switching group members, \
+             keeping the current zoom level. Off by default.",
+        );
 }
 
 /// The orientation-axes "screen" widget: a monitor-like rectangle showing a mini
@@ -870,6 +877,62 @@ pub(super) fn draw_axes_widget(
     ui.put(cb, egui::Checkbox::new(on, ""))
         .on_hover_text("Show orientation axes");
 }
+const SETTINGS_CONTENT_WIDTH: f32 = 640.0;
+const SETTINGS_NAV_WIDTH: f32 = 156.0;
+const SETTINGS_PAGES: [(SettingsPage, &str); 9] = [
+    (SettingsPage::Appearance, "Appearance"),
+    (SettingsPage::Rendering, "Rendering"),
+    (SettingsPage::View, "View"),
+    (SettingsPage::Representations, "Representations"),
+    (SettingsPage::Styles, "Styles"),
+    (SettingsPage::Materials, "Materials"),
+    (SettingsPage::Interactions, "Interactions"),
+    (SettingsPage::Colors, "Colors"),
+    (SettingsPage::Behavior, "Behavior"),
+];
+
+fn settings_layout(
+    ui: &mut egui::Ui,
+    popup: bool,
+    page: &mut SettingsPage,
+    content: impl FnOnce(&mut egui::Ui, SettingsPage),
+) {
+    if popup {
+        ui.set_width(300.0);
+        egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false, true])
+            .show(ui, |ui| content(ui, *page));
+        return;
+    }
+    ui.set_width(SETTINGS_NAV_WIDTH + SETTINGS_CONTENT_WIDTH + 24.0);
+    let body_height = (ui.ctx().content_rect().height() - 160.0).clamp(120.0, 440.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.vertical(|ui| {
+            ui.set_width(SETTINGS_NAV_WIDTH);
+            egui::ScrollArea::vertical().id_salt("settings_navigation")
+                .max_height(body_height).auto_shrink([false, false]).show(ui, |ui| {
+                    for (candidate, label) in SETTINGS_PAGES {
+                        if ui.add_sized(
+                            [SETTINGS_NAV_WIDTH, dropdown_height(ui)],
+                            egui::Button::selectable(*page == candidate, "").left_text(label),
+                        ).clicked() {
+                            *page = candidate;
+                        }
+                    }
+                });
+        });
+        let (divider, _) = ui.allocate_exact_size(egui::vec2(1.0, body_height), egui::Sense::hover());
+        ui.painter().line_segment([divider.center_top(), divider.center_bottom()],
+            ui.visuals().widgets.noninteractive.bg_stroke);
+        ui.vertical(|ui| {
+            ui.set_width(SETTINGS_CONTENT_WIDTH);
+            egui::ScrollArea::vertical().id_salt(("settings_content", *page as u8))
+                .max_height(body_height).auto_shrink([false, false])
+                .show(ui, |ui| content(ui, *page));
+        });
+    });
+}
+
 impl App {
 
     /// Effective new-rep defaults: the settings' `reps`, with the kind overridden by
@@ -938,7 +1001,7 @@ impl App {
         if previous.appearance != next.appearance {
             crate::theme::apply(ctx, &next.appearance);
         }
-        if previous.rendering != next.rendering {
+        if previous.rendering.ssaa != next.rendering.ssaa || previous.rendering.shadow_res != next.rendering.shadow_res {
             if let Some(rs) = frame.wgpu_render_state() {
                 self.renderer.reconfigure(rs, &next.rendering);
             }
@@ -988,6 +1051,10 @@ impl App {
                 }
             }
         }
+        set_color_picker_palette(ctx, next.colors.discrete_palette());
+        if let RepParams::Interactions { settings } = next.reps.style_params(RepKind::Interactions) {
+            self.scene.interaction_settings = settings;
+        }
         self.settings = next;
         self.rep_defaults = Self::effective_rep_defaults(&self.settings);
         self.last_render_camera = None;
@@ -1001,6 +1068,7 @@ impl App {
             return;
         };
         let mut current = self.current_settings();
+        set_color_picker_palette(ctx, current.colors.discrete_palette());
         let before = current.clone();
         let popup_was_open = dialog.child_popup_open || egui::Popup::is_any_open(ctx);
         let mut close = false;
@@ -1054,32 +1122,7 @@ impl App {
             }
         }
         let inner = window.show(ctx, |ui| {
-            if popup {
-                ui.set_width(300.0);
-            } else {
-                ui.set_width(640.0);
-            }
-            if !popup {
-                tab_bar(
-                    ui,
-                    &mut dialog.tab,
-                    &[
-                        (SettingsPage::Appearance, "Appearance"),
-                        (SettingsPage::Rendering, "Render"),
-                        (SettingsPage::View, "View"),
-                        (SettingsPage::Representations, "Reps"),
-                        (SettingsPage::Styles, "Styles"),
-                        (SettingsPage::Materials, "Materials"),
-                        (SettingsPage::Colors, "Colors"),
-                        (SettingsPage::Behavior, "Behavior"),
-                    ],
-                );
-                ui.add_space(8.0);
-            }
-            egui::ScrollArea::vertical()
-                .max_height(if popup { 380.0 } else { 440.0 })
-                .auto_shrink([false, true])
-                .show(ui, |ui| match dialog.tab {
+            settings_layout(ui, popup, &mut dialog.tab, |ui, page| match page {
                     SettingsPage::Appearance => settings_page_appearance(ui, &mut current),
                     SettingsPage::Rendering => settings_page_rendering(ui, &mut current),
                     SettingsPage::View => settings_page_view(
@@ -1093,9 +1136,10 @@ impl App {
                     SettingsPage::Representations => settings_page_reps(ui, &mut current),
                     SettingsPage::Styles => settings_page_styles(ui, &mut current, &mut dialog.style_page, dialog.preview.as_mut()),
                     SettingsPage::Materials => settings_page_materials(ui, &mut current, &mut dialog.material_page, dialog.preview.as_mut()),
+                    SettingsPage::Interactions => settings_page_interactions(ui, &mut current),
                     SettingsPage::Colors => settings_page_colors(ui, &mut current),
                     SettingsPage::Behavior => settings_page_behavior(ui, &mut current),
-                });
+            });
             ui.add_space(8.0);
             if let Some(error) = &dialog.save_error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -1382,31 +1426,33 @@ pub(super) fn settings_page_styles(
     selected: &mut RepKind,
     preview: Option<&mut SettingsPreview>,
 ) {
+    if *selected == RepKind::Interactions {
+        *selected = RepKind::Lines;
+    }
     ui.horizontal(|ui| {
         ui.label("Style").on_hover_text("Edit matching representations. Save keeps these options for new representations and sessions.");
-        egui::ComboBox::from_id_salt("settings_style").selected_text(selected.label()).show_ui(ui, |ui| {
-            for kind in RepKind::ALL { ui.selectable_value(selected, kind, kind.label()); }
+        fixed_combo(ui, "settings_style", RepKind::ALL.iter().filter(|&&kind| kind != RepKind::Interactions).map(|kind| kind.label())).selected_text(selected.label()).show_ui(ui, |ui| {
+            for kind in RepKind::ALL {
+                if kind != RepKind::Interactions { ui.selectable_value(selected, kind, kind.label()); }
+            }
         });
     });
     ui.add_space(8.0);
     let mut params = s.reps.style_params(*selected);
     let before = params;
-    let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(320.0);
+    let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(0.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 16.0;
         ui.vertical(|ui| {
-            ui.set_width(controls_width);
+            ui.set_max_width(controls_width);
             ui.spacing_mut().slider_width = 100.0;
             super::rep_panel::draw_style_options(ui, &mut params);
-            if let RepParams::Interactions { settings } = &mut params {
-                settings_interaction_options(ui, settings);
-            }
             if *selected == RepKind::Cartoon {
                 ui.horizontal(|ui| {
                     ui.label("SS algorithm").on_hover_text(
                         "Algorithm used to assign the helix, sheet, and coil geometry.",
                     );
-                    egui::ComboBox::from_id_salt("settings_ss")
+                    fixed_combo(ui, "settings_ss", ["DSSP", "DSSP (gmx)", "dss (PyMOL)"].into_iter())
                         .selected_text(match s.reps.ss_algo {
                             SsAlgorithm::Dssp => "DSSP",
                             SsAlgorithm::DsspGmx => "DSSP (gmx)",
@@ -1467,11 +1513,11 @@ pub(super) fn settings_page_materials(
     let mut options = s.reps.material_for(*selected).options();
     let before = options;
     let mut reset = false;
-    let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(320.0);
+    let controls_width = (ui.available_width() - PREVIEW_SIZE - 16.0).max(0.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 16.0;
         ui.vertical(|ui| {
-            ui.set_width(controls_width);
+            ui.set_max_width(controls_width);
             egui::Grid::new("material_options")
                 .num_columns(2)
                 .spacing([16.0, 8.0])
@@ -1480,6 +1526,12 @@ pub(super) fn settings_page_materials(
                         .on_hover_text("0 is invisible; 1 is fully opaque.");
                     slider_with_edit(ui, &mut options.opacity, 0.0..=1.0, true);
                     ui.end_row();
+                    if *selected == Material::Velvet {
+                        ui.label("Edge softness")
+                            .on_hover_text("Strength of the soft, tinted lighting near the silhouette.");
+                        slider_with_edit(ui, &mut options.hairiness, 0.0..=1.0, true);
+                        ui.end_row();
+                    }
                     if *selected == Material::FlatOutline {
                         ui.label("Contour width");
                         slider_with_edit(ui, &mut options.outline_width, 0.05..=1.0, true);
@@ -1496,11 +1548,11 @@ pub(super) fn settings_page_materials(
                             .on_hover_text("Strength of the light falling on the surface.");
                         slider_with_edit(ui, &mut options.diffuse, 0.0..=1.0, true);
                         ui.end_row();
-                        ui.label("Specular")
+                        ui.label(if *selected == Material::Velvet { "Sheen" } else { "Specular" })
                             .on_hover_text("Strength of surface highlights.");
                         slider_with_edit(ui, &mut options.specular, 0.0..=1.0, true);
                         ui.end_row();
-                        ui.label(if *selected == Material::MolecularNodes {
+                        ui.label(if matches!(*selected, Material::MolecularNodes | Material::Velvet) {
                             "Roughness"
                         } else {
                             "Shininess"
@@ -1547,52 +1599,158 @@ fn settings_interaction_options(
     ui: &mut egui::Ui,
     s: &mut crate::interactions::InteractionSettings,
 ) {
-    egui::Grid::new("style_interactions")
-        .num_columns(2)
-        .spacing([16.0, 8.0])
-        .show(ui, |ui| {
-            ui.label("Line width (px)");
-            slider_with_edit(ui, &mut s.line_width, 1.0..=10.0, true);
-            ui.end_row();
-            for (label, enabled) in [
-                ("Hydrogen bonds", &mut s.hbonds),
-                ("Hydrophobic", &mut s.hydrophobic),
-                ("Salt bridges", &mut s.salt_bridges),
-                ("π stacking", &mut s.pi_stacking),
-                ("π cation", &mut s.pi_cation),
-                ("Halogen bonds", &mut s.halogen),
-            ] {
-                ui.label(label);
-                ui.checkbox(enabled, "");
-                ui.end_row();
-            }
-            for (label, value, range) in [
-                ("H-bond distance (nm)", &mut s.hbond_dist, 0.25..=0.5),
-                ("H-bond with H (nm)", &mut s.hbond_dist_h, 0.25..=0.5),
-                ("H-bond angle (°)", &mut s.hbond_angle, 90.0..=180.0),
-                (
-                    "Hydrophobic dist. (nm)",
-                    &mut s.hydrophobic_dist,
-                    0.3..=0.55,
-                ),
-                ("Salt bridge dist. (nm)", &mut s.salt_bridge_dist, 0.3..=0.6),
-                ("π stacking dist. (nm)", &mut s.pi_stacking_dist, 0.3..=0.8),
-                ("π stacking angle (°)", &mut s.pi_stacking_angle, 0.0..=90.0),
-                (
-                    "π stacking offset (nm)",
-                    &mut s.pi_stacking_offset,
-                    0.0..=0.5,
-                ),
-                ("π cation distance (nm)", &mut s.pi_cation_dist, 0.3..=0.8),
-                ("π cation offset (nm)", &mut s.pi_cation_offset, 0.0..=0.5),
-                ("Halogen distance (nm)", &mut s.halogen_dist, 0.25..=0.5),
-                ("Halogen angle (°)", &mut s.halogen_angle, 90.0..=180.0),
-            ] {
-                ui.label(label);
-                slider_with_edit(ui, value, range, true);
-                ui.end_row();
-            }
+    fn section(
+        ui: &mut egui::Ui,
+        title: &str,
+        enabled: &mut bool,
+        color: &mut [u8; 4],
+        fields: &mut [(&str, &mut f32, std::ops::RangeInclusive<f32>)],
+    ) {
+        ui.add_space(8.0);
+        ui.push_id(title, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(enabled, bold_name(ui, title)).on_hover_text("Enable this interaction type");
+                let swatch = swatch_button(ui, *color, egui::vec2(32.0, dropdown_height(ui)));
+                color_popup(&swatch, color, None);
+            });
+            egui::Grid::new("parameters").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                for (label, value, range) in fields {
+                    ui.add_enabled(*enabled, egui::Label::new(*label));
+                    slider_with_edit(ui, value, range.clone(), *enabled);
+                    ui.end_row();
+                }
+            });
         });
+    }
+    ui.checkbox(&mut s.glowing_path, "Glowing path")
+        .on_hover_text("Render all enabled interaction types as glowing helices in their configured colors, brightest at the bond center.");
+    ui.add_enabled(s.glowing_path, egui::Checkbox::new(&mut s.animate_glowing_path, "Animate glowing paths"))
+        .on_hover_text("Rotate helices around their axes once every 2 seconds, keeping six turns per bond.");
+    egui::Grid::new("interaction_rendering").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+        ui.label(if s.glowing_path { "Tube width" } else { "Line width (px)" })
+            .on_hover_text("Controls the core and halo thickness of glowing tubes; 3 is the default. Dashed-line width is in pixels.");
+        slider_with_edit(ui, &mut s.line_width, 1.0..=20.0, true);
+        ui.end_row();
+    });
+    section(ui, "H-bonds", &mut s.hbonds, &mut s.colors[0], &mut [
+        ("Donor–acceptor distance (nm)", &mut s.hbond_dist, 0.25..=0.5),
+        ("Distance with H (nm)", &mut s.hbond_dist_h, 0.25..=0.5),
+        ("Minimum D–H···A angle (deg)", &mut s.hbond_angle, 90.0..=180.0),
+    ]);
+    section(ui, "Hydrophobic", &mut s.hydrophobic, &mut s.colors[1], &mut [
+        ("Maximum C···C distance (nm)", &mut s.hydrophobic_dist, 0.3..=0.55),
+    ]);
+    section(ui, "Salt bridges", &mut s.salt_bridges, &mut s.colors[2], &mut [
+        ("Charge-centre distance (nm)", &mut s.salt_bridge_dist, 0.3..=0.7),
+    ]);
+    section(ui, "π stacking", &mut s.pi_stacking, &mut s.colors[3], &mut [
+        ("Ring-centre distance (nm)", &mut s.pi_stacking_dist, 0.3..=0.8),
+        ("Plane angle tolerance (deg)", &mut s.pi_stacking_angle, 0.0..=90.0),
+        ("Maximum offset (nm)", &mut s.pi_stacking_offset, 0.0..=0.5),
+    ]);
+    section(ui, "π cation", &mut s.pi_cation, &mut s.colors[4], &mut [
+        ("Ring–cation distance (nm)", &mut s.pi_cation_dist, 0.3..=0.8),
+        ("Offset from ring axis (nm)", &mut s.pi_cation_offset, 0.0..=0.5),
+    ]);
+    section(ui, "Halogen bonds", &mut s.halogen, &mut s.colors[5], &mut [
+        ("X···acceptor distance (nm)", &mut s.halogen_dist, 0.25..=0.5),
+        ("Minimum C–X···A angle (deg)", &mut s.halogen_angle, 90.0..=180.0),
+    ]);
+}
+
+fn settings_page_interactions(ui: &mut egui::Ui, s: &mut Settings) {
+    let mut params = s.reps.style_params(RepKind::Interactions);
+    let before = params;
+    if let RepParams::Interactions { settings } = &mut params {
+        settings_interaction_options(ui, settings);
+    }
+    if ui.button("Reset interactions").on_hover_text("Restore factory interaction defaults").clicked() {
+        params = RepParams::for_kind(RepKind::Interactions);
+    }
+    if params != before {
+        s.reps.styles.retain(|params| params.kind() != RepKind::Interactions);
+        s.reps.styles.push(params);
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    #[test]
+    fn settings_pages_form_a_vertical_list_and_open_interactions() {
+        for theme in [crate::settings::ThemeMode::Dark, crate::settings::ThemeMode::Light] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, &crate::settings::AppearanceSettings { theme, ..Default::default() });
+            let mut page = SettingsPage::Appearance;
+            let frame = |page: &mut SettingsPage, events| {
+                ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 700.0))),
+                    events, ..Default::default()
+                }, |ui| {
+                    settings_layout(ui, false, page, |ui, selected| {
+                        assert!(ui.max_rect().left() > SETTINGS_NAV_WIDTH);
+                        ui.label(format!("Content: {selected:?}"));
+                    });
+                    assert!(ui.min_rect().height() <= 440.5,
+                        "settings body must not grow beyond its scrollable viewport");
+                })
+            };
+            let output = frame(&mut page, vec![]);
+            let entries: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if SETTINGS_PAGES.iter().any(|(_, label)| text.galley.text() == *label) =>
+                    Some((text.galley.text().to_string(), text.pos, text.galley.size())),
+                _ => None,
+            }).collect();
+            assert_eq!(entries.len(), SETTINGS_PAGES.len());
+            for pair in entries.windows(2) {
+                assert!(pair[1].1.y > pair[0].1.y);
+                assert!((pair[1].1.x - pair[0].1.x).abs() < 0.1);
+            }
+            let (_, pos, size) = entries.iter().find(|(label, _, _)| label == "Interactions").unwrap();
+            let pos = *pos + *size * 0.5;
+            for pressed in [true, false] {
+                frame(&mut page, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                }]);
+            }
+            assert_eq!(page, SettingsPage::Interactions);
+        }
+    }
+
+    #[test]
+    fn interaction_page_edits_are_saved_as_new_representation_defaults() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let mut settings = Settings::default();
+        let frame = |settings: &mut Settings, events| {
+            ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 1000.0))),
+                events, ..Default::default()
+            }, |ui| settings_page_interactions(ui, settings))
+        };
+        let output = frame(&mut settings, vec![]);
+        let label = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == "H-bonds" =>
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size())),
+            _ => None,
+        }).unwrap();
+        let checkbox = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.rect.right() < label.left()
+                && (rect.rect.center().y - label.center().y).abs() < 1.0
+                && (rect.rect.width() - rect.rect.height()).abs() < 0.1 => Some(rect.rect.center()),
+            _ => None,
+        }).unwrap();
+        for pressed in [true, false] {
+            frame(&mut settings, vec![egui::Event::PointerMoved(checkbox), egui::Event::PointerButton {
+                pos: checkbox, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let restored: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        let rep = Representation::from_defaults(&RepDefaults { kind: RepKind::Interactions, ..restored.reps });
+        let RepParams::Interactions { settings } = rep.params else { panic!("interaction defaults") };
+        assert!(!settings.hbonds);
+    }
 }
 
 const PREVIEW_SIZE: f32 = 232.0;
@@ -1725,6 +1883,7 @@ impl SettingsPreview {
             &crate::settings::RenderingSettings {
                 ssaa: 2,
                 shadow_res: 256,
+                ..Default::default()
             },
         );
         let raw = data::load_from_bytes(
@@ -2189,6 +2348,26 @@ mod material_preview_tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn style_preview_sits_next_to_the_controls_without_an_empty_column() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx, &crate::settings::AppearanceSettings::default());
+        let mut preview_left = 0.0;
+        let output = ctx.run_ui(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 900.0))),
+            ..Default::default()
+        }, |ui| {
+            settings_page_styles(ui, &mut Settings::default(), &mut RepKind::BallAndStick, None);
+            preview_left = ui.min_rect().right() - PREVIEW_SIZE;
+        });
+        let controls_right = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) => Some(rect.rect.right()),
+            _ => None,
+        }).fold(0.0_f32, f32::max);
+        assert!(preview_left - controls_right <= 20.0,
+            "preview gap is {} points", preview_left - controls_right);
     }
 }
 

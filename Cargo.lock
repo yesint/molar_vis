@@ -42,7 +42,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
- "const-random",
  "getrandom 0.3.4",
  "once_cell",
  "serde",
@@ -699,26 +698,6 @@ checksum = "e89f72f65e8501878b8a004d5a1afb780987e2ce2b4532c562e367a72c57499f"
 dependencies = [
  "log",
  "web-sys",
-]
-
-[[package]]
-name = "const-random"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87e00182fe74b066627d63b85fd550ac2998d4b0bd86bfed477a0ae4c7c71359"
-dependencies = [
- "const-random-macro",
-]
-
-[[package]]
-name = "const-random-macro"
-version = "0.1.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9d839f2a20b0aee515dc581a6172f2321f96cab76c1a38a4c584a194955390e"
-dependencies = [
- "getrandom 0.2.17",
- "once_cell",
- "tiny-keccak",
 ]
 
 [[package]]
@@ -2168,8 +2147,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ca8131b16b1897fcec7a97f1f974897f9708cee200f7ceaf851d41fce5a0965"
+source = "git+https://github.com/yesint/molar.git?rev=ba71a1d5744a03119955b7481f4443c0dd41c5d8#ba71a1d5744a03119955b7481f4443c0dd41c5d8"
 dependencies = [
  "anyhow",
  "clap",
@@ -2207,8 +2185,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43f77f446d637a46d0da651d6f96497733447b85b76826e6c709f7c82682a76"
+source = "git+https://github.com/yesint/molar.git?rev=ba71a1d5744a03119955b7481f4443c0dd41c5d8#ba71a1d5744a03119955b7481f4443c0dd41c5d8"
 dependencies = [
  "cc",
  "libloading",
@@ -2261,12 +2238,12 @@ dependencies = [
  "pollster",
  "rayon",
  "rfd",
- "rhai",
  "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "wgpu",
 ]
 
@@ -2281,6 +2258,7 @@ dependencies = [
  "log",
  "molar",
  "molar_vis_core",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -2295,6 +2273,7 @@ dependencies = [
  "molar_python",
  "molar_vis_core",
  "pyo3",
+ "serde_json",
  "winit",
 ]
 
@@ -2307,9 +2286,8 @@ dependencies = [
 
 [[package]]
 name = "molly"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75dccedc345e14623ecc79262729c65fb6a7262751e1ad7e4230664475c7957b"
+version = "0.6.1"
+source = "git+https://github.com/ma3ke/molly.git#9f2fd6bcff4cdad8c4ab509a519192f89d843774"
 
 [[package]]
 name = "moxcms"
@@ -2846,9 +2824,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-dependencies = [
- "portable-atomic",
-]
 
 [[package]]
 name = "once_cell_polyfill"
@@ -3099,8 +3074,7 @@ dependencies = [
 [[package]]
 name = "powersasa"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a1073b929b2cd79502edb9ed1e64aa5dd859466b696dbfe3c0fbf33eb1f4111"
+source = "git+https://github.com/yesint/powersasa-llm.git#2b9465029fe9da4432b4a0cf64a2d9a86621da3c"
 dependencies = [
  "nalgebra",
  "thiserror 2.0.19",
@@ -3446,34 +3420,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhai"
-version = "1.25.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd4dd0f8c36625202a4ba553c416c19b719947cd2a31d1bda06126e4a5727daf"
-dependencies = [
- "ahash",
- "bitflags 2.13.1",
- "num-traits",
- "once_cell",
- "rhai_codegen",
- "smallvec",
- "smartstring",
- "thin-vec",
- "web-time",
-]
-
-[[package]]
-name = "rhai_codegen"
-version = "3.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cd3a7535e50bf36857e7be7bec276d334e8c2dfa469c2201226fd01638ea5ca"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3730,17 +3676,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smartstring"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb72c633efbaa2dd666986505016c32c3044395ceaf881518399d2f4127ee29"
-dependencies = [
- "autocfg",
- "static_assertions",
- "version_check",
-]
-
-[[package]]
 name = "smithay-client-toolkit"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3913,12 +3848,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "thin-vec"
-version = "0.2.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79def32ffcd477db1ff26f76dab9e3a91f0bd42a85ca96577089b24623056f9d"
-
-[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3970,15 +3899,6 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
-]
-
-[[package]]
-name = "tiny-keccak"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
-dependencies = [
- "crunchy",
 ]
 
 [[package]]

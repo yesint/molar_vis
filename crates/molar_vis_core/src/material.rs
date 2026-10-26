@@ -33,6 +33,8 @@ pub enum Material {
     /// Soft dielectric studio shading with gentle contact occlusion, inspired by
     /// Molecular Nodes' default Principled material.
     MolecularNodes,
+    /// Matte cloth with a soft microfiber sheen at grazing angles.
+    Velvet,
     /// Edited preset; the stable index refers to ALL, whose order must not change.
     Custom { preset: u8, options: MaterialOptions },
 }
@@ -41,12 +43,45 @@ pub enum Material {
 /// remain byte-identical. These words are injected into all shared shader sources.
 pub(crate) const FLAT_OUTLINE_WORD: u32 = 0xffff_fffe;
 pub(crate) const MOLECULAR_NODES_WORD: u32 = 0xffff_fffd;
+pub(crate) const VELVET_WORD: u32 = 0xffff_fffc;
+/// Internal emission profile for interaction paths.
+pub(crate) const GLOWING_PATH_WORD: u32 = 0x9000_0000;
+pub(crate) const GLOWING_PATH_ANIMATION_BIT: u32 = 0x0800_0000;
+
+/// The unused 0x9 tag stores a 10-bit octahedral axis per component,
+/// a 7-bit length (0–2 nm), and an animation flag. The normal stores the path center.
+/// This keeps the glow payload inside the existing mesh vertex layout.
+pub(crate) fn glowing_path_word(axis: glam::Vec3, length: f32) -> u32 {
+    let p = axis / axis.abs().element_sum();
+    let mut oct = p.truncate();
+    if p.z < 0.0 {
+        oct = (glam::Vec2::ONE - glam::Vec2::new(oct.y, oct.x).abs()) * glam::Vec2::new(
+            if oct.x >= 0.0 { 1.0 } else { -1.0 },
+            if oct.y >= 0.0 { 1.0 } else { -1.0 });
+    }
+    let q = |x: f32| ((x * 0.5 + 0.5) * 1023.0).round() as u32;
+    let len = (length.clamp(0.0, 2.0) * 63.5).round().max(1.0) as u32;
+    GLOWING_PATH_WORD | q(oct.x) | (q(oct.y) << 10) | (len << 20)
+}
+
+/// Match the shader's decoded frame when building the enclosing capsule. This
+/// lets its radius carry the tube width without adding mesh vertex attributes.
+pub(crate) fn glowing_path_frame(word: u32) -> (glam::Vec3, f32) {
+    let x = (word & 1023) as f32 / 1023.0 * 2.0 - 1.0;
+    let y = ((word >> 10) & 1023) as f32 / 1023.0 * 2.0 - 1.0;
+    let mut axis = glam::Vec3::new(x, y, 1.0 - x.abs() - y.abs());
+    let fold = (-axis.z).max(0.0);
+    axis.x += if axis.x >= 0.0 { -fold } else { fold };
+    axis.y += if axis.y >= 0.0 { -fold } else { fold };
+    (axis.normalize(), ((word >> 20) & 127) as f32 / 63.5)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Shading {
     Classic,
     FlatOutline,
     MolecularNodes,
+    Velvet,
 }
 
 /// Persisted shader coefficients, written as full records when a preset is edited.
@@ -59,6 +94,9 @@ pub struct MaterialOptions {
     pub opacity: f32,
     pub outline: f32,
     pub outline_width: f32,
+    /// Strength of the soft edge shading. Retained as `hairiness` in saved settings.
+    #[serde(default)]
+    pub hairiness: f32,
 }
 
 /// Lighting + opacity coefficients (each 0..1).
@@ -67,13 +105,15 @@ pub struct MaterialParams {
     pub ambient: f32,
     pub diffuse: f32,
     pub specular: f32,
-    /// 0 = broad highlight, 1 = tight/sharp highlight (maps to a specular exponent).
+    /// Classic: 0 = broad highlight, 1 = tight/sharp highlight.
+    /// Molecular Nodes and Velvet instead use perceptual roughness (0 = smooth).
     pub shininess: f32,
     pub opacity: f32,
     /// VMD "Outline": silhouette/edge darkening at grazing angles (0 = off). Packed
     /// as a flag (the top bit of the shininess byte) with a fixed shader strength.
     pub outline: f32,
     pub outline_width: f32,
+    pub hairiness: f32,
 }
 
 impl Material {
@@ -87,14 +127,14 @@ impl Material {
         if let Self::Custom { options, .. } = self { return options; }
         let p = self.params();
         MaterialOptions { ambient: p.ambient, diffuse: p.diffuse, specular: p.specular,
-            shininess: p.shininess, opacity: p.opacity, outline: p.outline, outline_width: 0.5 }
+            shininess: p.shininess, opacity: p.opacity, outline: p.outline, outline_width: 0.5, hairiness: p.hairiness }
     }
     pub fn with_options(self, options: MaterialOptions) -> Self {
         let preset = Self::ALL.iter().position(|&m| m == self.preset()).unwrap_or(0) as u8;
         Self::Custom { preset, options }
     }
 
-    pub const ALL: [Material; 13] = [
+    pub const ALL: [Material; 14] = [
         Material::Opaque,
         Material::Transparent,
         Material::Glass,
@@ -108,6 +148,7 @@ impl Material {
         Material::AoEdgy,
         Material::FlatOutline,
         Material::MolecularNodes,
+        Material::Velvet,
     ];
 
     pub fn label(self) -> &'static str {
@@ -125,6 +166,7 @@ impl Material {
             Material::AoEdgy => "AO Edgy",
             Material::FlatOutline => "Outline",
             Material::MolecularNodes => "Mat. Nodes",
+            Material::Velvet => "Velvet",
             Material::Custom { .. } => self.preset().label(),
         }
     }
@@ -139,13 +181,14 @@ impl Material {
             opacity,
             outline,
             outline_width: 0.5,
+            hairiness: 0.0,
         };
         match self {
             Material::Custom { options: p, .. } => {
                 let mut result = self.preset().params();
                 result.ambient = p.ambient; result.diffuse = p.diffuse;
                 result.specular = p.specular; result.shininess = p.shininess;
-                result.opacity = p.opacity; result.outline = p.outline; result.outline_width = p.outline_width;
+                result.opacity = p.opacity; result.outline = p.outline; result.outline_width = p.outline_width; result.hairiness = p.hairiness;
                 result
             }
             Material::Opaque => m(0.10, 0.75, 0.45, 0.55, 1.00, 0.0),
@@ -164,6 +207,9 @@ impl Material {
             Material::AoEdgy => m(0.12, 1.00, 0.00, 0.00, 1.00, 0.7),
             Material::FlatOutline => MaterialParams {
                 shading: Shading::FlatOutline, ..m(1.0, 0.0, 0.0, 0.0, 1.0, 1.0)
+            },
+            Material::Velvet => MaterialParams {
+                shading: Shading::Velvet, hairiness: 0.65, ..m(0.16, 0.55, 0.85, 0.65, 1.0, 0.0)
             },
             Material::MolecularNodes => MaterialParams {
                 shading: Shading::MolecularNodes, ..m(0.34, 0.62, 0.3, 0.4, 1.0, 0.0)
@@ -186,6 +232,13 @@ impl Material {
         match self {
             Self::Custom { options: p, .. } => {
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 127.0).round() as u32;
+                if self.preset() == Self::Velvet {
+                    // Five shader controls in 28 bits; no geometry or extra buffers.
+                    let q5 = |v: f32| (v.clamp(0.0, 1.0) * 31.0).round() as u32;
+                    let q6 = |v: f32| (v.clamp(0.0, 1.0) * 63.0).round() as u32;
+                    return 0xe000_0000 | q5(p.ambient) | (q5(p.diffuse) << 5)
+                        | (q6(p.specular) << 10) | (q6(p.shininess) << 16) | (q6(p.hairiness) << 22);
+                }
                 let mode = match self.preset() {
                     Self::FlatOutline => 0xa,
                     Self::MolecularNodes => 0xb,
@@ -198,6 +251,7 @@ impl Material {
             }
             Self::FlatOutline => return FLAT_OUTLINE_WORD,
             Self::MolecularNodes => return MOLECULAR_NODES_WORD,
+            Self::Velvet => return VELVET_WORD,
             _ => {}
         }
         let p = self.params();
@@ -236,13 +290,103 @@ pub(crate) fn shade_molecular_nodes(base: glam::Vec3, normal: glam::Vec3, view: 
         + light(glam::vec3(0.7, -0.2, 0.9)) * (params.diffuse * (0.28 / 0.62))
 }
 
+/// CPU counterpart of the fuzzy shading model for small picker icons.
+/// Matches the single-surface sheen used by both renderers.
+pub(crate) fn shade_velvet(base: glam::Vec3, normal: glam::Vec3, view: glam::Vec3, params: &MaterialParams) -> glam::Vec3 {
+    let fuzz = params.hairiness.clamp(0.0, 1.0);
+    let nv = normal.dot(view).clamp(0.0, 1.0);
+    let roughness = params.shininess.clamp(0.0, 1.0);
+    let rim = (1.0 - nv).powf(3.5 + (1.2 - 3.5) * roughness);
+    let light = |direction: glam::Vec3| ((normal.dot(direction.normalize()) + 0.5) / 1.5).clamp(0.0, 1.0);
+    let key = light(glam::vec3(0.3, 0.4, 1.0));
+    let fill = light(glam::vec3(-0.6, 0.2, 0.7));
+    let body = base * (params.ambient + params.diffuse * (0.35 + 0.65 * key + 0.2 * fill));
+    let tint = base.lerp(base.max(glam::Vec3::ZERO).sqrt(), 0.3);
+    let soft_edge = tint * (params.ambient + params.diffuse * 0.85);
+    let sheen = tint * (0.3 * params.specular * rim * (0.6 + 0.4 * key));
+    body.lerp(soft_edge, fuzz * rim * 0.65) + sheen
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn velvet_sheen_is_finite_and_softens_the_grazing_edge() {
+        let base = glam::vec3(0.2, 0.05, 0.1);
+        let mut p = Material::Velvet.params();
+        let normal = glam::Vec3::Z;
+        // Grazing sheen should lift the edge without an unbounded white highlight.
+        let front = shade_velvet(base, normal, glam::Vec3::Z, &p);
+        let grazing = shade_velvet(base, normal, glam::Vec3::X, &p);
+        assert!(grazing.element_sum() > front.element_sum());
+        assert!(grazing.max_element() < 1.0);
+        for roughness in [0.0, 0.3, 1.0] {
+            p.shininess = roughness;
+            for normal in [glam::Vec3::X, glam::Vec3::Z, -glam::Vec3::Z] {
+                let color = shade_velvet(base, normal, glam::Vec3::Z, &p);
+                assert!(color.is_finite() && color.min_element() >= 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_is_packed_for_the_shader_and_never_adds_geometry() {
+        let mut options = Material::Velvet.options();
+        options.hairiness = 0.0;
+        let smooth = Material::Velvet.with_options(options);
+        options.hairiness = 1.0;
+        let fuzzy = Material::Velvet.with_options(options);
+        assert_eq!((smooth.pack_lighting() >> 22) & 63, 0);
+        assert_eq!((fuzzy.pack_lighting() >> 22) & 63, 63);
+        assert_eq!(smooth.pack_lighting() & 0x003f_ffff, fuzzy.pack_lighting() & 0x003f_ffff);
+        let mut geom = crate::geometry::GeometryData::default();
+        geom.spheres.push(crate::render::SphereInstance {
+            center: [0.0; 3], radius: 0.2, color: 0xffff_ffff, mat: 0, pick: [0; 2],
+        });
+        geom.mesh.vertices = [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]].map(|pos|
+            crate::render::MeshVertex { pos, normal: [0.0, 0.0, 1.0], color: 0xffff_ffff, mat: 0 }).to_vec();
+        geom.mesh.indices = vec![0, 1, 2];
+        let positions: Vec<_> = geom.mesh.vertices.iter().map(|v| v.pos).collect();
+        for material in [smooth, fuzzy, Material::Velvet] {
+            crate::geometry::stamp_material(&mut geom, material);
+            assert_eq!(geom.spheres.len(), 1);
+            assert!(geom.cylinders.is_empty() && geom.lines.is_empty() && geom.points.is_empty());
+            assert_eq!(geom.mesh.indices, [0, 1, 2]);
+            assert_eq!(geom.mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>(), positions);
+        }
+    }
+
+    #[test]
+    fn edited_velvet_preserves_shader_and_session_options() {
+        let mut options = Material::Velvet.options();
+        options.opacity = 0.5;
+        options.shininess = 0.25;
+        options.hairiness = 0.8;
+        let material = Material::Velvet.with_options(options);
+        let restored: Material = serde_json::from_str(&serde_json::to_string(&material).unwrap()).unwrap();
+        assert_eq!(restored, material);
+        assert_eq!(restored.preset(), Material::Velvet);
+        assert!(restored.params().shading == Shading::Velvet);
+        assert!(restored.is_transparent());
+        assert_ne!(restored.pack_lighting(), Material::Velvet.pack_lighting());
+        for other in Material::ALL {
+            if other == Material::Velvet { continue; }
+            assert_ne!(other.with_options(options).pack_lighting(), material.pack_lighting());
+        }
+    }
+
+    #[test]
+    fn older_material_options_without_hairiness_stay_smooth() {
+        let mut value = serde_json::to_value(Material::Velvet.options()).unwrap();
+        value.as_object_mut().unwrap().remove("hairiness");
+        let restored: MaterialOptions = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.hairiness, 0.0);
+    }
+
+    #[test]
     fn specialized_materials_round_trip_without_colliding_with_classic_words() {
-        for material in [Material::FlatOutline, Material::MolecularNodes] {
+        for material in [Material::FlatOutline, Material::MolecularNodes, Material::Velvet] {
             let restored: Material = serde_json::from_str(&serde_json::to_string(&material).unwrap()).unwrap();
             assert_eq!(material, restored);
             assert!(!material.is_transparent());

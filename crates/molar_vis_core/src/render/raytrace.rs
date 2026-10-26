@@ -134,6 +134,12 @@ pub struct RtScene {
 impl RtScene {
     #[cfg(test)]
     pub(super) fn from_test_mesh(mesh: &crate::geometry::MeshData, kind: crate::geometry::RepKind) -> Self {
+        Self::from_test_mesh_and_spheres(mesh, kind, &[])
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_test_mesh_and_spheres(mesh: &crate::geometry::MeshData, kind: crate::geometry::RepKind,
+        spheres: &[crate::render::SphereInstance]) -> Self {
         let mut s = Self::default();
         s.mesh_verts = mesh
             .vertices
@@ -150,18 +156,19 @@ impl RtScene {
                 i: [t[0], t[1], t[2], mesh_closed_flag(kind)],
             })
             .collect();
-        let aabbs: Vec<_> = s
-            .triangles
-            .iter()
-            .map(|t| triangle_aabb(&s.mesh_verts, t.i[0], t.i[1], t.i[2]))
-            .collect();
+        s.spheres = spheres.iter().map(|v| GpuSphere {
+            c: [v.center[0], v.center[1], v.center[2], v.radius], m: [v.color, v.mat, 0, 0],
+        }).collect();
+        let mut aabbs: Vec<_> = s.triangles.iter()
+            .map(|t| triangle_aabb(&s.mesh_verts, t.i[0], t.i[1], t.i[2])).collect();
+        aabbs.extend(s.spheres.iter().map(sphere_aabb));
         let _timing = crate::performance::span("rt-bvh");
         let (nodes, order) = build_bvh(&aabbs);
         s.nodes = nodes;
-        s.prim_indices = order
-            .into_iter()
-            .map(|i| tag(TAG_TRIANGLE, i as usize))
-            .collect();
+        s.prim_indices = order.into_iter().map(|i| {
+            if (i as usize) < s.triangles.len() { tag(TAG_TRIANGLE, i as usize) }
+            else { tag(TAG_SPHERE, i as usize - s.triangles.len()) }
+        }).collect();
         s
     }
 
@@ -303,6 +310,30 @@ impl RtScene {
                             }
                         }
                     }
+                    for &off in &offsets {
+                        // Mesh: append vertices (offset triangle indices into the shared array).
+                        let base = self.mesh_verts.len() as u32;
+                        for v in &geom.mesh.vertices {
+                            self.mesh_verts.push(GpuMeshVertex {
+                                p: [
+                                    v.pos[0] + off.x,
+                                    v.pos[1] + off.y,
+                                    v.pos[2] + off.z,
+                                    f32::from_bits(v.color),
+                                ],
+                                n: [v.normal[0], v.normal[1], v.normal[2], f32::from_bits(v.mat)],
+                            });
+                        }
+                        for t in geom.mesh.indices.chunks_exact(3) {
+                            let (i0, i1, i2) = (base + t[0], base + t[1], base + t[2]);
+                            aabbs.push(triangle_aabb(&self.mesh_verts, i0, i1, i2));
+                            tags.push(tag(TAG_TRIANGLE, self.triangles.len()));
+                            let closed = 0;
+                            self.triangles.push(GpuTriangle {
+                                i: [i0, i1, i2, closed],
+                            });
+                        }
+                    }
                     continue;
                 }
                 let Some(sel) = rep.sel.as_ref() else { continue };
@@ -326,8 +357,9 @@ impl RtScene {
                     fresh.as_ref()
                 };
 
+                let has_envelope = super::envelope::needed_primitives(geom.spheres, geom.cylinders);
                 for &off in &offsets {
-                    let envelope_group = if super::envelope::needed_primitives(geom.spheres, geom.cylinders) {
+                    let envelope_group = if has_envelope {
                         let group = next_envelope_group;
                         next_envelope_group += 1;
                         group
@@ -917,6 +949,7 @@ pub struct RtUniform {
     pub dims: [u32; 4],
     /// Progressive accumulation: prior_total_samples, reset(0/1), _, _. Set by `render`.
     pub accum: [u32; 4],
+    pub path_animation: [f32; 4],
 }
 
 /// GPU ray-tracing resources (compute tracer + fullscreen resolve). Created only on a

@@ -268,6 +268,10 @@ pub struct Camera {
     /// works). Zero after any re-framing. `#[serde(default)]` so older sessions still load.
     #[serde(default)]
     pub clip_offset: Vec3,
+    /// World bounds of the visible scene. The automatic far plane covers these
+    /// bounds even when a small selection is framed or the rig is moved in Z.
+    #[serde(default)]
+    pub depth_bounds: Option<[Vec3; 2]>,
 }
 
 /// A viewport corner, for anchoring the axes gizmo.
@@ -339,6 +343,7 @@ impl Camera {
             axes_corner: Corner::default(),
             pivot: None,
             clip_offset: Vec3::ZERO,
+            depth_bounds: Some([min, max]),
         }
     }
 
@@ -519,7 +524,17 @@ impl Camera {
         let aspect = aspect.max(1e-3);
         let d = self.clip_depth();
         let znear = (d - self.scene_radius).max(self.scene_radius * 0.02).max(1e-4);
-        let zfar = (d + self.scene_radius * 3.0).max(znear) + 1e-3;
+        let mut zfar = (d + self.scene_radius * 3.0).max(znear) + 1e-3;
+        if let Some([min, max]) = self.depth_bounds {
+            let axis = self.orientation * Vec3::Z;
+            let eye = self.eye();
+            let back = Vec3::new(
+                if axis.x >= 0.0 { min.x } else { max.x },
+                if axis.y >= 0.0 { min.y } else { max.y },
+                if axis.z >= 0.0 { min.z } else { max.z },
+            );
+            zfar = zfar.max((eye - back).dot(axis) + self.scene_radius * 0.02 + 1e-3);
+        }
         match self.projection {
             Projection::Perspective => Mat4::perspective_rh(self.fov_y, aspect, znear, zfar),
             Projection::Orthographic => {
@@ -605,8 +620,8 @@ impl Camera {
     }
 
     /// Move the whole camera rig along the view axis (Shift+RMB): translates the scene
-    /// in depth **without** changing `distance`, so the near/far clip planes stay put and
-    /// the molecule moves *through* them (front/back clipping / slabbing) — unlike a zoom,
+    /// in depth **without** changing `distance`, so the front clip plane stays put and
+    /// the molecule moves *through* it (front clipping / slabbing) — unlike a zoom,
     /// whose clip planes track the molecule. `dy` in points; drag down pushes the scene
     /// away from the camera, drag up pulls it toward (and into) the near plane. Scaled by
     /// the scene size so it feels consistent at any zoom.
@@ -794,5 +809,41 @@ mod tests {
             let got = Vec2::new(clip.x / clip.w, clip.y / clip.w);
             assert!((got - ndc).length() < 1e-3, "{proj:?}: {got:?} vs {ndc:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod far_clipping_tests {
+    use super::*;
+    #[test]
+    fn z_drag_does_not_introduce_a_back_clip_plane() {
+        for projection in [Projection::Orthographic, Projection::Perspective] {
+            let mut camera = Camera::frame_bbox(Vec3::splat(-1.0), Vec3::splat(1.0), 0.9);
+            camera.projection = projection;
+            camera.translate_z(-200.0);
+            let front = camera
+                .proj(1.0)
+                .project_point3(camera.view().transform_point3(Vec3::Z));
+            assert!(front.z < 0.0, "front slabbing remains active");
+            camera.translate_z(2000.0);
+            let back = camera
+                .proj(1.0)
+                .project_point3(camera.view().transform_point3(-Vec3::Z));
+            assert!(
+                (0.0..=1.0).contains(&back.z),
+                "{projection:?}: back was clipped at {}",
+                back.z
+            );
+        }
+    }
+    #[test]
+    fn focusing_a_ligand_keeps_background_in_the_depth_range() {
+        let mut camera = Camera::frame_bbox(Vec3::splat(-20.0), Vec3::splat(20.0), 0.9);
+        camera.focus_bbox(Vec3::splat(-0.3), Vec3::splat(0.3));
+        camera.translate_z(1500.0);
+        let back = camera
+            .proj(1.0)
+            .project_point3(camera.view().transform_point3(Vec3::new(0.0, 0.0, -20.0)));
+        assert!(back.z <= 1.0);
     }
 }

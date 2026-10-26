@@ -139,3 +139,11 @@ onto a channel drained at the top of `App::ui`; the viewer renders the JS-owned
 `System` by reference through a `WebSystemSource` (a `SharedSource` over an `Rc<System>`
 — safe borrows, no raw pointers, since the browser owns its own data and runs
 single-threaded).
+
+## Camera animation
+
+Camera methods now return promises that resolve to `Animation` handles. Optional
+`duration` and `easing` parameters enable smooth motion. For example:
+`const motion = await vis.rotate(90, 0, 1.5, "smooth"); await motion.wait();`.
+Use `vis.movie()` to build sequences for preview and seeking. See
+[the animation guide](../../docs/ANIMATION.md) for details. Video export is native-only.

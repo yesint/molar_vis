@@ -26,6 +26,7 @@ pub fn classify(ss: SS) -> SsClass {
 }
 
 /// Per-residue secondary structure, keyed by molar `resindex`.
+#[derive(Clone)]
 pub struct SsMap {
     map: std::collections::HashMap<usize, SS>,
 }

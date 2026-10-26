@@ -8,30 +8,17 @@
 //! This layer is **always compiled**: the app's own menu actions and the Python
 //! (`molar_vis_py`) / JavaScript (`molar_vis_js`) hosts drive the viewer through it.
 //!
-//! The in-app **Rhai console** on top of it — the [`engine`] and [`console`] modules — is
-//! behind the non-default `scripting` feature. Rhai and its console are a convenience for
-//! interactive use, not something every embedding wants to pay for, so an embedder that
-//! drives the viewer from its own host language can leave them out entirely.
-//!
 //! Pure-Rust + WASM-safe; only the `load()` command is native-gated (in
 //! `App::execute_command`).
 
 pub mod command;
-#[cfg(feature = "scripting")]
-pub mod console;
-#[cfg(feature = "scripting")]
-pub mod engine;
 
 pub use command::{parse_color, parse_material, Command, RepRef};
-#[cfg(feature = "scripting")]
-pub use console::{ConsoleLine, LineKind, ScriptConsole};
-#[cfg(feature = "scripting")]
-pub use engine::ScriptSession;
 
 /// Apply a **scene-mutating** command (everything except [`Command::Load`], which
 /// needs the App's loader and is handled in `App::execute_command`). Performs the
 /// same field-set + dirty-flag the GUI does, so the change converges on the normal
-/// `rebuild_dirty` path. Returns a message to show in the console on a bad index /
+/// `rebuild_dirty` path. Returns an error on a bad index /
 /// value / selection. Kept free of `App` so it's unit-testable without a GPU.
 pub fn apply_scene_command(
     scene: &mut crate::scene::Scene,
@@ -47,7 +34,7 @@ pub fn apply_scene_command(
             // Pre-validate for an immediate error; an empty match is a (non-fatal)
             // warning the field flags, so let it through.
             if let Err(EvalError::Invalid { message, .. }) =
-                scene.molecules[mi].data.evaluate(&text)
+                scene.validate_selection(mi, ri, &text)
             {
                 return Err(message);
             }
@@ -118,7 +105,7 @@ pub fn apply_scene_command(
         Command::Focus { mol, text } => {
             let mi = resolve_mol(scene, mol)?;
             let m = &scene.molecules[mi];
-            let (_, sel) = m.data.evaluate(&text).map_err(|e| match e {
+            let sel = scene.select(mi, &text).map_err(|e| match e {
                 EvalError::Empty => "selection matched no atoms".to_string(),
                 EvalError::Invalid { message, .. } => message,
             })?;
@@ -183,8 +170,7 @@ mod tests {
     /// Commands mutate the rep + set the right dirty flag; `AddRep` + a `Last`-targeted
     /// style grows the list and styles the new rep; selection resolves against molar's
     /// grammar. Built from [`Command`]s directly — this layer is what the app's menus and
-    /// the Python/JS hosts use, so its test must not depend on the Rhai front end (the
-    /// script→command half is covered in `engine`'s own tests).
+    /// the Python/JS hosts use.
     #[test]
     fn commands_mutate_the_scene() {
         let mut scene = load_scene();

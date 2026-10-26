@@ -69,6 +69,7 @@ impl App {
                 gray_active,
                 true,
             );
+            self.camera.depth_bounds = self.scene.visible_depth_bounds();
 
             let geometry_pending = self.scene.molecules.iter().filter(|m| m.visible)
                 .any(|m| m.reps.iter().any(|r| r.geometry_pending()));
@@ -81,7 +82,7 @@ impl App {
 
             // VMD-style navigation:
             //   LMB = free 3D rotate · Shift+LMB = roll (screen-plane rotate)
-            //   RMB = pan           · Shift+RMB = move scene along view Z (fixed clip → slab)
+            //   RMB = pan           · Shift+RMB = move scene along view Z (fixed front clip)
             //   middle = pan        · wheel = scale (zoom)
             // In Lasso pick mode an LMB drag draws the selection polygon (the held
             // modifier picks the set op on release: plain = replace, Shift = add,
@@ -108,6 +109,9 @@ impl App {
                 matches!(self.draw.as_ref().map(|d| d.tool), Some(DrawTool::DihedralRotate));
             let dihedral_dragging =
                 self.draw.as_ref().is_some_and(|d| d.dihedral.drag.is_some());
+            if response.dragged() || (response.hovered() && ui.input(|i| i.smooth_scroll_delta != egui::Vec2::ZERO)) {
+                self.cancel_animation();
+            }
             let delta = response.drag_delta();
             let mods = ui.input(|i| i.modifiers);
             let (shift, alt) = (mods.shift, mods.alt);
@@ -140,7 +144,7 @@ impl App {
                 }
             } else if response.dragged_by(egui::PointerButton::Secondary) {
                 if shift {
-                    // Move the scene along the view axis with fixed clip planes (slabbing),
+                    // Move the scene along the view axis with a fixed front clip plane (slabbing),
                     // not a zoom — so the molecule can be pushed through the near plane.
                     self.camera.translate_z(delta.y);
                 } else {
@@ -186,9 +190,24 @@ impl App {
             // The edited rep draws first so it stays visible over the grayed context reps.
             self.renderer.set_edit_active(gray_active);
 
+            let has_animated_paths = self.scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter().any(|rep|
+                rep.visible && rep.params.has_animated_glowing_path() && rep.gpu.has_geometry()));
+            let paths_animating = has_animated_paths && !matches!(self.rt.warm, Some(RtKind::Still))
+                && !matches!(self.rt.job, Some(RtJob::Still)) && !self.rt.still;
+            if paths_animating {
+                let timeline_owns_time = self.preview.is_some();
+                #[cfg(not(target_arch = "wasm32"))]
+                let timeline_owns_time = timeline_owns_time || self.movie_job.is_some();
+                if !timeline_owns_time {
+                    self.renderer.set_interaction_animation_time(ui.input(|i| i.time));
+                }
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+            }
+
             let cam_changed = self.last_render_camera != Some(self.camera);
             let size_changed = size_px != self.last_size;
-            let raster_dirty = geom_changed || cam_changed || size_changed || self.view_dirty || pulsing;
+            let scene_dirty = geom_changed || cam_changed || size_changed || self.view_dirty;
+            let raster_dirty = scene_dirty || pulsing || paths_animating;
 
             // Re-gather the tracer's scene before the next trace. The camera counts, not just the
             // geometry: multi-order bond strands are offset along the screen perpendicular, so a
@@ -220,8 +239,9 @@ impl App {
             // Any camera/scene/size change drops a showing still and aborts an in-progress /
             // pending **Still** back to the realtime view. (A Save renders offscreen at its own
             // captured view, so it keeps going.)
-            if raster_dirty {
+            if scene_dirty || pulsing {
                 self.rt.still = false;
+                if has_animated_paths { ui.ctx().request_repaint_after(std::time::Duration::from_millis(16)); }
                 if matches!(self.rt.warm, Some(RtKind::Still)) {
                     self.rt.warm = None;
                 }
@@ -396,7 +416,7 @@ impl App {
             if picking_center {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
-            let hovering = (self.pick_mode == PickMode::Click || picking_partner || picking_center)
+            let hovering = (self.pick_mode.shows_hover_info() || picking_partner || picking_center)
                 && !response.dragged();
             let mut residue_hit = false;
             let mut lens_shown = false;
@@ -444,6 +464,14 @@ impl App {
                         let proj = self.camera.proj(aspect);
                         pick::pick(&self.scene, view, proj, ndc_x, ndc_y)
                     };
+                    let interaction_hit = if !picking_partner && !picking_center {
+                        pick::pick_interaction(
+                            &self.scene, self.camera.view(), self.camera.proj(aspect),
+                            glam::vec2(ndc_x, ndc_y),
+                            glam::vec2(size_px[0] as f32, size_px[1] as f32),
+                            hit.as_ref(),
+                        )
+                    } else { None };
                     if picking_partner {
                         // Choosing an Interactions rep's partner: highlight the whole
                         // rep under the cursor (its atoms glow), and assign it on click.
@@ -471,7 +499,7 @@ impl App {
                         // Ring + info box on the atom under the cursor; a click makes it
                         // the centre of rotation, a click on empty space cancels.
                         if let Some(hit) = &hit {
-                            draw_pick_overlay(ui, rect, &self.camera, aspect, hit);
+                            draw_pick_overlay(ui, rect, &self.camera, aspect, &self.scene, hit);
                         }
                         if response.clicked() {
                             if let Some(hit) = &hit {
@@ -480,12 +508,14 @@ impl App {
                             self.center_pick = false;
                             ui.ctx().request_repaint();
                         }
+                    } else if let Some(hit) = interaction_hit {
+                        draw_interaction_overlay(ui, rect, &self.camera, aspect, &self.scene, &hit);
                     } else if let Some(hit) = hit {
                         // Click selects the hovered atom/residue: merge it into the
                         // active (pending) selection (Shift = add, Ctrl/⌘ = subtract,
                         // plain = replace), expanded per the scope mode. A plain LMB
                         // *drag* still orbits (handled above), so only a real click here.
-                        if response.clicked() {
+                        if self.pick_mode == PickMode::Click && response.clicked() {
                             let m = ui.input(|i| i.modifiers);
                             let op = if m.shift {
                                 LassoOp::Add
@@ -521,14 +551,14 @@ impl App {
                                     SelectionMode::Residues,
                                 )
                             };
-                            draw_residue_info_overlay(ui, rect, &hit, atoms.len());
+                            draw_residue_info_overlay(ui, rect, &self.scene, &hit, atoms.len());
                             if self.scene.set_hover(hit.mol, atoms) {
                                 ui.ctx().request_repaint();
                             }
                             residue_hit = true;
                         } else {
                             // Atoms mode: egui ring + atom info box.
-                            draw_pick_overlay(ui, rect, &self.camera, aspect, &hit);
+                            draw_pick_overlay(ui, rect, &self.camera, aspect, &self.scene, &hit);
                         }
                     }
                     // Hover detail lens: **independent of any atom hit** — wherever the
@@ -762,7 +792,7 @@ impl App {
     /// meaningless for single-atom hover picking, so it falls back to `Atoms` there
     /// (and the toolbar hides it); it stays available for the lasso.
     pub(super) fn effective_selection_mode(&self) -> SelectionMode {
-        if self.pick_mode == PickMode::Click && self.selection_mode == SelectionMode::BoundH {
+        if self.pick_mode.shows_hover_info() && self.selection_mode == SelectionMode::BoundH {
             SelectionMode::Atoms
         } else {
             self.selection_mode
@@ -801,6 +831,7 @@ impl App {
         if let Some(rep) = self.scene.molecules[target_mi].reps.get_mut(target_rep) {
             rep.partner = Some((chosen_src, chosen_rep));
             rep.geom_dirty = true;
+            self.scene.show_interaction_pocket(target_mi, target_rep, chosen_mi, &self.rep_defaults);
         }
         self.rep_pick = None;
         self.scene.clear_hover();

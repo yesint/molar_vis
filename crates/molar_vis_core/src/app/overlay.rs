@@ -27,6 +27,7 @@ pub(super) fn draw_pick_overlay(
     rect: egui::Rect,
     camera: &Camera,
     aspect: f32,
+    scene: &Scene,
     hit: &crate::pick::PickHit,
 ) {
     let vp = camera.proj(aspect) * camera.view();
@@ -60,6 +61,7 @@ pub(super) fn draw_pick_overlay(
         &painter,
         rect,
         &[
+            hover_address(scene, hit),
             format!("{} {} {}", hit.name, hit.resname, hit.resid),
             format!("{:.3}, {:.3}, {:.3}", hit.real.x, hit.real.y, hit.real.z),
         ],
@@ -68,15 +70,64 @@ pub(super) fn draw_pick_overlay(
 
 /// Lower-left info box for the **Residues** hover mode: reports the hovered residue
 /// (no ring — the steady GPU glow shows which atoms are highlighted).
-pub(super) fn draw_residue_info_overlay(ui: &egui::Ui, rect: egui::Rect, hit: &crate::pick::PickHit, n: usize) {
+pub(super) fn draw_residue_info_overlay(ui: &egui::Ui, rect: egui::Rect, scene: &Scene, hit: &crate::pick::PickHit, n: usize) {
     draw_info_box(
         &ui.painter_at(rect),
         rect,
         &[
+            hover_address(scene, hit),
             format!("{} {}", hit.resname, hit.resid),
-            format!("residue · {n} atom{}", if n == 1 { "" } else { "s" }),
+            format!("{n} atom{}", if n == 1 { "" } else { "s" }),
         ],
     );
+}
+
+fn hover_address(scene: &Scene, hit: &crate::pick::PickHit) -> String {
+    format!("{}:r{}", scene.source_address(hit.mol), hit.rep + scene.source_rep_offset(hit.mol))
+}
+
+pub(super) fn draw_interaction_overlay(
+    ui: &egui::Ui, rect: egui::Rect, camera: &Camera, aspect: f32,
+    scene: &Scene, hit: &crate::pick::InteractionHit<'_>,
+) {
+    use crate::interactions::InteractionKind as K;
+    let contact = &hit.geometry.contact;
+    let (label, distance_label, angle_label) = match contact.kind {
+        K::HBond => ("Hydrogen bond", "D–A distance", "D–H···A angle"),
+        K::Hydrophobic => ("Hydrophobic contact", "Distance", "Angle"),
+        K::SaltBridge => ("Salt bridge", "Centroid distance", "Angle"),
+        K::PiStacking => ("π stacking", "Centroid distance", "Ring-plane angle"),
+        K::PiCation => ("Cation–π", "Centroid distance", "Ring-axis angle"),
+        K::Halogen => ("Halogen bond", "X···A distance", "C–X···A angle"),
+    };
+    let mut lines = vec![
+        label.to_string(),
+        format!("{distance_label}: {:.3} nm", contact.a.distance(contact.b)),
+    ];
+    if let Some(angle) = contact.angle {
+        lines.push(format!("{angle_label}: {angle:.1}°"));
+    } else if contact.kind == K::HBond {
+        lines.push("Heavy-atom fallback; no H angle".into());
+    }
+    if let Some(offset) = contact.offset {
+        lines.push(format!("Lateral offset: {offset:.3} nm"));
+    }
+    let painter = ui.painter_at(rect);
+    let vp = camera.proj(aspect) * camera.view();
+    let screen = |v: glam::Vec3| egui::pos2(
+        rect.left() + (v.x * 0.5 + 0.5) * rect.width(),
+        rect.top() + (0.5 - v.y * 0.5) * rect.height(),
+    );
+    let RepParams::Interactions { settings } = scene.molecules[hit.mol].reps[hit.rep].params else { return };
+    let color = crate::theme::glow_color(ui.ctx(), &camera.background);
+    let width = settings.line_width / ui.ctx().pixels_per_point();
+    for &(a, b) in &hit.geometry.segments {
+        if let Some((a, b)) = pick::project_segment(vp, a, b) {
+            painter.line_segment([screen(a), screen(b)], egui::Stroke::new(width + 4.0, color.gamma_multiply(0.4)));
+            painter.line_segment([screen(a), screen(b)], egui::Stroke::new(width + 1.0, color));
+        }
+    }
+    draw_info_box(&painter, rect, &lines);
 }
 
 /// Draw a framed lower-left info box with `lines` of monospace text.

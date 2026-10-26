@@ -12,6 +12,7 @@ struct Camera {
     // Selection-glow color (rgb), chosen on the CPU from the viewport background so the
     // glow and the cues egui draws over the scene are one decision. See `theme::glow_color`.
     glow_color: vec4<f32>,
+    path_animation: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -81,6 +82,8 @@ fn oit_weight(eye_z: f32, a: f32) -> f32 {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: u32, inst: Instance) -> VsOut {
+    let radius = inst.radius;
+    let profile = inst.profile;
     var a0 = (camera.view * vec4<f32>(inst.p0, 1.0)).xyz;
     var a1 = (camera.view * vec4<f32>(inst.p1, 1.0)).xyz;
 
@@ -100,7 +103,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
         sp = select(vec3<f32>(1.0, 0.0, 0.0), sp / spl, spl > 1e-4);
         let shift = sp * (inst.offset.x * inst.offset.y);
         lane_shift = shift;
-        if (!bond_profile_enabled(inst.profile)) {
+        if (!bond_profile_enabled(profile)) {
             a0 = a0 + shift;
             a1 = a1 + shift;
         }
@@ -134,8 +137,8 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     // Oversize by 1.4× so the curved silhouette is fully covered (extra fragments miss
     // the ray test and `discard`); the sphere impostor does the same (1.25×). Extent
     // along the tube = projected half-length + cap; across = the radius.
-    let atom_radii = bond_profile_atom_radii(seg_len, inst.profile);
-    let bound_radius = select(inst.radius, max(max(inst.radius, atom_radii.x), atom_radii.y) + length(lane_shift) + inst.smoothing * min(atom_radii.x, atom_radii.y) / 3.0, bond_profile_enabled(inst.profile));
+    let atom_radii = bond_profile_atom_radii(seg_len, profile);
+    let bound_radius = select(radius, max(max(radius, atom_radii.x), atom_radii.y) + length(lane_shift) + inst.smoothing * min(atom_radii.x, atom_radii.y) / 3.0, bond_profile_enabled(profile));
     let bb = bound_radius * 1.4;
     let half_axis = 0.5 * abs(dot(a1 - a0, u)); // projected half-length of the tube
     let su = half_axis + bb;
@@ -148,7 +151,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
 
     var out: VsOut;
     out.instance = instance;
-    out.profile = inst.profile;
+    out.profile = profile;
     out.smoothing = inst.smoothing;
     out.color_blend = inst.color_blend;
     out.shift = lane_shift;
@@ -189,7 +192,7 @@ fn vs_main(@builtin(vertex_index) vidx: u32, @builtin(instance_index) instance: 
     out.view_pos = pos;
     out.base = a0;
     out.axis = d;
-    out.radius = inst.radius;
+    out.radius = radius;
     out.seg_len = seg_len;
     out.color = unpack_color(inst.color);
     out.color1 = unpack_color(inst.color1);

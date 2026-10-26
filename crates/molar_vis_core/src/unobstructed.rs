@@ -1,20 +1,27 @@
 //! Unobstructed-view geometry — pure, GPU-free, wasm-safe.
 //!
+//! Small solid targets use rendered spheres, capsules and mesh triangles in a
+//! fixed-scale depth grid (`pixels`): maximize visible area, including self-overlap.
+//! Large targets retain the accelerated atom-centre search below.
+//!
 //! Given a target representation's atoms and the atoms of every other rep that could
 //! hide it, this picks the camera view direction that leaves the **most target atoms
 //! directly visible** — front-most, hidden by neither another rep nor another atom of
 //! the target rep itself ("most of the rep is on screen").
 //!
-//! Every atom is modeled as a van-der-Waals sphere and projected **orthographically**
-//! (the viewer's default projection). A target atom counts as visible along a view
-//! direction `d` when no other atom nearer the camera covers its projected centre. The
-//! score is that visible count; the search maximizes it over a Fibonacci sphere of
-//! directions plus a local refine.
+//! The fallback atom search uses representation radii. Mesh representations supply
+//! actual triangles, accelerated with a BVH.
+//! Projection is orthographic (the viewer's default). A target atom counts as visible
+//! when its projected centre is covered by neither nearer spheres nor mesh triangles.
+//! The search maximizes that count over Fibonacci directions and a local refinement.
 //!
 //! `d` is the world direction from the target toward the camera: the camera sits on the
 //! `+d` side and looks back along `-d`, so a larger `dot(pos, d)` means nearer the
 //! camera. [`look_along_quat`] turns `d` into the camera orientation used by
 //! `App::unobstructed_view`.
+
+mod pixels;
+pub(crate) use pixels::{PixelScene, PixelView};
 
 use glam::{Mat3, Quat, Vec3};
 use std::f32::consts::TAU;
@@ -60,7 +67,7 @@ impl VisibilityScratch {
     /// hidden (only the front one of an overlapping pair shows).
     #[cfg(test)]
     fn visible_count(&mut self, target: &[(Vec3, f32)], occluders: &[(Vec3, f32)], d: Vec3) -> u32 {
-        self.visible_count_cancellable(target, occluders, d, &|| false)
+        self.visible_count_cancellable(target, occluders, d, None, &|| false)
             .unwrap()
     }
 
@@ -69,6 +76,7 @@ impl VisibilityScratch {
         target: &[(Vec3, f32)],
         occluders: &[(Vec3, f32)],
         d: Vec3,
+        mesh: Option<&TriangleOccluders>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<u32, String> {
         let t = target.len();
@@ -188,7 +196,7 @@ impl VisibilityScratch {
                     }
                 }
             }
-            if !hidden {
+            if !hidden && !mesh.is_some_and(|mesh| mesh.blocks(target[i].0, d)) {
                 visible += 1;
             }
         }
@@ -222,9 +230,21 @@ pub(crate) fn best_unobstructed_direction_cancellable(
     resolution: usize,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec3, String> {
+    best_direction_with_triangles_cancellable(target, occluders, &[], resolution, cancelled)
+}
+
+/// Mesh reps occlude with their actual triangles rather than their atom spheres.
+pub(crate) fn best_direction_with_triangles_cancellable(
+    target: &[(Vec3, f32)],
+    occluders: &[(Vec3, f32)],
+    triangles: &[[Vec3; 3]],
+    resolution: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec3, String> {
     if cancelled() {
         return Err("cancelled".into());
     }
+    let mesh = TriangleOccluders::new(triangles);
     if target.is_empty() {
         return Ok(Vec3::Z);
     }
@@ -235,7 +255,7 @@ pub(crate) fn best_unobstructed_direction_cancellable(
                 if cancelled() {
                     return Err("cancelled".into());
                 }
-                scratch.visible_count_cancellable(target, occluders, d, cancelled)
+                scratch.visible_count_cancellable(target, occluders, d, Some(&mesh), cancelled)
             })
             .collect()
     })
@@ -243,43 +263,54 @@ pub(crate) fn best_unobstructed_direction_cancellable(
 
 /// Both scorers use the same directions, tie order and three refinement rings.
 /// A batch scorer allows the GPU to evaluate each pass with one score readback.
-pub(crate) fn search_directions<E>(
+pub(crate) fn search_directions<E, S: Copy + Ord>(
     resolution: usize,
-    mut score: impl FnMut(&[Vec3]) -> Result<Vec<u32>, E>,
+    score: impl FnMut(&[Vec3]) -> Result<Vec<S>, E>,
+) -> Result<Vec3, E> {
+    search_directions_with_seeds(resolution, 1, score)
+}
+
+fn search_directions_with_seeds<E, S: Copy + Ord>(
+    resolution: usize,
+    seeds: usize,
+    mut score: impl FnMut(&[Vec3]) -> Result<Vec<S>, E>,
 ) -> Result<Vec3, E> {
     let dirs = fibonacci_sphere(resolution.max(8));
     let scores = score(&dirs)?;
     debug_assert_eq!(scores.len(), dirs.len());
-    let mut best = dirs[0];
-    let mut best_score = scores[0];
-    for (&d, &s) in dirs.iter().zip(&scores).skip(1) {
-        if s > best_score {
-            best_score = s;
-            best = d;
+    let mut ranked = dirs.into_iter().zip(scores).collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut candidates: Vec<(Vec3, S)> = Vec::new();
+    for candidate in ranked {
+        if candidates.iter().all(|(d, _)| d.dot(candidate.0) < 15_f32.to_radians().cos()) {
+            candidates.push(candidate);
+            if candidates.len() >= seeds { break; }
         }
     }
     for &ring_deg in &[10.0_f32, 4.0, 1.5] {
-        let base = best;
-        let (t1, t2) = tangent_basis(base);
         let tilt = ring_deg.to_radians();
         let (c, s) = (tilt.cos(), tilt.sin());
-        let dirs: Vec<_> = (0..16)
-            .map(|k| {
+        let dirs: Vec<_> = candidates.iter().flat_map(|&(base, _)| {
+            let (t1, t2) = tangent_basis(base);
+            (0..16).map(move |k| {
                 let az = k as f32 / 16.0 * TAU;
                 let tdir = t1 * az.cos() + t2 * az.sin();
                 (base * c + tdir * s).normalize()
-            })
+            }) })
             .collect();
         let scores = score(&dirs)?;
         debug_assert_eq!(scores.len(), dirs.len());
-        for (&d, &s) in dirs.iter().zip(&scores) {
-            if s > best_score {
-                best_score = s;
-                best = d;
+        for (candidate, (dirs, scores)) in candidates.iter_mut().zip(dirs.chunks(16).zip(scores.chunks(16))) {
+            for (&d, &s) in dirs.iter().zip(scores) {
+                if s > candidate.1 { *candidate = (d, s); }
             }
         }
     }
-    Ok(best.normalize_or_zero())
+    let mut best = candidates[0];
+    for candidate in candidates.into_iter().skip(1) {
+        if candidate.1 > best.1 { best = candidate; }
+    }
+    Ok(best.0.normalize_or_zero())
 }
 
 /// Camera orientation (a `Quat`) that looks at the target from direction `d`: the eye
@@ -467,5 +498,172 @@ mod tests {
             visible_count(&target, &occ, d) > visible_count(&target, &occ, Vec3::X),
             "the opening must beat the blocked side"
         );
+    }
+}
+
+struct TriangleOccluders {
+    triangles: Vec<[Vec3; 3]>,
+    nodes: Vec<TriangleNode>,
+}
+struct TriangleNode {
+    min: Vec3,
+    max: Vec3,
+    children: Option<[usize; 2]>,
+    range: std::ops::Range<usize>,
+}
+impl TriangleOccluders {
+    fn new(triangles: &[[Vec3; 3]]) -> Self {
+        let mut mesh = Self {
+            triangles: triangles.to_vec(),
+            nodes: Vec::new(),
+        };
+        if !triangles.is_empty() {
+            mesh.build(0, triangles.len());
+        }
+        mesh
+    }
+    fn build(&mut self, start: usize, end: usize) -> usize {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for triangle in &self.triangles[start..end] {
+            for &p in triangle {
+                min = min.min(p);
+                max = max.max(p);
+            }
+        }
+        let index = self.nodes.len();
+        self.nodes.push(TriangleNode {
+            min,
+            max,
+            children: None,
+            range: start..end,
+        });
+        if end - start > 8 {
+            let extent = max - min;
+            let axis = if extent.x >= extent.y && extent.x >= extent.z {
+                0
+            } else if extent.y >= extent.z {
+                1
+            } else {
+                2
+            };
+            let mid = start + (end - start) / 2;
+            self.triangles[start..end].select_nth_unstable_by(mid - start, |a, b| {
+                let center = |t: &[Vec3; 3]| (t[0][axis] + t[1][axis] + t[2][axis]) / 3.0;
+                center(a).total_cmp(&center(b))
+            });
+            let left = self.build(start, mid);
+            let right = self.build(mid, end);
+            self.nodes[index].children = Some([left, right]);
+        }
+        index
+    }
+    fn blocks(&self, origin: Vec3, direction: Vec3) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        fn box_hit(min: Vec3, max: Vec3, origin: Vec3, direction: Vec3) -> bool {
+            let mut near = 0.0_f32;
+            let mut far = f32::INFINITY;
+            for axis in 0..3 {
+                if direction[axis].abs() < 1e-8 {
+                    if origin[axis] < min[axis] - 1e-6 || origin[axis] > max[axis] + 1e-6 {
+                        return false;
+                    }
+                } else {
+                    let a = (min[axis] - origin[axis]) / direction[axis];
+                    let b = (max[axis] - origin[axis]) / direction[axis];
+                    near = near.max(a.min(b));
+                    far = far.min(a.max(b));
+                    if near > far + 1e-6 {
+                        return false;
+                    }
+                }
+            }
+            far > 1e-5
+        }
+        fn triangle_hit(t: &[Vec3; 3], o: Vec3, d: Vec3) -> bool {
+            let e1 = t[1] - t[0];
+            let e2 = t[2] - t[0];
+            let p = d.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1e-9 {
+                return false;
+            }
+            let v = o - t[0];
+            let u = v.dot(p) / det;
+            if !(-1e-6..=1.0 + 1e-6).contains(&u) {
+                return false;
+            }
+            let q = v.cross(e1);
+            let w = d.dot(q) / det;
+            w >= -1e-6 && u + w <= 1.0 + 1e-6 && e2.dot(q) / det > 1e-5
+        }
+        let mut stack = vec![0];
+        while let Some(index) = stack.pop() {
+            let node = &self.nodes[index];
+            if !box_hit(node.min, node.max, origin, direction) {
+                continue;
+            }
+            if let Some([left, right]) = node.children {
+                stack.push(left);
+                stack.push(right);
+            } else if self.triangles[node.range.clone()]
+                .iter()
+                .any(|t| triangle_hit(t, origin, direction))
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod triangle_tests {
+    use super::*;
+
+    #[test]
+    fn mesh_silhouettes_occlude_even_when_no_atom_proxy_is_near_the_ray() {
+        let triangles = [[
+            Vec3::new(-100.0, -100.0, 1.0),
+            Vec3::new(100.0, -100.0, 1.0),
+            Vec3::new(0.0, 100.0, 1.0),
+        ]];
+        let mesh = TriangleOccluders::new(&triangles);
+        assert!(mesh.blocks(Vec3::ZERO, Vec3::Z));
+        assert!(!mesh.blocks(Vec3::ZERO, -Vec3::Z));
+        let target = [(Vec3::ZERO, 0.1)];
+        assert_eq!(
+            VisibilityScratch::default()
+                .visible_count_cancellable(&target, &[], Vec3::Z, Some(&mesh), &|| false)
+                .unwrap(),
+            0
+        );
+        let direction =
+            best_direction_with_triangles_cancellable(&target, &[], &triangles, 256, &|| false)
+                .unwrap();
+        assert!(!mesh.blocks(Vec3::ZERO, direction));
+    }
+    #[test]
+    fn triangle_bvh_matches_brute_force_hits_in_different_regions() {
+        let triangles = (0..30)
+            .map(|i| {
+                let x = i as f32 * 3.0;
+                [
+                    Vec3::new(x - 1.0, -1.0, 1.0),
+                    Vec3::new(x + 1.0, -1.0, 1.0),
+                    Vec3::new(x, 1.0, 1.0),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mesh = TriangleOccluders::new(&triangles);
+        for x in 0..90 {
+            let origin = Vec3::new(x as f32, 0.0, 0.0);
+            let expected = triangles
+                .iter()
+                .any(|t| TriangleOccluders::new(&[*t]).blocks(origin, Vec3::Z));
+            assert_eq!(mesh.blocks(origin, Vec3::Z), expected);
+        }
     }
 }

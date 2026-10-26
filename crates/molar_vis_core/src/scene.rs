@@ -58,6 +58,7 @@ pub struct GroupId(pub u64);
 /// Switching members strips the prefix off the old member and re-materializes it
 /// onto the new one ([`Scene::switch_group_member`]); snapshots (undo/session)
 /// carry their own `Vec<RepState>` copies.
+#[derive(Clone)]
 pub struct MolGroup {
     pub id: GroupId,
     /// Display name (the source file's name).
@@ -232,6 +233,9 @@ pub struct Representation {
     /// Compiled selection (molar `SelectionExpr`), parsed from `sel_text` on commit.
     /// Re-evaluated per trajectory frame later; `None` until first successful parse.
     pub expr: Option<SelectionExpr>,
+    /// Prepared caller-owned variable descriptions paired with `expr`.
+    pub(crate) selection_variables: Option<crate::selection::SceneVariables>,
+    pub(crate) selection_scene_revision: u64,
     /// Evaluated atom set for the current state; bind to the `System` for coords.
     pub sel: Option<Sel>,
     /// Last selection error, shown in the UI; `None` if the selection is valid.
@@ -273,6 +277,8 @@ pub struct Representation {
     /// extracts the chosen residues' sub-ribbon from it (coincident → no z-fight, and
     /// works for a single residue). `None` for other reps. Transient.
     pub mesh_cache: Option<MeshCache>,
+    /// Detected contacts and their rendered dash segments, rebuilt with interaction geometry.
+    pub(crate) interaction_cache: Vec<crate::pick::InteractionGeometry>,
     /// Coordinate-independent inputs, replaced on every structural rebuild.
     pub(crate) primitive_cache: Option<geometry::PrimitiveCache>,
     pub(crate) cartoon_cache: Option<geometry::CartoonCache>,
@@ -460,6 +466,8 @@ impl Representation {
             ss_algo,
             sel_text,
             expr: None,
+            selection_variables: None,
+            selection_scene_revision: 0,
             sel: None,
             sel_error: None,
             sel_error_span: None,
@@ -476,6 +484,7 @@ impl Representation {
             ss_per_frame,
             ss_cache: None,
             mesh_cache: None,
+            interaction_cache: Vec::new(),
             primitive_cache: None,
             cartoon_cache: None,
             geometry_cache: None,
@@ -888,12 +897,6 @@ impl Molecule {
         self.hover_grid = None; // positions changed → the lens grid is stale
         if self.pending.is_some() {
             self.glow_dirty = true; // the glow follows the atoms' new positions
-        }
-        let needs_eval = self.reps.iter().any(|r| r.dynamic);
-        if needs_eval {
-            if let Some(frame) = self.trajectory.frames.get(self.trajectory.current) {
-                let _ = self.data.set_state(frame.clone());
-            }
         }
         for rep in &mut self.reps {
             if rep.dynamic {
@@ -1410,7 +1413,7 @@ impl Molecule {
     ///
     /// The adjacency is built from whichever bond table `f` will read, so the bond indices
     /// it hands out always index that same table.
-    fn with_perception_topology<R>(&self, f: impl FnOnce(&Topology, &BondAdjacency) -> R) -> R {
+    pub(crate) fn with_perception_topology<R>(&self, f: impl FnOnce(&Topology, &BondAdjacency) -> R) -> R {
         if let Some(sys) = self.data.system() {
             let top = sys.topology();
             let adj = BondAdjacency::build(top.atoms.len(), top.bonds.iter_pairs());
@@ -1465,7 +1468,7 @@ impl Molecule {
 /// atoms as an error, but the GUI distinguishes it from a real (syntax) error: an
 /// empty match is a non-destructive *warning* (the text stays, the field is flagged)
 /// while an invalid selection keeps the prior geometry and shows the message.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EvalError {
     /// Valid syntax, but the selection matched no atoms.
     Empty,
@@ -1544,9 +1547,51 @@ pub struct Scene {
     #[cfg(target_arch = "wasm32")]
     pub wasm_loaders: HashMap<MolId, crate::data::traj_wasm::TrajStream>,
     next_group_id: u64,
+    /// Active global detection settings used by foreign interaction selections.
+    pub interaction_settings: crate::interactions::InteractionSettings,
+    pub(crate) selection_signature: u64,
+    pub(crate) selection_revision: u64,
 }
 
 impl Scene {
+    /// Show whole receptor residues that interact with the preserved ligand geometry rep.
+    /// A matching predecessor is the preserved ligand rep; otherwise reference the
+    /// Interactions selection itself, which also supplies atoms and coordinates.
+    pub(crate) fn show_interaction_pocket(
+        &mut self,
+        ligand_mol: usize,
+        interactions_rep: usize,
+        receptor_mol: usize,
+        defaults: &crate::settings::RepDefaults,
+    ) {
+        let ligand = &self.molecules[ligand_mol];
+        let Some(interactions) = ligand.reps.get(interactions_rep) else { return };
+        let ligand_rep = ligand.reps[..interactions_rep].iter().rposition(|rep| {
+            rep.kind != RepKind::Interactions && rep.sel_text == interactions.sel_text
+        }).unwrap_or(interactions_rep);
+        let address = self.source_address(ligand_mol);
+        let rep_number = ligand_rep + self.source_rep_offset(ligand_mol);
+        let selection = format!("not apolh and same residue as interacts with {address}.r{rep_number}");
+        let receptor = &mut self.molecules[receptor_mol];
+        if let Some(rep) = receptor.reps.iter_mut().find(|rep| {
+            rep.kind == RepKind::Lines && rep.sel_text == selection
+        }) {
+            rep.visible = true;
+            rep.dynamic = true;
+            rep.sel_dirty = true;
+        } else {
+            let mut rep = Representation::from_defaults(&crate::settings::RepDefaults {
+                kind: RepKind::Lines, ..defaults.clone()
+            });
+            rep.sel_text = selection;
+            rep.color = ColorMethod::Element;
+            rep.dynamic = true;
+            receptor.reps.push(rep);
+        }
+        receptor.visible = true;
+        receptor.reps_open = true;
+    }
+
     /// Load a molecule into the scene, assigning it a fresh [`MolId`].
     pub fn add(&mut self, raw: RawMolecule, rep_defaults: &crate::settings::RepDefaults) -> MolId {
         let id = reserve_mol_id();
@@ -2274,5 +2319,88 @@ mod include_atom_tests {
         let mut r = rep_with("(x or index 5) and y");
         r.include_atom(9);
         assert_eq!(r.sel_text, "((x or index 5) and y) or index 9");
+    }
+}
+
+#[cfg(test)]
+mod interaction_pocket_tests {
+    use super::*;
+    use crate::settings::RepDefaults;
+
+    #[test]
+    fn receptor_lines_follow_the_ligand_group_and_reuse_existing_pocket() {
+        let defaults = RepDefaults::default();
+        let mut scene = Scene::default();
+        let atom = || Atom::new().with_name("N").with_atomic_number(7);
+        scene.add(RawMolecule::single_atom("receptor", atom(), Vec3::ZERO).unwrap(), &defaults);
+        scene.add_group(vec![
+            RawMolecule::single_atom("pose0", atom(), Vec3::X * 0.3).unwrap(),
+            RawMolecule::single_atom("pose1", atom(), Vec3::X).unwrap(),
+        ], MoleculeSource::default(), "poses".into(), &defaults);
+        let mut interactions = Representation::new(RepKind::Interactions);
+        interactions.sel_text = scene.molecules[1].reps[0].sel_text.clone();
+        scene.molecules[1].reps.push(interactions);
+        scene.molecules[1].n_shared += 1;
+        scene.show_interaction_pocket(1, 1, 0, &defaults);
+        let pocket = &scene.molecules[0].reps[1];
+        assert_eq!(pocket.kind, RepKind::Lines);
+        assert_eq!(pocket.sel_text, "not apolh and same residue as interacts with m1.r0");
+        assert!(pocket.dynamic && pocket.visible);
+        scene.refresh_selections();
+        assert!(scene.molecules[0].reps[1].sel.is_some());
+        scene.molecules[0].reps[1].visible = false;
+        scene.show_interaction_pocket(1, 1, 0, &defaults);
+        assert_eq!(scene.molecules[0].reps.len(), 2);
+        assert!(scene.molecules[0].reps[1].visible);
+        scene.switch_group_member(0, 1);
+        scene.refresh_selections();
+        assert!(scene.molecules[0].reps[1].sel_empty);
+        scene.switch_group_member(0, 0);
+        scene.refresh_selections();
+        assert!(scene.molecules[0].reps[1].sel.is_some());
+    }
+
+    #[test]
+    fn pocket_expands_contact_residues_and_excludes_nearby_noncontacts() {
+        let defaults = RepDefaults::default();
+        let mut top = Topology::default();
+        for (name, element, resid) in [("N", 7, 1), ("C", 6, 1), ("N", 7, 2)] {
+            top.atoms.push(&Atom::new().with_name(name).with_atomic_number(element).with_resid(resid));
+        }
+        top.assign_resindex();
+        let mut state = State::new_fake(3);
+        for (pos, x) in state.coords.iter_mut().zip([0.0, 2.0, 0.75]) { *pos = Pos::new(x, 0.0, 0.0); }
+        let mut scene = Scene::default();
+        scene.add(RawMolecule {
+            name: "receptor".into(), source: MoleculeSource::default(),
+            system: System::new(top, state).unwrap(), n_atoms: 3, bonds: vec![],
+            bbox_min: Vec3::ZERO, bbox_max: Vec3::X * 2.0,
+        }, &defaults);
+        scene.add(RawMolecule::single_atom("ligand", Atom::new().with_name("O").with_atomic_number(8), Vec3::X * 0.3).unwrap(), &defaults);
+        scene.molecules[1].reps.push(Representation::new(RepKind::Interactions));
+        scene.show_interaction_pocket(1, 1, 0, &defaults);
+        scene.refresh_selections();
+        let pocket = &scene.molecules[0].reps[1];
+        assert!(pocket.sel_error.is_none(), "{:?}", pocket.sel_error);
+        // Include the far atom in the contacting residue, exclude a nearby residue
+        // whose atoms do not satisfy any interaction detector.
+        assert_eq!(pocket.sel.as_ref().unwrap().get_index_slice(), [0, 1]);
+    }
+
+    #[test]
+    fn pocket_uses_the_matching_ligand_rep_number() {
+        let defaults = RepDefaults::default();
+        let mut scene = Scene::default();
+        for name in ["receptor", "ligand"] {
+            scene.add(RawMolecule::single_atom(name, Atom::new().with_name("CA"), Vec3::ZERO).unwrap(), &defaults);
+        }
+        let mut ligand = Representation::new(RepKind::Licorice);
+        ligand.sel_text = "name CA".into();
+        scene.molecules[1].reps.push(ligand);
+        let mut interactions = Representation::new(RepKind::Interactions);
+        interactions.sel_text = "name CA".into();
+        scene.molecules[1].reps.push(interactions);
+        scene.show_interaction_pocket(1, 2, 0, &defaults);
+        assert_eq!(scene.molecules[0].reps[1].sel_text, "not apolh and same residue as interacts with m1.r1");
     }
 }

@@ -38,8 +38,15 @@ use egui_phosphor::regular as icon;
 // `pub(crate)`: the ray tracer gathers interaction dashes through `build::build_interactions`
 // too, so the trace shows the same contact lines the raster does.
 mod align_dialog;
+mod animation;
+pub use animation::PreparedMovie;
+#[cfg(not(target_arch = "wasm32"))]
+mod movie;
+#[cfg(not(target_arch = "wasm32"))]
+mod background_movie;
 pub(crate) mod build;
-mod console;
+mod commands;
+mod groups;
 mod dihedral;
 #[cfg(not(target_arch = "wasm32"))]
 mod docking_dialog;
@@ -101,6 +108,13 @@ fn defuse_broken_ime(ctx: &egui::Context) {
 pub struct App {
     renderer: SceneRenderer,
     camera: Camera,
+    preview: Option<animation::Preview>,
+    #[cfg(not(target_arch = "wasm32"))]
+    movie_job: Option<movie::MovieJob>,
+    #[cfg(not(target_arch = "wasm32"))]
+    background_movie: Option<background_movie::BackgroundMovie>,
+    #[cfg(not(target_arch = "wasm32"))]
+    movie_dialog: Option<ModalState<movie::MovieDialog>>,
     scene: Scene,
     /// Persisted program settings (theme, render quality, new-document defaults,
     /// behavior). Loaded on launch from the platform config dir; edited via the
@@ -161,10 +175,6 @@ pub struct App {
     /// button turns it on; the next click on an atom makes that atom the centre of rotation
     /// (`Camera::set_center`). Esc / empty-click cancels. Transient.
     center_pick: bool,
-    /// Open per-type **Settings** dialog of an Interactions rep, if any: which rep, plus
-    /// the active type tab. A movable `egui::Window` (`draw_interactions_dialog`) edits
-    /// the rep's `InteractionSettings`. Transient.
-    interactions_dialog: Option<InteractionsDialog>,
     /// The UI theme the viewport background was last matched to, so a theme change can be
     /// detected (`System` mode also flips at runtime when the desktop does). See
     /// `follow_theme_background`.
@@ -214,9 +224,6 @@ pub struct App {
     /// When it changes (Draw toggled, scope re-pointed), every rep is re-marked dirty so the
     /// grey-out of the non-active reps is applied or removed. See [`App::draw_gray_active`].
     last_gray_active: Option<(MolId, usize)>,
-    /// The in-app scripting console: open state, scrollback, and the REPL behind it.
-    #[cfg(feature = "scripting")]
-    console: Console,
     /// External command channel for the native Python module (`molar_vis_py`) and the
     /// wasm JavaScript API (`molar_vis_js`): jobs queued from the host are drained + run
     /// with `&mut App` at the top of each `ui()`, so an external driver can control the
@@ -272,6 +279,7 @@ enum SettingsPage {
     Representations,
     Styles,
     Materials,
+    Interactions,
     Colors,
     Behavior,
 }
@@ -353,23 +361,6 @@ struct ImageDialog {
     scale: u32,
 }
 
-/// The in-app scripting console (see `script::console` / `script::engine`).
-///
-/// Open state, scrollback and REPL are one cluster: every site that touches one touches
-/// another — opening the panel also asks the input field for focus, and running a line
-/// appends the echo, the REPL's output and any error to the same scrollback.
-#[cfg(feature = "scripting")]
-#[derive(Default)]
-struct Console {
-    /// Whether the console panel is showing (toggled from the View menu).
-    open: bool,
-    /// Scrollback + input buffer + input history.
-    ui: crate::script::ScriptConsole,
-    /// Persistent Rhai REPL: keeps the engine + a `Scope` alive across input lines, so
-    /// `let` bindings survive between them.
-    repl: crate::script::ScriptSession,
-}
-
 /// Shared live settings editor and opening snapshot for Revert.
 struct SettingsDialog {
     original: Settings,
@@ -396,14 +387,6 @@ enum ViewPage {
     Camera,
     Lighting,
     Scene,
-}
-
-/// The per-type **Settings** dialog of an Interactions rep: which rep it edits (by molecule
-/// id, so a reorder can't retarget it) plus the active interaction-type tab.
-struct InteractionsDialog {
-    mol: MolId,
-    rep: usize,
-    tab: crate::interactions::InteractionKind,
 }
 
 /// The "rename molecule" dialog: the target molecule and the edit buffer.
@@ -531,9 +514,20 @@ impl App {
 
     pub fn resolve_rep(&self, mol_id: u64, rep_id: u64) -> Result<(usize, usize), String> {
         let mi = self.resolve_molecule(mol_id)?;
-        let ri = self.scene.molecules[mi].reps.iter().position(|r| r.id.0 == rep_id)
-            .ok_or_else(|| format!("stale representation handle {rep_id} on molecule {mol_id}"))?;
-        Ok((mi, ri))
+        if let Some(ri) = self.scene.molecules[mi].reps.iter().position(|r| r.id.0 == rep_id) {
+            return Ok((mi, ri));
+        }
+        // A shared representation moves to the group's shown member. Existing
+        // handles must continue addressing that same representation after a switch.
+        if let Some(gi) = self.scene.molecules[mi].group.and_then(|g| self.scene.group_index(g)) {
+            let group = &self.scene.groups[gi];
+            if let Some(shown) = group.members.get(group.current).and_then(|id| self.scene.mol_index(*id)) {
+                if let Some(ri) = self.scene.molecules[shown].reps.iter().position(|r| r.id.0 == rep_id) {
+                    return Ok((shown, ri));
+                }
+            }
+        }
+        Err(format!("stale representation handle {rep_id} on molecule {mol_id}"))
     }
 
     pub fn add_shared_molecule_with_id(
@@ -618,14 +612,17 @@ impl App {
             .map_err(|e| format!("could not save settings: {e}"))
     }
 
-    /// Drain + run any jobs queued by the Python thread (native module). Collected
-    /// first so the receiver borrow is released before each job takes `&mut self`.
+    /// Run queued host jobs, releasing the receiver borrow before each callback.
     fn run_external_jobs(&mut self) {
-        let jobs: Vec<AppJob> = match &self.jobs_rx {
-            Some(rx) => rx.try_iter().collect(),
-            None => return,
-        };
-        for job in jobs {
+        // Stop draining as soon as a movie starts. Commands behind it remain queued
+        // until export has restored the scene, including commands sent in the same batch.
+        for _ in 0..1024 {
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.movie_job.is_some() { break; }
+            let job = match self.jobs_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                Some(job) => job,
+                None => break,
+            };
             job(self);
         }
     }
@@ -656,6 +653,17 @@ impl App {
         }
         self.view_dirty = true;
         Ok(idx)
+    }
+
+    /// Whether molecule `mol` is currently shown.
+    pub fn molecule_visible(&self, mol: usize) -> Result<bool, String> {
+        self.scene.molecules.get(mol).map(|m| m.visible)
+            .ok_or_else(|| format!("no molecule {mol}"))
+    }
+
+    /// Show or hide molecule `mol` through the shared scene-command path.
+    pub fn set_molecule_visible(&mut self, mol: usize, visible: bool) -> Result<(), String> {
+        self.execute_command(crate::script::Command::ShowMol { mol, visible })
     }
 
     /// Append a default representation to molecule `mol`; returns the new rep index.
@@ -713,7 +721,8 @@ impl App {
     /// contacts against the partner representation `(partner_mol, partner_rep)`. Wires the
     /// same [`Representation::partner`] the interactive partner-picker sets (keyed by the
     /// partner molecule's [`MoleculeSource`]), so the build path is exactly the one
-    /// `MOLAR_VIS_DEBUG_INTERACTIONS` and the docking loader use. Returns the new rep index.
+    /// `MOLAR_VIS_DEBUG_INTERACTIONS` and the docking loader use. Also shows dynamic
+    /// receptor pocket lines within 0.6 nm of the ligand source rep. Returns the new rep index.
     pub fn add_interactions_rep(
         &mut self,
         mol: usize,
@@ -737,14 +746,18 @@ impl App {
             }
             pm.source.clone()
         };
-        let mut rep = Representation::new(RepKind::Interactions);
+        let mut rep = Representation::from_defaults(&RepDefaults {
+            kind: RepKind::Interactions, ..self.rep_defaults.clone()
+        });
         rep.partner = Some((partner_src, partner_rep));
         rep.sel_dirty = true;
         rep.geom_dirty = true;
         let m = &mut self.scene.molecules[mol];
         m.reps.push(rep);
+        let ri = m.reps.len() - 1;
+        self.scene.show_interaction_pocket(mol, ri, partner_mol, &self.rep_defaults);
         self.view_dirty = true;
-        Ok(m.reps.len() - 1)
+        Ok(ri)
     }
 
     /// Set representation `(mol, rep)`'s line width in pixels. Supported by the **Lines**
@@ -772,11 +785,12 @@ impl App {
     }
 
     /// Zoom the camera to fit exactly `indices` (a pymolar `Sel`'s atoms) of molecule
-    /// `mol` — the same zoom-to-selection the console's `focus` command and the
+    /// `mol` — the same zoom-to-selection the focus API and the
     /// `MOLAR_VIS_DEBUG_FOCUS` hook drive (`Camera::focus_bbox`).
     pub fn focus_selection(&mut self, mol: usize, indices: &[usize]) -> Result<(), String> {
         let text = crate::pick::index_selection_string(indices).ok_or("selection is empty")?;
-        self.execute_command(crate::script::Command::Focus { mol, text })
+        let id = self.scene.molecules.get(mol).ok_or("no such molecule")?.id.0;
+        self.program_view(crate::animation::ViewAction::Focus { mol: id, selection: text }, None, crate::animation::Easing::Smooth).map(|_| ())
     }
 
     /// Save the current scene + view as a JSON session file (public wrapper over the
@@ -883,31 +897,32 @@ impl App {
 
     /// Orbit the camera by absolute angles in degrees (yaw about up, pitch about right).
     pub fn rotate_view(&mut self, yaw_deg: f32, pitch_deg: f32) {
-        self.camera.rotate_deg(yaw_deg, pitch_deg);
+        self.navigate_view(crate::animation::ViewAction::rotation(yaw_deg, pitch_deg));
         self.view_dirty = true;
     }
 
     /// Roll the camera about the view axis by an absolute angle (degrees).
     pub fn roll_view(&mut self, deg: f32) {
-        self.camera.roll_deg(deg);
+        self.navigate_view(crate::animation::ViewAction::Move { yaw: 0.0, pitch: 0.0, roll: deg, zoom: 1.0, pan: [0.0; 2] });
         self.view_dirty = true;
     }
 
     /// Pan by a fraction of the viewport height (`+x` right, `+y` up).
     pub fn pan_view(&mut self, dx: f32, dy: f32) {
-        self.camera.pan_fraction(dx, dy);
+        self.navigate_view(crate::animation::ViewAction::Move { yaw: 0.0, pitch: 0.0, roll: 0.0, zoom: 1.0, pan: [dx, dy] });
         self.view_dirty = true;
     }
 
     /// Zoom by a factor (`>1` closer, `<1` farther).
     pub fn zoom_view(&mut self, factor: f32) {
-        self.camera.zoom_by(factor);
+        self.navigate_view(crate::animation::ViewAction::zoom(factor));
         self.view_dirty = true;
     }
 
     /// Make the world point `p` (nm) the centre of rotation, like VMD's `c` pick. The view
     /// does not move; later rotations turn about `p`.
     pub fn set_rotation_center(&mut self, p: glam::Vec3) {
+        self.cancel_animation();
         self.camera.set_center(p);
         self.view_dirty = true;
     }
@@ -929,12 +944,25 @@ impl App {
     /// Re-frame all molecules (zoom-to-fit + default orientation), keeping the current
     /// projection / background / lighting settings.
     pub fn reset_view(&mut self) {
+        self.navigate_view(crate::animation::ViewAction::Reset);
+    }
+
+    fn reset_view_immediate(&mut self) {
         if let Some((min, max)) = self.scene.bbox() {
             let framed = Camera::frame_bbox(min, max, self.settings.view.fill);
             self.camera.recenter(framed.target);
             self.camera.distance = framed.distance;
             self.camera.scene_radius = framed.scene_radius;
             self.camera.orientation = framed.orientation;
+        }
+        self.view_dirty = true;
+    }
+
+    /// Restore the full visible scene while keeping orientation and rendering settings.
+    pub fn reset_clipping(&mut self) {
+        if let Some([min, max]) = self.scene.visible_depth_bounds() {
+            self.camera.depth_bounds = Some([min, max]);
+            self.focus_camera_bounds(min, max);
         }
         self.view_dirty = true;
     }
@@ -967,18 +995,27 @@ impl App {
     /// including a nearer atom of another target rep — so the group is handled as if it
     /// were a single rep. `zoom_out` behaves as in [`Self::unobstructed_view`].
     ///
-    /// Atoms are modeled as vdW spheres (see [`crate::unobstructed`]); occluders are the
-    /// atoms of every visible per-atom rep that is *not* in `targets` (Interactions reps
-    /// draw no per-atom geometry and are skipped). Selections are refreshed first
+    /// Targets use vdW spheres (see [`crate::unobstructed`]); visible background reps
+    /// supply spheres at their rendered radii or actual mesh triangles. Interactions
+    /// reps (including glowing helices) are skipped as both obstacles and members
+    /// of a combined target. Selections are refreshed first
     /// so a freshly built scene (e.g. from the Python API) has evaluated selections.
     ///
     /// `resolution` is the coarse direction-search sample count (see
     /// [`crate::unobstructed::best_unobstructed_direction`]).
     pub fn unobstructed_view_multi(
-        &mut self,
-        targets: &[(usize, usize)],
-        zoom_out: f32,
-        resolution: usize,
+        &mut self, targets: &[(usize, usize)], zoom_out: f32, resolution: usize,
+    ) -> Result<(), String> {
+        let targets = targets.iter().map(|&(mi, ri)| {
+            let mol = self.scene.molecules.get(mi).ok_or("no such molecule")?;
+            let rep = mol.reps.get(ri).ok_or("no such representation")?;
+            Ok((mol.id.0, rep.id.0))
+        }).collect::<Result<Vec<_>, String>>()?;
+        self.program_view(crate::animation::ViewAction::Unobstructed { targets, zoom_out, resolution }, None, crate::animation::Easing::Smooth).map(|_| ())
+    }
+
+    fn unobstructed_view_multi_immediate(
+        &mut self, targets: &[(usize, usize)], zoom_out: f32, resolution: usize,
     ) -> Result<(), String> {
         #[cfg(not(target_arch = "wasm32"))]
         let started = std::time::Instant::now();
@@ -989,18 +1026,28 @@ impl App {
             target,
             occluders,
             visual_bounds,
+            triangles,
+            pixels,
         } = build::gather_unobstructed_atoms(&mut self.scene, targets)?;
 
         // Best direction, then fit visual extents in that camera basis.
         #[cfg(not(target_arch = "wasm32"))]
-        let gpu_dir = self.render_state.as_ref().and_then(|rs| {
+        let gpu_dir = self.render_state.as_ref().filter(|_| triangles.is_empty() && pixels.is_none()).and_then(|rs| {
             self.renderer.try_unobstructed_direction(rs, &target, &occluders, resolution)
         });
         #[cfg(target_arch = "wasm32")]
         let gpu_dir = None;
-        let dir = gpu_dir.unwrap_or_else(|| {
-            crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution)
-        });
+        let dir = if let Some(pixels) = pixels {
+            pixels.best_direction(resolution, Some(&crate::unobstructed::PixelView {
+                camera: &self.camera, bounds: &visual_bounds, size: self.last_size, zoom_out,
+            }), &|| false)?
+        } else { gpu_dir.unwrap_or_else(|| {
+            if triangles.is_empty() {
+                crate::unobstructed::best_unobstructed_direction(&target, &occluders, resolution)
+            } else {
+                crate::unobstructed::best_direction_with_triangles_cancellable(&target, &occluders, &triangles, resolution, &|| false).expect("uncancelled search")
+            }
+        }) };
         #[cfg(not(target_arch = "wasm32"))]
         log::info!(
             "unobstructed view: {}, {} target atoms, {} occluders, {:.1} ms",
@@ -1086,6 +1133,9 @@ impl eframe::App for App {
         ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
 
         #[cfg(not(target_arch = "wasm32"))]
+        if self.service_movie(ui) { return; }
+
+        #[cfg(not(target_arch = "wasm32"))]
         if self.service_unobstructed_job(&ctx) {
             // Block input without fading the scene. The delayed progress modal
             // supplies the backdrop only after the 0.5-second threshold.
@@ -1124,6 +1174,10 @@ impl eframe::App for App {
             self.scene.mark_shared_dirty();
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.service_movie(ui) { return; }
+        self.service_animation(&ctx);
 
         // Work around a winit/egui Wayland IME bug that otherwise breaks all text
         // entry (only the first char of a field is accepted). See `defuse_broken_ime`.
@@ -1229,8 +1283,9 @@ impl eframe::App for App {
         self.draw_delete_frames_dialog(&ctx);
         self.draw_rename_dialog(&ctx);
         self.draw_image_dialog(&ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.draw_movie_dialog(&ctx);
         self.draw_settings_dialog(&ctx, frame);
-        self.draw_interactions_dialog(&ctx);
         self.draw_align_dialog(&ctx);
 
         // Apply undo/redo after the panel so list indices stay stable during draw. Each
@@ -1284,10 +1339,6 @@ impl eframe::App for App {
         // Vertical drawing-tools palette on the right (only while Draw mode is on);
         // a panel, so it reserves its strip before the viewport fills the rest.
         self.draw_tools_panel(ui);
-        // Scripting console as a resizable bottom panel (when open), claimed before
-        // the central viewport so the 3D view fills the space above it.
-        #[cfg(feature = "scripting")]
-        self.draw_console(ui);
         self.draw_viewport(ui, frame);
 
         // Keep the viewport background in step with the UI theme (see the method).
@@ -1302,7 +1353,9 @@ impl eframe::App for App {
         // MOLAR_VIS_DEBUG_SAVE_UI=<path>: capture the whole egui surface (panels included)
         // and quit — the offscreen alternative to screenshotting a real window.
         #[cfg(not(target_arch = "wasm32"))]
-        self.rt.service_debug_ui_capture(&ctx);
+        if self.unobstructed_job.is_none() && self.preview.is_none() {
+            self.rt.service_debug_ui_capture(&ctx);
+        }
 
         // Service a pending "Save image" request here: `frame` (the wgpu render state) is
         // available, and `draw_viewport` has just refreshed `last_size`. Native saves
@@ -1314,11 +1367,14 @@ impl eframe::App for App {
         // repainting while any trace job runs so it advances each frame.
         #[cfg(not(target_arch = "wasm32"))]
         self.service_rt_save(frame);
-        if self.rt.job.is_some() {
+        if self.rt.job.is_some() || self.preview.is_some() {
             ctx.request_repaint();
         }
         #[cfg(target_arch = "wasm32")]
         self.poll_export(&ctx);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        self.service_background_movie(&ctx);
 
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
         let settled = !ctx.egui_is_using_pointer() && !ctx.egui_wants_keyboard_input();

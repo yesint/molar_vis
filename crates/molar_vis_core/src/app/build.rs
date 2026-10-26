@@ -1,7 +1,8 @@
 //! Free-function builders for hover-detail, glow, pick id-buffer geometry.
 use super::*;
 
-use crate::interactions::InteractionSet;
+use crate::interaction_source::gather_set;
+use molar::prelude::IndexSliceProvider;
 
 
 /// Build the hover detail "lens": a distance-faded CPK ball-and-stick of the atoms
@@ -116,9 +117,8 @@ pub(super) fn build_glow(
     n_atoms: usize,
     dashed_pbc: bool,
 ) -> geometry::GeometryData {
-    let Some(index_str) = pick::index_selection_string(atoms) else {
-        return geometry::GeometryData::default();
-    };
+    if atoms.is_empty() { return geometry::GeometryData::default(); }
+    let highlighted: std::collections::HashSet<_> = atoms.iter().copied().collect();
     // Highlighted residues (resindex), for extracting the Cartoon sub-ribbon.
     let topo = data.topology();
     let res_set: std::collections::HashSet<u32> = atoms
@@ -145,10 +145,10 @@ pub(super) fn build_glow(
         }
         // (rep selection) ∩ (pending atoms): glow only this rep's own atoms, in its
         // own style. Skip on an empty/invalid intersection.
-        let combined = format!("({}) and ({})", rep.sel_text, index_str);
-        let Ok((_, sel)) = data.evaluate(&combined) else {
-            continue;
-        };
+        let Some(selected) = &rep.sel else { continue };
+        let ids = selected.get_index_slice().iter().copied()
+            .filter(|id| highlighted.contains(id)).collect();
+        let Ok(sel) = molar::prelude::Sel::from_vec(ids) else { continue };
         let bound = data.bind_with_state(&sel, state);
         let mut geom = geometry::build(
             &bound, n_atoms, bonds, &rep.params, rep.color_spec(), rep.material,
@@ -304,6 +304,7 @@ fn displayed_state(mol: &scene::Molecule) -> &State {
         .unwrap_or_else(|| mol.data.state())
 }
 
+#[cfg(test)]
 fn v3(p: &molar::prelude::Pos) -> glam::Vec3 {
     glam::Vec3::new(p.x, p.y, p.z)
 }
@@ -332,203 +333,6 @@ pub(super) fn partner_index(scene: &Scene, rep: &Representation) -> Option<(usiz
     Some((pmi, *pr))
 }
 
-/// Gather everything one rep's selection contributes to interaction detection: heavy
-/// atoms (+ attached H / hydrophobic flag / halogen antecedent), aromatic rings within
-/// the selection (centroid + normal from the displayed frame; ring atom sets come from
-/// the molecule's cached `interaction_rings`), and charged groups. `res_key` is made
-/// unique per (molecule, residue) via `mol_idx` so the detector's residue-level dedup
-/// never merges same-index residues from two molecules.
-fn gather_set(mol: &scene::Molecule, mol_idx: usize, sel: &molar::prelude::Sel, state: &State) -> InteractionSet {
-    let topo = mol.data.topology();
-    let n = state.coords.len();
-    let res_base = (mol_idx as u64) << 40;
-    let coord = |i: usize| state.coords.get(i).map(v3);
-
-    // Adjacency over the whole molecule (bonds index the full topology).
-    let mut neigh: Vec<Vec<u32>> = vec![Vec::new(); n];
-    for bond in &mol.bonds {
-        let [a, b] = bond.pair();
-        if a < n && b < n {
-            neigh[a].push(b as u32);
-            neigh[b].push(a as u32);
-        }
-    }
-    let anum_of = |i: usize| topo.get_atom(i).map(|a| a.get_atomic_number()).unwrap_or(0);
-
-    // Selected atoms → heavy-atom AtomInfo + a membership mask (for rings/charges).
-    let bound = mol.data.bind_with_state(sel, state);
-    let mut in_sel = vec![false; n];
-    let mut atoms = Vec::new();
-    for p in bound.iter_particle() {
-        in_sel[p.id] = true;
-        let anum = p.atom.get_atomic_number();
-        if anum == 1 {
-            continue; // H rides in its heavy neighbour's `attached_h`
-        }
-        let mut only_ch = anum == 6;
-        let mut attached_h = Vec::new();
-        let mut antecedent = None;
-        for &nb in &neigh[p.id] {
-            let nb = nb as usize;
-            let na = anum_of(nb);
-            if only_ch && !matches!(na, 1 | 6) {
-                only_ch = false;
-            }
-            if na == 1 {
-                if let Some(c) = coord(nb) {
-                    attached_h.push(c);
-                }
-            } else if antecedent.is_none() {
-                antecedent = coord(nb);
-            }
-        }
-        atoms.push(crate::interactions::AtomInfo {
-            pos: glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z),
-            atomicnum: anum,
-            res_key: res_base | (p.atom.get_resindex() as u64),
-            only_ch_neighbors: only_ch,
-            attached_h,
-            antecedent,
-        });
-    }
-
-    // Aromatic rings fully inside the selection → centroid + plane normal.
-    let mut rings = Vec::new();
-    for ring in mol.interaction_rings.as_deref().unwrap_or(&[]) {
-        if ring.len() < 3 || !ring.iter().all(|&i| i < n && in_sel[i]) {
-            continue;
-        }
-        let pts: Vec<glam::Vec3> = ring.iter().filter_map(|&i| coord(i)).collect();
-        if pts.len() < 3 {
-            continue;
-        }
-        let center = pts.iter().copied().sum::<glam::Vec3>() / pts.len() as f32;
-        rings.push(crate::interactions::RingInfo {
-            center,
-            normal: crate::interactions::ring_normal(&pts),
-            res_key: res_base | (topo.get_atom(ring[0]).map(|a| a.get_resindex() as u64).unwrap_or(0)),
-        });
-    }
-
-    let (cations, anions) = charged_groups(topo, &neigh, state, &in_sel, res_base, n);
-    InteractionSet { atoms, rings, cations, anions }
-}
-
-/// Detect charged groups in the selection: standard amino-acid sidechains / termini by
-/// residue+atom name, plus ligand functional groups (carboxylate, phosphate/sulfate,
-/// guanidinium) by connectivity. Heuristic — real formal charges aren't available; this
-/// covers the common protein–ligand salt-bridge / π-cation cases.
-fn charged_groups(
-    topo: &molar::prelude::Topology,
-    neigh: &[Vec<u32>],
-    state: &State,
-    in_sel: &[bool],
-    res_base: u64,
-    n: usize,
-) -> (Vec<crate::interactions::ChargeGroup>, Vec<crate::interactions::ChargeGroup>) {
-    use crate::interactions::ChargeGroup;
-    use std::collections::HashMap;
-    let coord = |i: usize| state.coords.get(i).map(v3);
-    let name = |i: usize| topo.get_atom(i).map(|a| a.get_name().to_string()).unwrap_or_default();
-    let anum = |i: usize| topo.get_atom(i).map(|a| a.get_atomic_number()).unwrap_or(0);
-
-    // Group selected atoms by residue.
-    let mut byres: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (i, &sel) in in_sel.iter().enumerate().take(n) {
-        if sel {
-            if let Some(a) = topo.get_atom(i) {
-                byres.entry(a.get_resindex()).or_default().push(i);
-            }
-        }
-    }
-    let centroid = |ids: &[usize]| -> Option<glam::Vec3> {
-        let mut sum = glam::Vec3::ZERO;
-        let mut k = 0;
-        for &i in ids {
-            if let Some(c) = coord(i) {
-                sum += c;
-                k += 1;
-            }
-        }
-        (k > 0).then(|| sum / k as f32)
-    };
-
-    let mut cations = Vec::new();
-    let mut anions = Vec::new();
-    for (ridx, ids) in &byres {
-        let rk = res_base | (*ridx as u64);
-        let resname = topo
-            .get_atom(ids[0])
-            .map(|a| a.get_resname().to_ascii_uppercase())
-            .unwrap_or_default();
-        let pick = |names: &[&str]| -> Vec<usize> {
-            ids.iter().copied().filter(|&i| names.contains(&name(i).as_str())).collect()
-        };
-        let mut push = |grp: Vec<usize>, positive: bool| {
-            if let Some(c) = centroid(&grp) {
-                let cg = ChargeGroup { center: c, res_key: rk };
-                if positive {
-                    cations.push(cg);
-                } else {
-                    anions.push(cg);
-                }
-            }
-        };
-        match resname.as_str() {
-            "ARG" => push(pick(&["CZ", "NH1", "NH2", "NE"]), true),
-            "LYS" => push(pick(&["NZ"]), true),
-            "HIS" | "HID" | "HIE" | "HIP" | "HSD" | "HSE" | "HSP" => {
-                push(pick(&["ND1", "NE2", "CE1", "CG", "CD2"]), true)
-            }
-            "ASP" => push(pick(&["CG", "OD1", "OD2"]), false),
-            "GLU" => push(pick(&["CD", "OE1", "OE2"]), false),
-            _ => {
-                // Ligand / non-standard residue: functional groups by connectivity.
-                for &i in ids {
-                    let deg_heavy = |j: usize| neigh[j].iter().filter(|&&k| anum(k as usize) > 1).count();
-                    if anum(i) == 6 {
-                        // Carboxylate: C bonded to ≥2 terminal O.
-                        let os: Vec<usize> = neigh[i]
-                            .iter()
-                            .map(|&k| k as usize)
-                            .filter(|&k| anum(k) == 8 && deg_heavy(k) <= 1)
-                            .collect();
-                        if os.len() >= 2 {
-                            let mut g = os;
-                            g.push(i);
-                            push(g, false);
-                        }
-                        // Guanidinium / amidinium: C bonded to ≥3 N.
-                        let ns = neigh[i].iter().filter(|&&k| anum(k as usize) == 7).count();
-                        if ns >= 3 {
-                            let mut g: Vec<usize> = neigh[i].iter().map(|&k| k as usize).collect();
-                            g.push(i);
-                            push(g, true);
-                        }
-                    } else if matches!(anum(i), 15 | 16) {
-                        // Phosphate / sulfate: P/S bonded to ≥3 O.
-                        let os: Vec<usize> =
-                            neigh[i].iter().map(|&k| k as usize).filter(|&k| anum(k) == 8).collect();
-                        if os.len() >= 3 {
-                            let mut g = os;
-                            g.push(i);
-                            push(g, false);
-                        }
-                    }
-                }
-            }
-        }
-        // C-terminal carboxylate (any residue carrying a terminal-oxygen name).
-        let oxt = pick(&["OXT", "OT1", "OT2", "OT"]);
-        if !oxt.is_empty() {
-            let mut g = oxt;
-            g.extend(pick(&["C", "O"]));
-            push(g, false);
-        }
-    }
-    (cations, anions)
-}
-
 /// Build the dashed contact-line geometry for an **Interactions** rep (`mol[self_mi]
 /// .reps[rep_idx]`): detect the enabled interaction types between this rep's selection and
 /// its partner rep's selection (possibly in another molecule) and emit colored dashed
@@ -540,7 +344,16 @@ pub(crate) fn build_interactions(
     self_mi: usize,
     rep_idx: usize,
 ) -> geometry::GeometryData {
-    let empty = geometry::GeometryData::default;
+    let found = detect_interactions(scene, self_mi, rep_idx);
+    let Some(RepParams::Interactions { settings }) = scene.molecules.get(self_mi)
+        .and_then(|mol| mol.reps.get(rep_idx)).map(|rep| &rep.params) else {
+        return geometry::GeometryData::default();
+    };
+    geometry::interaction_geometry(&found, settings)
+}
+
+fn detect_interactions(scene: &Scene, self_mi: usize, rep_idx: usize) -> Vec<crate::interactions::Interaction> {
+    let empty = Vec::new;
     let Some(mol) = scene.molecules.get(self_mi) else {
         return empty();
     };
@@ -568,11 +381,7 @@ pub(crate) fn build_interactions(
 
     let set_a = gather_set(mol, self_mi, sel_a, displayed_state(mol));
     let set_b = gather_set(pmol, pmi, sel_b, displayed_state(pmol));
-    let found = crate::interactions::detect(&set_a, &set_b, &settings.detect());
-    geometry::GeometryData {
-        lines: geometry::interaction_lines(&found, settings.line_width),
-        ..Default::default()
-    }
+    crate::interactions::detect(&set_a, &set_b, &settings.detect())
 }
 
 /// World-space (nm) outward shell offset for the active-selection glow mesh — large
@@ -595,6 +404,68 @@ mod tests {
 
     fn tpath(f: &str) -> std::path::PathBuf {
         std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/")).join(f)
+    }
+
+    #[test]
+    #[ignore = "requires GPU; writes isolated JAK2 group visibility diagnostics"]
+    fn jak2_group_members_remain_visible_when_cycling() {
+        let rs = crate::render::test_gpu();
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx);
+        cc.wgpu_render_state = Some(rs.clone());
+        let mut app = App::new(&cc, AppLaunch {
+            files: vec![vec![tpath("jak2.pdb")], vec![tpath("jak2_inhs.sd")]],
+            ..Default::default()
+        }).unwrap();
+        let output = tpath("../target/jak2-group-debug");
+        std::fs::create_dir_all(&output).unwrap();
+        assert_eq!(app.scene.groups.len(), 1);
+        app.set_rep_style(0, 0, "cartoon").unwrap();
+        app.set_rep_color(0, 0, "solid:180,180,180").unwrap();
+        let first = app.scene.mol_index(app.scene.groups[0].members[0]).unwrap();
+        let group = app.scene.groups[0].id.0;
+        let owner = app.scene.molecules[first].id.0;
+        let ligand_rep = app.scene.molecules[first].reps[0].id.0;
+        let contacts = scene::reserve_rep_id().0;
+        app.add_group_interactions_with_id(group, contacts,
+            app.scene.molecules[0].id.0, app.scene.molecules[0].reps[0].id.0).unwrap();
+        assert_eq!(app.scene.molecules[0].reps.len(), 2, "one receptor pocket representation");
+        app.set_rep_color(first, 0, "solid:255,0,255").unwrap();
+        rebuild_dirty(&mut app.scene, &app.renderer, &app.settings, true, &rs, None, false);
+        app.unobstructed_view_multi_immediate(&[(first, 0)], 2.0, 256).unwrap();
+        app.camera.ao.enabled = false;
+        app.camera.shadow.enabled = false;
+        app.camera.depth_cue.enabled = false;
+        app.camera.background = crate::camera::Background::for_theme(false);
+        for member in 0..10 {
+            app.show_group_member(group, member).unwrap();
+            rebuild_dirty(&mut app.scene, &app.renderer, &app.settings, true, &rs, None, false);
+            let mi = app.scene.mol_index(app.scene.groups[0].members[member]).unwrap();
+            assert_eq!(app.resolve_rep(owner, ligand_rep).unwrap(), (mi, 0));
+            assert_eq!(app.resolve_rep(owner, contacts).unwrap(), (mi, 1));
+            assert_eq!(app.scene.molecules.iter().flat_map(|m| &m.reps)
+                .filter(|r| r.kind == RepKind::Interactions).count(), 1);
+            let mol = &app.scene.molecules[mi];
+            let rep = &mol.reps[0];
+            assert!(mol.visible && rep.visible, "member {member}: visibility");
+            assert!(rep.sel.as_ref().is_some_and(|s| !s.get_index_slice().is_empty()),
+                "member {member}: selection {:?}", rep.sel_error);
+            assert!(rep.gpu.has_geometry(), "member {member}: no GPU geometry");
+            app.camera.depth_bounds = app.scene.visible_depth_bounds();
+            let camera = &app.camera;
+            let capture = app.renderer.capture_begin(&rs, 480, 360,
+                camera.view(), camera.proj(480.0 / 360.0), camera.is_perspective(),
+                camera.cue_uniform(), camera.ao_uniform(), camera.shadow_uniform(),
+                camera.background, camera.eye_depth_range(), &app.scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let image = capture.read();
+            image.save(output.join(format!("member-{member:02}.png"))).unwrap();
+            let ligand_pixels = image.pixels().filter(|p|
+                p[0] > p[1].saturating_add(40) && p[2] > p[1].saturating_add(40)).count();
+            eprintln!("member {member}: {} atoms, {} selected, {ligand_pixels} ligand pixels",
+                mol.n_atoms, rep.sel.as_ref().unwrap().get_index_slice().len());
+            assert!(ligand_pixels > 50, "member {member}: inhibitor is not visible");
+        }
     }
 
     /// An Interactions rep whose partner is a MolGroup member follows the group's
@@ -636,66 +507,12 @@ mod tests {
 }
 
 
-/// Evaluate a dirty selection without constructing or uploading geometry.
-/// Returns true when an empty selection cleared previously drawn geometry.
-pub(super) fn refresh_selection(data: &crate::moldata::MolData, rep: &mut Representation) -> bool {
-    if !rep.sel_dirty {
-        return false;
-    }
-    let _timing = crate::performance::span("selection");
-    let mut cleared = false;
-    // Parse + evaluate the selection (against the System's own
-    // state). On error keep the previous selection/geometry and
-    // just surface the message.
-    match data.evaluate(rep.sel_text.as_str()) {
-        Ok((expr, sel)) => {
-            rep.expr = Some(expr);
-            rep.sel = Some(sel);
-            rep.sel_error = None;
-            rep.sel_error_span = None;
-            rep.sel_empty = false;
-            rep.geom_dirty = true;
-        }
-        // Valid selection that matches no atoms: not an error — drop
-        // the geometry (render nothing), keep the text, and flag the
-        // field. The viewport must re-render to clear the old mesh.
-        Err(scene::EvalError::Empty) => {
-            rep.expr = None;
-            rep.sel = None;
-            rep.sel_error = None;
-            rep.sel_error_span = None;
-            rep.sel_empty = true;
-            rep.gpu = Default::default();
-            rep.primitive_cache = None;
-            rep.cartoon_cache = None;
-            #[cfg(not(target_arch = "wasm32"))]
-            { rep.geometry_job = None; rep.geometry_waiting = false; }
-            rep.cache_geometry(Default::default(), 0, false, true);
-            rep.mesh_cache = None;
-            cleared = true;
-        }
-        Err(scene::EvalError::Invalid { message, span }) => {
-            // molar trims the input before parsing, so shift the span
-            // past any leading whitespace to align it with the field's
-            // text (leading whitespace is ASCII, so bytes == chars).
-            let lead = rep
-                .sel_text
-                .bytes()
-                .take_while(|b| *b == b' ' || *b == b'\t')
-                .count();
-            rep.sel_error = Some(message);
-            rep.sel_error_span = span.map(|r| r.start + lead..r.end + lead);
-            rep.sel_empty = false;
-        }
-    }
-    rep.sel_dirty = false;
-    cleared
-}
-
 pub(super) struct UnobstructedAtoms {
     pub target: Vec<(glam::Vec3, f32)>,
     pub occluders: Vec<(glam::Vec3, f32)>,
     pub visual_bounds: Vec<(glam::Vec3, f32)>,
+    pub triangles: Vec<[glam::Vec3; 3]>,
+    pub pixels: Option<crate::unobstructed::PixelScene>,
 }
 
 /// Gather each atom once, refreshing only selections relevant to this view.
@@ -715,27 +532,34 @@ pub(super) fn gather_unobstructed_atoms(
             return Err(format!("no rep {ri} on molecule {mi}"));
         }
     }
-    let target_reps: std::collections::HashSet<_> = targets.iter().copied().collect();
-    for (mi, mol) in scene.molecules.iter_mut().enumerate() {
-        for (ri, rep) in mol.reps.iter_mut().enumerate() {
-            if target_reps.contains(&(mi, ri))
-                || (mol.visible && rep.visible && rep.kind != RepKind::Interactions)
-            {
-                if refresh_selection(&mol.data, rep) {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        mol.pick_dirty = true;
-                    }
-                }
-            }
-        }
+    // Interactions are annotations, even when a caller includes them in a
+    // combined target. Their source selection must not become target blockers
+    // or enlarge the framing just because glowing paths now contain triangles.
+    let molecular_targets: Vec<_> = targets.iter().copied()
+        .filter(|&(mi, ri)| scene.molecules[mi].reps[ri].kind != RepKind::Interactions)
+        .collect();
+    if molecular_targets.is_empty() {
+        return Err("unobstructed view needs an atom representation; interactions are annotations".into());
     }
+    let targets = molecular_targets.as_slice();
+    let target_reps: std::collections::HashSet<_> = targets.iter().copied().collect();
+    let requested = scene.molecules.iter().enumerate().flat_map(|(mi, mol)| {
+        let targets = &target_reps;
+        mol.reps.iter().enumerate().filter_map(move |(ri, rep)| {
+            (targets.contains(&(mi, ri)) || (mol.visible && rep.visible && rep.kind != RepKind::Interactions))
+                .then_some((mi, ri))
+        })
+    }).collect();
+    scene.refresh_selections_for(&requested);
     let mut out = UnobstructedAtoms {
         target: Vec::new(),
         occluders: Vec::new(),
         visual_bounds: Vec::new(),
+        triangles: Vec::new(),
+        pixels: None,
     };
-    let mut seen = std::collections::HashSet::new();
+    let mut target_indices = std::collections::HashMap::new();
+    let mut occluder_indices = std::collections::HashMap::new();
     for &(mi, ri) in targets {
         let mol = &scene.molecules[mi];
         let rep = &mol.reps[ri];
@@ -752,8 +576,12 @@ pub(super) fn gather_unobstructed_atoms(
             // same atom at different sizes. Deduplicate only the visibility search.
             let radius = rep.params.visual_radius(p.atom.vdw());
             out.visual_bounds.push((pos, radius));
-            if seen.insert((mi, p.id)) {
-                out.target.push((pos, p.atom.vdw()));
+            if let Some(&i) = target_indices.get(&(mi, p.id)) {
+                let entry: &mut (glam::Vec3, f32) = &mut out.target[i];
+                entry.1 = entry.1.max(radius);
+            } else {
+                target_indices.insert((mi, p.id), out.target.len());
+                out.target.push((pos, radius));
             }
         }
         if let Some(geom) = rep.cached_geometry(false) {
@@ -766,6 +594,28 @@ pub(super) fn gather_unobstructed_atoms(
     if out.target.is_empty() {
         return Err("target reps select no atoms".to_string());
     }
+    // Small solid targets are scored by rendered area, including finite bonds
+    // and self-occlusion. Large targets retain the accelerated atom search.
+    if out.target.len() <= 512 {
+        let mut pixels = crate::unobstructed::PixelScene::default();
+        for (mi, mol) in scene.molecules.iter().enumerate() {
+            for (ri, rep) in mol.reps.iter().enumerate() {
+                let is_target = target_reps.contains(&(mi, ri));
+                if (!is_target && (!mol.visible || !rep.visible)) || rep.kind == RepKind::Interactions { continue; }
+                let Some(sel) = &rep.sel else { continue };
+                let smoothed = (rep.smooth_window > 1).then(|| mol.trajectory.smoothed_state(rep.smooth_window)).flatten();
+                let bound = mol.data.bind_with_state(sel, smoothed.as_ref().unwrap_or(mol.render_state()));
+                let built;
+                let geom = if let Some(geom) = rep.cached_geometry(true) { geom } else {
+                    let ss = geometry::needs_ss(&rep.params, rep.color).then(|| SsMap::compute(&bound, rep.ss_algo));
+                    built = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true);
+                    built.as_ref()
+                };
+                if is_target { pixels.target.extend(geom); } else { pixels.occluders.extend(geom); }
+            }
+        }
+        if !pixels.target.is_empty() { out.pixels = Some(pixels); }
+    }
     for (mi, mol) in scene.molecules.iter().enumerate() {
         if !mol.visible {
             continue;
@@ -776,12 +626,35 @@ pub(super) fn gather_unobstructed_atoms(
                 continue;
             }
             let Some(sel) = &rep.sel else { continue };
-            let bound = mol.data.bind_with_state(sel, mol.render_state());
+            let smoothed = (rep.smooth_window > 1).then(|| mol.trajectory.smoothed_state(rep.smooth_window)).flatten();
+            let state = smoothed.as_ref().unwrap_or(mol.render_state());
+            let bound = mol.data.bind_with_state(sel, state);
+            if rep.kind.draws_mesh() {
+                let built;
+                let mesh = if !rep.geom_dirty && !rep.coords_dirty {
+                    rep.mesh_cache.as_ref().map(|cache| &cache.mesh)
+                } else { None };
+                let mesh = if let Some(mesh) = mesh { mesh } else {
+                    let ss = geometry::needs_ss(&rep.params, rep.color).then(|| SsMap::compute(&bound, rep.ss_algo));
+                    built = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true);
+                    &built.mesh
+                };
+                for triangle in mesh.indices.chunks_exact(3) {
+                    out.triangles.push([0,1,2].map(|i| glam::Vec3::from_array(mesh.vertices[triangle[i] as usize].pos)));
+                }
+                continue;
+            }
             for p in bound.iter_particle() {
                 // Target atoms are already blockers in the combined projection.
-                if seen.insert((mi, p.id)) {
+                if target_indices.contains_key(&(mi, p.id)) { continue; }
+                let radius = rep.params.visual_radius(p.atom.vdw());
+                if let Some(&i) = occluder_indices.get(&(mi, p.id)) {
+                    let entry: &mut (glam::Vec3, f32) = &mut out.occluders[i];
+                    entry.1 = entry.1.max(radius);
+                } else {
+                    occluder_indices.insert((mi, p.id), out.occluders.len());
                     out.occluders
-                        .push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), p.atom.vdw()));
+                        .push((glam::Vec3::new(p.pos.x, p.pos.y, p.pos.z), radius));
                 }
             }
         }
@@ -859,6 +732,28 @@ fn queue_geometry(rep: &mut Representation, input: crate::geometry_jobs::Input) 
 /// hottest function in the app actually touches, and lets a caller keep the rest of `self`
 /// borrowed while it runs.
 pub(super) fn rebuild_dirty(
+    scene: &mut Scene, renderer: &SceneRenderer, settings: &Settings,
+    view_dirty: bool, rs: &eframe::egui_wgpu::RenderState,
+    gray_active: Option<(crate::scene::MolId, usize)>, background: bool,
+) -> bool {
+    rebuild_dirty_inner(scene,renderer,settings,view_dirty,rs,gray_active,RebuildOptions { background, preserve_cached_ss: false })
+}
+
+/// Preserve frozen secondary structure when first reconstructing a movie snapshot.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn rebuild_movie_snapshot(
+    scene: &mut Scene, renderer: &SceneRenderer, settings: &Settings,
+    rs: &eframe::egui_wgpu::RenderState,
+) -> bool {
+    rebuild_dirty_inner(scene,renderer,settings,true,rs,None,RebuildOptions { background: false, preserve_cached_ss: true })
+}
+
+struct RebuildOptions {
+    background: bool,
+    preserve_cached_ss: bool,
+}
+
+fn rebuild_dirty_inner(
 scene: &mut Scene,
 renderer: &SceneRenderer,
 settings: &Settings,
@@ -869,11 +764,15 @@ rs: &eframe::egui_wgpu::RenderState,
 // in Draw mode. `None` when not drawing → nothing greyed. The caller marks all reps
 // `geom_dirty` when this changes, so a rebuild reaches every rep.
 gray_active: Option<(crate::scene::MolId, usize)>,
-background: bool,
+options: RebuildOptions,
 ) -> bool {
+    let RebuildOptions { background, preserve_cached_ss } = options;
     #[cfg(target_arch = "wasm32")]
     let _ = background;
-    let mut changed = false;
+    if let RepParams::Interactions { settings: interactions } = settings.reps.style_params(RepKind::Interactions) {
+        scene.interaction_settings = interactions;
+    }
+    let mut changed = scene.refresh_selections();
     // Whether wrapping bonds are drawn as dashed minimum-image half-bonds (read
     // once: the molecule loop below borrows `self.scene` mutably).
     let dashed = settings.behavior.dashed_pbc_bonds;
@@ -943,7 +842,6 @@ background: bool,
         for (j, rep) in mol.reps.iter_mut().enumerate() {
             // Grey out every rep except the one open in the editor (Draw mode only).
             let grayed = matches!(gray_active, Some((tid, tr)) if !(mol_id == tid && j == tr));
-            changed |= refresh_selection(&mol.data, rep);
             #[cfg(not(target_arch = "wasm32"))]
             let background_allowed = background && gray_active.is_none()
                 && mol.trajectory.frames.len() <= 1 && !mol.trajectory.playing
@@ -1014,8 +912,11 @@ background: bool,
                 // into the cache, build geometry, recreate GPU buffers.
                 let (geom, fresh_ss, primitive_cache, cartoon_cache) = {
                     let bound = mol.data.bind_with_state(sel, state);
-                    let ss = geometry::needs_ss(&rep.params, rep.color)
-                        .then(|| SsMap::compute(&bound, rep.ss_algo));
+                    let ss = geometry::needs_ss(&rep.params, rep.color).then(|| {
+                        if preserve_cached_ss && !rep.ss_per_frame && !rep.dynamic {
+                            rep.ss_cache.clone().unwrap_or_else(|| SsMap::compute(&bound, rep.ss_algo))
+                        } else { SsMap::compute(&bound, rep.ss_algo) }
+                    });
                     let primitive_cache = geometry::PrimitiveCache::new(
                         &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                         ss.as_ref(),
@@ -1223,13 +1124,16 @@ background: bool,
     for (mi, ri) in inter_jobs {
         // Compute (immutable scene borrow), then upload + store (drops the borrow
         // first, so mutating the rep afterwards is fine).
-        let geom = build_interactions(scene, mi, ri);
+        let found = detect_interactions(scene, mi, ri);
+        let RepParams::Interactions { settings } = scene.molecules[mi].reps[ri].params else { continue };
+        let geom = geometry::interaction_geometry(&found, &settings);
         log::debug!(
             "interactions rep {mi}:{ri} → {} dashed line vertices",
             geom.lines.len()
         );
         let gpu = renderer.upload(rs, &geom);
         let rep = &mut scene.molecules[mi].reps[ri];
+        rep.interaction_cache = found.into_iter().map(crate::pick::InteractionGeometry::new).collect();
         rep.gpu = gpu;
         rep.geom_dirty = false;
         rep.coords_dirty = false;
@@ -1336,12 +1240,14 @@ mod unobstructed_tests {
         assert!((max - min - glam::Vec3::splat(0.06)).length() < 1e-5);
         let both = gather_unobstructed_atoms(&mut scene, &[(0, 0), (0, 1)]).unwrap();
         assert_eq!(both.target.len(), 1);
-        let (pos, vdw) = both.target[0];
+        let (pos, radius) = both.target[0];
         let (min, max) = bounds(&both);
-        assert!((min - (pos - glam::Vec3::splat(vdw * 2.0))).length() < 1e-5);
-        assert!((max - (pos + glam::Vec3::splat(vdw * 2.0))).length() < 1e-5);
+        assert!((min - (pos - glam::Vec3::splat(radius))).length() < 1e-5);
+        assert!((max - (pos + glam::Vec3::splat(radius))).length() < 1e-5);
         let reverse = gather_unobstructed_atoms(&mut scene, &[(0, 1), (0, 0)]).unwrap();
         assert_eq!(bounds(&both), bounds(&reverse));
+        assert_eq!(both.target, reverse.target);
+        assert_eq!(small.target[0].1, 0.03);
     }
 
     #[test]
@@ -1362,19 +1268,71 @@ mod unobstructed_tests {
     }
 
     #[test]
+    fn glowing_and_dashed_interactions_never_obstruct_or_expand_combined_targets() {
+        use crate::interactions::{Interaction, InteractionKind, InteractionSettings};
+        use glam::Vec3;
+        // Cover both the small-target pixel scorer and the large-target atom scorer.
+        for selection in ["index 0:2", "index 0:599"] {
+            let mut scene = fixture_scene();
+            scene.molecules[0].reps = vec![rep(selection), rep("index 700:710")];
+            scene.molecules[1].visible = false;
+            let baseline = gather_unobstructed_atoms(&mut scene, &[(0, 0)]).unwrap();
+            let direction = |atoms: &UnobstructedAtoms| {
+                if let Some(pixels) = &atoms.pixels {
+                    pixels.best_direction(32, None, &|| false).unwrap()
+                } else {
+                    crate::unobstructed::best_unobstructed_direction(&atoms.target, &atoms.occluders, 32)
+                }
+            };
+            let expected_direction = direction(&baseline);
+            let origin = baseline.target[0].0;
+            for glowing in [false, true] {
+                let settings = InteractionSettings { glowing_path: glowing, line_width: 20.0, ..Default::default() };
+                let geometry = geometry::interaction_geometry(&[Interaction { atoms: Default::default(),  kind: InteractionKind::HBond,
+                    a: origin + Vec3::new(-0.3, 0.0, 0.1), b: origin + Vec3::new(0.3, 0.0, 0.1),
+                    angle: None, offset: None }], &settings);
+                assert_eq!(!geometry.mesh.vertices.is_empty(), glowing);
+                assert_eq!(!geometry.lines.is_empty(), !glowing);
+                let mol = &mut scene.molecules[0];
+                let mut annotation = Representation::new(RepKind::Interactions);
+                annotation.params = RepParams::Interactions { settings };
+                annotation.sel = Some(mol.data.select_all());
+                annotation.sel_dirty = false;
+                annotation.geom_dirty = false;
+                annotation.coords_dirty = false;
+                annotation.cache_geometry(geometry, mol.n_atoms, true, false);
+                assert!(annotation.cached_geometry(true).is_some(), "exercise populated, clean annotation geometry");
+                mol.reps.push(annotation);
+                for targets in [vec![(0, 0)], vec![(0, 0), (0, 2)]] {
+                    let actual = gather_unobstructed_atoms(&mut scene, &targets).unwrap();
+                    assert_eq!(actual.target, baseline.target);
+                    assert_eq!(actual.occluders, baseline.occluders);
+                    assert_eq!(actual.visual_bounds, baseline.visual_bounds);
+                    assert_eq!(actual.triangles, baseline.triangles);
+                    assert_eq!(actual.pixels.is_some(), baseline.pixels.is_some());
+                    assert_eq!(direction(&actual), expected_direction);
+                }
+                assert!(gather_unobstructed_atoms(&mut scene, &[(0, 2)]).err().unwrap().contains("interactions are annotations"));
+                scene.molecules[0].reps.pop();
+            }
+        }
+    }
+
+    #[test]
     fn selection_refresh_preserves_invalid_selection_and_handles_empty_selection() {
         let mut scene = fixture_scene();
-        let mol = &mut scene.molecules[0];
-        let mut r = rep("index 0 1");
-        assert!(!refresh_selection(&mol.data, &mut r));
-        r.sel_text = "  definitely_invalid_keyword".into();
-        r.sel_dirty = true;
-        refresh_selection(&mol.data, &mut r);
-        assert_eq!(r.sel.as_ref().unwrap().len(), 2);
-        assert!(r.sel_error.is_some());
-        r.sel_text = "index 999999".into();
-        r.sel_dirty = true;
-        assert!(refresh_selection(&mol.data, &mut r));
+        scene.molecules[0].reps = vec![rep("index 0:1")];
+        scene.refresh_selections();
+        assert_eq!(scene.molecules[0].reps[0].sel.as_ref().unwrap().len(), 2);
+        scene.molecules[0].reps[0].sel_text = "  definitely_invalid_keyword".into();
+        scene.molecules[0].reps[0].sel_dirty = true;
+        scene.refresh_selections();
+        assert_eq!(scene.molecules[0].reps[0].sel.as_ref().unwrap().len(), 2);
+        assert!(scene.molecules[0].reps[0].sel_error.is_some());
+        scene.molecules[0].reps[0].sel_text = "index 999999".into();
+        scene.molecules[0].reps[0].sel_dirty = true;
+        assert!(scene.refresh_selections());
+        let r = &scene.molecules[0].reps[0];
         assert!(r.sel.is_none() && r.sel_empty && r.sel_error.is_none());
         assert!(!r.sel_dirty);
     }
@@ -1489,6 +1447,91 @@ mod geometry_job_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod unobstructed_render_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires GPU; audits ribbon occlusion and ring readability for ten JAK2 inhibitors"]
+    fn jak2_unobstructed_views_clear_ribbons_and_show_ring_faces() {
+        use crate::material::Material;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let rs = crate::render::test_gpu();
+        let mut cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+        cc.wgpu_render_state = Some(rs.clone());
+        let mut app = App::new(&cc, AppLaunch {
+            files: vec![vec![root.join("tests/jak2.pdb")], vec![root.join("tests/jak2_inhs.sd")]],
+            ..Default::default()
+        }).unwrap();
+        app.last_size = [640, 360];
+        app.set_rep_style(0, 0, "cartoon").unwrap();
+        let protein = &mut app.scene.molecules[0].reps[0];
+        protein.params = RepParams::Cartoon { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness: 0.03, bevel_height: 0.0 };
+        protein.sel_text = "not apolh".into();
+        protein.sel_dirty = true;
+        protein.color = ColorMethod::Solid([140,140,140,255]);
+        protein.material = Material::Opaque;
+        let group = app.scene.groups[0].id.0;
+        let owner = app.scene.mol_index(app.scene.groups[0].members[0]).unwrap();
+        let ligand = &mut app.scene.molecules[owner].reps[0];
+        ligand.sel_text = "not apolh".into();
+        ligand.sel_dirty = true;
+        ligand.color = ColorMethod::Solid([255,0,255,255]);
+        ligand.material = Material::Opaque;
+        app.add_group_interactions_with_id(group, scene::reserve_rep_id().0,
+            app.scene.molecules[0].id.0, app.scene.molecules[0].reps[0].id.0).unwrap();
+        app.camera.ao.enabled = false;
+        app.camera.shadow.enabled = false;
+        app.camera.depth_cue.enabled = false;
+        app.camera.background = crate::camera::Background { kind: BgKind::Solid, color: [1.0;4], ..Default::default() };
+        let dir = root.join("target/unobstructed-regression");
+        std::fs::create_dir_all(&dir).unwrap();
+        let capture = |app: &mut App| {
+            app.camera.depth_bounds = app.scene.visible_depth_bounds();
+            let c = &app.camera;
+            let cap = app.renderer.capture_begin(&rs, 640, 360, c.view(), c.proj(640.0/360.0),
+                c.is_perspective(), c.cue_uniform(), c.ao_uniform(), c.shadow_uniform(),
+                c.background, c.eye_depth_range(), &app.scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            cap.read()
+        };
+        let mut failures = Vec::new();
+        for member in 0..10 {
+            app.show_group_member(group, member).unwrap();
+            let mi = app.scene.mol_index(app.scene.groups[0].members[member]).unwrap();
+            rebuild_dirty(&mut app.scene, &app.renderer, &app.settings, true, &rs, None, false);
+            app.unobstructed_view_multi_immediate(&[(mi,0)], 2.0, 256).unwrap();
+            let direction = app.camera.orientation * glam::Vec3::Z;
+            app.scene.molecules[mi].ensure_interaction_rings();
+            let mol = &app.scene.molecules[mi];
+            let face = mol.interaction_rings.as_deref().unwrap_or(&[]).iter().map(|ring| {
+                let points = ring.iter().map(|&i| v3(&mol.render_state().coords[i])).collect::<Vec<_>>();
+                crate::interactions::ring_normal(&points).dot(direction).abs()
+            }).fold(1.0_f32, f32::min);
+            // The pixel oracle excludes pocket/contact dashes to measure only the
+            // ribbon, using identical geometry/pose in both reference captures.
+            app.scene.molecules[mi].reps[1].visible = false;
+            let all_receptor = capture(&mut app);
+            app.scene.molecules[0].reps[1].visible = false;
+            let visible = capture(&mut app);
+            app.scene.molecules[0].visible = false;
+            let isolated = capture(&mut app);
+            app.scene.molecules[0].visible = true;
+            app.scene.molecules[0].reps[1].visible = true;
+            app.scene.molecules[mi].reps[1].visible = true;
+            let magenta = |p: &image::Rgba<u8>| p[0] > p[1].saturating_add(60) && p[2] > p[1].saturating_add(60);
+            let reference = isolated.pixels().filter(|p| magenta(p)).count();
+            let shown = isolated.pixels().zip(visible.pixels()).filter(|(a,b)| magenta(a) && magenta(b)).count();
+            let fraction = shown as f32 / reference.max(1) as f32;
+            let all_shown = isolated.pixels().zip(all_receptor.pixels()).filter(|(a,b)| magenta(a) && magenta(b)).count();
+            let all_fraction = all_shown as f32 / reference.max(1) as f32;
+            visible.save(dir.join(format!("ligand-{:02}.png",member+1))).unwrap();
+            eprintln!("ligand {}: ribbon clearance {:.2}%, all receptor {:.2}%, minimum ring face {:.3}", member+1, fraction*100.0, all_fraction*100.0, face);
+            // Even the least face-on ring must retain at least one fifth of
+            // its face area; an edge-on collapse previously scored below 0.01.
+            if fraction < 0.995 || all_fraction < 0.98 || face < 0.2 {
+                failures.push(format!("ligand {}: clearance {fraction:.3}, all receptor {all_fraction:.3}, ring face {face:.3}", member+1));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
+    }
     use crate::camera::{Camera, Projection};
     use glam::Vec3;
 

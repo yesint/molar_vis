@@ -2,6 +2,22 @@
 use super::*;
 use super::widgets::*;
 
+/// Split spare row width between the dropdowns, using all option labels so a
+/// selection change does not move its neighbors.
+pub(super) fn representation_picker_widths(ui: &egui::Ui) -> [f32; 3] {
+    let labels = [
+        max_label_width(ui, RepKind::ALL.iter().map(|kind| kind.label())),
+        max_label_width(ui, ColorMethod::ALL.iter().map(|method| method.label())),
+        max_label_width(ui, Material::ALL.iter().map(|material| material.label())),
+    ];
+    let ranges = labels.map(|label| picker_width_range(ui, label));
+    let compact: f32 = ranges.iter().map(|range| range.0).sum();
+    let growth: f32 = ranges.iter().map(|range| range.1 - range.0).sum();
+    let available = ui.available_width() - 2.0 * ui.spacing().item_spacing.x;
+    let fraction = if growth > 0.0 { ((available - compact) / growth).clamp(0.0, 1.0) } else { 0.0 };
+    ranges.map(|(compact, full)| compact + (full - compact) * fraction)
+}
+
 
 /// Draw a small vector icon depicting a representation style into `rect`.
 pub(super) fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: RepKind, color: egui::Color32) {
@@ -90,20 +106,21 @@ pub(super) fn paint_style_icon(painter: &egui::Painter, rect: egui::Rect, kind: 
 
 /// A clickable icon+label row inside the style dropdown. Returns true if clicked.
 pub(super) fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 22.0), egui::Sense::click());
+    let width = max_label_width(ui, RepKind::ALL.iter().map(|kind| kind.label())) + 46.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, dropdown_height(ui)), egui::Sense::click());
     if selected || resp.hovered() {
         ui.painter()
             .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
     let color = ui.visuals().text_color();
     let icon_rect =
-        egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
+        egui::Rect::from_center_size(egui::pos2(rect.left() + 17.0, rect.center().y), egui::vec2(26.0, 18.0));
     paint_style_icon(ui.painter(), icon_rect, kind, color);
     ui.painter().text(
         egui::pos2(icon_rect.right() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         kind.label(),
-        egui::FontId::proportional(15.0),
+        egui::TextStyle::Button.resolve(ui.style()),
         color,
     );
     resp.clicked()
@@ -116,8 +133,11 @@ pub(super) fn style_option(ui: &mut egui::Ui, kind: RepKind, selected: bool) -> 
 pub(super) fn style_picker(ui: &mut egui::Ui, rep: &mut Representation, defaults: &RepDefaults) -> Option<Representation> {
     let color = ui.visuals().text_color();
     let kind = rep.kind;
-    let lw = max_label_width(ui, RepKind::ALL.iter().map(|&k| k.label()));
-    let resp = picker_button(ui, kind.label(), lw, |p, r| paint_style_icon(p, r, kind, color));
+    let label_width = max_label_width(ui, RepKind::ALL.iter().map(|kind| kind.label()));
+    let resp = picker_button(ui, kind.label(), label_width, |p, r| paint_style_icon(p, r, kind, color));
+    if std::env::var("MOLAR_VIS_DEBUG_MENU").as_deref() == Ok("style") {
+        egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&resp));
+    }
 
     let mut cloned_old = None;
     egui::Popup::menu(&resp).show(|ui| {
@@ -327,19 +347,21 @@ pub(super) fn paint_color_icon(painter: &egui::Painter, rect: egui::Rect, method
 /// When `arrow` is set it draws a right-pointing submenu indicator (used for the
 /// `Solid` row, which opens the color submenu).
 pub(super) fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: bool, arrow: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(172.0, 22.0), egui::Sense::click());
+    let width = max_label_width(ui, ColorMethod::ALL.iter().map(|method| method.label()))
+        + 46.0 + ui.spacing().icon_width;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, dropdown_height(ui)), egui::Sense::click());
     if selected || resp.hovered() {
         ui.painter()
             .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
     }
     let icon_rect =
-        egui::Rect::from_min_size(rect.left_top() + egui::vec2(4.0, 2.0), egui::vec2(26.0, 18.0));
+        egui::Rect::from_center_size(egui::pos2(rect.left() + 17.0, rect.center().y), egui::vec2(26.0, 18.0));
     paint_color_icon(ui.painter(), icon_rect, method, ui.visuals().text_color());
     ui.painter().text(
         egui::pos2(icon_rect.right() + 8.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         method.label(),
-        egui::FontId::proportional(15.0),
+        egui::TextStyle::Button.resolve(ui.style()),
         ui.visuals().text_color(),
     );
     if arrow {
@@ -352,44 +374,6 @@ pub(super) fn color_option(ui: &mut egui::Ui, method: ColorMethod, selected: boo
         );
     }
     resp
-}
-
-/// A small clickable color swatch in the `Solid` submenu grid. Highlights on
-/// hover and rings the currently-selected color.
-pub(super) fn swatch_button(ui: &mut egui::Ui, c: [u8; 4], selected: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
-    ui.painter()
-        .rect_filled(rect, 2.0, egui::Color32::from_rgb(c[0], c[1], c[2]));
-    let stroke = if selected {
-        egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill)
-    } else if resp.hovered() {
-        egui::Stroke::new(1.5_f32, ui.visuals().widgets.hovered.fg_stroke.color)
-    } else {
-        egui::Stroke::new(1.0_f32, egui::Color32::from_gray(80))
-    };
-    ui.painter()
-        .rect_stroke(rect, 2.0, stroke, egui::StrokeKind::Inside);
-    resp.on_hover_text(format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))
-        .clicked()
-}
-
-pub(super) fn solid_presets(ui: &mut egui::Ui, palette: &[[u8; 4]], current: &mut [u8; 4]) -> bool {
-    let mut changed = false;
-    egui::Grid::new("solid_presets")
-        .min_col_width(0.0)
-        .spacing(egui::vec2(3.0, 3.0))
-        .show(ui, |ui| {
-            for (index, &color) in palette.iter().enumerate() {
-                if swatch_button(ui, color, color == *current) {
-                    *current = color;
-                    changed = true;
-                }
-                if (index + 1) % 4 == 0 {
-                    ui.end_row();
-                }
-            }
-        });
-    changed
 }
 
 /// The current solid color, or the default if the rep isn't colored by Solid.
@@ -407,9 +391,9 @@ pub(super) fn current_solid(method: ColorMethod) -> [u8; 4] {
 pub(super) fn color_picker(ui: &mut egui::Ui, rep: &mut Representation) {
     use egui::containers::menu::{MenuConfig, SubMenu};
     let method = rep.color;
-    let lw = max_label_width(ui, ColorMethod::ALL.iter().map(|&m| m.label()));
     let ink = ui.visuals().text_color();
-    let resp = picker_button(ui, method.label(), lw, |p, r| paint_color_icon(p, r, method, ink));
+    let label_width = max_label_width(ui, ColorMethod::ALL.iter().map(|method| method.label()));
+    let resp = picker_button(ui, method.label(), label_width, |p, r| paint_color_icon(p, r, method, ink));
 
     egui::Popup::menu(&resp).show(|ui| {
         // The built-in per-atom schemes: pick one and close.
@@ -470,6 +454,8 @@ pub(super) fn preview_shade(
         }
         crate::material::Shading::MolecularNodes =>
             crate::material::shade_molecular_nodes(base, n, glam::Vec3::Z, p),
+        crate::material::Shading::Velvet =>
+            crate::material::shade_velvet(base, n, glam::Vec3::Z, p),
         crate::material::Shading::Classic => {
             let ndl = n.dot(light).max(0.0);
             let ndh = n.dot(half).max(0.0);
@@ -668,10 +654,10 @@ pub(super) fn paint_material_icon(painter: &egui::Painter, rect: egui::Rect, mat
 /// A grid cell in the material picker: a two-sphere-and-bond **preview** rendered
 /// with the material's lighting, plus its label. Returns true if clicked.
 pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: bool) -> bool {
-    let cell_width = Material::ALL.iter().map(|material| ui.painter().layout_no_wrap(
-        material.label().to_owned(), egui::FontId::proportional(11.5), ui.visuals().text_color()).size().x)
-        .fold(74.0_f32, f32::max) + 8.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell_width, 70.0), egui::Sense::click());
+    let cell_width = max_label_width(ui, Material::ALL.iter().map(|material| material.label()))
+        .max(74.0) + 2.0 * ui.spacing().button_padding.x;
+    let label_height = dropdown_height(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell_width, 52.0 + label_height), egui::Sense::click());
     if selected || resp.hovered() {
         ui.painter()
             .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.weak_bg_fill);
@@ -690,10 +676,10 @@ pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: boo
     );
     paint_material_preview(ui.painter(), preview, material);
     ui.painter().text(
-        egui::pos2(rect.center().x, rect.bottom() - 11.0),
+        egui::pos2(rect.center().x, rect.bottom() - label_height * 0.5),
         egui::Align2::CENTER_CENTER,
         material.label(),
-        egui::FontId::proportional(11.5),
+        egui::TextStyle::Button.resolve(ui.style()),
         ui.visuals().text_color(),
     );
     resp.clicked()
@@ -713,8 +699,8 @@ pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation, defau
 pub(super) fn material_selector(ui: &mut egui::Ui, selected: &mut Material, defaults: &RepDefaults) -> bool {
     let material = if matches!(*selected, Material::Custom { .. }) { *selected } else { defaults.material_for(*selected) };
     let mut changed = false;
-    let lw = max_label_width(ui, Material::ALL.iter().map(|&m| m.label()));
-    let resp = picker_button(ui, material.label(), lw, |p, r| paint_material_icon(p, r, material));
+    let label_width = max_label_width(ui, Material::ALL.iter().map(|material| material.label()));
+    let resp = picker_button(ui, material.label(), label_width, |p, r| paint_material_icon(p, r, material));
 
     egui::Popup::menu(&resp).show(|ui| {
         egui::Grid::new("material_grid")
@@ -740,6 +726,48 @@ mod discrete_preset_tests {
     use super::*;
 
     #[test]
+    fn wider_rows_expand_dropdowns_and_show_full_labels() {
+        for theme in [crate::settings::ThemeMode::Dark, crate::settings::ThemeMode::Light] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx, &crate::settings::AppearanceSettings { theme, ..Default::default() });
+            let labels: [Vec<&str>; 3] = [
+                RepKind::ALL.iter().map(|kind| kind.label()).collect(),
+                ColorMethod::ALL.iter().map(|method| method.label()).collect(),
+                Material::ALL.iter().map(|material| material.label()).collect(),
+            ];
+            let mut measured = Vec::new();
+            for width in [380.0, 620.0] {
+                let mut widths = [0.0; 3];
+                let output = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1000.0))),
+                    ..Default::default()
+                }, |ui| {
+                    widths = representation_picker_widths(ui);
+                    for (index, labels) in labels.iter().enumerate() {
+                        let label_width = max_label_width(ui, labels.iter().copied());
+                        ui.spacing_mut().combo_width = widths[index];
+                        let mut first = None;
+                        for label in labels {
+                            let rect = picker_button(ui, label, label_width, |_, _| {}).rect;
+                            assert!((rect.width() - *first.get_or_insert(rect.width())).abs() < 0.1);
+                        }
+                    }
+                });
+                if width > 600.0 {
+                    assert!(output.shapes.iter().all(|shape| match &shape.shape {
+                        egui::Shape::Text(text) => !text.galley.elided,
+                        _ => true,
+                    }), "wide rows must display complete dropdown labels");
+                }
+                measured.push(widths);
+            }
+            for index in 0..3 {
+                assert!(measured[1][index] > measured[0][index]);
+            }
+        }
+    }
+
+    #[test]
     fn shared_picker_shows_active_palette_on_right_and_selects_edited_color() {
         let ctx = egui::Context::default();
         let mut preferences = crate::color::ColorPreferences::default();
@@ -758,7 +786,9 @@ mod discrete_preset_tests {
                 .iter()
                 .filter_map(|shape| match &shape.shape {
                     egui::Shape::Rect(rect)
-                        if rect.rect.size() == egui::vec2(20.0, 20.0) && rect.fill.a() > 0 =>
+                        if (rect.rect.width() - COLOR_SWATCH_SIZE).abs() < 0.1
+                            && (rect.rect.height() - COLOR_SWATCH_SIZE).abs() < 0.1
+                            && rect.fill.a() > 0 =>
                     {
                         Some((rect.rect.center(), rect.fill.to_array()))
                     }
@@ -790,13 +820,13 @@ mod discrete_preset_tests {
             drawn.iter().map(|(_, color)| *color).collect::<Vec<_>>(),
             preferences.categorical
         );
-        assert!(drawn.iter().all(|(pos, _)| pos.x > ctx.global_style().spacing.slider_width));
+        assert!(drawn.iter().all(|(pos, _)| pos.x > COLOR_PICKER_WIDTH));
         assert!((drawn[1].0.x - drawn[0].0.x - 23.0).abs() < 0.1);
         assert!((drawn[4].0.x - drawn[0].0.x).abs() < 0.1);
         assert!((drawn[4].0.y - drawn[0].0.y - 23.0).abs() < 0.1);
         assert!(!output.shapes.iter().any(|shape|
             matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Discrete palette")));
-        assert!(drawn.iter().all(|(pos, _)| pos.x < 300.0));
+        assert!(drawn.iter().all(|(pos, _)| pos.x < COLOR_PICKER_WIDTH + 110.0));
         let position = drawn[0].0;
         let mut changed = false;
         for pressed in [true, false] {
