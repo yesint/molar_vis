@@ -303,7 +303,7 @@ impl RtScene {
                         for seg in geom.lines.chunks_exact(2) {
                             let (v0, v1) =
                                 (shift_line_vertex(seg[0], off), shift_line_vertex(seg[1], off));
-                            if let Some(gc) = line_capsule(&v0, &v1, view) {
+                            for gc in line_capsules(&v0, &v1, view) {
                                 aabbs.push(cylinder_aabb(&gc));
                                 tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
                                 self.cylinders.push(gc);
@@ -350,9 +350,10 @@ impl RtScene {
                     let bound = mol.data.bind_with_state(sel, state);
                     let ss = geometry::needs_ss(&rep.params, rep.color)
                         .then(|| SsMap::compute(&bound, rep.ss_algo));
-                    fresh = geometry::build(
+                    fresh = geometry::build_with_reference(
                         &bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(),
                         rep.material, ss.as_ref(), dashed_pbc,
+                        Some(mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state())),
                     );
                     fresh.as_ref()
                 };
@@ -419,7 +420,7 @@ impl RtScene {
                     for seg in geom.lines.chunks_exact(2) {
                         let (v0, v1) =
                             (shift_line_vertex(seg[0], off), shift_line_vertex(seg[1], off));
-                        if let Some(gc) = line_capsule(&v0, &v1, view) {
+                        for gc in line_capsules(&v0, &v1, view) {
                             aabbs.push(cylinder_aabb(&gc));
                             tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
                             self.cylinders.push(gc);
@@ -458,7 +459,7 @@ impl RtScene {
                     self.spheres.push(sphere);
                 }
                 for line in geom.lines.chunks_exact(2) {
-                    if let Some(cylinder) = line_capsule(&line[0], &line[1], view) {
+                    for cylinder in line_capsules(&line[0], &line[1], view) {
                         aabbs.push(cylinder_aabb(&cylinder));
                         tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
                         self.cylinders.push(cylinder);
@@ -506,7 +507,7 @@ impl RtScene {
                         for seg in edges.chunks_exact(2) {
                             let (v0, v1) =
                                 (shift_line_vertex(seg[0], off), shift_line_vertex(seg[1], off));
-                            if let Some(gc) = line_capsule(&v0, &v1, view) {
+                            for gc in line_capsules(&v0, &v1, view) {
                                 aabbs.push(cylinder_aabb(&gc));
                                 tags.push(tag(TAG_CYLINDER, self.cylinders.len()));
                                 self.cylinders.push(gc);
@@ -598,6 +599,24 @@ fn point_sphere(point: &crate::render::PointInstance, offset: Vec3, view: RtView
 /// The material is **flat** (ambient 1, no diffuse or specular) so a line traces as the unlit
 /// constant color the rasterizer draws, rather than as a shaded tube — a line is a schematic,
 /// not a physical stick. AO/shadow still multiply it, as they do every other surface.
+fn line_capsules(
+    v0: &crate::render::line::LineVertex,
+    v1: &crate::render::line::LineVertex,
+    view: RtView,
+) -> impl Iterator<Item = GpuCylinder> {
+    let dashed = v0.width < 0.0;
+    let pieces = dashed.then(|| crate::geometry::dashes(v0.pos, v1.pos));
+    let solid = (!dashed).then_some((v0.pos, v1.pos));
+    let (v0, v1) = (*v0, *v1);
+    pieces.into_iter().flatten().chain(solid).filter_map(move |(p0, p1)| {
+        line_capsule(
+            &crate::render::line::LineVertex { pos: p0, width: v0.width.abs(), ..v0 },
+            &crate::render::line::LineVertex { pos: p1, width: v1.width.abs(), ..v1 },
+            view,
+        )
+    })
+}
+
 fn line_capsule(
     v0: &crate::render::line::LineVertex,
     v1: &crate::render::line::LineVertex,

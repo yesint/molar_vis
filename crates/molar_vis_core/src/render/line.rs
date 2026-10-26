@@ -18,7 +18,8 @@ pub struct LineVertex {
     pub pos: [f32; 3],
     /// RGBA8 packed.
     pub color: u32,
-    /// Line width in pixels (screen-space). Equal for both endpoints of a segment.
+    /// Line width in pixels (screen-space). Negative marks procedural dashes;
+    /// the absolute value is the drawn width. Equal for both endpoints.
     pub width: f32,
     /// Multi-order strand offset in pixels (screen-space, signed). The vertex
     /// shader translates the vertex by this many pixels along the segment's

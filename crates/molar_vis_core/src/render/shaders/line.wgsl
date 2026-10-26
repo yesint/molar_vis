@@ -39,6 +39,8 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>, // rgb + opacity
     @location(1) eye_z: f32,
+    @location(2) along_nm: f32,
+    @location(3) @interpolate(flat) dashed: u32,
 };
 
 fn unpack_color(c: u32) -> vec4<f32> {
@@ -87,14 +89,22 @@ fn vs_main(@builtin(vertex_index) vidx: u32, seg: VsIn) -> VsOut {
     // Offset by half-width pixels along the screen perpendicular (for the quad's
     // thickness) plus the strand offset. Convert the pixel offset to NDC (1 NDC
     // unit = viewport/2 px), then back to clip by *w so it survives the divide.
-    let offset_px = perp * (side * (seg.width * 0.5) + strand_px);
+    let offset_px = perp * (side * (abs(seg.width) * 0.5) + strand_px);
     let offset_ndc = offset_px / (0.5 * viewport);
 
     var out: VsOut;
     out.clip = vec4<f32>(clip.xy + offset_ndc * clip.w, clip.z, clip.w);
     out.color = color;
     out.eye_z = eye_z;
+    out.along_nm = select(0.0, distance(seg.pos0, seg.pos1), at_end1);
+    out.dashed = select(0u, 1u, seg.width < 0.0);
     return out;
+}
+
+// World-space dash lengths match geometry::dashes used by ray tracing.
+fn dash_gap(in: VsOut) -> bool {
+    let phase = in.along_nm - floor(in.along_nm / LINE_DASH_PERIOD) * LINE_DASH_PERIOD;
+    return in.dashed != 0u && phase > LINE_DASH_LEN;
 }
 
 // Weighted-blended OIT weight, biased strongly toward the camera using linear
@@ -110,6 +120,7 @@ struct OpaqueOut {
 
 @fragment
 fn fs_main(in: VsOut) -> OpaqueOut {
+    if dash_gap(in) { discard; }
     var out: OpaqueOut;
     out.color = vec4<f32>(apply_fog(in.color.rgb, in.eye_z), in.color.a);
     out.normal = vec4<f32>(0.0, 0.0, 1.0, 1.0);
@@ -121,6 +132,7 @@ fn fs_main(in: VsOut) -> OpaqueOut {
 
 @fragment
 fn fs_glow(in: VsOut) -> @location(0) vec4<f32> {
+    if dash_gap(in) { discard; }
     // `camera.params.w` is the animated pulse multiplier (see render.rs).
     return vec4<f32>(camera.glow_color.rgb, clamp(0.85 * camera.params.w, 0.0, 1.0));
 }
@@ -132,6 +144,7 @@ struct OitOut {
 
 @fragment
 fn fs_oit(in: VsOut) -> OitOut {
+    if dash_gap(in) { discard; }
     let rgb = apply_fog(in.color.rgb, in.eye_z);
     let a = in.color.a;
     let w = oit_weight(in.eye_z, a);

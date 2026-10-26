@@ -7,6 +7,7 @@ pub(crate) struct PrimitiveCache {
     radii: Vec<f32>,
     bonds: Vec<Bond>,
     bonded: Vec<bool>,
+    bond_lengths: Vec<f32>,
     params: RepParams,
     material: Material,
 }
@@ -20,6 +21,7 @@ impl PrimitiveCache {
         color: ColorSpec,
         material: Material,
         ss: Option<&SsMap>,
+        reference: &State,
     ) -> Option<Self> {
         let scale = match *params {
             RepParams::Vdw { scale } => scale,
@@ -48,14 +50,18 @@ impl PrimitiveCache {
         }
         let mut bonded = vec![false; ids.len()];
         let bonds = if needs_bonds { bonds } else { &[] };
+        let mut lengths = Vec::new();
+        let reference_lengths = super::bond_lengths(reference, bonds);
         let bonds = bonds
             .iter()
-            .filter_map(|bond| {
+            .enumerate()
+            .filter_map(|(index, bond)| {
                 let [a, b] = bond.pair();
                 let (a, b) = (*local.get(a)?, *local.get(b)?);
                 if a == usize::MAX || b == usize::MAX {
                     return None;
                 }
+                lengths.push(reference_lengths[index]);
                 bonded[a] = true;
                 bonded[b] = true;
                 Some(Bond::with_order(a, b, bond.order))
@@ -67,6 +73,7 @@ impl PrimitiveCache {
             radii,
             bonds,
             bonded,
+            bond_lengths: lengths,
             params: *params,
             material,
         })
@@ -135,7 +142,7 @@ impl PrimitiveCache {
         }
         match self.params {
             RepParams::Licorice { bond_radius, bond_color_blend } => {
-                data.cylinders = cylinders(&lut, &self.bonds, bond_radius, pbox, None, 0.0, bond_color_blend, true);
+                data.cylinders = cylinders(&lut, &self.bonds, bond_radius, pbox, None, 0.0, bond_color_blend, true, Some(&self.bond_lengths));
             }
             RepParams::BallAndStick {
                 bond_radius,
@@ -145,10 +152,10 @@ impl PrimitiveCache {
             } => {
                 let radii = (bond_smoothing > 0.0).then_some(self.radii.as_slice());
                 data.cylinders =
-                    cylinders(&lut, &self.bonds, bond_radius, pbox, radii, bond_smoothing, bond_color_blend, false);
+                    cylinders(&lut, &self.bonds, bond_radius, pbox, radii, bond_smoothing, bond_color_blend, false, Some(&self.bond_lengths));
             }
             RepParams::Lines { width, bond_color_blend } => {
-                data.lines = lines(&lut, &self.bonds, width, pbox, bond_color_blend);
+                data.lines = lines(&lut, &self.bonds, width, pbox, bond_color_blend, Some(&self.bond_lengths));
                 for (i, entry) in lut.iter().enumerate() {
                     if self.bonded[i] {
                         continue;
@@ -215,6 +222,7 @@ mod tests {
                     ColorMethod::Element.into(),
                     Material::Opaque,
                     None,
+                    mol.render_state(),
                 )
                 .unwrap();
                 black_box(cache.build(mol.render_state(), false));
@@ -294,6 +302,7 @@ mod tests {
                     color.into(),
                     Material::Transparent,
                     Some(&ss),
+                    mol.render_state(),
                 )
                 .unwrap();
                 assert_eq!(
@@ -323,7 +332,7 @@ mod tests {
                     }
                     for dashed in [false, true] {
                         let moved = mol.data.bind_with_state(&sel, &state);
-                        let expected = build(
+                        let expected = build_with_reference(
                             &moved,
                             mol.n_atoms,
                             &bonds,
@@ -332,6 +341,7 @@ mod tests {
                             Material::Transparent,
                             Some(&ss),
                             dashed,
+                            Some(mol.render_state()),
                         );
                         let actual = cache.build(&state, dashed);
                         fn bytes<T: bytemuck::Pod>(v: &[T]) -> &[u8] {

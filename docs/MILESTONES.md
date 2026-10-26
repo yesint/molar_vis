@@ -240,8 +240,8 @@
   structure are found at all. (2) **Minimum-image dashed half-bonds** (`geometry.rs`
   `half_bond_ends` via `PeriodicBox::closest_image`; box from the bound's `BoxProvider::get_box`,
   no call-site changes): a bond crossing a face is drawn as two **dashed** stubs running from each
-  atom **to its partner's nearest image** (full bond toward the image, not beyond — reaches where
-  the partner is in the next cell), crossing opposite faces; nothing crosses the box interior.
+  atom **toward its partner's nearest image**, limited to half the reference bond length
+  measured from the loaded structure. Stub length does not grow with box size or frame separation.
   Cylinders + lines. (3) **Cartoon**: runs split at a PBC jump (`is_pbc_jump`) so the ribbon never
   crosses the box; a jump end is **extended one residue past the face** (ghost control point at the
   partner's image), stays opaque up to the face (`is_inside`), then is **dashed** beyond it
@@ -250,7 +250,7 @@
   `tests/pbc_pair.pdb` (2-atom wrapped bond) + `tests/2lao_pbc_broken.pdb` (2lao shifted by
   half a box in X and wrapped into a snug box, so the protein is split across the X face) — both
   committed. Verified: bond count unchanged from the whole protein (1855); no long lines/ribbons
-  across the box; dashed stubs reach the partner image; the cartoon ribbon is dashed beyond the
+  across the box; dashed stubs point toward the partner image; the cartoon ribbon is dashed beyond the
   boundary.
 - ✅ M17 **Depth-cue modes (VMD `cuemode`) + cursor-centered zoom** — two "Rendering & visuals"
   items. (1) **Depth-cue falloff curves**: `CueMode {Linear, Exp, Exp2}` on `DepthCue` (matching
@@ -822,6 +822,11 @@
   color selection, including settings colors, background, accent, and Solid coloring.
   The side panel can be collapsed from its menu bar and restored from the view
   toolbar, giving the viewport the full window width while it is collapsed.
+  Native GPU devices use the adapter's supported buffer size limit, fixing a
+  crash when large systems need vertex buffers above wgpu's 256 MiB default.
+  Periodic line dashes are generated in the raster shader instead of expanding
+  every dash on the CPU. Trajectory updates retain fixed line vertex counts for
+  stretched periodic links; ray-traced exports keep explicit dash geometry.
 
 - Camera animation and native movie export: shared explicit-time camera paths for
   Rust/Python/JavaScript, full-turn rotation and pivot support, multiplicative zoom,

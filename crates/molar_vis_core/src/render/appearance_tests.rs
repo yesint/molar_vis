@@ -2452,3 +2452,51 @@ fn glowing_path_bounded_search_matches_full_search() {
         assert!(error.iter().all(|v| v.abs() < 1e-4), "ray {ray}: bounded/full search difference {error:?}");
     }
 }
+
+#[test]
+#[ignore = "requires GPU; compares procedural line dashes with explicit segments in raster and trace"]
+fn procedural_line_dashes_match_explicit_segments() {
+    use crate::{geometry::RepKind, scene::Representation};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mut camera = Camera::frame_bbox(Vec3::splat(-0.6), Vec3::splat(0.6), 0.8);
+    camera.orientation = glam::Quat::IDENTITY;
+    camera.depth_cue.enabled = false;
+    camera.ao.enabled = false;
+    camera.shadow.enabled = false;
+    camera.background = crate::camera::Background::for_theme(false);
+    for projection in [Projection::Orthographic, Projection::Perspective] {
+        camera.projection = projection;
+        for alpha in [255u32, 128] {
+            let v0 = LineVertex { pos: [-0.4, 0.0, -0.2], color: (alpha << 24) | 0x0000ff, width: -4.0, offset_px: 0.0 };
+            let v1 = LineVertex { pos: [0.4, 0.0, 0.2], ..v0 };
+            let explicit: Vec<_> = crate::geometry::dashes(v0.pos, v1.pos).into_iter()
+                .flat_map(|(a, b)| [LineVertex { pos: a, width: 4.0, ..v0 }, LineVertex { pos: b, width: 4.0, ..v1 }]).collect();
+            let mut images = Vec::new();
+            for vertices in [vec![v0, v1], explicit] {
+                let geom = GeometryData { lines: vertices, ..Default::default() };
+                let mol = &mut scene.molecules[0];
+                let mut rep = Representation::new(RepKind::Lines);
+                rep.sel = Some(mol.data.select_all());
+                rep.gpu = renderer.upload(&rs, &geom);
+                rep.cache_geometry(geom, mol.n_atoms, true, false);
+                rep.sel_dirty = false;
+                rep.geom_dirty = false;
+                rep.coords_dirty = false;
+                mol.reps = vec![rep];
+                images.push(raster_and_trace(&mut renderer, &rs, &scene, &camera));
+            }
+            for (kind, a, b) in [("raster", &images[0].0, &images[1].0), ("trace", &images[0].1, &images[1].1)] {
+                let error: f64 = a.pixels().zip(b.pixels()).map(|(a,b)|
+                    (0..3).map(|i| a[i].abs_diff(b[i]) as f64).sum::<f64>()).sum();
+                let mae = error / (a.width() * a.height() * 3) as f64;
+                assert!(mae < 0.5, "{kind}, {projection:?}, alpha={alpha}: MAE={mae}");
+                assert!(a.pixels().filter(|p| p[0] > p[1].saturating_add(30)).count() > 50,
+                    "dashed line must remain visible");
+            }
+        }
+    }
+}

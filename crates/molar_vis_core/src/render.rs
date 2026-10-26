@@ -139,6 +139,8 @@ fn inject_early_z(src: &str, enable: bool) -> std::borrow::Cow<'static, str> {
 fn lit_shader_source(src: &str) -> String {
     let constants = format!("const MATERIAL_FLAT_OUTLINE: u32 = {}u;\nconst MATERIAL_MOLECULAR_NODES: u32 = {}u;\nconst MATERIAL_VELVET: u32 = {}u;\nconst MATERIAL_GLOWING_PATH: u32 = {}u;\nconst MATERIAL_PATH_ANIMATION_BIT: u32 = {}u;\n",
         crate::material::FLAT_OUTLINE_WORD, crate::material::MOLECULAR_NODES_WORD, crate::material::VELVET_WORD, crate::material::GLOWING_PATH_WORD, crate::material::GLOWING_PATH_ANIMATION_BIT);
+    let constants = format!("{constants}const LINE_DASH_LEN: f32 = {};\nconst LINE_DASH_PERIOD: f32 = {};\n",
+        crate::geometry::DASH_LEN, crate::geometry::DASH_LEN + crate::geometry::DASH_GAP);
     format!("{}\n{}\n{}\n{}\n{}", constants, envelope::shader(src, false), include_str!("render/shaders/lighting.wgsl"), include_str!("render/shaders/bond_profile.wgsl"), include_str!("render/shaders/ao_kernel.wgsl"))
 }
 

@@ -27,7 +27,7 @@ pub(super) fn build_hover_detail(
     let params = RepParams::BallAndStick {
         sphere_scale: 0.25, bond_radius: 0.04, bond_smoothing: 0.0, bond_color_blend: 0.0,
     };
-    let mut geom = geometry::build(
+    let mut geom = geometry::build_with_reference(
         &bound,
         n_atoms,
         bonds,
@@ -35,8 +35,7 @@ pub(super) fn build_hover_detail(
         crate::color::ColorSpec { method: ColorMethod::Element, preferences, ..Default::default() },
         crate::material::Material::Opaque,
         None,
-        dashed_pbc,
-    );
+        dashed_pbc, Some(data.state()));
     fade_by_ray(&mut geom, detail.ray_o, detail.ray_d, detail.radius);
     geom
 }
@@ -150,10 +149,9 @@ pub(super) fn build_glow(
             .filter(|id| highlighted.contains(id)).collect();
         let Ok(sel) = molar::prelude::Sel::from_vec(ids) else { continue };
         let bound = data.bind_with_state(&sel, state);
-        let mut geom = geometry::build(
+        let mut geom = geometry::build_with_reference(
             &bound, n_atoms, bonds, &rep.params, rep.color_spec(), rep.material,
-            rep.ss_cache.as_ref(), dashed_pbc,
-        );
+            rep.ss_cache.as_ref(), dashed_pbc, Some(data.state()));
         // Surface re-builds the glow over the *subset* of selected atoms, so its mesh
         // nearly — but not exactly — coincides with the parent's (the grid isosurface
         // shifts at the subset boundary). Two near-coplanar surfaces z-fight, so push
@@ -608,7 +606,7 @@ pub(super) fn gather_unobstructed_atoms(
                 let built;
                 let geom = if let Some(geom) = rep.cached_geometry(true) { geom } else {
                     let ss = geometry::needs_ss(&rep.params, rep.color).then(|| SsMap::compute(&bound, rep.ss_algo));
-                    built = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true);
+                    built = geometry::build_with_reference(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true, Some(mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state())));
                     built.as_ref()
                 };
                 if is_target { pixels.target.extend(geom); } else { pixels.occluders.extend(geom); }
@@ -636,7 +634,7 @@ pub(super) fn gather_unobstructed_atoms(
                 } else { None };
                 let mesh = if let Some(mesh) = mesh { mesh } else {
                     let ss = geometry::needs_ss(&rep.params, rep.color).then(|| SsMap::compute(&bound, rep.ss_algo));
-                    built = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true);
+                    built = geometry::build_with_reference(&bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), true, Some(mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state())));
                     &built.mesh
                 };
                 for triangle in mesh.indices.chunks_exact(3) {
@@ -920,6 +918,7 @@ options: RebuildOptions,
                     let primitive_cache = geometry::PrimitiveCache::new(
                         &bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material,
                         ss.as_ref(),
+                        mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state()),
                     );
                     let cartoon_cache = geometry::CartoonCache::new(
                         &bound, n_atoms, &rep.params, rep.color_spec(), rep.material, ss.as_ref(),
@@ -928,7 +927,7 @@ options: RebuildOptions,
                         rep.color_spec(), rep.material, ss.as_ref(), cartoon_cache.as_ref(), dashed,
                         background_allowed, || primitive_cache.as_ref().map_or_else(
                             || cartoon_cache.as_ref().map_or_else(
-                                || geometry::build(&bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), dashed),
+                                || geometry::build_with_reference(&bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, ss.as_ref(), dashed, Some(mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state()))),
                                 |cache| cache.build(state, dashed),
                             ),
                             |cache| cache.build(state, dashed),
@@ -964,7 +963,7 @@ options: RebuildOptions,
                         rep.color_spec(), rep.material, rep.ss_cache.as_ref(), rep.cartoon_cache.as_ref(),
                         dashed, background_allowed, || rep.primitive_cache.as_ref().map_or_else(
                             || rep.cartoon_cache.as_ref().map_or_else(
-                                || geometry::build(&bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, rep.ss_cache.as_ref(), dashed),
+                                || geometry::build_with_reference(&bound, n_atoms, &mol.bonds, &rep.params, rep.color_spec(), rep.material, rep.ss_cache.as_ref(), dashed, Some(mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state()))),
                                 |cache| cache.build(state, dashed),
                             ),
                             |cache| cache.build(state, dashed),

@@ -168,8 +168,9 @@ where
 /// adapter advertises it**, and the renderer injects the attribute only when the
 /// device ended up with the feature — so unsupported adapters (and WebGL2/wasm,
 /// which never run this path) fall back to the plain late-Z shaders. We mirror
-/// eframe's default limits (incl. the `max_texture_dimension_2d = 8192` bump) so
-/// nothing else about device creation changes. Shared by the native binary and the
+/// eframe's default limits (incl. the `max_texture_dimension_2d = 8192` bump), but
+/// allow vertex buffers up to the adapter's supported size for large systems.
+/// Shared by the native binary and the
 /// Python module (both spawn the viewer with `eframe::run_native`).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn early_z_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
@@ -200,6 +201,7 @@ pub fn early_z_wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
                     required_features,
                     required_limits: wgpu::Limits {
                         max_texture_dimension_2d: 8192,
+                        max_buffer_size: adapter.limits().max_buffer_size,
                         ..base_limits
                     },
                     ..Default::default()
@@ -299,6 +301,37 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "requires native GPU; allocates the reported 460 MiB line buffer"]
+    fn native_device_accepts_large_geometry_buffers() {
+        use eframe::egui_wgpu::WgpuSetup;
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await.unwrap();
+            let WgpuSetup::CreateNew(setup) = super::early_z_wgpu_options().wgpu_setup else {
+                panic!("expected the native device configuration");
+            };
+            let descriptor = (setup.device_descriptor)(&adapter);
+            assert_eq!(descriptor.required_limits.max_buffer_size, adapter.limits().max_buffer_size);
+            const REPORTED_LINE_BUFFER_BYTES: u64 = 482_740_656;
+            if adapter.limits().max_buffer_size < REPORTED_LINE_BUFFER_BYTES {
+                eprintln!("adapter cannot support the reported line buffer size");
+                return;
+            }
+            let (device, _) = adapter.request_device(&descriptor).await.unwrap();
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("large-lines-regression"),
+                size: REPORTED_LINE_BUFFER_BYTES,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            assert_eq!(buffer.size(), REPORTED_LINE_BUFFER_BYTES);
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        });
     }
 
     #[test]

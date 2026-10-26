@@ -15,6 +15,18 @@
   rework. The camera viewport param (`params.yz`) stays at the **logical** size so fat-line pixel
   widths come out correct after the downsample (a 2× target with logical viewport → line is `w`
   final px). Cost: `SSAA²`× fragments per re-render; idle still 0 GPU (render-skip unchanged).
+  Periodic line dashes use one quad per bond stub and discard gaps in the fragment
+  shader. A negative internal line width marks dashed segments; its absolute value
+  is the visible pixel width. Dash length and spacing share the CPU constants used
+  when ray tracing expands those segments. This keeps trajectory vertex buffers
+  independent of the number of dashes on long periodic links.
+  Periodic line and cylinder stubs are limited to half the bond's reference
+  minimum-image length from the structure (trajectory frame 0). The current frame
+  determines their direction, so increasing the box or separating atoms cannot
+  lengthen the stubs. Reference lengths are cached with the primitive topology.
+  With periodic handling enabled, links stretched beyond twice their reference
+  length also become dashed stubs. If the nearest image is unchanged, their
+  stubs point away from the interior connecting segment instead of crossing the box.
 - **Impostors** — spheres & cylinders are GPU ray-cast in fragment shaders that write
   analytic `frag_depth`, so they occlude correctly against each other (and, later, the
   cartoon mesh). The camera uniform carries a perspective flag: perspective uses an
@@ -63,6 +75,9 @@
   to plain late-Z, unchanged. **Surfaces/cartoon** are plain meshes (no `frag_depth`) so the GPU
   already early-Zs them — no change needed. Set `MOLAR_VIS_NO_EARLY_Z=1` to force the feature
   off (the A/B verification + escape hatch).
+  Native device creation also requests the adapter's supported `max_buffer_size`,
+  rather than wgpu's default 256 MiB cap, so large molecular geometry can use
+  buffers above that default when the hardware supports them.
 - **Depth cueing (fog)** — fog fades all geometry toward the background (`BG` in
   `render.rs`, also the clear color) by eye-space distance, with three VMD-style falloff
   **`CueMode`s** (matching the OpenGL fog equations): **Linear**, **Exp** (`1−e^(−k·t)`), **Exp²**

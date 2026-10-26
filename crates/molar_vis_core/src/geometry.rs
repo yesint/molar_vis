@@ -337,7 +337,22 @@ pub fn build(
     ss: Option<&SsMap>,
     dashed_pbc: bool,
 ) -> GeometryData {
+    build_with_reference(bound, n_atoms, bonds, params, color, material, ss, dashed_pbc, None)
+}
+
+pub(crate) fn build_with_reference(
+    bound: &(impl ParticleIterProvider + PosProvider + AtomProvider + BoxProvider),
+    n_atoms: usize,
+    bonds: &[Bond],
+    params: &RepParams,
+    color: ColorSpec,
+    material: Material,
+    ss: Option<&SsMap>,
+    dashed_pbc: bool,
+    reference: Option<&State>,
+) -> GeometryData {
     let _timing = crate::performance::span("geometry-full-build");
+    let reference_lengths = reference.map(|state| bond_lengths(state, bonds));
     let colorizer = Colorizer::new(color, bound, n_atoms, ss);
     // The periodic box lets bond rendering use the minimum image, so a bond crossing
     // a box face is drawn as two dashed half-bond stubs (one from each atom toward its
@@ -367,7 +382,7 @@ pub fn build(
             let bonded = bonded_mask(bonds, &lut);
             GeometryData {
                 spheres: spheres_where(bound, &colorizer, |_| bond_radius, |i| !bonded[i]),
-                cylinders: cylinders(&lut, bonds, bond_radius, pbox, None, 0.0, bond_color_blend, true),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox, None, 0.0, bond_color_blend, true, reference_lengths.as_deref()),
                 ..Default::default()
             }
         }
@@ -382,13 +397,13 @@ pub fn build(
             });
             GeometryData {
                 spheres: spheres(bound, &colorizer, |a| a.vdw() * sphere_scale),
-                cylinders: cylinders(&lut, bonds, bond_radius, pbox, radii.as_deref(), bond_smoothing, bond_color_blend, false),
+                cylinders: cylinders(&lut, bonds, bond_radius, pbox, radii.as_deref(), bond_smoothing, bond_color_blend, false, reference_lengths.as_deref()),
                 ..Default::default()
             }
         }
         RepParams::Lines { width, bond_color_blend } => {
             let lut = selected_lut(bound, &colorizer, n_atoms);
-            let mut lines = lines(&lut, bonds, width, pbox, bond_color_blend);
+            let mut lines = lines(&lut, bonds, width, pbox, bond_color_blend, reference_lengths.as_deref());
             // Lines only draws bonds, so a selected atom with no drawn bond (an ion,
             // a lone water, …) would otherwise be invisible. VMD marks such atoms
             // with a tiny cross — emit one per bondless atom, at the same width.
@@ -758,8 +773,8 @@ fn midpoint(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 
 /// Dash geometry (nm): a wrapping half-bond stub is split into short solid pieces
 /// with gaps so it reads as dashed.
-const DASH_LEN: f32 = 0.02;
-const DASH_GAP: f32 = 0.015;
+pub(crate) const DASH_LEN: f32 = 0.02;
+pub(crate) const DASH_GAP: f32 = 0.015;
 
 /// Multi-order bond rendering. A bond with order ≥ 2 is drawn as several parallel
 /// strands offset sideways in the **screen plane** (the offset direction is computed
@@ -795,36 +810,59 @@ fn strand_slots(order: BondOrder) -> &'static [(f32, bool)] {
     }
 }
 
-/// The two half-bond endpoints for a bond `a→b` plus whether it **crosses a box
-/// face** (wraps). A normal bond uses the usual midpoint split (`a → mid`, `b →
-/// mid`), drawn solid. A **wrapping** bond is instead drawn as two stubs that run
-/// from each atom **to its partner's nearest periodic image** (the full bond
-/// toward the image, not beyond it): `a → b_image` and `b → a_image`. These cross
-/// opposite box faces, reach where the partner actually is in the nearest cell,
-/// never cross the box interior, and are dashed.
+pub(crate) fn bond_lengths(state: &State, bonds: &[Bond]) -> Vec<f32> {
+    bonds.iter().map(|bond| {
+        let a = &state.coords[bond.i1];
+        let b = &state.coords[bond.i2];
+        let image = state.pbox.as_ref().filter(|b| {
+            let e = b.get_box_extents();
+            e.x.min(e.y).min(e.z) >= MIN_USABLE_BOX_NM
+        }).map_or(*b, |pbox| pbox.closest_image(b, a));
+        (image - a).norm()
+    }).collect()
+}
+
+/// Periodic bonds use dashed stubs directed toward the partner's nearest image.
+/// Each stub is at most half the reference bond length, independent of box size
+/// or separation in a trajectory frame. Stretched links also use short stubs,
+/// even when the nearest image is unchanged. Normal bonds split at the midpoint.
 fn half_bond_ends(
     pa: [f32; 3],
     pb: [f32; 3],
     pbox: Option<&PeriodicBox>,
     wrap_thresh2: f32,
+    reference_length: Option<f32>,
 ) -> ([f32; 3], [f32; 3], bool) {
     if let Some(b) = pbox {
-        // Fast pre-test: a real covalent bond is short (< the search cutoff), so it
-        // can only wrap if the two atoms sit far apart in raw coords. Skip the two
-        // `closest_image` calls unless the raw separation exceeds half the box — the
-        // overwhelming majority of bonds are non-wrapping, so this is the hot path.
+        // A link can become implausibly long before crossing half the box.
+        // This occurs when a guessed contact separates during a trajectory.
+        // Keep ordinary bond fluctuations solid, but do not draw links longer
+        // than twice their reference length through the system.
+        let stretch_limit2 = reference_length.map_or(f32::INFINITY, |length| {
+            (2.0 * length.max(1e-6)).powi(2)
+        });
         let (rx, ry, rz) = (pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]);
-        if rx * rx + ry * ry + rz * rz > wrap_thresh2 {
+        let raw_length2 = rx * rx + ry * ry + rz * rz;
+        if raw_length2 > wrap_thresh2.min(stretch_limit2) {
             let pa_p = Pos::new(pa[0], pa[1], pa[2]);
             let pb_p = Pos::new(pb[0], pb[1], pb[2]);
             // `closest_image(point, target)` = the image of `point` nearest `target`.
             let b_img = b.closest_image(&pb_p, &pa_p); // image of b nearest a
-            let a_img = b.closest_image(&pa_p, &pb_p); // image of a nearest b
-            // Wraps iff b's nearest image to a isn't b's real position.
+            // Split both image-crossing and stretched links into bounded stubs.
             let (dx, dy, dz) = (b_img.x - pb[0], b_img.y - pb[1], b_img.z - pb[2]);
-            if dx * dx + dy * dy + dz * dz > 1e-8 {
-                let a_end = [b_img.x, b_img.y, b_img.z];
-                let b_end = [a_img.x, a_img.y, a_img.z];
+            let image_changed = dx * dx + dy * dy + dz * dz > 1e-8;
+            if image_changed || raw_length2 > stretch_limit2 {
+                // A stretched link whose nearest image did not change must
+                // indicate the outside connection, not point into the box
+                // along the spurious long segment between the displayed atoms.
+                let delta = if image_changed { b_img - pa_p } else { pa_p - pb_p };
+                let length = delta.norm();
+                let half = 0.5 * reference_length.unwrap_or(length).min(length);
+                let direction = if length > 1e-8 { delta / length } else { delta };
+                let a_end = pa_p + direction * half;
+                let b_end = pb_p - direction * half;
+                let a_end = [a_end.x, a_end.y, a_end.z];
+                let b_end = [b_end.x, b_end.y, b_end.z];
                 return (a_end, b_end, true);
             }
         }
@@ -875,6 +913,7 @@ fn cylinders(
     smoothing: f32,
     color_blend: f32,
     touching_strands: bool,
+    reference_lengths: Option<&[f32]>,
 ) -> Vec<CylinderInstance> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
@@ -892,12 +931,12 @@ fn cylinders(
             v.push(CylinderInstance { p0, radius: rad, p1, color, color1, mat: 0, offset, profile, smoothing, color_blend: color_blend.clamp(0.0, 1.0) });
         }
     };
-    for bond in bonds {
+    for (index, bond) in bonds.iter().enumerate() {
         let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
-            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
+            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2, reference_lengths.map(|lengths| lengths[index]));
             // A bond that wraps a periodic box face is drawn as two single-color dashed
-            // stubs (each atom → its partner's nearest image). A normal bond is one
+            // stubs (half the reference length toward the nearest image). A normal bond is one
             // two-tone capsule per chemical-order strand.
             if wrapped {
                 push(pa, a_end, ca, ca, radius, [0.0, 0.0], true, [0.0; 4]);
@@ -934,6 +973,7 @@ fn lines(
     width: f32,
     pbox: Option<&PeriodicBox>,
     color_blend: f32,
+    reference_lengths: Option<&[f32]>,
 ) -> Vec<LineVertex> {
     let wrap2 = pbox.map_or(f32::INFINITY, wrap_thresh2);
     let mut v = Vec::new();
@@ -941,20 +981,16 @@ fn lines(
     // `offset_px` shifts the line sideways along the segment's screen perpendicular
     // (computed per-frame in the shader). `0.0` = the single-bond center.
     let mut push = |p0: [f32; 3], p1: [f32; 3], color, color1, offset_px: f32, dashed: bool| {
-        if dashed {
-            for (s, e) in dashes(p0, p1) {
-                v.push(LineVertex { pos: s, color, width, offset_px });
-                v.push(LineVertex { pos: e, color, width, offset_px });
-            }
-        } else {
-            v.push(LineVertex { pos: p0, color, width, offset_px });
-            v.push(LineVertex { pos: p1, color: color1, width, offset_px });
-        }
+        // The raster shader cuts gaps in one segment, avoiding hundreds of
+        // CPU dash vertices for stretched periodic bonds during playback.
+        let width = if dashed { -width.abs() } else { width };
+        v.push(LineVertex { pos: p0, color, width, offset_px });
+        v.push(LineVertex { pos: p1, color: color1, width, offset_px });
     };
-    for bond in bonds {
+    for (index, bond) in bonds.iter().enumerate() {
         let [a, b] = bond.pair();
         if let (Some((pa, ca)), Some((pb, cb))) = (lut[a], lut[b]) {
-            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2);
+            let (a_end, b_end, wrapped) = half_bond_ends(pa, pb, pbox, wrap2, reference_lengths.map(|lengths| lengths[index]));
             // PBC-wrapping bond → the single dashed PBC half-bonds (the rare PBC +
             // multi-order combo falls back to one strand). Otherwise split by order.
             if wrapped {
@@ -1040,7 +1076,7 @@ mod bond_display_tests {
         for radius in [0.005, 0.03, 0.1] {
             for order in [BondOrder::Double, BondOrder::Triple] {
                 let tubes = cylinders(&endpoints(), &[Bond::with_order(0, 1, order)],
-                    radius, None, None, 0.0, 0.4, true);
+                    radius, None, None, 0.0, 0.4, true, None);
                 let extent = tubes.iter().map(|c| c.offset[0].abs() * c.offset[1] + c.radius)
                     .fold(0.0_f32, f32::max);
                 assert!((extent - radius).abs() < 1e-7);
@@ -1060,7 +1096,7 @@ mod bond_display_tests {
             let mut previous_lanes = None;
             for radius in [0.005, 0.015, 0.025, 0.05] {
                 let tubes = cylinders(&endpoints(), &[Bond::with_order(0, 1, order)],
-                    radius, None, None, 0.0, 0.0, false);
+                    radius, None, None, 0.0, 0.0, false, None);
                 let extent = tubes.iter().map(|c| c.offset[0].abs() * c.offset[1] + c.radius)
                     .fold(0.0_f32, f32::max);
                 assert!(extent > previous_extent);
@@ -1082,9 +1118,65 @@ mod bond_display_tests {
     }
 
     #[test]
+    fn periodic_stubs_end_at_the_half_bond_midpoint_in_large_boxes() {
+        for size in [4.0, 40.0, 400.0] {
+            let pbox = PeriodicBox::from_vectors_angles(size, size, size, 90.0, 90.0, 90.0).unwrap();
+            let a = [0.05, 1.0, 1.0];
+            let b = [size - 0.09, 1.0, 1.0];
+            let (ae, be, wraps) = half_bond_ends(a, b, Some(&pbox), wrap_thresh2(&pbox), Some(0.14));
+            assert!(wraps);
+            assert!((ae[0] + 0.02).abs() < 3e-5);
+            assert!((be[0] - (size - 0.02)).abs() < 1e-4);
+            // Even a spurious, stretched link must stay at the reference length.
+            let far = [size * 0.75, 1.0, 1.0];
+            let (ae, be, wraps) = half_bond_ends(a, far, Some(&pbox), wrap_thresh2(&pbox), Some(0.14));
+            assert!(wraps);
+            assert!((ae[0] - a[0]).abs() <= 0.07003);
+            assert!((be[0] - far[0]).abs() <= 0.07003);
+        }
+    }
+
+    #[test]
+    fn long_periodic_lines_keep_constant_vertex_count() {
+        let pbox = PeriodicBox::from_vectors_angles(40.0, 40.0, 40.0, 90.0, 90.0, 90.0).unwrap();
+        let lut = [Some(([5.0, 0.0, 0.0], 0xff0000ff)), Some(([35.0, 0.0, 0.0], 0xffff0000))];
+        let vertices = lines(&lut, &[Bond::new(0, 1)], 2.0, Some(&pbox), 0.0, Some(&[0.14]));
+        assert_eq!(vertices.len(), 4, "two periodic stubs, independent of dash count");
+        assert!(vertices.iter().all(|v| v.width == -2.0));
+        assert!((vertices[1].pos[0] - 4.93).abs() < 1e-5);
+        assert!((vertices[3].pos[0] - 35.07).abs() < 1e-5);
+        let tubes = cylinders(&lut, &[Bond::new(0, 1)], 0.02, Some(&pbox), None,
+            0.0, 0.0, true, Some(&[0.14]));
+        assert!(!tubes.is_empty());
+        for tube in tubes {
+            let origin = if tube.color == 0xff0000ff { 5.0 } else { 35.0 };
+            assert!((tube.p0[0] - origin).abs() <= 0.07001);
+            assert!((tube.p1[0] - origin).abs() <= 0.07001);
+        }
+    }
+
+    #[test]
+    fn stretched_links_below_half_box_use_short_stubs() {
+        let pbox = PeriodicBox::from_vectors_angles(40.0, 40.0, 40.0, 90.0, 90.0, 90.0).unwrap();
+        let a = [5.0, 1.0, 1.0];
+        let b = [15.0, 1.0, 1.0];
+        let (ae, be, dashed) = half_bond_ends(a, b, Some(&pbox), wrap_thresh2(&pbox), Some(0.14));
+        assert!(dashed, "a stretched link must not span the box just because its nearest image is unchanged");
+        assert!((ae[0] - 4.93).abs() < 1e-5);
+        assert!((be[0] - 15.07).abs() < 1e-5);
+        // Small length fluctuations are still rendered as ordinary solid bonds.
+        let (ae, be, dashed) = half_bond_ends(a, [5.2, 1.0, 1.0], Some(&pbox), wrap_thresh2(&pbox), Some(0.14));
+        assert!(!dashed);
+        assert_eq!(ae, be);
+        assert!((ae[0] - 5.1).abs() < 1e-5);
+        // Disabling periodic bond handling keeps the plain-bond behavior.
+        assert!(!half_bond_ends(a, b, None, f32::INFINITY, Some(0.14)).2);
+    }
+
+    #[test]
     fn line_color_transition_covers_requested_fraction_without_gaps() {
         for blend in [0.0, 0.25, 0.5, 1.0] {
-            let vertices = lines(&endpoints(), &[Bond::new(0, 1)], 2.0, None, blend);
+            let vertices = lines(&endpoints(), &[Bond::new(0, 1)], 2.0, None, blend, None);
             let pieces: Vec<_> = vertices.chunks_exact(2).collect();
             assert_eq!(pieces.first().unwrap()[0].pos[0], 0.0);
             assert_eq!(pieces.last().unwrap()[1].pos[0], 1.0);
