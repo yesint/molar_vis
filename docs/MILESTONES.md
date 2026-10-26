@@ -827,6 +827,10 @@
   Periodic line dashes are generated in the raster shader instead of expanding
   every dash on the CPU. Trajectory updates retain fixed line vertex counts for
   stretched periodic links; ray-traced exports keep explicit dash geometry.
+  Native file loading keeps the UI event loop responsive, with a delayed centered
+  **Loading...** modal and dimmed interface after one second. Terminal feedback
+  is limited to slow command-line startup loads. Async trajectories use the same
+  lower-right progress panel as movie rendering, with a loaded-frame counter.
 
 - Camera animation and native movie export: shared explicit-time camera paths for
   Rust/Python/JavaScript, full-turn rotation and pivot support, multiplicative zoom,

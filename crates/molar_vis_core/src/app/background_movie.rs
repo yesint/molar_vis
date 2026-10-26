@@ -340,31 +340,26 @@ impl App {
             }
         }
         let progress = job.handle.progress();
-        egui::Area::new(egui::Id::new("background-movie-progress"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(260.0);
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}  Background render", icon::FILM_STRIP));
-                        if ui.button("Cancel").clicked() {
-                            job.handle.cancel();
-                        }
-                    });
-                    ui.add(
-                        egui::ProgressBar::new(
-                            progress.completed as f32 / progress.total.max(1) as f32,
-                        )
-                        .text(format!("{} / {}", progress.completed, progress.total)),
-                    );
-                    if let Some(texture) = &job.texture {
-                        ui.collapsing("Preview", |ui| {
-                            ui.add(egui::Image::new(texture).max_width(250.0));
-                        });
-                    }
-                });
+        let panel_rect = super::widgets::corner_progress_panel(ctx, "background-movie-progress", 12.0, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}  Background render", icon::FILM_STRIP));
+                if ui.button("Cancel").clicked() {
+                    job.handle.cancel();
+                }
             });
+            ui.add(
+                egui::ProgressBar::new(
+                    progress.completed as f32 / progress.total.max(1) as f32,
+                )
+                .text(format!("{} / {}", progress.completed, progress.total)),
+            );
+            if let Some(texture) = &job.texture {
+                ui.collapsing("Preview", |ui| {
+                    ui.add(egui::Image::new(texture).max_width(250.0));
+                });
+            }
+        });
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new("background-movie-progress-rect"), panel_rect));
         self.background_movie = Some(job);
         ctx.request_repaint_after(Duration::from_millis(33));
     }

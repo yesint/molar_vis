@@ -159,6 +159,7 @@ impl App {
         self.view_dirty = true;
         Ok(())
     }
+    #[cfg(target_arch = "wasm32")]
     pub(super) fn add_mesh_bytes(&mut self, id: MolId, name: String, bytes: &[u8]) {
         let Some(mi) = self.scene.mol_index(id) else {
             return;
@@ -190,10 +191,17 @@ impl App {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            match std::fs::read(&path) {
-                Ok(bytes) => self.add_mesh_bytes(id, name, &bytes),
-                Err(e) => self.status = format!("Could not read mesh: {e}"),
-            }
+            self.begin_loading(move || {
+                let bytes = std::fs::read(&path).map_err(|e| format!("Could not read mesh: {e}"))?;
+                import_ply(&bytes)
+            }, move |app, source| {
+                if let Some(mi) = app.scene.mol_index(id) {
+                    app.scene.molecules[mi].meshes.push(Mesh::new(name.clone(), source));
+                    app.scene.molecules[mi].reps_open = true;
+                    app.status = format!("Loaded mesh {name}");
+                    app.view_dirty = true;
+                }
+            });
         }
         #[cfg(target_arch = "wasm32")]
         {

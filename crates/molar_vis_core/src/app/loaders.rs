@@ -5,6 +5,7 @@ use super::widgets::*;
 
 
 /// State of the "Load trajectory" modal.
+#[derive(Clone)]
 pub(super) struct LoadDialog {
     mol_id: MolId,
     path: Option<PathBuf>,
@@ -156,41 +157,30 @@ impl App {
 
     /// Load a structure file from disk (native). A multi-molecule SDF/MOL (≥2 `$$$$`
     /// records) becomes a [`MolGroup`]; anything else (incl. a single-record SDF) is
-    /// one ordinary molecule. Shared by the Open dialog and the startup path.
+    /// one ordinary molecule. Read/parse on a worker, then install on the UI thread.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn open_structure_path(&mut self, path: &std::path::Path) {
         let bonds = self.settings.behavior.bond_params();
-        let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-        if matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
-            match data::load_records(path, &bonds) {
-                Ok(records) if records.len() >= 2 => {
-                    let name = path
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "group".to_string());
-                    self.add_group(records, MoleculeSource::File(path.to_path_buf()), name);
-                }
-                Ok(mut records) => {
-                    // A single-record SDF is just one molecule; reload it like any
-                    // file (source = File, so the session round-trips it normally).
-                    let mut raw = records.pop().unwrap();
-                    raw.source = MoleculeSource::File(path.to_path_buf());
-                    self.add_loaded(raw);
-                }
-                Err(e) => {
-                    log::error!("{e}");
-                    self.status = e;
-                }
+        let path = path.to_path_buf();
+        let source = path.clone();
+        self.begin_loading(move || {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+            if matches!(ext.as_str(), "sdf" | "sd" | "mol") {
+                data::load_records(&path, &bonds)
+            } else {
+                data::load_with(&path, &bonds).map(|raw| vec![raw])
             }
-        } else {
-            match data::load_with(path, &bonds) {
-                Ok(raw) => self.add_loaded(raw),
-                Err(e) => {
-                    log::error!("{e}");
-                    self.status = e;
-                }
+        }, move |app, mut records| {
+            if records.len() > 1 {
+                let name = source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                app.add_group(records, MoleculeSource::File(source), name);
+            } else if let Some(mut raw) = records.pop() {
+                raw.source = MoleculeSource::File(source);
+                app.add_loaded(raw);
+            } else {
+                app.status = "no molecules found in file".into();
             }
-        }
+        });
     }
 
     /// Add a freshly loaded multi-record file as a [`MolGroup`]: each record becomes a
@@ -484,6 +474,7 @@ impl App {
     }
 
     /// Begin loading the dialog's file into its molecule (sync or async).
+    #[cfg_attr(target_arch = "wasm32", allow(unreachable_code))]
     pub(super) fn start_load(&mut self, dialog: &LoadDialog) -> Result<(), String> {
         let path = dialog.path.clone().ok_or("no file selected")?;
         // Empty "last frame" → read to the end of the file.
@@ -523,24 +514,37 @@ impl App {
             LoadMode::Sync => {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
-                    let frames = data::traj_loader::read_frames_sync(&path, &opts, expected)?;
-                    if frames.is_empty() {
-                        return Err("no frames matched the selected range".to_string());
-                    }
-                    let added = frames.len();
-                    let mol = self
-                        .scene
-                        .molecules
-                        .iter_mut()
-                        .find(|m| m.id == dialog.mol_id)
-                        .ok_or("molecule no longer exists")?;
-                    let first_new = mol.trajectory.frames.len();
-                    mol.append_frames(frames);
-                    mol.traj_loads.push(record);
-                    mol.trajectory.current = first_new; // jump to first loaded frame
-                    mol.apply_current_frame();
-                    self.status = format!("Loaded {added} frame(s)");
-                    self.view_dirty = true;
+                    let mol_id = dialog.mol_id;
+                    let retry = dialog.clone();
+                    self.begin_loading(move || {
+                        let frames = data::traj_loader::read_frames_sync(&path, &opts, expected)
+                            .and_then(|frames| {
+                                if frames.is_empty() { Err("no frames matched the selected range".into()) }
+                                else { Ok(frames) }
+                            });
+                        Ok(frames)
+                    }, move |app, result: Result<Vec<State>, String>| {
+                        let frames = match result {
+                            Ok(frames) => frames,
+                            Err(error) => {
+                                app.status = error.clone();
+                                app.load_dialog = Some(ModalState { inner: retry, error: Some(error) });
+                                return;
+                            }
+                        };
+                        let Some(mol) = app.scene.molecules.iter_mut().find(|m| m.id == mol_id) else {
+                            app.status = "molecule no longer exists".into();
+                            return;
+                        };
+                        let added = frames.len();
+                        let first_new = mol.trajectory.frames.len();
+                        mol.append_frames(frames);
+                        mol.traj_loads.push(record);
+                        mol.trajectory.current = first_new;
+                        mol.apply_current_frame();
+                        app.status = format!("Loaded {added} frame(s)");
+                        app.view_dirty = true;
+                    });
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -553,9 +557,15 @@ impl App {
                 {
                     let rx = data::traj_loader::spawn_async(path, opts, expected);
                     self.scene.loaders.insert(dialog.mol_id, rx);
+                    let mut progress = super::loading::AsyncProgress::new(&opts);
+                    progress.request = Some(dialog.clone());
+                    self.async_load_progress.insert(dialog.mol_id, progress);
                     if let Some(mol) =
                         self.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id)
                     {
+                        if let Some(progress) = self.async_load_progress.get_mut(&dialog.mol_id) {
+                            progress.record_index = Some(mol.traj_loads.len());
+                        }
                         mol.traj_loads.push(record);
                     }
                     self.status = "Loading trajectory…".to_string();
@@ -570,6 +580,40 @@ impl App {
         Ok(())
     }
 
+    /// Exercise the actual async dialog path in hidden UI captures.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn debug_start_async_trajectory(&mut self, path: PathBuf) {
+        let Some(mol) = self.scene.molecules.first() else { return };
+        let mut dialog = LoadDialog::new(mol.id);
+        dialog.path = Some(path);
+        dialog.mode = LoadMode::Async;
+        if let Err(error) = self.start_load(&dialog) { self.status = error; }
+    }
+
+    fn fail_async_load(&mut self, id: MolId, error: String) {
+        self.status = error.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(progress) = self.async_load_progress.get_mut(&id) {
+            // Failed loads must not be replayed as successful full-range loads
+            // when the user saves and reopens the session.
+            if let Some(mol) = self.scene.molecules.iter_mut().find(|mol| mol.id == id) {
+                if let Some(index) = progress.record_index {
+                    if progress.loaded == 0 && index < mol.traj_loads.len() {
+                        mol.traj_loads.remove(index);
+                    } else if let Some(record) = mol.traj_loads.get_mut(index) {
+                        record.to = Some(record.from.saturating_add(
+                            progress.loaded.saturating_sub(1).saturating_mul(record.stride.max(1))));
+                    }
+                }
+                if let Some(request) = progress.request.take() {
+                    self.load_dialog = Some(ModalState { inner: request, error: Some(error) });
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = id;
+    }
+
     /// Drain background loaders, appending streamed frames to their molecules.
     /// Non-blocking (`try_recv`); finished/errored/disconnected loaders are removed.
     pub(super) fn poll_loaders(&mut self) {
@@ -580,7 +624,8 @@ impl App {
         let ids: Vec<MolId> = self.scene.loaders.keys().copied().collect();
         let mut finished: Vec<MolId> = Vec::new();
         for id in ids {
-            while let Some(rx) = self.scene.loaders.get(&id) {
+            for _ in 0..64 {
+                let Some(rx) = self.scene.loaders.get(&id) else { break };
                 let msg = rx.try_recv();
                 match msg {
                     Ok(LoadMsg::Frame(state)) => {
@@ -589,19 +634,28 @@ impl App {
                             self.scene.molecules.iter_mut().find(|m| m.id == id)
                         {
                             mol.push_frame(state);
+                            if let Some(progress) = self.async_load_progress.get_mut(&id) { progress.loaded += 1; }
                         }
                     }
                     Ok(LoadMsg::Done) => {
+                        if let Some(progress) = self.async_load_progress.get(&id) {
+                            if progress.loaded == 0 {
+                                self.fail_async_load(id, "No frames matched the selected range".into());
+                            } else {
+                                self.status = format!("Loaded {} frame(s)", progress.loaded);
+                            }
+                        }
                         finished.push(id);
                         break;
                     }
-                    Ok(LoadMsg::Error(e)) => {
-                        self.status = e;
+                    Ok(LoadMsg::Error(error)) => {
+                        self.fail_async_load(id, error);
                         finished.push(id);
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
+                        self.fail_async_load(id, "Trajectory loading stopped unexpectedly".into());
                         finished.push(id);
                         break;
                     }
@@ -610,6 +664,7 @@ impl App {
         }
         for id in finished {
             self.scene.loaders.remove(&id);
+            self.async_load_progress.remove(&id);
         }
     }
 
@@ -636,6 +691,7 @@ impl App {
             match batch {
                 Ok(frames) => {
                     if let Some(mol) = self.scene.molecules.iter_mut().find(|m| m.id == id) {
+                        if let Some(progress) = self.async_load_progress.get_mut(&id) { progress.loaded += frames.len(); }
                         for st in frames {
                             mol.push_frame(st);
                         }
@@ -663,6 +719,7 @@ impl App {
         }
         for id in &finished {
             self.scene.wasm_loaders.remove(id);
+            self.async_load_progress.remove(id);
         }
         if view_dirty {
             self.view_dirty = true;
@@ -671,5 +728,83 @@ impl App {
         if !self.scene.wasm_loaders.is_empty() {
             ctx.request_repaint();
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod loading_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "requires native GPU; exercises sync/async trajectory modes and delayed read errors"]
+    fn trajectory_jobs_preserve_modes_ranges_and_retry_errors() {
+        let ctx = egui::Context::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.wgpu_render_state = Some(crate::render::test_gpu());
+        let mut app = App::new(&cc, AppLaunch::default()).unwrap();
+        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/2lao.pdb");
+        app.add_loaded(data::load(&file).unwrap());
+        let id = app.scene.molecules[0].id;
+        let mut request = LoadDialog::new(id);
+        request.path = Some(file.with_file_name("missing-trajectory.xtc"));
+        app.start_load(&request).unwrap();
+        let wait = |app: &mut App| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while app.service_loading(&ctx) {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait(&mut app);
+        let retry = app.load_dialog.take().expect("a failed sync read must reopen its dialog");
+        assert!(retry.error.is_some());
+        assert_eq!(retry.inner.mol_id, id);
+        assert_eq!(app.scene.molecules[0].trajectory.frames.len(), 1);
+        request.path = Some(file.clone());
+        request.to_text = "0".into();
+        app.start_load(&request).unwrap();
+        wait(&mut app);
+        let mol = &app.scene.molecules[0];
+        assert_eq!(mol.trajectory.frames.len(), 2);
+        assert_eq!(mol.trajectory.current, 1);
+        assert_eq!(mol.traj_loads[0].to, Some(0));
+        request.mode = LoadMode::Async;
+        app.start_load(&request).unwrap();
+        assert!(app.async_loading_active());
+        assert!(!app.service_loading(&ctx), "async mode must not block the interface");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.async_loading_active() {
+            app.poll_loaders();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(app.scene.molecules[0].trajectory.frames.len(), 3);
+        assert_eq!(app.scene.molecules[0].traj_loads.len(), 2);
+        request.path = Some(file.with_file_name("toy_tube.pdb"));
+        app.start_load(&request).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.async_loading_active() {
+            app.poll_loaders();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let retry = app.load_dialog.as_ref().expect("atom mismatch must show a visible error dialog");
+        let error = retry.error.as_ref().unwrap();
+        assert!(error.contains("2 atoms") && error.contains("1911"), "{error}");
+        assert_eq!(retry.inner.mode, LoadMode::Async);
+        assert_eq!(retry.inner.path, request.path);
+        assert_eq!(app.scene.molecules[0].trajectory.frames.len(), 3);
+        assert_eq!(app.scene.molecules[0].traj_loads.len(), 2, "failed load must not be saved");
+        let mut visible_error = false;
+        for _ in 0..3 {
+            let output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                ..Default::default()
+            }, |_| app.draw_load_dialog(&ctx));
+            visible_error |= output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text().contains("2 atoms")));
+        }
+        assert!(visible_error);
     }
 }

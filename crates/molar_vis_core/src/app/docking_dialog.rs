@@ -12,6 +12,77 @@ use super::*;
 use super::widgets::{modal_shell, ModalBody, ModalSpec};
 use crate::docking::{docking_mode, structure_frame_counts, sync_action, DockingMode, Sync};
 
+struct DockingData {
+    receptor: data::RawMolecule,
+    poses: Vec<data::RawMolecule>,
+    frames: Vec<(PathBuf, usize, Vec<State>)>,
+    count_structure: bool,
+    receptor_frames: usize,
+    mode: DockingMode,
+    structure: PathBuf,
+    ligands: Vec<PathBuf>,
+}
+
+impl DockingData {
+    fn read(protein: &[PathBuf], ligands: &[PathBuf], bonds: data::bonds::BondParams) -> Result<Self, String> {
+
+        // --- ligands: one multi-record file, or one file per pose --------------------
+        let mut poses: Vec<data::RawMolecule> = Vec::new();
+        for path in ligands {
+            let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+            // A record-structured file may hold many poses; anything else is one.
+            if matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
+                poses.extend(data::load_records(path, &bonds)?);
+            } else {
+                poses.push(data::load_with(path, &bonds)?);
+            }
+        }
+        if poses.is_empty() {
+            return Err("no ligand poses were loaded".into());
+        }
+
+        // --- receptor: the first file is the topology, the rest are its ensemble -----
+        //
+        // The **first file supplies the topology**; the receptor's conformations are its own
+        // coordinates plus the frames of every file after it — except when those files already
+        // hold one conformation per pose, in which case the structure is the reference
+        // conformation rather than a pose. Which of the two a file list means is decided by
+        // [`structure_frame_counts`] (from the pose count, the only thing that can tell them
+        // apart); with nothing after the first file it is always its own ensemble, so a
+        // one-model PDB is rigid docking and a 26-model one flexible.
+        let (structure, extra) = protein.split_first().ok_or("no protein file selected")?;
+        let receptor = data::load_with(structure, &bonds)?;
+        let n_atoms = receptor.n_atoms;
+        // Read the frames *before* anything is added to the scene, so a count mismatch
+        // aborts with the document untouched.
+        let mut frames: Vec<(std::path::PathBuf, usize, Vec<State>)> = Vec::new();
+        for path in extra {
+            let opts = LoadOptions { from: 0, to: None, stride: 1 };
+            let read = data::traj_loader::read_frames_sync(path, &opts, n_atoms)?;
+            if !read.is_empty() {
+                frames.push((path.clone(), 0, read));
+            }
+        }
+        let appended: usize = frames.iter().map(|(_, _, s)| s.len()).sum();
+        let count_structure = structure_frame_counts(appended, poses.len());
+        // Nothing after the first file: fall back to that file's own extra models (read from
+        // frame 1, since frame 0 is the structure we already loaded) — seeded as frame 0 below.
+        if frames.is_empty() {
+            let opts = LoadOptions { from: 1, to: None, stride: 1 };
+            let own = data::traj_loader::read_frames_sync(structure, &opts, n_atoms)?;
+            if !own.is_empty() {
+                frames.push((structure.clone(), 1, own));
+            }
+        }
+        let receptor_frames =
+            frames.iter().map(|(_, _, s)| s.len()).sum::<usize>() + count_structure as usize;
+        let mode = docking_mode(receptor_frames, poses.len())?;
+
+        Ok(Self { receptor, poses, frames, count_structure, receptor_frames, mode,
+            structure: structure.clone(), ligands: ligands.to_vec() })
+    }
+}
+
 /// State of the "Load docking data" modal.
 ///
 /// Both selections are `Vec<PathBuf>` because both are legitimately multi-file:
@@ -159,15 +230,9 @@ impl App {
             },
             // A rejected combination reopens the dialog with the reason (the shell's fourth
             // state), so the selection can be fixed without starting over.
-            |app, dialog| match app.load_docking(&dialog.protein, &dialog.ligands) {
-                Ok(msg) => {
-                    app.status = msg;
-                    Ok(())
-                }
-                Err(e) => {
-                    log::error!("docking load: {e}");
-                    Err(e)
-                }
+            |app, dialog| {
+                app.begin_docking_load(dialog.protein.clone(), dialog.ligands.clone());
+                Ok(())
             },
         );
     }
@@ -183,60 +248,28 @@ impl App {
         protein: &[std::path::PathBuf],
         ligands: &[std::path::PathBuf],
     ) -> Result<String, String> {
+        self.install_docking(DockingData::read(protein, ligands, self.settings.behavior.bond_params())?)
+    }
+
+    pub(super) fn begin_docking_load(&mut self, protein: Vec<PathBuf>, ligands: Vec<PathBuf>) {
         let bonds = self.settings.behavior.bond_params();
-
-        // --- ligands: one multi-record file, or one file per pose --------------------
-        let mut poses: Vec<data::RawMolecule> = Vec::new();
-        for path in ligands {
-            let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-            // A record-structured file may hold many poses; anything else is one.
-            if matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
-                poses.extend(data::load_records(path, &bonds)?);
-            } else {
-                poses.push(data::load_with(path, &bonds)?);
+        let (read_protein, read_ligands) = (protein.clone(), ligands.clone());
+        self.begin_loading(move || Ok(DockingData::read(&read_protein, &read_ligands, bonds)), move |app, loaded| {
+            match loaded.and_then(|data| app.install_docking(data)) {
+                Ok(message) => app.status = message,
+                Err(error) => {
+                    app.status = error.clone();
+                    app.docking_dialog = Some(super::widgets::ModalState {
+                        inner: DockingDialog { protein, ligands }, error: Some(error),
+                    });
+                }
             }
-        }
-        if poses.is_empty() {
-            return Err("no ligand poses were loaded".into());
-        }
+        });
+    }
 
-        // --- receptor: the first file is the topology, the rest are its ensemble -----
-        //
-        // The **first file supplies the topology**; the receptor's conformations are its own
-        // coordinates plus the frames of every file after it — except when those files already
-        // hold one conformation per pose, in which case the structure is the reference
-        // conformation rather than a pose. Which of the two a file list means is decided by
-        // [`structure_frame_counts`] (from the pose count, the only thing that can tell them
-        // apart); with nothing after the first file it is always its own ensemble, so a
-        // one-model PDB is rigid docking and a 26-model one flexible.
-        let (structure, extra) = protein.split_first().ok_or("no protein file selected")?;
-        let receptor = data::load_with(structure, &bonds)?;
-        let n_atoms = receptor.n_atoms;
-        // Read the frames *before* anything is added to the scene, so a count mismatch
-        // aborts with the document untouched.
-        let mut frames: Vec<(std::path::PathBuf, usize, Vec<State>)> = Vec::new();
-        for path in extra {
-            let opts = LoadOptions { from: 0, to: None, stride: 1 };
-            let read = data::traj_loader::read_frames_sync(path, &opts, n_atoms)?;
-            if !read.is_empty() {
-                frames.push((path.clone(), 0, read));
-            }
-        }
-        let appended: usize = frames.iter().map(|(_, _, s)| s.len()).sum();
-        let count_structure = structure_frame_counts(appended, poses.len());
-        // Nothing after the first file: fall back to that file's own extra models (read from
-        // frame 1, since frame 0 is the structure we already loaded) — seeded as frame 0 below.
-        if frames.is_empty() {
-            let opts = LoadOptions { from: 1, to: None, stride: 1 };
-            let own = data::traj_loader::read_frames_sync(structure, &opts, n_atoms)?;
-            if !own.is_empty() {
-                frames.push((structure.clone(), 1, own));
-            }
-        }
-        let receptor_frames =
-            frames.iter().map(|(_, _, s)| s.len()).sum::<usize>() + count_structure as usize;
-        let mode = docking_mode(receptor_frames, poses.len())?;
-
+    fn install_docking(&mut self, data: DockingData) -> Result<String, String> {
+        let DockingData { receptor, poses, frames, count_structure, receptor_frames, mode, structure, ligands } = data;
+        let ligands = ligands.as_slice();
         // --- commit: receptor, then the pose group, then the link ------------------
         let mut receptor = receptor;
         receptor.source = MoleculeSource::File(structure.clone());

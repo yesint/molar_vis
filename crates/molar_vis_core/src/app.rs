@@ -55,6 +55,7 @@ mod draw_input;
 mod export;
 mod init;
 mod loaders;
+mod loading;
 mod meshes;
 mod overlay;
 mod panels;
@@ -128,6 +129,11 @@ pub struct App {
     settings_dialog: Option<SettingsDialog>,
     /// Hide the molecule controls while retaining a restore button in the view toolbar.
     side_panel_collapsed: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    loading_context: egui::Context,
+    #[cfg(not(target_arch = "wasm32"))]
+    loading_jobs: std::collections::VecDeque<loading::Job>,
+    async_load_progress: std::collections::HashMap<MolId, loading::AsyncProgress>,
     last_settings_page: SettingsPage,
     /// Camera at the last 3D render; `None` forces a render.
     last_render_camera: Option<Camera>,
@@ -1135,6 +1141,21 @@ impl eframe::App for App {
         ui.painter().rect_filled(ui.max_rect(), 0.0, ui.visuals().panel_fill);
 
         #[cfg(not(target_arch = "wasm32"))]
+        if self.service_loading(&ctx) {
+            let opacity = ui.painter().opacity();
+            ui.disable();
+            ui.set_opacity(opacity);
+            self.draw_left_panel(ui);
+            self.draw_view_toolbar(ui);
+            self.draw_viewport(ui, frame);
+            self.draw_loading_progress(&ctx);
+            if self.loading_feedback_visible() && std::env::var_os("MOLAR_VIS_DEBUG_CAPTURE_LOADING").is_some() {
+                self.rt.service_debug_ui_capture(&ctx);
+            }
+            return;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
         if self.service_movie(ui) { return; }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1247,6 +1268,7 @@ impl eframe::App for App {
             ) {
                 Ok(stream) => {
                     self.scene.wasm_loaders.insert(mol_id, stream);
+                    self.async_load_progress.insert(mol_id, loading::AsyncProgress::new(&LoadOptions::default()));
                     self.status = format!("Loading {name}…");
                 }
                 Err(e) => {
@@ -1377,6 +1399,7 @@ impl eframe::App for App {
 
         #[cfg(not(target_arch = "wasm32"))]
         self.service_background_movie(&ctx);
+        self.draw_async_loading_progress(&ctx);
 
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
         let settled = !ctx.egui_is_using_pointer() && !ctx.egui_wants_keyboard_input();

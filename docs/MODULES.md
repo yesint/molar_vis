@@ -17,7 +17,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   grouping (pure logic, WASM-safe, unit-tested): `-m`/`--molecule` starts a new molecule; within a
   group the **first file provides the topology** and **all frames of the group's files form the
   trajectory**. The native bin (`crates/molar_vis/src/main.rs`) parses argv (incl. `-h`/`--help`)
-  into the groups; `App::new` loads each group's structure, then appends the **first file's frames
+  into the groups; native startup prepares each group on a loading worker after the
+  window opens. It loads the structure, then appends the **first file's frames
   beyond frame 0** (so a multi-MODEL/trajectory structure file contributes all its frames, like VMD)
   **plus** every extra file's frames via `read_frames_sync` (native-only); files that yield no extra
   frames aren't recorded as trajectory loads, so a plain single-frame structure stays static. So
@@ -43,6 +44,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     rep's geometry) + free-fn geometry builders (`build_glow`/`build_hover_detail`/`build_pick`/…) +
     `gray_out` (desaturate + dim a built rep's colours for Draw-mode's non-active greying).
   - `app/loaders.rs` — load/delete-frames/rename dialogs, loaders, `pick_file` (cfg-heavy IO).
+  - `app/loading.rs` — native file-read workers and UI-thread commits, startup file
+    preparation, one-second loading modal/terminal feedback, and async loading state.
   - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
   - `app/commands.rs` — shared scene-command execution.
   - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.

@@ -999,3 +999,22 @@ mod modal_shell_tests {
         assert!(out.is_none(), "a successful retry must close, discarding the stale error");
     }
 }
+
+/// Shared lower-corner frame for movie rendering and streaming-load progress.
+pub(super) fn corner_progress_panel(
+    ctx: &egui::Context,
+    id: &str,
+    bottom: f32,
+    contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Rect {
+    egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -bottom])
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(260.0);
+                contents(ui);
+            });
+        })
+        .response.rect
+}

@@ -10,6 +10,8 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         launch: AppLaunch,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        #[cfg(target_arch = "wasm32")]
+        let _ = &launch;
         // Program settings: load from the platform config dir (created with defaults
         // on first launch). `MOLAR_VIS_DEBUG_DEFAULTS=1` forces built-in defaults
         // (no file IO) so headless verification is reproducible and never depends on
@@ -61,105 +63,19 @@ impl App {
             scene.interaction_settings = interactions;
         }
         let mut status = String::new();
-        // VMD-style command-line grouping: each `launch.files` entry is one molecule's
-        // file list — the first file is the structure (topology + frame 0) and any
-        // following files load as appended trajectory states. `-m` on the command line
-        // starts a new molecule (see `launch::parse_file_args`).
-        for group in &launch.files {
-            let (structure, extra) = match group.split_first() {
-                Some(parts) => parts,
-                None => continue,
-            };
-            // A multi-molecule SDF/MOL as the sole file in the group → a molecular
-            // group (its records are distinct molecules, not trajectory frames).
-            let ext = structure
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase());
-            if extra.is_empty() && matches!(ext.as_deref(), Some("sdf") | Some("sd") | Some("mol")) {
-                match data::load_records(structure, &bond_params) {
-                    Ok(records) if records.len() >= 2 => {
-                        let name = structure
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "group".to_string());
-                        scene.add_group(
-                            records,
-                            crate::scene::MoleculeSource::File(structure.clone()),
-                            name,
-                            &rep_defaults,
-                        );
-                        continue;
-                    }
-                    Ok(mut records) => {
-                        // Single-record SDF: just one molecule (reload like a file).
-                        let mut raw = records.pop().unwrap();
-                        raw.source = crate::scene::MoleculeSource::File(structure.clone());
-                        scene.add(raw, &rep_defaults);
-                        continue;
-                    }
-                    Err(e) => {
-                        log::error!("{e}");
-                        status = e;
-                        continue;
-                    }
-                }
-            }
-            let raw = match data::load_with(structure, &bond_params) {
-                Ok(raw) => raw,
-                Err(e) => {
-                    log::error!("{e}");
-                    status = e;
-                    continue;
-                }
-            };
-            scene.add(raw, &rep_defaults);
-            let mol = scene.molecules.last_mut().unwrap();
-            mol.trajectory.speed_fps = settings.behavior.traj_fps;
-            mol.trajectory.loop_mode = settings.behavior.loop_mode;
-            // Build the trajectory from ALL frames in the group, VMD-style: the **first
-            // file's frames beyond frame 0** (frame 0 is the structure just loaded — a
-            // multi-MODEL/trajectory structure file thus contributes all its frames),
-            // then every extra file's frames. `seed_frame0` (idempotent) makes frame 0
-            // the structure; only files that actually yield frames are recorded as
-            // trajectory loads, so a plain single-frame structure stays static.
-            #[cfg(not(target_arch = "wasm32"))]
+        // Real launches load after the first UI frame, so slow reads can show
+        // progress. Explicit verification hooks retain their synchronous startup.
+        #[cfg(not(target_arch = "wasm32"))]
+        let defer_startup = std::env::var_os("MOLAR_VIS_DEBUG_DEFER_LOAD").is_some()
+            || !std::env::vars_os().any(|(name, _)| name.to_string_lossy().starts_with("MOLAR_VIS_DEBUG_"));
+        #[cfg(not(target_arch = "wasm32"))]
+        if !defer_startup {
+            for error in super::loading::Startup::read(&launch.files, bond_params)
+                .install(&mut scene, &rep_defaults, &settings)
             {
-                let n = mol.n_atoms;
-                let mut seeded = false;
-                // (path, from): the first file is read from frame 1 (frame 0 is the
-                // structure); extra files from frame 0.
-                let sources = std::iter::once((structure, 1usize))
-                    .chain(extra.iter().map(|p| (p, 0usize)));
-                for (path, from) in sources {
-                    let opts = LoadOptions { from, to: None, stride: 1 };
-                    match data::traj_loader::read_frames_sync(path, &opts, n) {
-                        Ok(frames) if !frames.is_empty() => {
-                            if !seeded {
-                                mol.seed_frame0();
-                                seeded = true;
-                            }
-                            mol.append_frames(frames);
-                            mol.traj_loads.push(crate::scene::TrajLoad {
-                                path: path.clone(),
-                                from,
-                                to: None,
-                                stride: 1,
-                            });
-                        }
-                        Ok(_) => {} // no frames in this file (e.g. single-MODEL structure)
-                        Err(e) => {
-                            log::error!("trajectory {}: {e}", path.display());
-                            status = e;
-                        }
-                    }
-                }
-                if seeded {
-                    mol.apply_current_frame();
-                }
+                log::error!("{error}");
+                status = error;
             }
-            #[cfg(target_arch = "wasm32")]
-            let _ = extra;
         }
         // Verification hook: MOLAR_VIS_DEBUG_SDF=<path> loads a multi-molecule SDF as
         // a group (bypassing the file dialog); MOLAR_VIS_DEBUG_GROUP_MEMBER=<n> shows
@@ -315,7 +231,9 @@ impl App {
         // the first molecule (sync), bypassing the dialog; MOLAR_VIS_DEBUG_FRAME=<n>
         // selects the displayed frame so headless screenshots can confirm motion.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(traj_path) = std::env::var("MOLAR_VIS_DEBUG_TRAJ") {
+        if let Some(traj_path) = std::env::var("MOLAR_VIS_DEBUG_TRAJ").ok()
+            .filter(|_| std::env::var_os("MOLAR_VIS_DEBUG_TRAJ_ASYNC").is_none())
+        {
             if let Some(mol) = scene.molecules.first_mut() {
                 mol.seed_frame0();
                 let envn = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<usize>().ok());
@@ -559,6 +477,11 @@ impl App {
             rep_defaults,
             settings_dialog: None,
             side_panel_collapsed: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            loading_context: cc.egui_ctx.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            loading_jobs: Default::default(),
+            async_load_progress: Default::default(),
             last_settings_page: SettingsPage::default(),
             last_render_camera: None,
             last_size: [0, 0],
@@ -615,9 +538,27 @@ impl App {
         };
 
         #[cfg(not(target_arch = "wasm32"))]
+        if defer_startup && !launch.files.is_empty() {
+            let files = launch.files.clone();
+            app.begin_loading(move || Ok(super::loading::Startup::read(&files, bond_params)), App::install_startup);
+            app.mark_command_line_loading();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(docking) = &launch.docking {
-            app.status = app.load_docking(&docking.receptor, &docking.ligands)?;
-            log::info!("{}", app.status);
+            if defer_startup {
+                app.begin_docking_load(docking.receptor.clone(), docking.ligands.clone());
+                app.mark_command_line_loading();
+            } else {
+                app.status = app.load_docking(&docking.receptor, &docking.ligands)?;
+                log::info!("{}", app.status);
+            }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("MOLAR_VIS_DEBUG_TRAJ_ASYNC").is_some() {
+            if let Some(path) = std::env::var_os("MOLAR_VIS_DEBUG_TRAJ") {
+                app.debug_start_async_trajectory(path.into());
+            }
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_AXES=1 shows the orientation-axes gizmo.

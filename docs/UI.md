@@ -111,6 +111,19 @@ enabled >50 frames) · **step** = playback skip per tick; row 2: first · back �
 slider · forward · last); reps listed (indented) when the molecule caret is open. The
 **Load-trajectory** modal's *Last frame* is a **text field** (empty = read to EOF), not a checkbox.
 
+Native file reads and parsing run on workers. Synchronous loads keep the interface
+blocked until the result is installed. After one second, a centered **Loading...**
+message and spinner appear over a dimmed interface. Slow loads of files supplied
+on the command line also print the message once in the terminal; GUI loads stay
+silent. This covers command-line startup, structures, synchronous trajectories,
+sessions and their source files, docking data, and meshes. Fast loads show no modal.
+Asynchronous trajectory loads keep the interface usable and show **Loading...** in
+a lower-right progress panel matching movie rendering, with the number of frames
+loaded and a total when the selected range provides one. The panel disappears
+on completion or failure and stacks above movie progress if both are active.
+Async trajectory failures reopen the load dialog with the reason, including the
+actual and expected atom counts for a mismatch, while preserving the file and range.
+
 **Custom mesh rows** (`app/meshes.rs`) appear below the owning molecule's selections.
 Each row has a mesh icon, name, visibility toggle, and a menu with **Save…** and
 **Delete**. The style selector offers **Points**, **Wireframe**, and **Surface**,

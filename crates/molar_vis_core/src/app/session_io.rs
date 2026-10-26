@@ -72,6 +72,44 @@ fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
         _ => a == b,
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+struct PreparedSession {
+    session: Session,
+    molecules: Vec<Result<(data::RawMolecule, Vec<(TrajLoad, Vec<State>)>), String>>,
+    groups: Vec<Result<Vec<data::RawMolecule>, String>>,
+    errors: Vec<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PreparedSession {
+    fn read(session: Session, bonds: data::bonds::BondParams) -> Self {
+        let mut errors = Vec::new();
+        let molecules = session.molecules.iter().map(|ms| {
+            let MoleculeSource::File(path) = &ms.source else {
+                return Err(format!("“{}” was loaded from memory (no file) — cannot reload", ms.name));
+            };
+            let raw = data::load_with(path, &bonds)?;
+            let mut frames = Vec::new();
+            for record in &ms.traj_loads {
+                let opts = LoadOptions { from: record.from, to: record.to, stride: record.stride.max(1) };
+                match data::traj_loader::read_frames_sync(&record.path, &opts, raw.n_atoms) {
+                    Ok(read) if !read.is_empty() => frames.push((record.clone(), read)),
+                    Ok(_) => (),
+                    Err(error) => errors.push(format!("trajectory {}: {error}", record.path.display())),
+                }
+            }
+            Ok((raw, frames))
+        }).collect();
+        let groups = session.groups.iter().map(|gs| {
+            let MoleculeSource::File(path) = &gs.source else {
+                return Err(format!("group “{}” was loaded from memory — cannot reload", gs.name));
+            };
+            data::load_records(path, &bonds)
+        }).collect();
+        Self { session, molecules, groups, errors }
+    }
+}
+
 impl App {
 
     /// Tear down the current document: drop all molecules (and the trash), cancel
@@ -85,6 +123,13 @@ impl App {
         self.scene.trash.clear();
         self.scene.group_trash.clear();
         self.scene.loaders.clear();
+        self.async_load_progress.clear();
+        #[cfg(target_arch = "wasm32")]
+        self.scene.wasm_loaders.clear();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.loading_jobs.clear();
+        }
         self.load_dialog = None;
     }
 
@@ -372,7 +417,11 @@ impl App {
         else {
             return;
         };
-        self.load_session_from(&path);
+        let bonds = self.settings.behavior.bond_params();
+        self.begin_loading(move || {
+            let json = std::fs::read_to_string(&path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+            Ok(PreparedSession::read(Session::from_json(&json)?, bonds))
+        }, |app, prepared| { let _ = app.apply_prepared_session(prepared); });
     }
 
     /// Read and apply a session file at `path` (the file half of
@@ -409,25 +458,21 @@ impl App {
     /// a new document — the undo history is reset to the loaded state.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn apply_session(&mut self, session: Session) -> Result<(), String> {
+        let prepared = PreparedSession::read(session, self.settings.behavior.bond_params());
+        self.apply_prepared_session(prepared)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_prepared_session(&mut self, prepared: PreparedSession) -> Result<(), String> {
+        let PreparedSession { session, molecules, groups, mut errors } = prepared;
         // Replace the whole document.
         self.reset_document();
 
-        let mut errors: Vec<String> = Vec::new();
         let mut loaded = 0usize;
-        for ms in &session.molecules {
-            let MoleculeSource::File(path) = &ms.source else {
-                errors.push(format!(
-                    "“{}” was loaded from memory (no file) — cannot reload",
-                    ms.name
-                ));
-                continue;
-            };
-            let raw = match data::load_with(path, &self.settings.behavior.bond_params()) {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(e);
-                    continue;
-                }
+        for (ms, prepared) in session.molecules.iter().zip(molecules) {
+            let (raw, frames) = match prepared {
+                Ok(loaded) => loaded,
+                Err(error) => { errors.push(error); continue; }
             };
             self.scene.add(raw, &self.rep_defaults);
             let mol = self.scene.molecules.last_mut().unwrap();
@@ -445,20 +490,9 @@ impl App {
             // action and the frames are needed before the first render).
             if !ms.traj_loads.is_empty() {
                 mol.seed_frame0();
-                for tl in &ms.traj_loads {
-                    let opts = LoadOptions {
-                        from: tl.from,
-                        to: tl.to,
-                        stride: tl.stride.max(1),
-                    };
-                    match data::traj_loader::read_frames_sync(&tl.path, &opts, mol.n_atoms) {
-                        Ok(frames) if !frames.is_empty() => {
-                            mol.append_frames(frames);
-                            mol.traj_loads.push(tl.clone());
-                        }
-                        Ok(_) => {} // recorded load now yields no frames — skip silently
-                        Err(e) => errors.push(format!("trajectory {}: {e}", tl.path.display())),
-                    }
+                for (record, frames) in frames {
+                    mol.append_frames(frames);
+                    mol.traj_loads.push(record);
                 }
                 mol.trajectory.set_current(ms.current_frame);
                 mol.apply_current_frame();
@@ -468,17 +502,14 @@ impl App {
 
         // Reconstruct molecular groups: re-open each group's source file, pull out the
         // recorded members by record index, restore their own reps + the shared reps.
-        for gs in &session.groups {
+        for (gs, prepared) in session.groups.iter().zip(groups) {
             let MoleculeSource::File(path) = &gs.source else {
                 errors.push(format!("group “{}” was loaded from memory — cannot reload", gs.name));
                 continue;
             };
-            let records = match data::load_records(path, &self.settings.behavior.bond_params()) {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(e);
-                    continue;
-                }
+            let records = match prepared {
+                Ok(records) => records,
+                Err(error) => { errors.push(error); continue; }
             };
             // Take records out by index (RawMolecule isn't Clone, members are distinct).
             let mut records: Vec<Option<data::RawMolecule>> = records.into_iter().map(Some).collect();
@@ -641,5 +672,33 @@ impl Scene {
             n += 1;
         }
         Ok(n)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod loading_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_session_keeps_structure_trajectory_and_group_sources() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests");
+        let structure = root.join("2lao.pdb");
+        let poses = root.join("ligands20.sdf");
+        let settings = Settings::default();
+        let mut scene = Scene::default();
+        scene.add(data::load(&structure).unwrap(), &settings.reps);
+        scene.molecules[0].traj_loads.push(TrajLoad { path: structure.clone(), from: 0, to: Some(0), stride: 1 });
+        scene.add_group(data::load_records(&poses, &settings.behavior.bond_params()).unwrap(),
+            MoleculeSource::File(poses), "poses".into(), &settings.reps);
+        let session = Session::capture(&scene, ViewState::default());
+        let prepared = PreparedSession::read(session, settings.behavior.bond_params());
+        assert!(prepared.errors.is_empty());
+        assert_eq!(prepared.molecules.len(), 1);
+        let (raw, frames) = prepared.molecules.into_iter().next().unwrap().unwrap();
+        assert_eq!(raw.n_atoms, scene.molecules[0].n_atoms);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0.path, structure);
+        assert_eq!(frames[0].1.len(), 1);
+        assert_eq!(prepared.groups.into_iter().next().unwrap().unwrap().len(), 20);
     }
 }

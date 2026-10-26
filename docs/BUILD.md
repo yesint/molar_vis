@@ -59,6 +59,11 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   CPU work stops at its next cancellation check and GPU work stops after the current small
   batch. The camera changes only on successful completion. Python/headless calls remain
   synchronous, and browser builds retain their existing synchronous CPU path.
+- Native startup normally reads files on a worker so the window can display loading
+  feedback. Existing `MOLAR_VIS_DEBUG_*` startup hooks keep synchronous preparation
+  for reproducible captures. Set `MOLAR_VIS_DEBUG_DEFER_LOAD=1` to exercise normal
+  startup loading with debug hooks; add `MOLAR_VIS_DEBUG_CAPTURE_LOADING=1` and
+  `MOLAR_VIS_DEBUG_SAVE_UI=<path>` to capture the delayed loading modal itself.
 - Unobstructed-view GPU verification (native compute adapter required):
   `cargo test -p molar_vis_core render::unobstructed::tests -- --ignored --nocapture`.
   Appearance verification (native GPU, no window):
@@ -88,6 +93,7 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   `MOLAR_VIS_DEBUG_ZOOM=<factor>` (dolly out by `factor`),
   `MOLAR_VIS_DEBUG_VIEWMENU=1` (open the compact viewer-settings popup at startup),
   `MOLAR_VIS_DEBUG_TRAJ=<path>` (load a trajectory into mol 0, bypassing the dialog) +
+  `MOLAR_VIS_DEBUG_TRAJ_ASYNC=1` (use the actual async dialog path and its loading OSD) +
   `MOLAR_VIS_DEBUG_FRAME=<n>` (display frame n) + `MOLAR_VIS_DEBUG_TRAJ_FROM/TO/STRIDE=<n>`
   (load range/stride) + `MOLAR_VIS_DEBUG_TRAJ_PLAY=1` (auto-play, exercises the incremental
   update path) + `MOLAR_VIS_DEBUG_BOX=1` (show mol 0's periodic box) +
