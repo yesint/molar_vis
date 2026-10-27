@@ -323,7 +323,7 @@ impl Representation {
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         { self.geometry_job = None; self.geometry_waiting = false; }
-        self.mesh_cache = self.kind.draws_mesh()
+        self.mesh_cache = (self.kind.draws_mesh() && !geom.mesh.vertices.is_empty())
             .then(|| MeshCache::new(std::mem::take(&mut geom.mesh), n_atoms));
         // Draw-mode gray colors must never enter a normal ray-traced image.
         static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
