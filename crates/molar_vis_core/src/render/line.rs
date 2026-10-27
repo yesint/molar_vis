@@ -86,6 +86,7 @@ pub fn build_pipeline(
     depth_compare: wgpu::CompareFunction,
     fs_entry: &str,
 ) -> wgpu::RenderPipeline {
+    let _timing = crate::performance::span("pipeline-line");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("line-shader"),
         source: wgpu::ShaderSource::Wgsl(super::lit_shader_source(include_str!("shaders/line.wgsl")).into()),

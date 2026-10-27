@@ -64,6 +64,14 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   for reproducible captures. Set `MOLAR_VIS_DEBUG_DEFER_LOAD=1` to exercise normal
   startup loading with debug hooks; add `MOLAR_VIS_DEBUG_CAPTURE_LOADING=1` and
   `MOLAR_VIS_DEBUG_SAVE_UI=<path>` to capture the delayed loading modal itself.
+- The native command-line viewer builds shader pipelines on a worker. If this stage
+  lasts more than 0.5 seconds, the window shows a spinner and `Compiling shaders...`,
+  and the terminal prints the message once. The message disappears when the renderer
+  is ready. This timer measures initialization; wgpu does not report driver cache hits.
+  Set `MOLAR_VIS_DEBUG_CAPTURE_SHADERS=1` with `MOLAR_VIS_DEBUG_SAVE_UI=<path>` to capture
+  this startup message. A separate `MESA_SHADER_CACHE_DIR` can exercise a cold Mesa
+  driver cache without clearing the normal cache. `MOLAR_VIS_DEBUG_EXIT=1` retains
+  synchronous initialization for existing offscreen render checks.
 - Unobstructed-view GPU verification (native compute adapter required):
   `cargo test -p molar_vis_core render::unobstructed::tests -- --ignored --nocapture`.
   Appearance verification (native GPU, no window):
@@ -201,9 +209,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **2.3.0** (crates.io, pinned with `=2.3.0`, `default-features=false` →
+molar **2.4.0** (Git revision pinned in `Cargo.toml`, `default-features=false` →
 `Float=f32`; **edition 2024, MSRV 1.85** — see [molar integration](MOLAR.md)),
-molar_ff **2.3.0** (same registry release — GAFF/GAFF2 typing and a fixed Espaloma
+molar_ff **2.4.0** (same Git revision — GAFF/GAFF2 typing and a fixed Espaloma
 charge kernel without `tract` or a general ONNX runtime; native-only in this viewer),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
 `../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature).
@@ -211,8 +219,9 @@ charge kernel without `tract` or a general ONNX runtime; native-only in this vie
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
-**Installable** — all release dependencies come from crates.io. The three Molar
-packages are pinned to `2.3.0` so Python and core molecular types match. `Cargo.lock`
+**Installable** — published viewer 0.2.2 uses crates.io dependencies. This checkout
+pins all three Molar packages to version `2.4.0` at the same Git revision so Python
+and core molecular types match. `Cargo.lock`
 pins the full dependency graph. Install the viewer with
 `cargo install molar_vis --version 0.2.2 --locked`.
 For local development, use temporary `[patch.crates-io]` entries pointing to

@@ -67,6 +67,7 @@ pub(crate) fn perceive(input: &Topology, state: &State) -> Result<Chemistry, Str
     if needs_connectivity {
         // Use Molar's covalent radii and coordination limits, not the display's
         // VDW-radius graph. Keep explicitly supplied chemical orders.
+        let _timing = crate::performance::span("hbond-connectivity");
         let known: Vec<_> = top
             .bonds
             .iter()
@@ -95,6 +96,7 @@ pub(crate) fn perceive(input: &Topology, state: &State) -> Result<Chemistry, Str
         .iter()
         .any(|b| matches!(b.order(), BondOrder::Unspecified | BondOrder::Aromatic))
     {
+        let _timing = crate::performance::span("hbond-bond-orders");
         let options = BondOrderOptions {
             input_orders: InputOrders::PreserveKnown,
             hydrogens: if has_h {

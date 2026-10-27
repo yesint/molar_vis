@@ -10,8 +10,26 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         launch: AppLaunch,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        #[cfg(target_arch = "wasm32")]
-        let _ = &launch;
+        let _timing = crate::performance::span("app-init");
+        let settings = Self::startup_settings(&cc.egui_ctx);
+        let render_state = cc
+            .wgpu_render_state
+            .as_ref()
+            .ok_or("wgpu render state unavailable (eframe must use the wgpu backend)")?;
+        let renderer = SceneRenderer::new(render_state, &settings.rendering);
+        Self::from_renderer(
+            &super::startup::Context {
+                egui_ctx: cc.egui_ctx.clone(),
+                #[cfg(not(target_arch = "wasm32"))]
+                wgpu_render_state: cc.wgpu_render_state.clone(),
+            },
+            launch,
+            settings,
+            renderer,
+        )
+    }
+
+    pub(super) fn startup_settings(ctx: &egui::Context) -> Settings {
         // Program settings: load from the platform config dir (created with defaults
         // on first launch). `MOLAR_VIS_DEBUG_DEFAULTS=1` forces built-in defaults
         // (no file IO) so headless verification is reproducible and never depends on
@@ -43,13 +61,19 @@ impl App {
                 _ => ThemeMode::System,
             };
         }
-        crate::theme::apply(&cc.egui_ctx, &settings.appearance);
+        crate::theme::apply(ctx, &settings.appearance);
 
-        let render_state = cc
-            .wgpu_render_state
-            .as_ref()
-            .ok_or("wgpu render state unavailable (eframe must use the wgpu backend)")?;
-        let renderer = SceneRenderer::new(render_state, &settings.rendering);
+        settings
+    }
+
+    pub(super) fn from_renderer(
+        cc: &super::startup::Context,
+        launch: AppLaunch,
+        settings: Settings,
+        renderer: SceneRenderer,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        #[cfg(target_arch = "wasm32")]
+        let _ = &launch;
 
         // New-representation defaults come from the settings; VMD's default style is
         // Lines. MOLAR_VIS_DEBUG_REP=vdw|licorice|… still overrides the kind for

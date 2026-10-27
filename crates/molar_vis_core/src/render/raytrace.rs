@@ -1090,6 +1090,7 @@ impl Raytracer {
     /// (no compute, or no `Rgba32Float` storage). `color_format` is the scene color
     /// target the resolve writes into.
     pub fn new(rs: &RenderState, color_format: wgpu::TextureFormat) -> Option<Self> {
+        let _timing = crate::performance::span("raytracer-init");
         let device = &rs.device;
         if !rs
             .adapter

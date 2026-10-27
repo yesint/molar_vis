@@ -76,6 +76,7 @@ pub fn build_pipeline(
     fs_entry: &str,
     early_z: bool,
 ) -> wgpu::RenderPipeline {
+    let _timing = crate::performance::span("pipeline-sphere");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("sphere-shader"),
         source: wgpu::ShaderSource::Wgsl(super::inject_early_z(

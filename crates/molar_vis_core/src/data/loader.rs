@@ -267,3 +267,42 @@ impl RawMolecule {
         })
     }
 }
+
+#[cfg(test)]
+mod altloc_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn jak2_cys917_draws_only_conformer_a_bonds() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/jak2.pdb"));
+        let params = BondParams::default();
+        for raw in [
+            load_with(path, &params).unwrap(),
+            load_from_bytes("jak2.pdb", std::fs::read(path).unwrap(), &params).unwrap(),
+        ] {
+            let top = raw.system.topology();
+            let atoms: Vec<_> = top.atoms.iter().enumerate()
+                .filter(|(_, atom)| atom.get_resid() == 917 && atom.get_chain() == 'A')
+                .map(|(id, atom)| (id, atom.get_name().to_string())).collect();
+            assert_eq!(atoms.len(), 10, "alternate B sites must not reach geometry generation");
+            assert_eq!(atoms.iter().map(|(_, name)| name).collect::<BTreeSet<_>>().len(), 10);
+            let name = |id| atoms.iter().find(|(i, _)| *i == id).map(|(_, n)| n.as_str());
+            let pair = |a: &str, b: &str| {
+                let mut names = [a.to_string(), b.to_string()];
+                names.sort();
+                names
+            };
+            let actual: BTreeSet<_> = raw.bonds.iter().filter_map(|bond| {
+                Some(pair(name(bond.i1)?, name(bond.i2)?))
+            }).collect();
+            let expected = [
+                ("N", "CA"), ("CA", "C"), ("C", "O"), ("CA", "CB"), ("CB", "SG"),
+                ("CA", "HA"), ("CB", "HB1"), ("CB", "HB2"), ("SG", "HG"),
+            ].map(|(a, b)| pair(a, b)).into_iter().collect();
+            assert_eq!(actual, expected, "Cys 917 must contain no cross-conformer bonds");
+            let cb = atoms.iter().find(|(_, name)| name == "CB").unwrap().0;
+            assert!((raw.system.state().coords[cb] - Pos::new(4.847, -1.2578, 0.783)).norm() < 1e-6);
+        }
+    }
+}

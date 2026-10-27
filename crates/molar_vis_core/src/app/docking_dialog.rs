@@ -25,6 +25,7 @@ struct DockingData {
 
 impl DockingData {
     fn read(protein: &[PathBuf], ligands: &[PathBuf], bonds: data::bonds::BondParams) -> Result<Self, String> {
+        let _timing = crate::performance::span("docking-read");
 
         // --- ligands: one multi-record file, or one file per pose --------------------
         let mut poses: Vec<data::RawMolecule> = Vec::new();
@@ -268,6 +269,7 @@ impl App {
     }
 
     fn install_docking(&mut self, data: DockingData) -> Result<String, String> {
+        let _timing = crate::performance::span("docking-install");
         let DockingData { receptor, poses, frames, count_structure, receptor_frames, mode, structure, ligands } = data;
         let ligands = ligands.as_slice();
         // --- commit: receptor, then the pose group, then the link ------------------

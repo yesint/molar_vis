@@ -10,6 +10,7 @@ fn v3(p: &Pos) -> glam::Vec3 {
 /// coordinates. This cached stage uses the full structure, never a display selection.
 fn prepare_hbond_chemistry(mol: &scene::Molecule) -> &crate::hbond::Chemistry {
     mol.interaction_hbond_chemistry.get_or_init(|| {
+        let _timing = crate::performance::span("hbond-chemistry");
         let mut top = mol.data.topology().clone();
         top.bonds = crate::data::bonds::bond_storage(&mol.bonds);
         hbond_chemistry::perceive(&top, mol.data.state()).unwrap_or_else(|error| {

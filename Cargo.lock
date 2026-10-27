@@ -2146,8 +2146,8 @@ dependencies = [
 
 [[package]]
 name = "molar"
-version = "2.3.0"
-source = "git+https://github.com/yesint/molar.git?rev=ba71a1d5744a03119955b7481f4443c0dd41c5d8#ba71a1d5744a03119955b7481f4443c0dd41c5d8"
+version = "2.4.0"
+source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
 dependencies = [
  "anyhow",
  "clap",
@@ -2172,9 +2172,8 @@ dependencies = [
 
 [[package]]
 name = "molar_ff"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fb80736eed418ff9ee21c1301a84d4192660bf0e4682bbc605ff93dc09e6e70"
+version = "2.4.0"
+source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
 dependencies = [
  "matrixmultiply",
  "molar",
@@ -2184,8 +2183,8 @@ dependencies = [
 
 [[package]]
 name = "molar_gromacs"
-version = "2.3.0"
-source = "git+https://github.com/yesint/molar.git?rev=ba71a1d5744a03119955b7481f4443c0dd41c5d8#ba71a1d5744a03119955b7481f4443c0dd41c5d8"
+version = "2.4.0"
+source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
 dependencies = [
  "cc",
  "libloading",
@@ -2193,9 +2192,8 @@ dependencies = [
 
 [[package]]
 name = "molar_python"
-version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d631b4480c56b36a63cd813bbd70346bbaead0f3f0fe1b35bce44eb7906dbbbc"
+version = "2.4.0"
+source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
 dependencies = [
  "env_logger",
  "log",
@@ -2286,8 +2284,8 @@ dependencies = [
 
 [[package]]
 name = "molly"
-version = "0.6.1"
-source = "git+https://github.com/ma3ke/molly.git#9f2fd6bcff4cdad8c4ab509a519192f89d843774"
+version = "0.7.0"
+source = "git+https://github.com/ma3ke/molly.git#da06147efe4a4c7f30df2fba9c979431b093f9f7"
 
 [[package]]
 name = "moxcms"

@@ -42,6 +42,7 @@ pub fn build_pipeline(
     depth_compare: wgpu::CompareFunction,
     fs_entry: &str,
 ) -> wgpu::RenderPipeline {
+    let _timing = crate::performance::span("pipeline-point");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("point-shader"),
         source: wgpu::ShaderSource::Wgsl(

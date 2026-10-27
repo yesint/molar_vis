@@ -821,6 +821,7 @@ fn make_pick_targets(
 
 impl SceneRenderer {
     pub fn new(rs: &RenderState, settings: &crate::settings::RenderingSettings) -> Self {
+        let _timing = crate::performance::span("renderer-init");
         let device = &rs.device;
         if crate::performance::enabled() {
             crate::performance::counters("adapter", serde_json::json!({

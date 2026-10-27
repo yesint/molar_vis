@@ -54,6 +54,7 @@ mod draw;
 mod draw_input;
 mod export;
 mod init;
+pub(crate) mod startup;
 mod loaders;
 mod loading;
 mod meshes;

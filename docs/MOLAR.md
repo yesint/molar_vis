@@ -4,13 +4,15 @@
 
 ## molar integration notes
 
-### Pinned molar 2.3 API
+### Pinned molar 2.4 API
 
-The workspace pins the crates.io packages molar, molar_python, and molar_ff to
-version `2.3.0` in `Cargo.toml`. The resolver API is currently supplied by the
-`[patch.crates-io]` entry pointing to the adjacent `../molar/molar` checkout during
-development of the foreign-selection API. Both repositories must be present. This
-local patch can return to a Git revision after the API is published upstream. Molar 2.3 retains the **struct-of-arrays** storage introduced in
+The workspace pins molar, molar_python, and molar_ff to version `2.4.0`, with
+`[patch.crates-io]` entries selecting Git revision
+`10880f0c22f35723544674910c112dba7db69817`. This revision includes the PDB reader
+fix that retains blank and `A` alternate locations and skips other positions in
+every model. Bonds referencing discarded atoms are removed during `CONECT`
+resolution. No adjacent Molar checkout is required to build the viewer.
+Molar 2.4 retains the **struct-of-arrays** storage introduced in
 2.0/2.1. `molar_ff` now supplies a fixed Espaloma charge kernel without a general ONNX
 runtime or an `espaloma` feature flag. The viewer still gates charge computation to
 native builds. The storage API details that matter here:

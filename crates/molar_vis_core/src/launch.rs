@@ -238,7 +238,15 @@ pub fn run(launch: AppLaunch) -> eframe::Result<()> {
     eframe::run_native(
         "molar_vis",
         native_options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, launch)?))),
+        Box::new(move |cc| {
+            // File/render verification hooks require synchronous initialization.
+            if std::env::var_os("MOLAR_VIS_DEBUG_EXIT").is_some() {
+                Ok(Box::new(App::new(cc, launch)?) as Box<dyn eframe::App>)
+            } else {
+                Ok(Box::new(crate::app::startup::NativeStartup::new(cc, launch)?)
+                    as Box<dyn eframe::App>)
+            }
+        }),
     )
 }
 
