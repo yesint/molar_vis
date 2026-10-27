@@ -93,7 +93,7 @@ pub(super) fn draw_interaction_overlay(
     use crate::interactions::InteractionKind as K;
     let contact = &hit.geometry.contact;
     let (label, distance_label, angle_label) = match contact.kind {
-        K::HBond => ("Hydrogen bond", "D–A distance", "D–H···A angle"),
+        K::HBond => ("Hydrogen bond", if contact.angle.is_some() { "H···A distance" } else { "D–A distance" }, "D–H···A angle"),
         K::Hydrophobic => ("Hydrophobic contact", "Distance", "Angle"),
         K::SaltBridge => ("Salt bridge", "Centroid distance", "Angle"),
         K::PiStacking => ("π stacking", "Centroid distance", "Ring-plane angle"),

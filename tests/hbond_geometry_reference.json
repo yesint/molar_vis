@@ -1,0 +1,1507 @@
+[
+  {
+    "name": "water_acceptor_rotation_0",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.36,
+          0.08,
+          0
+        ],
+        [
+          0.36,
+          -0.08,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "water_acceptor_rotation_30",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.3119615242270663,
+          0.09928203230275509,
+          0
+        ],
+        [
+          0.3919615242270663,
+          -0.03928203230275509,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "water_acceptor_rotation_45",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.28585786437626903,
+          0.09899494936611666,
+          0
+        ],
+        [
+          0.3989949493661166,
+          -0.014142135623730963,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "water_acceptor_rotation_60",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.2607179676972449,
+          0.09196152422706633,
+          0
+        ],
+        [
+          0.39928203230275505,
+          0.011961524227066304,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "water_acceptor_rotation_90",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.21999999999999997,
+          0.060000000000000005,
+          0
+        ],
+        [
+          0.38,
+          0.05999999999999999,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "water_acceptor_rotation_120",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.20071796769724493,
+          0.011961524227066339,
+          0
+        ],
+        [
+          0.3392820323027551,
+          0.0919615242270663,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "water_acceptor_rotation_150",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.20803847577293366,
+          -0.03928203230275509,
+          0
+        ],
+        [
+          0.2880384757729337,
+          0.09928203230275509,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "water_acceptor_rotation_180",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.24,
+          -0.07999999999999999,
+          0
+        ],
+        [
+          0.24,
+          0.08000000000000002,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "donor_h_rotation_0",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "donor_h_rotation_20",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.09396926207859085,
+          0.03420201433256687,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "donor_h_rotation_44",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.07193398003386513,
+          0.06946583704589973,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "donor_h_rotation_46",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.06946583704589973,
+          0.07193398003386511,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "donor_h_rotation_70",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.03420201433256689,
+          0.09396926207859084,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "donor_h_rotation_100",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          -0.01736481776669303,
+          0.0984807753012208,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "donor_h_rotation_180",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          -0.1,
+          1.2246467991473533e-17,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.104,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "planar_donor_height_0",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          -0.05,
+          0.0866,
+          0
+        ],
+        [
+          -0.05,
+          -0.0866,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "planar_donor_height_0.2",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          -0.05,
+          0.0866,
+          0
+        ],
+        [
+          -0.05,
+          -0.0866,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0.2
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "planar_donor_height_0.4",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          -0.05,
+          0.0866,
+          0
+        ],
+        [
+          -0.05,
+          -0.0866,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0.4
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "planar_donor_height_0.8",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          -0.05,
+          0.0866,
+          0
+        ],
+        [
+          -0.05,
+          -0.0866,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0.8
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "carbonyl_acceptor_angle_20",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.18723688550569098,
+          0.04104241719908024,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "carbonyl_acceptor_angle_50",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.22286548683761526,
+          0.09192533317427735,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "carbonyl_acceptor_angle_70",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.25895758280091974,
+          0.112763114494309,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": false
+  },
+  {
+    "name": "carbonyl_acceptor_angle_100",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.3208377813200316,
+          0.11817693036146495,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "carbonyl_acceptor_angle_120",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.36,
+          0.10392304845413264,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "carbonyl_acceptor_angle_160",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          0.41276311449430897,
+          0.041042417199080264,
+          0
+        ]
+      ],
+      "normal": [
+        0,
+        0,
+        1
+      ]
+    },
+    "accepted": true
+  },
+  {
+    "name": "no_explicit_h",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "name": "explicit_h_points_away_no_fallback",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          -0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": false
+  },
+  {
+    "name": "nearest_of_two_hydrogens",
+    "donor": {
+      "pos": [
+        0,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          -0.03,
+          0.09,
+          0
+        ],
+        [
+          0.1,
+          0,
+          0
+        ]
+      ],
+      "heavy": [],
+      "normal": null
+    },
+    "acceptor": {
+      "pos": [
+        0.3,
+        0,
+        0
+      ],
+      "geometry": "Tetrahedral",
+      "h": [],
+      "heavy": [],
+      "normal": null
+    },
+    "accepted": true
+  },
+  {
+    "acceptor": {
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          2.9337000846862793,
+          -1.3521000146865845,
+          0.5559999942779541
+        ]
+      ],
+      "normal": [
+        -0.4444270730018616,
+        -0.23300962150096893,
+        -0.8649803996086121
+      ],
+      "pos": [
+        2.841900110244751,
+        -1.2661000490188599,
+        0.5800000429153442
+      ]
+    },
+    "donor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          2.8234000205993652,
+          -0.9842000007629395,
+          0.42490002512931824
+        ],
+        [
+          2.6854000091552734,
+          -0.8853999972343445,
+          0.4488999843597412
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        2.723600149154663,
+        -0.9828000068664551,
+        0.45749998092651367
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 0, index: 4823 } -> AtomId { molecule: 1, index: 2 }",
+    "accepted": false
+  },
+  {
+    "acceptor": {
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          2.9337000846862793,
+          -1.3521000146865845,
+          0.5559999942779541
+        ]
+      ],
+      "normal": [
+        -0.4444270730018616,
+        -0.23300962150096893,
+        -0.8649803996086121
+      ],
+      "pos": [
+        2.841900110244751,
+        -1.2661000490188599,
+        0.5800000429153442
+      ]
+    },
+    "donor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          2.3961000442504883,
+          -1.4241999387741089,
+          0.39169999957084656
+        ],
+        [
+          2.49780011177063,
+          -1.3585000038146973,
+          0.5131000280380249
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        2.494300127029419,
+        -1.4210000038146973,
+        0.4288000166416168
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 0, index: 4826 } -> AtomId { molecule: 1, index: 2 }",
+    "accepted": false
+  },
+  {
+    "acceptor": {
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          2.9337000846862793,
+          -1.3521000146865845,
+          0.5559999942779541
+        ]
+      ],
+      "normal": [
+        -0.4444270730018616,
+        -0.23300962150096893,
+        -0.8649803996086121
+      ],
+      "pos": [
+        2.841900110244751,
+        -1.2661000490188599,
+        0.5800000429153442
+      ]
+    },
+    "donor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          2.6221001148223877,
+          -1.3481000661849976,
+          0.7472000122070312
+        ],
+        [
+          2.4535000324249268,
+          -1.326300024986267,
+          0.7248000502586365
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        2.548800230026245,
+        -1.2928999662399292,
+        0.6960999965667725
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 0, index: 4829 } -> AtomId { molecule: 1, index: 2 }",
+    "accepted": false
+  },
+  {
+    "acceptor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          2.707200050354004,
+          -1.6166000366210938,
+          0.3207000195980072
+        ],
+        [
+          2.693199872970581,
+          -1.6556999683380127,
+          0.4869999885559082
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        2.7458999156951904,
+        -1.5983999967575073,
+        0.41659998893737793
+      ]
+    },
+    "donor": {
+      "geometry": "Trigonal",
+      "h": [
+        [
+          2.818429946899414,
+          -1.5031999349594116,
+          0.6559299826622009
+        ],
+        [
+          2.9812700748443604,
+          -1.5591200590133667,
+          0.5873300433158875
+        ]
+      ],
+      "heavy": [
+        [
+          2.9337000846862793,
+          -1.3521000146865845,
+          0.5559999942779541
+        ]
+      ],
+      "normal": [
+        0.4444270431995392,
+        0.23300962150096893,
+        0.8649803996086121
+      ],
+      "pos": [
+        2.9091999530792236,
+        -1.48170006275177,
+        0.6035000085830688
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 1, index: 0 } -> AtomId { molecule: 0, index: 4832 }",
+    "accepted": false
+  },
+  {
+    "acceptor": {
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          2.9337000846862793,
+          -1.3521000146865845,
+          0.5559999942779541
+        ]
+      ],
+      "normal": [
+        -0.4444270730018616,
+        -0.23300962150096893,
+        -0.8649803996086121
+      ],
+      "pos": [
+        2.841900110244751,
+        -1.2661000490188599,
+        0.5800000429153442
+      ]
+    },
+    "donor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          2.707200050354004,
+          -1.6166000366210938,
+          0.3207000195980072
+        ],
+        [
+          2.693199872970581,
+          -1.6556999683380127,
+          0.4869999885559082
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        2.7458999156951904,
+        -1.5983999967575073,
+        0.41659998893737793
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 0, index: 4832 } -> AtomId { molecule: 1, index: 2 }",
+    "accepted": false
+  },
+  {
+    "acceptor": {
+      "geometry": "Trigonal",
+      "h": [],
+      "heavy": [
+        [
+          3.2348999977111816,
+          -1.0266000032424927,
+          0.33000001311302185
+        ],
+        [
+          3.402399778366089,
+          -0.926099956035614,
+          0.19759999215602875
+        ]
+      ],
+      "normal": [
+        -0.5855267643928528,
+        -0.08605402708053589,
+        -0.8060727119445801
+      ],
+      "pos": [
+        3.3443000316619873,
+        -1.0365999937057495,
+        0.2515999972820282
+      ]
+    },
+    "donor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          3.3904998302459717,
+          -1.4072999954223633,
+          0.3239000141620636
+        ],
+        [
+          3.5169999599456787,
+          -1.298200011253357,
+          0.28519999980926514
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        3.4590001106262207,
+        -1.3783000707626343,
+        0.24979999661445618
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 0, index: 4841 } -> AtomId { molecule: 1, index: 12 }",
+    "accepted": false
+  },
+  {
+    "acceptor": {
+      "geometry": "Tetrahedral",
+      "h": [
+        [
+          3.3904998302459717,
+          -1.4072999954223633,
+          0.3239000141620636
+        ],
+        [
+          3.5169999599456787,
+          -1.298200011253357,
+          0.28519999980926514
+        ]
+      ],
+      "heavy": [],
+      "normal": null,
+      "pos": [
+        3.4590001106262207,
+        -1.3783000707626343,
+        0.24979999661445618
+      ]
+    },
+    "donor": {
+      "geometry": "Trigonal",
+      "h": [
+        [
+          3.326740026473999,
+          -1.289120078086853,
+          0.3282800018787384
+        ]
+      ],
+      "heavy": [
+        [
+          3.1791000366210938,
+          -1.1502000093460083,
+          0.38359999656677246
+        ],
+        [
+          3.1600000858306885,
+          -1.3652000427246094,
+          0.43390002846717834
+        ]
+      ],
+      "normal": [
+        0.47496020793914795,
+        0.16024471819400787,
+        0.8652943968772888
+      ],
+      "pos": [
+        3.2330002784729004,
+        -1.2699999809265137,
+        0.37620002031326294
+      ]
+    },
+    "name": "jak2_pose_0 AtomId { molecule: 1, index: 13 } -> AtomId { molecule: 0, index: 4841 }",
+    "accepted": false
+  }
+]

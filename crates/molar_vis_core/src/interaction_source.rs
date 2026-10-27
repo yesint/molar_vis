@@ -1,8 +1,25 @@
 //! Shared chemical input for interaction rendering and foreign selections.
 use crate::{interactions::InteractionSet, scene};
 use molar::prelude::*;
+mod hbond_chemistry;
 fn v3(p: &Pos) -> glam::Vec3 {
     glam::Vec3::new(p.x, p.y, p.z)
+}
+
+/// Prepare chemical connectivity, bond orders and roles before gathering contact
+/// coordinates. This cached stage uses the full structure, never a display selection.
+fn prepare_hbond_chemistry(mol: &scene::Molecule) -> &crate::hbond::Chemistry {
+    mol.interaction_hbond_chemistry.get_or_init(|| {
+        let mut top = mol.data.topology().clone();
+        top.bonds = crate::data::bonds::bond_storage(&mol.bonds);
+        hbond_chemistry::perceive(&top, mol.data.state()).unwrap_or_else(|error| {
+            log::warn!("Cannot assign hydrogen-bond chemistry for {}: {error}", mol.name);
+            crate::hbond::Chemistry {
+                roles: vec![crate::hbond::Role::default(); mol.n_atoms],
+                neighbors: vec![Vec::new(); mol.n_atoms],
+            }
+        })
+    })
 }
 
 /// Gather everything one rep's selection contributes to interaction detection: heavy
@@ -17,6 +34,7 @@ pub(crate) fn gather_set(
     sel: &molar::prelude::Sel,
     state: &State,
 ) -> InteractionSet {
+    let chemistry = prepare_hbond_chemistry(mol);
     let topo = mol.data.topology();
     let n = state.coords.len();
     let res_base = (mol_idx as u64) << 40;
@@ -43,29 +61,42 @@ pub(crate) fn gather_set(
         if anum == 1 {
             continue; // H rides in its heavy neighbour's `attached_h`
         }
-        let mut only_ch = anum == 6;
+        let only_ch = anum == 6 && neigh[p.id].iter().all(|&i| matches!(anum_of(i as usize), 1 | 6));
         let mut attached_h = Vec::new();
-        let mut antecedent = None;
-        for &nb in &neigh[p.id] {
+        let mut heavy_neighbors = Vec::new();
+        let antecedent = neigh[p.id].iter().find(|&&i| anum_of(i as usize) != 1)
+            .and_then(|&i| coord(i as usize));
+        for &nb in &chemistry.neighbors[p.id] {
             let nb = nb as usize;
             let na = anum_of(nb);
-            if only_ch && !matches!(na, 1 | 6) {
-                only_ch = false;
-            }
             if na == 1 {
                 if let Some(c) = coord(nb) {
                     attached_h.push(c);
                 }
-            } else if antecedent.is_none() {
-                antecedent = coord(nb);
+            } else if let Some(c) = coord(nb) {
+                heavy_neighbors.push(c);
             }
         }
+        let pos = v3(p.pos);
+        let mut plane_points = heavy_neighbors.iter().take(2).copied().collect::<Vec<_>>();
+        if plane_points.len() == 1 {
+            if let Some(&nb) = chemistry.neighbors[p.id].iter().find(|&&i| anum_of(i as usize) != 1) {
+                if let Some(c) = chemistry.neighbors[nb as usize].iter().copied()
+                    .find(|&i| i as usize != p.id && anum_of(i as usize) != 1)
+                    .and_then(|i| coord(i as usize)) {
+                    plane_points.push(c);
+                }
+            }
+        }
+        let plane_normal = (plane_points.len() == 2)
+            .then(|| (plane_points[0] - pos).cross(plane_points[1] - pos).try_normalize())
+            .flatten();
         atoms.push(crate::interactions::AtomInfo {
             id: crate::interactions::AtomId {
                 molecule: mol_idx,
                 index: p.id,
             },
-            attached_h_ids: neigh[p.id]
+            attached_h_ids: chemistry.neighbors[p.id]
                 .iter()
                 .map(|&i| i as usize)
                 .filter(|&i| anum_of(i) == 1)
@@ -79,6 +110,7 @@ pub(crate) fn gather_set(
             res_key: res_base | (p.atom.get_resindex() as u64),
             only_ch_neighbors: only_ch,
             attached_h,
+            hbond: crate::hbond::Site { role: chemistry.roles[p.id], heavy_neighbors, plane_normal },
             antecedent,
         });
     }
@@ -265,4 +297,84 @@ fn charged_groups(
         }
     }
     (cations, anions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interactions::{detect, InteractionKind, InteractionSettings};
+
+    #[test]
+    fn hbond_preparation_preserves_source_and_invalidates_after_edits() {
+        let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/jak2_inhs.sd"));
+        let mut scene = scene::Scene::default();
+        scene.add(crate::data::load(path).unwrap(), &crate::settings::RepDefaults::default());
+        let mol = &mut scene.molecules[0];
+        let before: Vec<_> = mol.bonds.iter().map(|b| (b.pair(), b.order)).collect();
+        let charges: Vec<_> = mol.data.topology().atoms.iter().map(|a| a.get_formal_charge()).collect();
+        let prepared = prepare_hbond_chemistry(mol) as *const _;
+        assert_eq!(prepared, prepare_hbond_chemistry(mol) as *const _);
+        assert_eq!(before, mol.bonds.iter().map(|b| (b.pair(), b.order)).collect::<Vec<_>>());
+        assert_eq!(charges, mol.data.topology().atoms.iter().map(|a| a.get_formal_charge()).collect::<Vec<_>>());
+        mol.cycle_bond_order(0);
+        assert!(mol.interaction_hbond_chemistry.get().is_none());
+        assert_eq!(mol.data.topology().bonds.iter().next().unwrap().order(), mol.bonds[0].order);
+        prepare_hbond_chemistry(mol);
+        mol.set_atom_element(0, &Atom::new().with_atomic_number(6));
+        assert!(mol.interaction_hbond_chemistry.get().is_none());
+        prepare_hbond_chemistry(mol);
+        mol.add_atom(&Atom::new().with_atomic_number(8), glam::Vec3::splat(100.0)).unwrap();
+        assert!(mol.interaction_hbond_chemistry.get().is_none());
+    }
+
+    #[test]
+    fn jak2_water_hbonds_end_at_explicit_hydrogens() {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests"));
+        let mut scene = scene::Scene::default();
+        let defaults = crate::settings::RepDefaults::default();
+        scene.add(crate::data::load(&root.join("jak2.pdb")).unwrap(), &defaults);
+        scene.add(crate::data::load(&root.join("jak2_inhs.sd")).unwrap(), &defaults);
+        for mol in &scene.molecules {
+            mol.with_perception_topology(|top, _| hbond_chemistry::perceive(top, mol.data.state()))
+                .expect("JAK2 chemistry must be assigned");
+        }
+        let gather = |mi, selection: &str| {
+            let mol = &scene.molecules[mi];
+            gather_set(mol, mi, &scene.select(mi, selection).unwrap(), mol.data.state())
+        };
+        // Deliberately omit H from the selections; donor eligibility must still
+        // reflect the hydrogens present in the underlying structures.
+        let waters = gather(0, "resname HOH and not name H*");
+        let receptor = gather(0, "not name H*");
+        let ligand = gather(1, "not name H*");
+        assert!(!waters.atoms.is_empty());
+        assert!(waters.atoms.iter().all(|a| a.attached_h.len() == 2));
+        assert!(waters.atoms.iter().all(|a| a.hbond.role.donor && a.hbond.role.acceptor));
+        let mut water_donations = 0;
+        let mut ligand_contacts = 0;
+        for partner in [&receptor, &ligand] {
+            for contact in detect(&waters, partner, &InteractionSettings::default().detect()) {
+                if contact.kind != InteractionKind::HBond {
+                    continue;
+                }
+                assert!(contact.angle.is_some(), "explicit-H JAK2 contacts must not use the heavy-atom fallback: {:?}", contact.atoms);
+                let endpoints = [contact.a, contact.b];
+                let water = waters.atoms.iter().find(|a| a.id == contact.atoms[0][0]).unwrap();
+                let other = partner.atoms.iter().find(|a| a.id == contact.atoms[1][0]).unwrap();
+                let water_donates = water.attached_h.iter().any(|h| endpoints.contains(h))
+                    && endpoints.contains(&other.pos);
+                let other_donates = other.attached_h.iter().any(|h| endpoints.contains(h))
+                    && endpoints.contains(&water.pos);
+                assert!(water_donates || other_donates, "H-bond must connect H to its acceptor");
+                water_donations += usize::from(water_donates);
+                ligand_contacts += usize::from(other.id.molecule == 1);
+            }
+        }
+        assert!(water_donations > 0, "fixture must exercise water as donor");
+        // The seven chemically possible water–ligand directions in pose 0 all
+        // fail the pinned Mol* geometry test (frozen in the reference fixture).
+        assert_eq!(ligand_contacts, 0);
+        assert!(detect(&receptor, &ligand, &InteractionSettings::default().detect()).iter()
+            .any(|c| c.kind == InteractionKind::HBond), "fixture must retain protein–ligand H-bonds");
+    }
 }

@@ -25,6 +25,7 @@ mod geometry;
 mod geometry_jobs;
 mod history;
 mod interactions;
+mod hbond;
 mod interaction_source;
 mod launch;
 mod material;

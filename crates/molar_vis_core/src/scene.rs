@@ -629,6 +629,8 @@ pub struct Molecule {
     /// on a topology clone — no side effects). Topology-derived, so stable across
     /// trajectory frames (only the centroids move); `None` until first needed. Transient.
     pub interaction_rings: Option<Vec<Vec<usize>>>,
+    /// Chemical H-bond roles; positions and local planes are gathered from each frame.
+    pub(crate) interaction_hbond_chemistry: std::sync::OnceLock<crate::hbond::Chemistry>,
     /// Transient UI state: whether this molecule's representations block is
     /// expanded in the panel. Not part of `EditState` (view state, not undoable).
     pub reps_open: bool,
@@ -798,6 +800,7 @@ impl Molecule {
             selected_rep: Some(0),
             aromatic_rings: Vec::new(),
             interaction_rings: None,
+            interaction_hbond_chemistry: Default::default(),
             reps_open: true,
             trajectory: Trajectory::default(),
             show_box: false,
@@ -843,6 +846,7 @@ impl Molecule {
     /// authority (it is also the only bond store a *shared* molecule has, since we don't
     /// own that topology — hence the no-op there).
     pub(crate) fn sync_bonds_to_topology(&mut self) {
+        self.interaction_hbond_chemistry.take();
         let bonds = bond_storage(&self.bonds);
         if let Some(sys) = self.data.system_mut() {
             // Only an index out of range can fail, and `self.bonds` is maintained in
@@ -1104,6 +1108,7 @@ impl Molecule {
                 self.bbox_max = self.bbox_max.max(pos);
                 self.hover_grid = None;
                 self.structure_version += 1;
+                self.interaction_hbond_chemistry.take();
                 Some(idx)
             }
             Err(_) => None,
@@ -1217,6 +1222,7 @@ impl Molecule {
         }
         self.hover_grid = None;
         self.structure_version += 1;
+        self.interaction_hbond_chemistry.take();
     }
 
     /// Rotate the atoms `atoms` (global indices) about the world-space line through
@@ -1320,6 +1326,7 @@ impl Molecule {
         if let Some(b) = self.bonds.get_mut(k) {
             b.order = b.order.cycle();
             self.structure_version += 1;
+            self.sync_bonds_to_topology();
         }
     }
 

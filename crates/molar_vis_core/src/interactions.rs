@@ -5,8 +5,9 @@
 //! returns the interaction lines.
 //!
 //! Types detected (PLIP thresholds, `plip/basic/config.py`):
-//! - **Hydrogen bonds** — donor/acceptor N/O/S; with an explicit H, D–A `< 4.1 Å` **and**
-//!   D–H···A angle `> 100°`, else a heavy-atom D–A `≤ 3.5 Å` fallback (structures without H).
+//! - **Hydrogen bonds** — chemically assigned donors/acceptors and Mol* local geometry
+//!   (see `hbond`), using explicit H endpoints when present. The viewer distance and
+//!   D–H···A settings are additional constraints.
 //! - **Hydrophobic** — carbons with only C/H neighbours, `< 4.0 Å`, one per residue pair.
 //! - **Salt bridges** — opposite-charge group centroids `< 5.5 Å`.
 //! - **π-stacking** — two aromatic ring centroids `< 5.5 Å` with parallel or T-shaped planes.
@@ -47,6 +48,7 @@ pub struct AtomInfo {
     pub only_ch_neighbors: bool,
     /// Positions of the hydrogens bonded to this atom (drives the H-bond angle test).
     pub attached_h: Vec<Vec3>,
+    pub hbond: crate::hbond::Site,
     /// A bonded heavy neighbour's position (the C for a halogen — the C–X vector for the
     /// halogen-bond angle). `None` if the atom has no heavy neighbour.
     pub antecedent: Option<Vec3>,
@@ -93,6 +95,7 @@ pub struct Interaction {
     /// Atom identities on both sides, including complete ring/charge groups.
     pub atoms: [Vec<AtomId>; 2],
     pub kind: InteractionKind,
+    /// Rendered endpoints: H···A for an explicit-H bond, otherwise atoms / centroids.
     pub a: Vec3,
     pub b: Vec3,
     /// D–H···A, C–X···A or ring-plane angle, in degrees, when defined.
@@ -326,20 +329,10 @@ fn angle_deg(v1: Vec3, v2: Vec3) -> f32 {
     (v1.dot(v2) / n).clamp(-1.0, 1.0).acos().to_degrees()
 }
 
-/// Whether `donor`→`acc` is a valid H-bond at heavy-atom distance `d` (nm).
+/// Shared detection predicate; hydrogen choice and geometry are evaluated together.
+#[cfg(test)]
 fn hbond_ok(donor: &AtomInfo, acc: &AtomInfo, d: f32, p: &DetectParams) -> bool {
-    if !is_nos(donor.atomicnum) || !is_nos(acc.atomicnum) {
-        return false;
-    }
-    if donor.attached_h.is_empty() {
-        d <= p.hbond_dist_heavy
-    } else {
-        d < p.hbond_dist_h
-            && donor
-                .attached_h
-                .iter()
-                .any(|h| angle_deg(donor.pos - *h, acc.pos - *h) > p.hbond_angle_min)
-    }
+    crate::hbond::contact(donor, acc, d, p).is_some()
 }
 
 /// Whether `x`(halogen)→`acc` is a valid halogen bond at distance `d` (nm): the C–X···A
@@ -375,7 +368,7 @@ fn atom_level(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mu
     }
     let mut max_cut = 0.0_f32;
     if p.hbonds {
-        max_cut = max_cut.max(p.hbond_dist_h);
+        max_cut = max_cut.max(p.hbond_dist_h).max(p.hbond_dist_heavy);
     }
     if p.hydrophobic {
         max_cut = max_cut.max(p.hydrophobic_dist);
@@ -426,23 +419,23 @@ fn atom_level(a: &InteractionSet, b: &InteractionSet, p: &DetectParams, out: &mu
                     *e = (d, qi.pos, gi.pos, qi.id, gi.id);
                 }
             }
-            if p.hbonds && (hbond_ok(qi, gi, d, p) || hbond_ok(gi, qi, d, p)) {
-                let angle = [(qi, gi), (gi, qi)].into_iter()
-                    .filter(|(donor, acc)| hbond_ok(donor, acc, d, p))
-                    .flat_map(|(donor, acc)| donor.attached_h.iter()
-                        .map(move |h| angle_deg(donor.pos - *h, acc.pos - *h)))
-                    .filter(|&angle| angle > p.hbond_angle_min)
-                    .max_by(f32::total_cmp);
-                let mut atoms = [vec![qi.id], vec![gi.id]];
-                for (side, (donor, acc)) in [(qi, gi), (gi, qi)].into_iter().enumerate() {
-                    if hbond_ok(donor, acc, d, p) {
-                        atoms[side].extend(donor.attached_h.iter().zip(&donor.attached_h_ids)
-                            .filter(|(h, _)| angle_deg(donor.pos - **h, acc.pos - **h) > p.hbond_angle_min)
-                            .map(|(_, &id)| id));
+            if p.hbonds {
+                let contact = [(qi, gi), (gi, qi)].into_iter().enumerate()
+                    .filter_map(|(side, (donor, acc))|
+                        crate::hbond::contact(donor, acc, d, p).map(|c| (side, c)))
+                    .max_by(|(_, a), (_, b)| a.angle.unwrap_or(0.0).total_cmp(&b.angle.unwrap_or(0.0)));
+                if let Some((side, contact)) = contact {
+                    let (donor, acc) = if side == 0 { (qi, gi) } else { (gi, qi) };
+                    let mut atoms = [vec![qi.id], vec![gi.id]];
+                    if let Some(id) = contact.hydrogen.and_then(|i| donor.attached_h_ids.get(i)) {
+                        atoms[side].push(*id);
                     }
+                    if a.atoms.len() > b.atoms.len() { atoms.swap(0, 1); }
+                    let h = contact.hydrogen.map_or(donor.pos, |i| donor.attached_h[i]);
+                    let (pa, pb) = if side == 0 { (h, acc.pos) } else { (acc.pos, h) };
+                    out.push(Interaction { atoms, kind: InteractionKind::HBond, a: pa, b: pb,
+                        angle: contact.angle, offset: None });
                 }
-                if a.atoms.len() > b.atoms.len() { atoms.swap(0, 1); }
-                out.push(Interaction { atoms, kind: InteractionKind::HBond, a: qi.pos, b: gi.pos, angle, offset: None });
             }
             if p.halogen && (halogen_ok(qi, gi, d, p) || halogen_ok(gi, qi, d, p)) {
                 let (x, acc) = if halogen_ok(qi, gi, d, p) { (qi, gi) } else { (gi, qi) };
@@ -686,6 +679,11 @@ mod tests {
             res_key: res,
             only_ch_neighbors: atomicnum == 6,
             attached_h: Vec::new(),
+            hbond: crate::hbond::Site {
+                role: crate::hbond::Role { donor: is_nos(atomicnum), acceptor: is_nos(atomicnum),
+                    geometry: crate::hbond::Geometry::Tetrahedral },
+                ..Default::default()
+            },
             antecedent: None,
         }
     }
@@ -706,16 +704,74 @@ mod tests {
         let r = detect(&set(vec![donor]), &set(vec![acc]), &InteractionSettings::default().detect());
         assert_eq!(count(&r, InteractionKind::HBond), 1);
         assert!((r[0].angle.unwrap() - 180.0).abs() < 1e-4);
-        assert!((r[0].a.distance(r[0].b) - 0.30).abs() < 1e-6);
+        assert_eq!(r[0].a, Vec3::new(0.10, 0.0, 0.0));
+        assert_eq!(r[0].b, Vec3::new(0.30, 0.0, 0.0));
+        assert!((r[0].a.distance(r[0].b) - 0.20).abs() < 1e-6);
+    }
+
+    #[test]
+    fn water_hbond_uses_the_valid_hydrogen_in_both_search_directions() {
+        let mut donor = atom([0.0, 0.0, 0.0], 8, 0);
+        donor.id = AtomId { molecule: 0, index: 0 };
+        donor.attached_h = vec![Vec3::new(-0.03, 0.09, 0.0), Vec3::new(0.1, 0.0, 0.0)];
+        donor.attached_h_ids = vec![AtomId { molecule: 0, index: 1 }, AtomId { molecule: 0, index: 2 }];
+        let mut acc = atom([0.30, 0.0, 0.0], 8, 1);
+        acc.id = AtomId { molecule: 1, index: 0 };
+        acc.attached_h = vec![Vec3::new(0.36, 0.08, 0.0), Vec3::new(0.36, -0.08, 0.0)];
+        let p = InteractionSettings::default().detect();
+        for extra_atom in [false, true] {
+            let mut donor_set = set(vec![cloneinfo(&donor)]);
+            if extra_atom {
+                donor_set.atoms.push(atom([10.0, 0.0, 0.0], 6, 2));
+            }
+            let acc_set = set(vec![cloneinfo(&acc)]);
+            for (a, b, donor_side) in [(&donor_set, &acc_set, 0), (&acc_set, &donor_set, 1)] {
+                let found = detect(a, b, &p);
+                assert_eq!(found.len(), 1);
+                let contact = &found[0];
+                assert_eq!(contact.kind, InteractionKind::HBond);
+                assert!((contact.a == donor.attached_h[1] && contact.b == acc.pos)
+                    || (contact.b == donor.attached_h[1] && contact.a == acc.pos));
+                assert!((contact.angle.unwrap() - 180.0).abs() < 1e-4);
+                assert_eq!(contact.atoms[donor_side], vec![donor.id, donor.attached_h_ids[1]]);
+                assert_eq!(contact.atoms[1 - donor_side], vec![acc.id]);
+            }
+        }
     }
 
     #[test]
     fn hbond_angle_too_small_is_rejected() {
         let mut donor = atom([0.0, 0.0, 0.0], 7, 0);
         donor.attached_h = vec![Vec3::new(-0.10, 0.0, 0.0)];
-        let acc = atom([0.38, 0.0, 0.0], 8, 1);
-        let r = detect(&set(vec![donor]), &set(vec![acc]), &InteractionSettings::default().detect());
+        let mut acc = atom([0.30, 0.0, 0.0], 8, 1);
+        acc.hbond.role.donor = false;
+        let donor = set(vec![donor]);
+        let acc = set(vec![acc]);
+        for (a, b) in [(&donor, &acc), (&acc, &donor)] {
+            let r = detect(a, b, &InteractionSettings::default().detect());
+            assert_eq!(count(&r, InteractionKind::HBond), 0,
+                "reversing donor and acceptor must not bypass the explicit-H angle test");
+        }
+    }
+
+    #[test]
+    fn hbond_acceptor_only_atoms_cannot_donate() {
+        let mut a = atom([0.0, 0.0, 0.0], 8, 0);
+        let mut b = atom([0.30, 0.0, 0.0], 7, 1);
+        a.hbond.role.donor = false;
+        b.hbond.role.donor = false;
+        let r = detect(&set(vec![a]), &set(vec![b]), &InteractionSettings::default().detect());
         assert_eq!(count(&r, InteractionKind::HBond), 0);
+    }
+
+    #[test]
+    fn hbond_fallback_remains_available_for_a_partner_without_explicit_h() {
+        let mut water = atom([0.0, 0.0, 0.0], 8, 0);
+        water.attached_h = vec![Vec3::new(-0.03, 0.09, 0.0), Vec3::new(-0.03, -0.09, 0.0)];
+        let donor = atom([0.30, 0.0, 0.0], 7, 1);
+        let r = detect(&set(vec![water]), &set(vec![donor]), &InteractionSettings::default().detect());
+        assert_eq!(count(&r, InteractionKind::HBond), 1);
+        assert_eq!(r[0].angle, None);
     }
 
     #[test]
@@ -724,6 +780,8 @@ mod tests {
         let close = detect(&set(vec![atom([0.0, 0.0, 0.0], 7, 0)]), &set(vec![atom([0.30, 0.0, 0.0], 8, 1)]), &p);
         assert_eq!(count(&close, InteractionKind::HBond), 1);
         assert_eq!(close[0].angle, None, "no fabricated angle without H coordinates");
+        assert_eq!(close[0].a, Vec3::ZERO);
+        assert_eq!(close[0].b, Vec3::new(0.30, 0.0, 0.0));
         let far = detect(&set(vec![atom([0.0, 0.0, 0.0], 7, 0)]), &set(vec![atom([0.40, 0.0, 0.0], 8, 1)]), &p);
         assert_eq!(count(&far, InteractionKind::HBond), 0);
     }
@@ -895,6 +953,7 @@ mod tests {
             res_key: a.res_key,
             only_ch_neighbors: a.only_ch_neighbors,
             attached_h: a.attached_h.clone(),
+            hbond: a.hbond.clone(),
             antecedent: a.antecedent,
         }
     }
