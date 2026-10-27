@@ -22,6 +22,8 @@
 
 use std::sync::mpsc::Sender;
 
+mod lifecycle;
+
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -1358,57 +1360,53 @@ impl RepHandle {
 fn spawn(visible: bool) -> PyResult<Visualizer> {
     let (tx, rx) = std::sync::mpsc::channel::<AppJob>();
 
-    std::thread::Builder::new()
-        .name("molar_vis-ui".into())
-        .spawn(move || {
-            let mut viewport = eframe::egui::ViewportBuilder::default()
-                .with_title("molar_vis")
-                .with_inner_size([1200.0, 800.0]);
-            if !visible {
-                // Invisible window: headless render-to-file with no desktop window.
-                viewport = viewport.with_visible(false);
-            }
-            let native_options = eframe::NativeOptions {
-                renderer: eframe::Renderer::Wgpu,
-                // Same early-Z device opt-in as the standalone binary (kills close-up
-                // impostor overdraw when the adapter supports it).
-                wgpu_options: molar_vis_core::early_z_wgpu_options(),
-                viewport,
-                event_loop_builder: Some(Box::new(|builder| {
-                    // Permit the event loop on this non-main thread.
-                    #[cfg(target_os = "linux")]
-                    {
-                        use winit::platform::wayland::EventLoopBuilderExtWayland;
-                        use winit::platform::x11::EventLoopBuilderExtX11;
-                        EventLoopBuilderExtWayland::with_any_thread(builder, true);
-                        EventLoopBuilderExtX11::with_any_thread(builder, true);
-                    }
-                    #[cfg(target_os = "windows")]
-                    {
-                        use winit::platform::windows::EventLoopBuilderExtWindows;
-                        EventLoopBuilderExtWindows::with_any_thread(builder, true);
-                    }
-                    let _ = builder;
-                })),
-                ..Default::default()
-            };
+    lifecycle::spawn(move |ui_ctx| {
+        let mut viewport = eframe::egui::ViewportBuilder::default()
+            .with_title("molar_vis")
+            .with_inner_size([1200.0, 800.0]);
+        if !visible {
+            // Invisible window: headless render-to-file with no desktop window.
+            viewport = viewport.with_visible(false);
+        }
+        let native_options = eframe::NativeOptions {
+            renderer: eframe::Renderer::Wgpu,
+            // Same early-Z device opt-in as the standalone binary (kills close-up
+            // impostor overdraw when the adapter supports it).
+            wgpu_options: molar_vis_core::early_z_wgpu_options(),
+            viewport,
+            event_loop_builder: Some(Box::new(|builder| {
+                // Permit the event loop on this non-main thread.
+                #[cfg(target_os = "linux")]
+                {
+                    use winit::platform::wayland::EventLoopBuilderExtWayland;
+                    use winit::platform::x11::EventLoopBuilderExtX11;
+                    EventLoopBuilderExtWayland::with_any_thread(builder, true);
+                    EventLoopBuilderExtX11::with_any_thread(builder, true);
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::EventLoopBuilderExtWindows;
+                    EventLoopBuilderExtWindows::with_any_thread(builder, true);
+                }
+                let _ = builder;
+            })),
+            ..Default::default()
+        };
 
-            let result = eframe::run_native(
-                "molar_vis",
-                native_options,
-                Box::new(move |cc| {
-                    let mut app = App::new(cc, AppLaunch::default())?;
-                    app.set_jobs(rx);
-                    Ok(Box::new(app) as Box<dyn eframe::App>)
-                }),
-            );
-            if let Err(e) = result {
-                log::error!("molar_vis viewer thread exited with error: {e}");
-            }
-        })
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to start viewer thread: {e}"))
-        })?;
+        let result = eframe::run_native(
+            "molar_vis",
+            native_options,
+            Box::new(move |cc| {
+                let _ = ui_ctx.set(cc.egui_ctx.clone());
+                let mut app = App::new(cc, AppLaunch::default())?;
+                app.set_jobs(rx);
+                Ok(Box::new(app) as Box<dyn eframe::App>)
+            }),
+        );
+        if let Err(e) = result {
+            log::error!("molar_vis viewer thread exited with error: {e}");
+        }
+    })?;
 
     Ok(Visualizer { jobs: tx })
 }
@@ -1427,5 +1425,8 @@ fn molar_vis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RepHandle>()?;
     m.add_class::<MeshHandle>()?;
     m.add_function(wrap_pyfunction!(spawn, m)?)?;
+    let shutdown = wrap_pyfunction!(lifecycle::shutdown, m)?;
+    m.py().import("atexit")?.call_method1("register", (&shutdown,))?;
+    m.add_function(shutdown)?;
     Ok(())
 }

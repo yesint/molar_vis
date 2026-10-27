@@ -28,6 +28,16 @@ cd crates/molar_vis_py && maturin develop --release   # builds + installs as `mo
 python -c "import molar_vis as mv; s=mv.System('tests/2lao.pdb'); v=mv.spawn(); m=v.add_mol(s); m.add_rep(s('protein'), style='cartoon', color='ss'); import time; time.sleep(30)"
 ```
 
+Python closes viewer windows and joins their threads at normal interpreter exit,
+including viewers that are still initializing. The shutdown handler releases the
+GIL while waiting so the viewer can finish work on shared Python molecular data.
+It does not abandon live renderer threads after a timeout, because those threads
+must stop before process exit unloads the graphics driver. Linux GPU subprocess
+regressions can be run against the installed extension with
+`MOLAR_VIS_TEST_GPU=1 python3 crates/molar_vis_py/tests/test_shutdown.py -v`.
+These tests use hidden windows and cover immediate exit, cold shader startup,
+repeated rendered scenes, and repeated shutdown calls.
+
 Headless verification on this dev box used a scratch venv + `spectacle -b -n -a -o out.png` to
 screenshot the window opened from Python. NB: `pkill -f molar_vis-ui` matches its own shell command
 line — kill the python process by PID instead.
