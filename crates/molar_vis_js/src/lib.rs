@@ -341,6 +341,7 @@ impl System {
 /// access is required to inspect counts or obtain an individual molecule.
 #[wasm_bindgen]
 pub struct StructureFile {
+    name: String,
     molecules: Vec<System>,
     n_atoms: usize,
 }
@@ -370,7 +371,7 @@ impl StructureFile {
             }
         }
         if molecules.is_empty() { return Err(JsError::new("the file contains no molecules")); }
-        Ok(StructureFile { molecules, n_atoms })
+        Ok(StructureFile { name: name.to_owned(), molecules, n_atoms })
     }
 
     #[wasm_bindgen(getter, js_name = numMolecules)]
@@ -416,6 +417,15 @@ pub struct Visualizer {
 
 #[wasm_bindgen]
 impl Visualizer {
+    /// Set the viewer UI theme without saving browser preferences.
+    pub async fn set_theme(&self, name: String) -> Result<(), JsError> {
+        query_job(&self.jobs, move |app| app.set_theme(&name)).await
+    }
+
+    pub async fn theme(&self) -> Result<String, JsError> {
+        query_job(&self.jobs, |app| Ok(app.theme_name().to_owned())).await
+    }
+
     /// Apply sidebar/selection-toolbar visibility on the next viewer frame.
     pub async fn set_ui_visibility(&self, selection_panel: bool, selection_toolbar: bool) -> Result<(), JsError> {
         query_job(&self.jobs, move |app| { app.set_ui_visibility(selection_panel, selection_toolbar); Ok(()) }).await
@@ -719,6 +729,18 @@ impl Visualizer {
             }),
         );
     }
+    /// Add every record of a parsed file as a normal molar_vis group.
+    pub async fn add_file(&self, file: &StructureFile) -> Result<MolGroup, JsError> {
+        let name = file.name.clone();
+        let sources = file.molecules.iter().map(|system| {
+            (system.name.clone(), Box::new(WebSystemSource {
+                system: system.system.clone(), version: system.version.clone(),
+            }) as Box<dyn SharedSource>)
+        }).collect();
+        let id = query_job(&self.jobs, move |app| app.add_shared_group(sources, name)).await?;
+        Ok(MolGroup { id, jobs: self.jobs.clone() })
+    }
+
     /// Add a molecule, rendering **directly** from the parsed `System` (by reference);
     /// returns a handle.
     pub fn add_mol(&self, sys: &System) -> MolHandle {
@@ -861,6 +883,11 @@ impl Visualizer {
         Ok(())
     }
 
+    /// Read the current background, including solid/gradient mode and colors.
+    pub async fn background_json(&self) -> Result<String, JsError> {
+        query_job(&self.jobs, |app| app.background_json()).await
+    }
+
     /// Flat background color, RGB in 0–1.
     pub fn background(&self, r: f32, g: f32, b: f32) {
         send(
@@ -938,6 +965,38 @@ impl Visualizer {
             &self.jobs,
             Box::new(move |app| app.set_shadows(enabled, strength)),
         );
+    }
+}
+
+/// A loaded molecular group. All records remain in the scene; shared styles follow its shown member.
+#[wasm_bindgen]
+pub struct MolGroup {
+    id: u64,
+    jobs: Sender<AppJob>,
+}
+
+#[wasm_bindgen]
+impl MolGroup {
+    pub async fn members(&self) -> Result<Vec<MolHandle>, JsError> {
+        let id = self.id;
+        let ids = query_job(&self.jobs, move |app| app.group_members(id)).await?;
+        Ok(ids.into_iter().map(|mol| MolHandle { mol, jobs: self.jobs.clone() }).collect())
+    }
+
+    pub async fn current(&self) -> Result<usize, JsError> {
+        let id = self.id;
+        query_job(&self.jobs, move |app| app.group_current(id)).await
+    }
+
+    pub async fn show(&self, member: usize) -> Result<(), JsError> {
+        let id = self.id;
+        query_job(&self.jobs, move |app| app.show_group_member(id, member)).await
+    }
+
+    pub async fn reps(&self) -> Result<Vec<RepHandle>, JsError> {
+        let id = self.id;
+        let (mol, ids) = query_job(&self.jobs, move |app| app.group_rep_ids(id)).await?;
+        Ok(ids.into_iter().map(|rep| RepHandle { mol, rep, jobs: self.jobs.clone() }).collect())
     }
 }
 
@@ -1211,6 +1270,24 @@ pub struct RepHandle {
 
 #[wasm_bindgen]
 impl RepHandle {
+    /// Set fluid bonds and bond-color blending (both 0–1) for ball-and-stick.
+    pub async fn set_ballstick_bonds(&self, fluid_bonds: f32, color_blend: f32) -> Result<(), JsError> {
+        let (mol, rep) = (self.mol, self.rep);
+        query_job(&self.jobs, move |app| {
+            let (mi, ri) = app.resolve_rep(mol, rep)?;
+            app.set_ballstick_bonds(mi, ri, fluid_bonds, color_blend)
+        }).await
+    }
+
+    /// Read the current [fluid bonds, bond-color blend] values, including UI edits.
+    pub async fn ballstick_bonds(&self) -> Result<Vec<f32>, JsError> {
+        let (mol, rep) = (self.mol, self.rep);
+        query_job(&self.jobs, move |app| {
+            let (mi, ri) = app.resolve_rep(mol, rep)?;
+            app.ballstick_bonds(mi, ri).map(|values| values.to_vec())
+        }).await
+    }
+
     #[wasm_bindgen(getter, js_name = molId)]
     pub fn mol_id(&self) -> f64 { self.mol as f64 }
     #[wasm_bindgen(getter, js_name = repId)]

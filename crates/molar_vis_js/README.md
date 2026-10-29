@@ -48,6 +48,23 @@ independently, and `JSON.parse(await vis.ui_visibility_json())` reads their stat
 keeping the viewer and UI visibility settings. This supports displaying another
 record with `file.molecule(index)` and `vis.add_mol(...)`.
 
+`await vis.set_theme("light")` selects the light UI theme without saving browser
+preferences; `"dark"` and `"system"` are also supported. `await vis.theme()` reads
+the current choice. On a ball-and-stick representation,
+`await rep.set_ballstick_bonds(0.5, 0.5)` sets fluid bonds and bond-color blending.
+Both controls accept finite values from 0 to 1; other styles reject the operation.
+`await rep.ballstick_bonds()` reads the two values, including edits made in the UI.
+Loading a molecule and `vis.clear()` preserve the current background.
+`vis.background(1, 1, 1)` selects solid white; `await vis.background_json()` reads
+the current background mode and colors.
+
+`const group = await vis.add_file(file)` loads every parsed record into a normal
+molar_vis molecular group. All members remain in the scene and appear in the
+sidebar. `await group.members()`, `await group.current()`, and
+`await group.show(index)` inspect and select group members. `await group.reps()`
+returns the shared representations; their styles and bond settings follow the
+shown member. The original `StructureFile` can be freed after `add_file` resolves.
+
 Only one viewer may run in a document. Hosts can use a dedicated iframe to
 isolate viewer keyboard shortcuts and release the viewer by removing the iframe.
 The host page supplies its own file picker and molecule navigation controls.

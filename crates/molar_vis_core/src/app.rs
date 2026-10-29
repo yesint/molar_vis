@@ -131,7 +131,6 @@ pub struct App {
     /// Hide the molecule controls while retaining a restore button in the view toolbar.
     side_panel_collapsed: bool,
     selection_toolbar_visible: bool,
-    #[cfg(not(target_arch = "wasm32"))]
     loading_context: egui::Context,
     #[cfg(not(target_arch = "wasm32"))]
     loading_jobs: std::collections::VecDeque<loading::Job>,
@@ -520,9 +519,11 @@ impl App {
         (!self.side_panel_collapsed, self.selection_toolbar_visible)
     }
 
-    /// Clear the document without closing the viewer or changing its UI visibility.
+    /// Clear the document while preserving the viewer's background and UI visibility.
     pub fn clear(&mut self) {
+        let background = self.camera.background;
         self.new_session();
+        self.camera.background = background;
     }
 
     pub fn molecule_ids(&self) -> Vec<u64> {
@@ -787,6 +788,54 @@ impl App {
         Ok(ri)
     }
 
+    /// Set the two ball-and-stick bond controls without changing atom/bond radii.
+    pub fn set_ballstick_bonds(&mut self, mol: usize, rep: usize, fluid_bonds: f32, color_blend: f32) -> Result<(), String> {
+        if ![fluid_bonds, color_blend].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
+            return Err("bond controls must be finite values between 0 and 1".into());
+        }
+        let molecule = self.scene.molecules.get_mut(mol).ok_or("no such molecule")?;
+        let representation = molecule.reps.get_mut(rep).ok_or("no such representation")?;
+        let RepParams::BallAndStick { bond_smoothing, bond_color_blend, .. } = &mut representation.params else {
+            return Err("bond controls require a ball-and-stick representation".into());
+        };
+        *bond_smoothing = fluid_bonds;
+        *bond_color_blend = color_blend;
+        representation.geom_dirty = true;
+        molecule.hover_detail_dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
+    pub fn ballstick_bonds(&self, mol: usize, rep: usize) -> Result<[f32; 2], String> {
+        let molecule = self.scene.molecules.get(mol).ok_or("no such molecule")?;
+        let representation = molecule.reps.get(rep).ok_or("no such representation")?;
+        match representation.params {
+            RepParams::BallAndStick { bond_smoothing, bond_color_blend, .. } => Ok([bond_smoothing, bond_color_blend]),
+            _ => Err("bond controls require a ball-and-stick representation".into()),
+        }
+    }
+
+    /// Change this viewer's UI theme without writing saved preferences.
+    pub fn set_theme(&mut self, name: &str) -> Result<(), String> {
+        self.settings.appearance.theme = match name {
+            "light" => ThemeMode::Light,
+            "dark" => ThemeMode::Dark,
+            "system" => ThemeMode::System,
+            _ => return Err("theme must be light, dark, or system".into()),
+        };
+        crate::theme::apply(&self.loading_context, &self.settings.appearance);
+        self.loading_context.request_repaint();
+        Ok(())
+    }
+
+    pub fn theme_name(&self) -> &'static str {
+        match self.settings.appearance.theme {
+            ThemeMode::Light => "light",
+            ThemeMode::Dark => "dark",
+            ThemeMode::System => "system",
+        }
+    }
+
     /// Set representation `(mol, rep)`'s line width in pixels. Supported by the **Lines**
     /// style (`RepParams::Lines { width, bond_color_blend }`) and the **Interactions** style (dashed-line
     /// width, `InteractionSettings::line_width`); every other style has no line width and
@@ -959,7 +1008,7 @@ impl App {
     }
 
     /// Replace the camera with one framing `[min, max]` and seed the user's default view
-    /// (projection / background / depth cue / lighting), as a fresh document gets.
+    /// (projection / depth cue / lighting), retaining the current background.
     ///
     /// `Camera::frame_bbox` builds a *whole* camera, so it also resets the view settings —
     /// which is why `ViewDefaults::seed_camera` follows it. But the defaults have no entry
@@ -967,9 +1016,11 @@ impl App {
     /// would silently switch off the first time a molecule lands in an empty scene.
     fn reframe_camera(&mut self, min: glam::Vec3, max: glam::Vec3) {
         let axes = (self.camera.axes_on, self.camera.axes_corner);
+        let background = self.camera.background;
         self.camera = Camera::frame_bbox(min, max, self.settings.view.fill);
         self.settings.view.seed_camera(&mut self.camera);
         (self.camera.axes_on, self.camera.axes_corner) = axes;
+        self.camera.background = background;
     }
 
     /// Re-frame all molecules (zoom-to-fit + default orientation), keeping the current
@@ -1099,6 +1150,10 @@ impl App {
     pub fn set_projection(&mut self, projection: Projection) {
         self.camera.projection = projection;
         self.view_dirty = true;
+    }
+
+    pub fn background_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.camera.background).map_err(|e| crate::errors::error_chain(&e))
     }
 
     /// Flat background color (RGB, 0–1).

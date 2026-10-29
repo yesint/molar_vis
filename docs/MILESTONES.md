@@ -955,3 +955,16 @@ restarting the renderer. All parsing and rendering remain in the browser.
 The WebGL2 renderer omits the unused normal attachment in the opaque and background
 passes. This prevents an independent-blend validation error during browser startup;
 SSAO was already disabled on this backend.
+
+## Browser appearance controls
+
+The JavaScript API exposes runtime theme selection and ball-and-stick fluid-bond
+and color-blend controls, with readback and validation. Hosts can set their own
+preview defaults without changing the viewer's saved preferences.
+
+Loading into an empty scene and clearing through the host API preserve the current
+solid or gradient background. The explicit New Session action still restores defaults.
+
+The JavaScript `add_file` API loads every parsed record as a normal viewer group.
+Shared-source groups use the same member visibility and shared representations as
+file-loaded groups, and failed member construction leaves the scene unchanged.

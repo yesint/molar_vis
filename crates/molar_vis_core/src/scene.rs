@@ -1670,10 +1670,37 @@ impl Scene {
         if records.is_empty() {
             return None;
         }
+        let members = records.into_iter().map(|raw| self.add(raw, rep_defaults)).collect();
+        self.finish_group(members, source, name, rep_defaults)
+    }
+
+    /// Add a complete group backed by already parsed external structures.
+    /// Build every member before modifying the scene so errors do not add a partial file.
+    pub fn add_shared_group(
+        &mut self,
+        sources: Vec<(String, Box<dyn crate::moldata::SharedSource>)>,
+        name: String,
+        bond_params: &crate::data::bonds::BondParams,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Result<MolId, String> {
+        if sources.is_empty() { return Err("the group contains no molecules".into()); }
+        let molecules = sources.into_iter().map(|(name, source)| {
+            Molecule::new_shared(reserve_mol_id(), name, source, bond_params, rep_defaults)
+        }).collect::<Result<Vec<_>, _>>()?;
+        let members = molecules.iter().map(|mol| mol.id).collect();
+        self.molecules.extend(molecules);
+        Ok(self.finish_group(members, MoleculeSource::Bytes { name: name.clone() }, name, rep_defaults).unwrap())
+    }
+
+    fn finish_group(
+        &mut self,
+        members: Vec<MolId>,
+        source: MoleculeSource,
+        name: String,
+        rep_defaults: &crate::settings::RepDefaults,
+    ) -> Option<MolId> {
         let gid = self.alloc_group_id();
-        let mut members = Vec::with_capacity(records.len());
-        for raw in records {
-            let id = self.add(raw, rep_defaults);
+        for &id in &members {
             let mi = self.mol_index(id).unwrap();
             let mol = &mut self.molecules[mi];
             // Members carry no own reps; the group's shared rep is what shows.
@@ -1686,7 +1713,6 @@ impl Scene {
             // shows a compact list of member names (a 20-record SDF would otherwise be
             // a wall of "(no own representations)").
             mol.reps_open = false;
-            members.push(id);
         }
         // Default shared rep = Licorice (SDF records are small organics/ligands).
         let mut licorice = rep_defaults.clone();

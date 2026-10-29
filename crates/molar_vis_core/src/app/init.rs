@@ -502,7 +502,6 @@ impl App {
             settings_dialog: None,
             side_panel_collapsed: false,
             selection_toolbar_visible: true,
-            #[cfg(not(target_arch = "wasm32"))]
             loading_context: cc.egui_ctx.clone(),
             #[cfg(not(target_arch = "wasm32"))]
             loading_jobs: Default::default(),

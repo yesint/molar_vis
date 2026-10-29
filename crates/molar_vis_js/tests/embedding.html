@@ -29,20 +29,65 @@ try {
   await rejects(() => start_embedded("missing"));
   const vis = await start_embedded("viewer");
   assert(await vis.ui_visibility_json() === '{"selection_panel":false,"selection_toolbar":false}', "Embedded controls are hidden");
+  await vis.set_theme("light");
+  assert(await vis.theme() === "light", "Host can select the light theme");
+  await rejects(() => vis.set_theme("invalid"));
+  assert(await vis.theme() === "light", "Invalid themes leave the current theme intact");
+  vis.background(1, 1, 1);
+  const white = await vis.background_json();
+  assert(JSON.parse(white).color.join() === "1,1,1,1", "White background is applied");
   file.free();
   let molecule = vis.add_mol(second);
   assert((await vis.mols()).length === 1, "A molecule survives freeing the file");
-  for (const rep of await molecule.reps()) { rep.style = "ballstick"; rep.color = "element"; }
+  assert(await vis.background_json() === white, "Loading the first molecule preserves the background");
+  for (const rep of await molecule.reps()) {
+    rep.style = "ballstick";
+    rep.color = "element";
+    await rep.set_ballstick_bonds(0.5, 0.5);
+    assert(Array.from(await rep.ballstick_bonds()).join() === "0.5,0.5", "Fluid bonds and color blend reach the representation");
+    await rejects(() => rep.set_ballstick_bonds(NaN, 0.5));
+    await rejects(() => rep.set_ballstick_bonds(0.5, 2));
+    assert(Array.from(await rep.ballstick_bonds()).join() === "0.5,0.5", "Invalid bond settings are atomic");
+    rep.style = "lines";
+    await rejects(() => rep.set_ballstick_bonds(0.5, 0.5));
+    rep.style = "ballstick";
+    await rep.set_ballstick_bonds(0.5, 0.5);
+  }
   await vis.set_ui_visibility(true, false);
   assert(JSON.parse(await vis.ui_visibility_json()).selection_panel, "Sidebar visibility can change");
   await vis.set_ui_visibility(false, false);
+  assert(await vis.background_json() === white, "Representation changes preserve the background");
+  vis.background_gradient(new Float32Array([0, 0, 0]), new Float32Array([1, 1, 1]));
+  const gradient = await vis.background_json();
   await vis.clear();
+  assert(await vis.background_json() === gradient, "Clearing preserves the gradient background");
   assert((await vis.mols()).length === 0, "Clear removes the previous molecule");
   assert(!JSON.parse(await vis.ui_visibility_json()).selection_panel, "Clear keeps controls hidden");
   molecule = vis.add_mol(second);
   assert((await molecule.reps()).length > 0, "The same parsed molecule can be displayed again");
+  assert(await vis.background_json() === gradient, "Loading a replacement molecule preserves the gradient");
+  assert(await vis.theme() === "light", "Replacement keeps the UI theme");
+  await vis.clear();
+  const groupedFile = StructureFile.from_bytes("group.sdf", encoder.encode(text + single));
+  const group = await vis.add_file(groupedFile);
+  groupedFile.free();
+  assert((await vis.mols()).length === 2 && (await group.members()).length === 2, "All file molecules are loaded in the viewer together");
+  assert(await group.current() === 0, "The first group member is selected");
+  const shared = (await group.reps())[0];
+  shared.style = "ballstick";
+  await shared.set_ballstick_bonds(0.5, 0.5);
+  await group.show(1);
+  assert(await group.current() === 1 && (await vis.mols()).length === 2, "Switching retains all loaded molecules");
+  assert(Array.from(await shared.ballstick_bonds()).join() === "0.5,0.5", "Shared appearance follows group navigation");
+  assert(await vis.background_json() === gradient, "Group loading and navigation preserve the background");
+  await rejects(() => group.show(2));
+  assert(await group.current() === 1, "Invalid group navigation leaves the current member intact");
+  await group.show(0);
+  assert(Array.from(await shared.ballstick_bonds()).join() === "0.5,0.5", "Switching back keeps shared appearance");
+  await vis.clear();
+  await rejects(() => group.members());
   await rejects(() => start_embedded("viewer"));
-  report = "PASS: file counts, parsed record ownership, malformed input, awaited startup, hidden controls, and scene replacement";
+  report = "PASS: file counts, parsed record ownership, malformed input, awaited startup, UI controls, appearance, background preservation, complete-file groups, and scene replacement";
 } catch (error) { report = `FAIL: ${error.stack || error}`; }
 await fetch("/result", { method:"POST", body:report });
 </script></html>

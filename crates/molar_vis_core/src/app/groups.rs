@@ -43,6 +43,28 @@ impl App {
         }
     }
 
+    /// Add all parsed file records as a normal viewer group with shared representations.
+    pub fn add_shared_group(
+        &mut self,
+        sources: Vec<(String, Box<dyn crate::moldata::SharedSource>)>,
+        name: String,
+    ) -> Result<u64, String> {
+        let was_empty = self.scene.molecules.is_empty();
+        let first = self.scene.add_shared_group(sources, name, &self.settings.behavior.bond_params(), &self.rep_defaults)?;
+        let mi = self.scene.mol_index(first).ok_or("group has no first member")?;
+        self.scene.selected_mol = Some(mi);
+        if was_empty {
+            let (min, max) = self.scene.molecules[mi].current_bbox();
+            self.reframe_camera(min, max);
+        }
+        let group = self.scene.molecules[mi].group.ok_or("molecule has no group")?;
+        let gi = self.scene.group_index(group).ok_or("group was not added")?;
+        self.scene.groups[gi].expanded = true;
+        self.scene.groups[gi].members_expanded = true;
+        self.view_dirty = true;
+        Ok(group.0)
+    }
+
     pub fn group_ids(&self) -> Vec<u64> {
         self.scene.groups.iter().map(|g| g.id.0).collect()
     }
