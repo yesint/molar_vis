@@ -112,6 +112,7 @@ impl App {
     /// All buttons are the shared `overlay_button` (uniform height, framed,
     /// ink-centered glyph); dropdowns/popups hang off `egui::Popup::menu`.
     pub(super) fn draw_view_toolbar(&mut self, ui: &mut egui::Ui) {
+        if !self.selection_toolbar_visible { return; }
         egui::Panel::top("view_toolbar")
             .show_separator_line(false)
             .frame(

@@ -9,6 +9,8 @@ collapsing headers; global scene controls live in the top view toolbar, below).
 A button at the right end of the menu bar collapses the side panel so the view
 uses the full window width. A restore button appears at the left of the view
 toolbar. Restoring the panel keeps its previous width and molecule folds.
+Embedding hosts can hide the sidebar and selection toolbar independently through
+`App::set_ui_visibility`; these flags are not persisted as user preferences.
 **Menu bar** (`draw_menu_bar`, an `egui::MenuBar` — the old inline toolbar of buttons is gone,
 every global action now lives in a menu): three drop-downs — with **hover-switching** (once one
 menu is open, moving the pointer onto a sibling top-level button opens that one). egui 0.34's

@@ -36,7 +36,7 @@ use std::sync::mpsc::Sender;
 use wasm_bindgen::prelude::*;
 
 use molar::prelude::{
-    FileHandler, IndexSliceProvider, Sel as MSel, SelectionExpr, State, System as MSystem, Topology,
+    FileHandler, FileFormatError, IndexSliceProvider, Sel as MSel, SelectionExpr, State, System as MSystem, Topology,
 };
 use molar_vis_core::eframe;
 use molar_vis_core::{
@@ -284,6 +284,7 @@ impl SharedSource for WebSystemSource {
 /// A structure parsed in the browser. Owns a molar `System` in an `Rc`; `add_mol`
 /// shares it into the scene by reference (a cheap `Rc` clone), so the `System` stays
 /// usable from JS (e.g. for more `select` calls) afterward.
+#[derive(Clone)]
 #[wasm_bindgen]
 pub struct System {
     system: Rc<MSystem>,
@@ -336,6 +337,55 @@ impl System {
     }
 }
 
+/// All molecule records parsed once from a local file. No rendering or network
+/// access is required to inspect counts or obtain an individual molecule.
+#[wasm_bindgen]
+pub struct StructureFile {
+    molecules: Vec<System>,
+    n_atoms: usize,
+}
+
+#[wasm_bindgen]
+impl StructureFile {
+    pub fn from_bytes(name: &str, bytes: &[u8]) -> Result<StructureFile, JsError> {
+        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        let mut reader = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes.to_vec()))
+            .map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))?;
+        let mut molecules = Vec::new();
+        let mut n_atoms = 0;
+        loop {
+            match reader.read() {
+                Ok((topology, state)) => {
+                    let count = topology.atoms.len();
+                    let system = MSystem::new(topology, state)
+                        .map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))?;
+                    n_atoms += count;
+                    molecules.push(System {
+                        system: Rc::new(system), version: Rc::new(Cell::new(0)),
+                        name: format!("{name} #{}", molecules.len() + 1), n_atoms: count,
+                    });
+                }
+                Err(error) if matches!(error.kind(), FileFormatError::Eof) => break,
+                Err(error) => return Err(JsError::new(&format!("molecule {}: {}", molecules.len() + 1, molar_vis_core::error_chain(&error)))),
+            }
+        }
+        if molecules.is_empty() { return Err(JsError::new("the file contains no molecules")); }
+        Ok(StructureFile { molecules, n_atoms })
+    }
+
+    #[wasm_bindgen(getter, js_name = numMolecules)]
+    pub fn num_molecules(&self) -> usize { self.molecules.len() }
+
+    #[wasm_bindgen(getter, js_name = numAtoms)]
+    pub fn num_atoms(&self) -> usize { self.n_atoms }
+
+    /// Return a shared handle to a zero-based record. The file can be freed
+    /// without invalidating this handle or a viewer that uses it.
+    pub fn molecule(&self, index: usize) -> Result<System, JsError> {
+        self.molecules.get(index).cloned().ok_or_else(|| JsError::new("molecule index is out of range"))
+    }
+}
+
 /// A frozen set of atom indices (the result of `System.select`). Consumed by
 /// `add_rep`/`select` to set a representation's selection.
 #[wasm_bindgen]
@@ -366,6 +416,23 @@ pub struct Visualizer {
 
 #[wasm_bindgen]
 impl Visualizer {
+    /// Apply sidebar/selection-toolbar visibility on the next viewer frame.
+    pub async fn set_ui_visibility(&self, selection_panel: bool, selection_toolbar: bool) -> Result<(), JsError> {
+        query_job(&self.jobs, move |app| { app.set_ui_visibility(selection_panel, selection_toolbar); Ok(()) }).await
+    }
+
+    /// Read the actual UI state, including changes made through the viewer.
+    pub async fn ui_visibility_json(&self) -> Result<String, JsError> {
+        query_job(&self.jobs, |app| {
+            let (selection_panel, selection_toolbar) = app.ui_visibility();
+            Ok(serde_json::json!({"selection_panel": selection_panel, "selection_toolbar": selection_toolbar}).to_string())
+        }).await
+    }
+
+    pub async fn clear(&self) -> Result<(), JsError> {
+        query_job(&self.jobs, |app| { app.clear(); Ok(()) }).await
+    }
+
     /// Set the camera orbit pivot (x, y, z) in nanometers.
     pub fn rotation_center(&self, x: f32, y: f32, z: f32) -> Result<(), JsError> {
         if ![x, y, z].iter().all(|v| v.is_finite()) { return Err(JsError::new("rotation center must be finite")); }
@@ -1215,44 +1282,52 @@ impl RepHandle {
 /// running on this page (one viewer per page in v1).
 #[wasm_bindgen]
 pub fn start(canvas_id: &str) -> Result<Visualizer, JsError> {
-    use wasm_bindgen::JsCast as _;
-
-    console_error_panic_hook::set_once();
-    let _ = console_log::init_with_level(log::Level::Info);
-
-    if VIEWER_STARTED.with(|f| f.replace(true)) {
-        return Err(JsError::new(
-            "a molar_vis viewer is already running on this page",
-        ));
-    }
-
-    let document = web_sys::window()
-        .and_then(|w| w.document())
-        .ok_or_else(|| JsError::new("no document"))?;
-    let canvas = document
-        .get_element_by_id(canvas_id)
-        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-        .ok_or_else(|| JsError::new(&format!("page has no <canvas id=\"{canvas_id}\">")))?;
-
-    let (tx, rx) = std::sync::mpsc::channel::<AppJob>();
-
+    let (canvas, tx, rx) = prepare_viewer(canvas_id)?;
     wasm_bindgen_futures::spawn_local(async move {
-        let result = eframe::WebRunner::new()
-            .start(
-                canvas,
-                eframe::WebOptions::default(),
-                Box::new(move |cc| {
-                    let mut app = App::new(cc, AppLaunch::default())?;
-                    app.set_jobs(rx);
-                    Ok(Box::new(app) as Box<dyn eframe::App>)
-                }),
-            )
-            .await;
-        match result {
-            Ok(()) => log::info!("molar_vis: web runner started"),
-            Err(e) => log::error!("molar_vis failed to start: {}", molar_vis_core::js_error_chain(&e)),
+        if let Err(error) = run_viewer(canvas, rx, false).await {
+            log::error!("molar_vis failed to start: {error:?}");
         }
     });
-
     Ok(Visualizer { jobs: tx })
+}
+
+/// Start an embedded viewer with its selection sidebar and toolbar hidden.
+/// Resolves after graphics initialization; rejects if the renderer cannot start.
+#[wasm_bindgen]
+pub async fn start_embedded(canvas_id: &str) -> Result<Visualizer, JsError> {
+    let (canvas, tx, rx) = prepare_viewer(canvas_id)?;
+    run_viewer(canvas, rx, true).await?;
+    Ok(Visualizer { jobs: tx })
+}
+
+fn prepare_viewer(canvas_id: &str) -> Result<(web_sys::HtmlCanvasElement, Sender<AppJob>, std::sync::mpsc::Receiver<AppJob>), JsError> {
+    use wasm_bindgen::JsCast as _;
+    console_error_panic_hook::set_once();
+    let _ = console_log::init_with_level(log::Level::Info);
+    let document = web_sys::window().and_then(|w| w.document()).ok_or_else(|| JsError::new("no document"))?;
+    let canvas = document.get_element_by_id(canvas_id)
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .ok_or_else(|| JsError::new(&format!("page has no canvas {canvas_id:?}")))?;
+    if VIEWER_STARTED.with(|f| f.replace(true)) {
+        return Err(JsError::new("a molar_vis viewer is already running on this page"));
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<AppJob>();
+    Ok((canvas, tx, rx))
+}
+
+async fn run_viewer(canvas: web_sys::HtmlCanvasElement, rx: std::sync::mpsc::Receiver<AppJob>, embedded: bool) -> Result<(), JsError> {
+    let result = eframe::WebRunner::new().start(
+        canvas, eframe::WebOptions::default(),
+        Box::new(move |cc| {
+            let mut app = App::new(cc, AppLaunch::default())?;
+            if embedded { app.set_ui_visibility(false, false); }
+            app.set_jobs(rx);
+            Ok(Box::new(app) as Box<dyn eframe::App>)
+        }),
+    ).await;
+    if let Err(error) = result {
+        VIEWER_STARTED.with(|f| f.set(false));
+        return Err(JsError::new(&molar_vis_core::js_error_chain(&error)));
+    }
+    Ok(())
 }

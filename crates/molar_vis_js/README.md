@@ -17,6 +17,48 @@ vis.projection("perspective");
 vis.background_gradient([0.02, 0.02, 0.06], [0.10, 0.12, 0.20]);
 ```
 
+## Embedded file previews
+
+`StructureFile.from_bytes(name, Uint8Array)` parses all molecule records with
+molar, including mixed V2000/V3000 SDF files. It does not upload data or start a
+renderer. `numMolecules` and `numAtoms` report the file totals; `molecule(index)`
+returns a `System` for a zero-based record without parsing it again. The returned
+system remains valid after the file handle is freed.
+
+```js
+import init, { StructureFile, start_embedded } from "./pkg/molar_vis.js";
+await init();
+const file = StructureFile.from_bytes(input.name, new Uint8Array(await input.arrayBuffer()));
+console.log(file.numMolecules, file.numAtoms);
+const vis = await start_embedded("molar_vis_canvas");
+const sys = file.molecule(0);
+const mol = vis.add_mol(sys);
+for (const rep of await mol.reps()) {
+  rep.style = "ballstick";
+  rep.color = "element";
+}
+```
+
+`start_embedded` hides the selection sidebar and selection toolbar before the
+first frame. Its promise rejects if graphics initialization fails. The existing
+`start` function retains its visible controls and immediate return value.
+`await vis.set_ui_visibility(sidebar, toolbar)` changes the two controls
+independently, and `JSON.parse(await vis.ui_visibility_json())` reads their state.
+`await vis.clear()` removes the document and resets its camera/history while
+keeping the viewer and UI visibility settings. This supports displaying another
+record with `file.molecule(index)` and `vis.add_mol(...)`.
+
+Only one viewer may run in a document. Hosts can use a dedicated iframe to
+isolate viewer keyboard shortcuts and release the viewer by removing the iframe.
+The host page supplies its own file picker and molecule navigation controls.
+
+To check parsing, counts, hidden controls, record switching, and error handling
+in Chromium after building the package:
+
+```sh
+python3 crates/molar_vis_js/tests/run_browser.py --package crates/molar_vis_js/web/pkg
+```
+
 ## Live scene listings
 
 Use `await vis.mols()` and `await mol.reps()` to list the current scene, including

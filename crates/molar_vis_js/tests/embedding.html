@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Embedding API checks</title>
+<style>html,body { margin:0; height:100%; } canvas { width:100%; height:100%; display:block; }</style>
+<canvas id="viewer"></canvas>
+<script type="module">
+const checkpoint = text => fetch("/result", {method:"POST", body:text});
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const rejects = async action => { try { await action(); } catch { return; } throw new Error("Expected rejection"); };
+window.addEventListener("error", event => checkpoint(`FAIL: ${event.message}`));
+window.addEventListener("unhandledrejection", event => checkpoint(`FAIL: ${event.reason}`));
+let report;
+try {
+  const { default: init, StructureFile, start_embedded } = await import("/pkg/molar_vis.js");
+  await init();
+  const text = await (await fetch("/methane.sdf")).text();
+  const encoder = new TextEncoder();
+  const file = StructureFile.from_bytes("batch.sdf", encoder.encode(text + text));
+  assert(file.numMolecules === 2 && file.numAtoms === 10, "Complete-file counts");
+  const single = "Helium\n  test\n\n  1  0  0  0  0  0            999 V2000\n    0.0000    0.0000    0.0000 He  0  0  0  0  0  0\nM  END\n$$$$\n";
+  const mixed = StructureFile.from_bytes("mixed.sd", encoder.encode(text + single));
+  assert(mixed.numMolecules === 2 && mixed.numAtoms === 6, "Mixed-format totals include unequal record sizes and the .sd extension");
+  assert(mixed.molecule(1).numAtoms === 1, "Mixed-format second record");
+  mixed.free();
+  const second = file.molecule(1);
+  assert(second.numAtoms === 5 && second.select("all").numAtoms === 5, "Second molecule is parsed");
+  await rejects(() => file.molecule(2));
+  await rejects(() => StructureFile.from_bytes("bad.sdf", encoder.encode(text + "broken")));
+  await rejects(() => StructureFile.from_bytes("empty.sdf", new Uint8Array()));
+  await rejects(() => start_embedded("missing"));
+  const vis = await start_embedded("viewer");
+  assert(await vis.ui_visibility_json() === '{"selection_panel":false,"selection_toolbar":false}', "Embedded controls are hidden");
+  file.free();
+  let molecule = vis.add_mol(second);
+  assert((await vis.mols()).length === 1, "A molecule survives freeing the file");
+  for (const rep of await molecule.reps()) { rep.style = "ballstick"; rep.color = "element"; }
+  await vis.set_ui_visibility(true, false);
+  assert(JSON.parse(await vis.ui_visibility_json()).selection_panel, "Sidebar visibility can change");
+  await vis.set_ui_visibility(false, false);
+  await vis.clear();
+  assert((await vis.mols()).length === 0, "Clear removes the previous molecule");
+  assert(!JSON.parse(await vis.ui_visibility_json()).selection_panel, "Clear keeps controls hidden");
+  molecule = vis.add_mol(second);
+  assert((await molecule.reps()).length > 0, "The same parsed molecule can be displayed again");
+  await rejects(() => start_embedded("viewer"));
+  report = "PASS: file counts, parsed record ownership, malformed input, awaited startup, hidden controls, and scene replacement";
+} catch (error) { report = `FAIL: ${error.stack || error}`; }
+await fetch("/result", { method:"POST", body:report });
+</script></html>

@@ -130,6 +130,7 @@ pub struct App {
     settings_dialog: Option<SettingsDialog>,
     /// Hide the molecule controls while retaining a restore button in the view toolbar.
     side_panel_collapsed: bool,
+    selection_toolbar_visible: bool,
     #[cfg(not(target_arch = "wasm32"))]
     loading_context: egui::Context,
     #[cfg(not(target_arch = "wasm32"))]
@@ -507,6 +508,23 @@ mod external_color_api_tests {
 }
 
 impl App {
+    /// Control the selection sidebar and viewport toolbar independently.
+    /// These host-specific settings are not saved as user preferences.
+    pub fn set_ui_visibility(&mut self, selection_panel: bool, selection_toolbar: bool) {
+        self.side_panel_collapsed = !selection_panel;
+        self.selection_toolbar_visible = selection_toolbar;
+        self.view_dirty = true;
+    }
+
+    pub fn ui_visibility(&self) -> (bool, bool) {
+        (!self.side_panel_collapsed, self.selection_toolbar_visible)
+    }
+
+    /// Clear the document without closing the viewer or changing its UI visibility.
+    pub fn clear(&mut self) {
+        self.new_session();
+    }
+
     pub fn molecule_ids(&self) -> Vec<u64> {
         self.scene.molecules.iter().map(|m| m.id.0).collect()
     }

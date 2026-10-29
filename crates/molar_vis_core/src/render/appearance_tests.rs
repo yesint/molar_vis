@@ -1310,7 +1310,7 @@ fn depth_only_shadows_match_opaque_pipeline_depth() {
             &rs.device,
             DEPTH_FORMAT,
             &renderer.camera_bgl,
-            &opaque_targets(renderer.color_format),
+            &opaque_targets(renderer.color_format, renderer.oit_enabled),
             true,
             wgpu::CompareFunction::Less,
             "fs_shadow",

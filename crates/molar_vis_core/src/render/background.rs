@@ -36,6 +36,7 @@ pub fn build_pipeline(
     color_format: wgpu::TextureFormat,
     depth_format: wgpu::TextureFormat,
     bgl: &wgpu::BindGroupLayout,
+    normal_target: bool,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bg-shader"),
@@ -74,7 +75,7 @@ pub fn build_pipeline(
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
-                Some(wgpu::ColorTargetState {
+                normal_target.then_some(wgpu::ColorTargetState {
                     format: super::NORMAL_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::empty(),

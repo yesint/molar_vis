@@ -205,14 +205,14 @@ fn make_ssao_bind_group(
 
 /// Color-target descriptors for the opaque pass: shaded color plus the smooth
 /// view-space normal consumed by SSAO.
-fn opaque_targets(color_format: wgpu::TextureFormat) -> Vec<Option<wgpu::ColorTargetState>> {
+fn opaque_targets(color_format: wgpu::TextureFormat, normal_target: bool) -> Vec<Option<wgpu::ColorTargetState>> {
     vec![
         Some(wgpu::ColorTargetState {
             format: color_format,
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
             write_mask: wgpu::ColorWrites::ALL,
         }),
-        Some(wgpu::ColorTargetState {
+        normal_target.then_some(wgpu::ColorTargetState {
             format: NORMAL_FORMAT,
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
@@ -898,7 +898,9 @@ impl SceneRenderer {
         // Opaque pass: single alpha-blended target, depth-write on, `fs_main`.
         // OIT pass: accum+reveal targets, depth-write off (test on), `fs_oit`.
         let f = color_format;
-        let opaque_t = opaque_targets(f);
+        // WebGL2 has no independent blending and does not run SSAO. Do not
+        // attach its unused normal target: its blend state differs from color.
+        let opaque_t = opaque_targets(f, oit_enabled);
         let oit_t = oit_targets();
         let glow_t = glow_targets(f);
         let less = wgpu::CompareFunction::Less;
@@ -1055,7 +1057,7 @@ impl SceneRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bg_pipeline = background::build_pipeline(device, color_format, DEPTH_FORMAT, &bg_bgl);
+        let bg_pipeline = background::build_pipeline(device, color_format, DEPTH_FORMAT, &bg_bgl, oit_enabled);
         let bg_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg-bg"),
             layout: &bg_bgl,
@@ -1663,7 +1665,7 @@ impl SceneRenderer {
                             store: wgpu::StoreOp::Store,
                         },
                     }),
-                    Some(wgpu::RenderPassColorAttachment {
+                    self.oit_enabled.then_some(wgpu::RenderPassColorAttachment {
                         view: &self.targets.normal_view,
                         resolve_target: None,
                         depth_slice: None,

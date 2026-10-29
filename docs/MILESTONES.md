@@ -943,3 +943,15 @@ both raster and ray tracing without reducing the helix resolution. On the JAK2
 fancy-session close-up, the live OIT pass decreased from 9.4 to 4.4 ms; a fixed
 1000×800 capture was pixel-identical. A GPU regression compares 8,192 rays with
 the full search across viewing angles, widths, lengths and animation phases.
+
+## Browser embedding and file inspection
+
+The JavaScript API parses complete structure files through `StructureFile`, with
+molecule/atom totals and shared `System` handles for individual records. Embedded
+startup waits for graphics initialization and starts with the selection sidebar
+and toolbar hidden. Hosts can change both controls and clear the document without
+restarting the renderer. All parsing and rendering remain in the browser.
+
+The WebGL2 renderer omits the unused normal attachment in the opaque and background
+passes. This prevents an independent-blend validation error during browser startup;
+SSAO was already disabled on this backend.
