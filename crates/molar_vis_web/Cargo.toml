@@ -12,4 +12,4 @@ name = "molar_vis_web"
 path = "src/main.rs"
 
 [dependencies]
-molar_vis_core = { version = "0.2.2", path = "../molar_vis_core" }
+molar_vis_core = { version = "0.3.0", path = "../molar_vis_core" }

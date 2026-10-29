@@ -19,8 +19,8 @@ crate-type = ["cdylib"]
 # workspace produces an empty cdylib and pulls nothing extra. Built for the browser with
 # `wasm-pack build crates/molar_vis_js --target web`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-molar_vis_core = { version = "0.2.2", path = "../molar_vis_core" }
-# Same molar as the workspace (rev-pinned, default-features => Float = f32) so the
+molar_vis_core = { version = "0.3.0", path = "../molar_vis_core" }
+# Same molar as the workspace (version-pinned, default-features => Float = f32) so the
 # molar types unify with molar_vis_core's across the graph.
 molar = { workspace = true }
 log = { workspace = true }

@@ -178,7 +178,7 @@ files are desktop features.
 Install the published desktop viewer with a [Rust toolchain](https://rustup.rs):
 
 ```sh
-cargo install molar_vis --version 0.2.2 --locked
+cargo install molar_vis --version 0.3.0 --locked
 molar_vis protein.pdb
 ```
 

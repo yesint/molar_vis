@@ -3,7 +3,7 @@ members = ["crates/molar_vis_core", "crates/molar_vis", "crates/molar_vis_web", 
 resolver = "2"
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "Artistic-2.0"
 authors = ["Semen Yesylevskyy"]
@@ -34,9 +34,9 @@ serde_json = "1"
 egui-stylesheet = "0.1"
 # Published Molar packages use the same release so Rust and Python types unify.
 # The default coordinate precision is f32; the fixed Espaloma kernel needs no ONNX runtime.
-molar = { version = "=2.4.0", default-features = false }
-molar_python = { version = "=2.4.0" }
-molar_ff = { version = "=2.4.0", default-features = false }
+molar = { version = "=2.4.1", default-features = false }
+molar_python = { version = "=2.4.1" }
+molar_ff = { version = "=2.4.1", default-features = false }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]
@@ -44,9 +44,3 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
-
-# Pin V3000 support and keep Rust and Python Molar types unified.
-[patch.crates-io]
-molar = { git = "https://github.com/yesint/molar.git", rev = "f0bd80b537d1948a24f66f808ddcbc26a812a127" }
-molar_ff = { git = "https://github.com/yesint/molar.git", rev = "f0bd80b537d1948a24f66f808ddcbc26a812a127" }
-molar_python = { git = "https://github.com/yesint/molar.git", rev = "f0bd80b537d1948a24f66f808ddcbc26a812a127" }

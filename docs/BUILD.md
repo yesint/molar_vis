@@ -219,9 +219,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **2.4.0** (Git revision pinned in `Cargo.toml`, `default-features=false` →
+molar **2.4.1** (crates.io version pinned in `Cargo.toml`, `default-features=false` →
 `Float=f32`; **edition 2024, MSRV 1.85** — see [molar integration](MOLAR.md)),
-molar_ff **2.4.0** (same Git revision — GAFF/GAFF2 typing and a fixed Espaloma
+molar_ff **2.4.1** (the same registry release provides GAFF/GAFF2 typing and a fixed Espaloma
 charge kernel without `tract` or a general ONNX runtime; native-only in this viewer),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
 `../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature).
@@ -229,11 +229,10 @@ charge kernel without `tract` or a general ONNX runtime; native-only in this vie
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
-**Installable** — published viewer 0.2.2 uses crates.io dependencies. This checkout
-pins all three Molar packages to version `2.4.0` at the same Git revision so Python
-and core molecular types match. `Cargo.lock`
-pins the full dependency graph. Install the viewer with
-`cargo install molar_vis --version 0.2.2 --locked`.
+Viewer 0.3.0 uses crates.io dependencies. The workspace pins all three Molar
+packages to version `2.4.1` so Python and core molecular types match.
+`Cargo.lock` pins the full dependency graph. Install the viewer with
+`cargo install molar_vis --version 0.3.0 --locked`.
 For local development, use temporary `[patch.crates-io]` entries pointing to
 `../molar/molar`, `../molar/molar_ff`, `../molar/molar_python`, or
 `../egui-stylesheet`; do not commit those overrides. Publish dependency changes
@@ -248,10 +247,10 @@ first, then update the workspace's registry version requirements and lockfile.
 
 ## Selection resolver development dependency
 
-The workspace pins the unreleased external PEG hooks to a molar Git revision.
-The patch also makes the Python and force-field crates use the same molar types.
-For local development, temporarily replace it with the adjacent `../molar/molar`
-checkout. Push the molar changes first, then pin their Git revision in the viewer;
+Molar 2.4.1 includes the external PEG hooks used by the selection resolver.
+For local development, use temporary `[patch.crates-io]` entries for the adjacent
+Molar checkout, keeping the core, Python, and force-field packages on the same
+version. Publish Molar changes before updating the viewer's registry dependencies;
 do not commit a local path override.
 
 Run the resolver tests with

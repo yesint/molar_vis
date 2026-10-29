@@ -6,12 +6,11 @@
 
 ### Pinned molar 2.4 API
 
-The workspace pins molar, molar_python, and molar_ff to version `2.4.0`, with
-`[patch.crates-io]` entries selecting Git revision
-`10880f0c22f35723544674910c112dba7db69817`. This revision includes the PDB reader
-fix that retains blank and `A` alternate locations and skips other positions in
-every model. Bonds referencing discarded atoms are removed during `CONECT`
-resolution. No adjacent Molar checkout is required to build the viewer.
+The workspace pins molar, molar_python, and molar_ff to crates.io version `2.4.1`.
+This release includes V3000 SDF support and the PDB reader fix that retains blank
+and `A` alternate locations and skips other positions in every model. Bonds
+referencing discarded atoms are removed during `CONECT` resolution. No adjacent
+Molar checkout is required to build the viewer.
 Molar 2.4 retains the **struct-of-arrays** storage introduced in
 2.0/2.1. `molar_ff` now supplies a fixed Espaloma charge kernel without a general ONNX
 runtime or an `espaloma` feature flag. The viewer still gates charge computation to
