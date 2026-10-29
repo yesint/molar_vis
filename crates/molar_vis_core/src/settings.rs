@@ -368,15 +368,20 @@ impl Settings {
                     s
                 }
                 Err(e) => {
+                    let e = crate::errors::error_chain(&e);
                     let bak = path.with_extension("json.bak");
                     log::warn!(
                         "settings file {} is invalid ({e}); backing up to {} and resetting",
                         path.display(),
                         bak.display()
                     );
-                    let _ = std::fs::rename(&path, &bak);
+                    if let Err(e) = std::fs::rename(&path, &bak) {
+                        log::warn!("could not back up settings: {}", crate::errors::error_chain(&e));
+                    }
                     let s = Self::default();
-                    let _ = s.save();
+                    if let Err(e) = s.save() {
+                        log::warn!("could not save default settings: {}", crate::errors::error_chain(&e));
+                    }
                     s
                 }
             },
@@ -384,12 +389,12 @@ impl Settings {
                 let s = Self::default();
                 match s.save() {
                     Ok(()) => log::info!("created default settings at {}", path.display()),
-                    Err(e) => log::warn!("couldn't write default settings: {e}"),
+                    Err(e) => log::warn!("couldn't write default settings: {}", crate::errors::error_chain(&e)),
                 }
                 s
             }
             Err(e) => {
-                log::warn!("couldn't read settings ({e}); using defaults");
+                log::warn!("couldn't read settings ({}); using defaults", crate::errors::error_chain(&e));
                 Self::default()
             }
         }
@@ -517,19 +522,22 @@ mod tests {
 impl Settings {
     pub fn load_or_create() -> Self {
         let loaded = (|| {
-            let storage = web_sys::window()?.local_storage().ok()??;
-            let text = storage.get_item("molar_vis.settings").ok()??;
-            serde_json::from_str(&text).ok()
+            let storage = web_sys::window()?.local_storage()
+                .inspect_err(|e| log::warn!("could not open browser storage: {}", crate::errors::js_error_chain(e))).ok()??;
+            let text = storage.get_item("molar_vis.settings")
+                .inspect_err(|e| log::warn!("could not read browser settings: {}", crate::errors::js_error_chain(e))).ok()??;
+            serde_json::from_str(&text)
+                .inspect_err(|e| log::warn!("invalid browser settings: {}", crate::errors::error_chain(e))).ok()
         })();
         loaded.unwrap_or_default()
     }
     pub fn save(&self) -> std::io::Result<()> {
         let error = |message: String| std::io::Error::other(message);
         let storage = web_sys::window().ok_or_else(|| error("Browser window unavailable".into()))?
-            .local_storage().map_err(|e| error(format!("{e:?}")))?
+            .local_storage().map_err(|e| error(crate::errors::js_error_chain(&e)))?
             .ok_or_else(|| error("Browser storage unavailable".into()))?;
-        let text = serde_json::to_string_pretty(self).map_err(|e| error(e.to_string()))?;
-        storage.set_item("molar_vis.settings", &text).map_err(|e| error(format!("{e:?}")))
+        let text = serde_json::to_string_pretty(self).map_err(|e| error(crate::errors::error_chain(&e)))?;
+        storage.set_item("molar_vis.settings", &text).map_err(|e| error(crate::errors::js_error_chain(&e)))
     }
 }
 

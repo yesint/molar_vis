@@ -212,7 +212,7 @@ impl Movie {
     #[pyo3(signature = (view_json, duration=1.0, easing="smooth"))]
     fn go_to_view(&mut self, view_json: &str, duration: f64, easing: &str) -> PyResult<()> {
         let view =
-            serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(molar_vis_core::error_chain(&e)))?;
         self.push(ViewAction::To { view }, duration, easing)
     }
     fn trajectory(&mut self, mol: &MolHandle, start: usize, end: usize, fps: f64) -> PyResult<()> {
@@ -367,7 +367,7 @@ impl SharedSource for PySystemSource {
         Python::attach(|py| {
             let sp = self.sys.bind(py).get();
             let expr = SelectionExpr::new(text).map_err(|e| EvalError::Invalid {
-                message: e.to_string(),
+                message: molar_vis_core::error_chain(&e),
                 span: None,
             })?;
             match (&expr).into_sel_index(sp, None) {
@@ -375,7 +375,7 @@ impl SharedSource for PySystemSource {
                     .map(|sel| (expr, sel))
                     .map_err(|_| EvalError::Empty),
                 Err(e) => Err(EvalError::Invalid {
-                    message: e.to_string(),
+                    message: molar_vis_core::error_chain(&e),
                     span: None,
                 }),
             }
@@ -659,7 +659,7 @@ impl Visualizer {
     }
     fn view_json(&self, py: Python<'_>) -> PyResult<String> {
         query_job(&self.jobs, py, |app| {
-            serde_json::to_string(&app.view_pose()).map_err(|e| e.to_string())
+            serde_json::to_string(&app.view_pose()).map_err(|e| molar_vis_core::error_chain(&e))
         })
     }
     #[pyo3(signature = (yaw, pitch=0.0, duration=None, easing="smooth"))]
@@ -741,7 +741,7 @@ impl Visualizer {
         easing: &str,
     ) -> PyResult<Animation> {
         let view =
-            serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(molar_vis_core::error_chain(&e)))?;
         schedule_view(&self.jobs, py, ViewAction::To { view }, duration, easing)
     }
     fn cancel_animation(&self) -> PyResult<()> {
@@ -1404,7 +1404,7 @@ fn spawn(visible: bool) -> PyResult<Visualizer> {
             }),
         );
         if let Err(e) = result {
-            log::error!("molar_vis viewer thread exited with error: {e}");
+            log::error!("molar_vis viewer thread exited with error: {}", molar_vis_core::error_chain(&e));
         }
     })?;
 

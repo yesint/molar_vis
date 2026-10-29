@@ -199,7 +199,7 @@ impl App {
             .ok_or("wgpu render state unavailable")?;
         rs.device
             .poll(wgpu::PollType::Poll)
-            .map_err(|e| format!("GPU polling failed: {e}"))?;
+            .map_err(|e| format!("GPU polling failed: {e}", e = crate::errors::error_chain(&e)))?;
         if job.readback.as_ref().is_some_and(|rb| rb.is_ready()) {
             let readback = job.readback.take().unwrap();
             if let Some(error) = readback.error() {

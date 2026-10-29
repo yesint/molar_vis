@@ -98,7 +98,7 @@ impl FrameSink {
         let mut stdin = None;
         let mut stderr = None;
         if options.png_sequence {
-            std::fs::create_dir(&temp).map_err(|e| e.to_string())?;
+            std::fs::create_dir(&temp).map_err(|e| crate::errors::error_chain(&e))?;
         } else {
             let mut process = Command::new(&options.ffmpeg)
                 .args([
@@ -143,7 +143,7 @@ impl FrameSink {
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
-                .map_err(|e| format!("cannot start FFmpeg ({}): {e}", options.ffmpeg.display()))?;
+                .map_err(|e| format!("cannot start FFmpeg ({}): {e}", options.ffmpeg.display(), e = crate::errors::error_chain(&e)))?;
             stdin = process.stdin.take();
             stderr = process.stderr.take();
             child = Some(Arc::new(Mutex::new(process)));
@@ -161,7 +161,14 @@ impl FrameSink {
                     thread::spawn(move || {
                         let mut tail = Vec::new();
                         let mut buf = [0u8; 4096];
-                        while let Ok(n) = stream.read(&mut buf) {
+                        loop {
+                            let n = match stream.read(&mut buf) {
+                                Ok(n) => n,
+                                Err(error) => {
+                                    log::error!("cannot read FFmpeg diagnostics: {}", crate::errors::error_chain(&error));
+                                    break;
+                                }
+                            };
                             if n == 0 {
                                 break;
                             }
@@ -180,7 +187,7 @@ impl FrameSink {
                         }
                         if let Some(pipe) = stdin.as_mut() {
                             pipe.write_all(&rgba)
-                                .map_err(|e| format!("FFmpeg frame write failed: {e}"))?;
+                                .map_err(|e| format!("FFmpeg frame write failed: {e}", e = crate::errors::error_chain(&e)))?;
                         } else {
                             image::save_buffer(
                                 work_dir.join(format!("frame_{index:06}.png")),
@@ -189,7 +196,7 @@ impl FrameSink {
                                 options.height,
                                 image::ColorType::Rgba8,
                             )
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| crate::errors::error_chain(&e))?;
                         }
                     }
                     drop(stdin.take()); // EOF flushes delayed packets and the MP4 trailer.
@@ -199,7 +206,7 @@ impl FrameSink {
                                 .lock()
                                 .unwrap()
                                 .try_wait()
-                                .map_err(|e| e.to_string())?
+                                .map_err(|e| crate::errors::error_chain(&e))?
                             {
                                 if !status.success() {
                                     return Err(format!("FFmpeg exited with {status}"));
@@ -221,7 +228,9 @@ impl FrameSink {
                 if let Some(process) = &worker_child {
                     let _ = process.lock().unwrap().wait();
                 }
-                let detail = error_reader.and_then(|t| t.join().ok()).unwrap_or_default();
+                let detail = error_reader.and_then(|t| t.join().map_err(|payload| {
+                    log::error!("FFmpeg diagnostics worker failed: {}", crate::errors::panic_message(payload.as_ref()));
+                }).ok()).unwrap_or_default();
                 let outcome = outcome.map_err(|e| {
                     if detail.is_empty() {
                         e
@@ -241,7 +250,7 @@ impl FrameSink {
                 if png {
                     let _ = std::fs::remove_dir(&temp);
                 }
-                return Err(format!("cannot start encoder worker: {e}"));
+                return Err(format!("cannot start encoder worker: {}", crate::errors::error_chain(&e)));
             }
         };
         Ok(Self {
@@ -272,7 +281,7 @@ impl FrameSink {
                 } else {
                     std::fs::rename(&self.temp, &self.destination)
                 }
-                .map_err(|e| format!("cannot publish video output: {e}"));
+                .map_err(|e| format!("cannot publish video output: {e}", e = crate::errors::error_chain(&e)));
                 self.committed = result.is_ok();
                 Some(result)
             }

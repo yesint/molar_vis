@@ -134,7 +134,9 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             // Raster capture is cheap → drive the map to completion and write to the chosen file.
-            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Err(error) = rs.device.poll(wgpu::PollType::wait_indefinitely()) {
+                log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+            }
             self.write_png_native(cap.read(), &dest);
         }
         #[cfg(target_arch = "wasm32")]
@@ -173,7 +175,9 @@ impl App {
         }
 
         // Phase 2: poll the readback (non-blocking); write to the pre-chosen path when it lands.
-        let _ = rs.device.poll(wgpu::PollType::Poll);
+        if let Err(error) = rs.device.poll(wgpu::PollType::Poll) {
+            log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+        }
         let ready = matches!(
             self.rt.job.as_ref(),
             Some(RtJob::Save { reading: Some(rb), .. }) if rb.is_ready()
@@ -191,6 +195,7 @@ impl App {
         match img.save(path) {
             Ok(()) => self.status = format!("saved image to {}", path.display()),
             Err(e) => {
+                let e = crate::errors::error_chain(&e);
                 log::error!("save image: {e}");
                 self.status = format!("save image failed: {e}");
             }
@@ -223,6 +228,7 @@ impl App {
                 self.status = format!("downloaded {name}");
             }
             Err(e) => {
+                let e = crate::errors::error_chain(&e);
                 log::error!("encode png: {e}");
                 self.status = format!("image export failed: {e}");
             }
@@ -299,7 +305,7 @@ impl super::RtState {
             match image::RgbaImage::from_raw(w, h, img.as_raw().to_vec()) {
                 Some(rgba) => match rgba.save(&path) {
                     Ok(()) => log::info!("debug: saved UI screenshot ({w}×{h}) to {path}"),
-                    Err(e) => log::error!("debug UI screenshot save failed: {e}"),
+                    Err(e) => log::error!("debug UI screenshot save failed: {}", crate::errors::error_chain(&e)),
                 },
                 None => log::error!("debug UI screenshot: unexpected pixel buffer size"),
             }

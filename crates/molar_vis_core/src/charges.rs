@@ -47,7 +47,7 @@ pub fn compute_espaloma(mol: &mut Molecule, sel: &Sel) -> Result<ChargeEdit, Str
     let seeds: Vec<usize> = sel.iter_index().collect();
     let atoms = mol.connected_closure(&seeds);
     let sel = &Sel::from_vec(atoms.clone())
-        .map_err(|e| format!("can't select the complete molecule: {e}"))?;
+        .map_err(|e| format!("can't select the complete molecule: {e}", e = crate::errors::error_chain(&e)))?;
     let sys = mol.data.system_mut().ok_or(
         "this molecule's data is owned by the host program; compute charges there instead",
     )?;
@@ -57,7 +57,7 @@ pub fn compute_espaloma(mol: &mut Molecule, sel: &Sel) -> Result<ChargeEdit, Str
     };
 
     sys.try_bind_mut(sel)
-        .map_err(|e| format!("can't select those atoms: {e}"))?
+        .map_err(|e| format!("can't select those atoms: {e}", e = crate::errors::error_chain(&e)))?
         .apply_charges(ChargeModel::Espaloma)
         .map_err(explain)?;
 
@@ -72,16 +72,17 @@ pub fn compute_espaloma(mol: &mut Molecule, sel: &Sel) -> Result<ChargeEdit, Str
 /// but they don't say what the user should *do* — and for the overwhelmingly common case
 /// (no bond orders) the answer is "load an SDF/MOL instead", which is worth spelling out.
 fn explain(e: ChargeError) -> String {
+    let detail = crate::errors::error_chain(&e);
     match e {
         ChargeError::MissingBondOrders(..) => format!(
-            "{e}\n\nEspaloma needs explicit single/double/triple bonds. Structures whose \
+            "{detail}\n\nEspaloma needs explicit single/double/triple bonds. Structures whose \
              connectivity was guessed from distances (PDB, GRO, XYZ) don't have them — \
              load the molecule from an SDF/MOL file, or draw it in the structure editor."
         ),
         ChargeError::OpenSelection { .. } => format!(
-            "{e}\n\nCharges are equilibrated over a whole molecule, so the selection has \
+            "{detail}\n\nCharges are equilibrated over a whole molecule, so the selection has \
              to contain every atom of it. Widen the selection to the complete molecule."
         ),
-        other => other.to_string(),
+        other => crate::errors::error_chain(&other),
     }
 }

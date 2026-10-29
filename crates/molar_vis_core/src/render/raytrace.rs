@@ -1606,7 +1606,9 @@ impl Raytracer {
     ) {
         self.trace_begin(rs, size, uniform, total_samples);
         while !self.trace_step(rs, target, 32) {
-            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Err(error) = rs.device.poll(wgpu::PollType::wait_indefinitely()) {
+                log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+            }
         }
     }
 }

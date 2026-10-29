@@ -26,7 +26,7 @@ mod native {
         context: Context,
         launch: AppLaunch,
         settings: Settings,
-        result: mpsc::Receiver<SceneRenderer>,
+        result: mpsc::Receiver<Result<SceneRenderer, String>>,
         started: Instant,
         announced: bool,
     }
@@ -59,14 +59,12 @@ mod native {
             std::thread::Builder::new()
                 .name("molar-vis-shaders".into())
                 .spawn(move || {
-                    // If pipeline creation panics, disconnect the channel and repaint
-                    // so the window reports failure instead of spinning indefinitely.
+                    // Return panic details and repaint so shader failures reach the window.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         SceneRenderer::new(&render_state, &rendering)
                     }));
-                    if let Ok(renderer) = result {
-                        let _ = tx.send(renderer);
-                    }
+                    let result = result.map_err(|payload| format!("Shader initialization failed: {}", crate::errors::panic_message(payload.as_ref())));
+                    let _ = tx.send(result);
                     drop(tx);
                     ctx.request_repaint();
                 })?;
@@ -88,7 +86,13 @@ mod native {
         fn poll(&mut self) {
             let Some(pending) = &self.pending else { return };
             let renderer = match pending.result.try_recv() {
-                Ok(renderer) => renderer,
+                Ok(Ok(renderer)) => renderer,
+                Ok(Err(error)) => {
+                    eprintln!("{error}");
+                    self.pending = None;
+                    self.error = Some(error);
+                    return;
+                },
                 Err(mpsc::TryRecvError::Empty) => return,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.pending = None;
@@ -101,6 +105,7 @@ mod native {
             match App::from_renderer(&pending.context, pending.launch, pending.settings, renderer) {
                 Ok(app) => self.app = Some(app),
                 Err(error) => {
+                    let error = crate::errors::error_chain(error.as_ref());
                     eprintln!("molar_vis failed to start: {error}");
                     self.error = Some(format!("molar_vis failed to start: {error}"));
                 }

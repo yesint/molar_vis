@@ -74,10 +74,10 @@ pub(crate) fn perceive(input: &Topology, state: &State) -> Result<Chemistry, Str
             .filter(|b| b.order() != BondOrder::Unspecified)
             .map(|b| Bond::with_order(b.i1(), b.i2(), b.order()))
             .collect();
-        let system = System::new(top.clone(), local_state.clone()).map_err(|e| e.to_string())?;
+        let system = System::new(top.clone(), local_state.clone()).map_err(|e| crate::errors::error_chain(&e))?;
         let perceived =
             perceive_connectivity(&system.select_all_bound(), &ConnectivityOptions::default())
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| crate::errors::error_chain(&e))?;
         let mut bonds = std::collections::BTreeMap::new();
         for b in perceived
             .iter()
@@ -111,8 +111,8 @@ pub(crate) fn perceive(input: &Topology, state: &State) -> Result<Chemistry, Str
             ..Default::default()
         };
         let assignment = assign_bond_orders(&top, Some(&local_state.coords), &options)
-            .map_err(|e| e.to_string())?;
-        assignment.apply_to(&mut top).map_err(|e| e.to_string())?;
+            .map_err(|e| crate::errors::error_chain(&e))?;
+        assignment.apply_to(&mut top).map_err(|e| crate::errors::error_chain(&e))?;
     }
     let mut chemistry = Chemistry {
         roles: vec![Role::default(); active.len()],

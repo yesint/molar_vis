@@ -45,8 +45,8 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
-# Pin the PDB alternate-location fix; keep Rust and Python Molar types unified.
+# Pin V3000 support and keep Rust and Python Molar types unified.
 [patch.crates-io]
-molar = { git = "https://github.com/yesint/molar.git", rev = "10880f0c22f35723544674910c112dba7db69817" }
-molar_ff = { git = "https://github.com/yesint/molar.git", rev = "10880f0c22f35723544674910c112dba7db69817" }
-molar_python = { git = "https://github.com/yesint/molar.git", rev = "10880f0c22f35723544674910c112dba7db69817" }
+molar = { git = "https://github.com/yesint/molar.git", rev = "f0bd80b537d1948a24f66f808ddcbc26a812a127" }
+molar_ff = { git = "https://github.com/yesint/molar.git", rev = "f0bd80b537d1948a24f66f808ddcbc26a812a127" }
+molar_python = { git = "https://github.com/yesint/molar.git", rev = "f0bd80b537d1948a24f66f808ddcbc26a812a127" }

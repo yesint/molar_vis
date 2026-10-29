@@ -1218,7 +1218,7 @@ impl App {
                     self.status = "Defaults saved for new sessions".to_string();
                 }
                 Err(e) => {
-                    let error = format!("Could not save defaults: {e}");
+                    let error = format!("Could not save defaults: {}", crate::errors::error_chain(&e));
                     dialog.save_error = Some(error.clone());
                     self.status = error;
                 }

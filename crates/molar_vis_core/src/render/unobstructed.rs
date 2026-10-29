@@ -340,10 +340,10 @@ impl UnobstructedGpu {
                     submission_index: Some(submission),
                     timeout: None,
                 })
-                .map_err(|e| format!("GPU score poll: {e}"))?;
+                .map_err(|e| format!("GPU score poll: {e}", e = crate::errors::error_chain(&e)))?;
             rx.recv()
-                .map_err(|e| format!("GPU score readback: {e}"))?
-                .map_err(|e| format!("GPU score map: {e}"))?;
+                .map_err(|e| format!("GPU score readback: {e}", e = crate::errors::error_chain(&e)))?
+                .map_err(|e| format!("GPU score map: {e}", e = crate::errors::error_chain(&e)))?;
             {
                 let data: Vec<u32> = {
                     let mapped = scene.readback.slice(..).get_mapped_range();

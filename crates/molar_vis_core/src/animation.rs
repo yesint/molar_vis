@@ -229,7 +229,7 @@ pub struct Movie {
 }
 impl Movie {
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let movie: Self = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let movie: Self = serde_json::from_str(json).map_err(|e| crate::errors::error_chain(&e))?;
         movie.validate()?;
         Ok(movie)
     }

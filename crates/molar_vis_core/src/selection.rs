@@ -122,7 +122,7 @@ impl Target {
             }
             let result = rest[..count]
                 .parse()
-                .map_err(|_| SelectionResolveError::new("index is too large"))?;
+                .map_err(|e| SelectionResolveError::new(format!("index is too large: {}", crate::errors::error_chain(&e))))?;
             *rest = &rest[count..];
             Ok(result)
         }
@@ -349,14 +349,14 @@ fn parser_error(error: SelectionParserError) -> EvalError {
             span: Some(info.span),
         },
         SelectionParserError::Variable { name, span, error } => EvalError::Invalid {
-            message: format!("variable '{name}': {error}"),
+            message: format!("variable '{name}': {}", crate::errors::error_chain(&error)),
             span: Some(span),
         },
         SelectionParserError::ResolverRequired { name, span } => EvalError::Invalid {
             message: format!("variable '{name}' requires a resolver"),
             span: Some(span),
         },
-        other => invalid(other.to_string()),
+        other => invalid(crate::errors::error_chain(&other)),
     }
 }
 fn invalid(message: impl Into<String>) -> EvalError {
@@ -376,7 +376,7 @@ fn indices(result: Result<Sel, SelectionError>) -> Result<Vec<usize>, EvalError>
         Ok(sel) => Ok(sel.into_svec().to_vec()),
         Err(SelectionError::EmptyExpr(_)) => Ok(Vec::new()),
         Err(SelectionError::Parser(error)) => Err(parser_error(error)),
-        Err(error) => Err(invalid(error.to_string())),
+        Err(error) => Err(invalid(crate::errors::error_chain(&error))),
     }
 }
 fn state(scene: &Scene, mol: usize, frame: Option<usize>) -> Result<&State, SelectionResolveError> {
@@ -454,7 +454,7 @@ impl SelectionResolver for Binding<'_> {
             state(self.scene, mi, target.frame)?,
             domain,
         )
-        .map_err(|error| SelectionResolveError::new(error.to_string()))
+        .map_err(|error| SelectionResolveError::new(crate::errors::error_chain(&error)))
     }
     fn evaluate_prefix(
         &self,
@@ -555,10 +555,10 @@ impl<'a> Evaluation<'a> {
         self.dependencies(variables);
         let source = SelectionSourceView::from_parts(
             self.scene.molecules[mi].data.topology(),
-            state(self.scene, mi, frame).map_err(|e| invalid(e.to_string()))?,
+            state(self.scene, mi, frame).map_err(|e| invalid(crate::errors::error_chain(&e)))?,
             None,
         )
-        .map_err(|e| invalid(e.to_string()))?;
+        .map_err(|e| invalid(crate::errors::error_chain(&e)))?;
         let binding = Binding {
             scene: self.scene,
             variables,

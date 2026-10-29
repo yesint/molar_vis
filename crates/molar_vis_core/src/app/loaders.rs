@@ -67,11 +67,15 @@ pub(super) fn pick_file(accept: &str, ctx: egui::Context, deliver: impl Fn(Strin
     let Some(document) = web_sys::window().and_then(|w| w.document()) else {
         return;
     };
-    let Ok(input) = document
+    let input = match document
         .create_element("input")
-        .and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().map_err(|_| wasm_bindgen::JsValue::NULL.into()))
-    else {
-        return;
+        .and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().map_err(wasm_bindgen::JsValue::from))
+    {
+        Ok(input) => input,
+        Err(error) => {
+            log::error!("could not create file picker: {}", crate::errors::js_error_chain(&error));
+            return;
+        }
     };
     input.set_type("file");
     input.set_accept(accept);
@@ -92,7 +96,7 @@ pub(super) fn pick_file(accept: &str, ctx: egui::Context, deliver: impl Fn(Strin
                     deliver(name, bytes);
                     ctx.request_repaint();
                 }
-                Err(e) => log::error!("failed to read file: {e:?}"),
+                Err(e) => log::error!("failed to read file: {}", crate::errors::js_error_chain(&e)),
             }
         });
     });
@@ -480,7 +484,7 @@ impl App {
         // Empty "last frame" → read to the end of the file.
         let to = match dialog.to_text.trim() {
             "" => None,
-            s => Some(s.parse::<usize>().map_err(|_| "last frame must be a number".to_string())?),
+            s => Some(s.parse::<usize>().map_err(|e| format!("last frame must be a number: {}", crate::errors::error_chain(&e)))?),
         };
         let opts = LoadOptions { from: dialog.from, to, stride: dialog.stride.max(1) };
         if let Some(to) = opts.to {

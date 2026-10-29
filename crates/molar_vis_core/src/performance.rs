@@ -202,7 +202,9 @@ pub(crate) fn submit(
     if let (Some(frame), Some(buffer)) = (frame, readback) {
         frame.read(&rs.queue, buffer);
         // Nonblocking: progress callbacks for earlier submissions as well.
-        let _ = rs.device.poll(wgpu::PollType::Poll);
+        if let Err(error) = rs.device.poll(wgpu::PollType::Poll) {
+            log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+        }
     }
 }
 

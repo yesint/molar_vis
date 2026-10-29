@@ -119,7 +119,7 @@ impl SceneSnapshot {
         scene.groups = self.groups;
         for snapshot in self.molecules {
             let system =
-                System::new(snapshot.topology, snapshot.state).map_err(|e| e.to_string())?;
+                System::new(snapshot.topology, snapshot.state).map_err(|e| crate::errors::error_chain(&e))?;
             let n_atoms = system.topology().atoms.len();
             let mut mol = scene::Molecule::new(
                 snapshot.id,
@@ -280,12 +280,12 @@ impl App {
                         images,
                     )
                 }))
-                .unwrap_or_else(|_| Err("background render worker failed".into()));
+                .unwrap_or_else(|payload| Err(format!("background render worker failed: {}", crate::errors::panic_message(payload.as_ref()))));
                 // Publish completion on the worker so wait() does not depend on UI polling.
                 worker_handle.finish(result.clone());
                 let _ = tx.send(result);
             })
-            .map_err(|e| format!("cannot start background render: {e}"))?;
+            .map_err(|e| format!("cannot start background render: {e}", e = crate::errors::error_chain(&e)))?;
         self.background_movie = Some(BackgroundMovie {
             handle: handle.clone(),
             active_input,
@@ -456,7 +456,7 @@ fn run_worker(
             cancelled()?;
             rs.device
                 .poll(wgpu::PollType::Poll)
-                .map_err(|e| format!("GPU polling failed: {e}"))?;
+                .map_err(|e| format!("GPU polling failed: {e}", e = crate::errors::error_chain(&e)))?;
             std::thread::sleep(Duration::from_millis(1));
         }
         if let Some(error) = capture.error() {

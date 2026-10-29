@@ -98,6 +98,9 @@ impl Job {
             let output =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&worker_cancel)));
             if !worker_cancel.load(Ordering::Relaxed) {
+                let output = output.map_err(|payload| {
+                    log::error!("geometry worker failed: {}", crate::errors::panic_message(payload.as_ref()));
+                });
                 let _ = tx.send(output.ok());
             }
         });

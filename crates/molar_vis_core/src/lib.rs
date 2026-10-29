@@ -16,6 +16,7 @@ mod charges;
 mod color;
 mod color_presets;
 mod data;
+mod errors;
 /// Loading a docking result (receptor + ligand poses) — see the module docs. Native-only,
 /// like the dialog that drives it (`app::docking_dialog`): reading several files from disk.
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,6 +49,9 @@ mod trajectory;
 mod unobstructed;
 
 pub use app::{App, AppJob};
+pub use errors::error_chain;
+#[cfg(target_arch = "wasm32")]
+pub use errors::js_error_chain;
 pub use color::{ColorPreferences, Gradient};
 pub use color_presets::ColorPreset;
 pub use mesh::{MeshState, MeshStyle, import_ply, reserve_mesh_id};

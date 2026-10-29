@@ -64,7 +64,7 @@ impl Animation {
         self.handle.is_done()
     }
     pub fn progress_json(&self) -> Result<String, JsError> {
-        serde_json::to_string(&self.handle.progress()).map_err(|e| JsError::new(&e.to_string()))
+        serde_json::to_string(&self.handle.progress()).map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))
     }
     pub async fn wait(&self) -> Result<(), JsError> {
         let handle = self.handle.clone();
@@ -189,7 +189,7 @@ impl Movie {
     /// Add any shared ViewStep, including simultaneous motion and saved-view transitions.
     pub fn add_step_json(&mut self, json: &str) -> Result<(), JsError> {
         let step: ViewStep =
-            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+            serde_json::from_str(json).map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))?;
         step.validate().map_err(|e| JsError::new(&e))?;
         self.recipe.steps.push(step);
         self.prepared = None;
@@ -300,13 +300,13 @@ impl System {
     pub fn from_bytes(name: &str, bytes: &[u8]) -> Result<System, JsError> {
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         let mut fh = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes.to_vec()))
-            .map_err(|e| JsError::new(&format!("can't read {name}: {e}")))?;
+            .map_err(|e| JsError::new(&format!("can't read {name}: {}", molar_vis_core::error_chain(&e))))?;
         let (top, st) = fh
             .read()
-            .map_err(|e| JsError::new(&format!("failed to parse {name}: {e}")))?;
+            .map_err(|e| JsError::new(&format!("failed to parse {name}: {}", molar_vis_core::error_chain(&e))))?;
         let n_atoms = top.atoms.len();
         let system = MSystem::new(top, st)
-            .map_err(|e| JsError::new(&format!("invalid structure in {name}: {e}")))?;
+            .map_err(|e| JsError::new(&format!("invalid structure in {name}: {}", molar_vis_core::error_chain(&e))))?;
         Ok(System {
             system: Rc::new(system),
             version: Rc::new(Cell::new(0)),
@@ -689,13 +689,13 @@ impl Visualizer {
     }
     pub async fn view_json(&self) -> Result<String, JsError> {
         query_job(&self.jobs, |app| {
-            serde_json::to_string(&app.view_pose()).map_err(|e| e.to_string())
+            serde_json::to_string(&app.view_pose()).map_err(|e| molar_vis_core::error_chain(&e))
         })
         .await
     }
     pub async fn animate_json(&self, json: &str) -> Result<Animation, JsError> {
         let step: ViewStep =
-            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+            serde_json::from_str(json).map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))?;
         step.validate().map_err(|e| JsError::new(&e))?;
         let handle = query_job(&self.jobs, move |app| app.animate_view(step)).await?;
         Ok(Animation {
@@ -780,7 +780,7 @@ impl Visualizer {
         duration: Option<f64>,
         easing: Option<String>,
     ) -> Result<Animation, JsError> {
-        let view = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        let view = serde_json::from_str(json).map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))?;
         schedule_view(&self.jobs, ViewAction::To { view }, duration, easing).await
     }
     pub fn cancel_animation(&self) {
@@ -1250,7 +1250,7 @@ pub fn start(canvas_id: &str) -> Result<Visualizer, JsError> {
             .await;
         match result {
             Ok(()) => log::info!("molar_vis: web runner started"),
-            Err(e) => log::error!("molar_vis failed to start: {e:?}"),
+            Err(e) => log::error!("molar_vis failed to start: {}", molar_vis_core::js_error_chain(&e)),
         }
     });
 

@@ -14,20 +14,8 @@ use std::sync::mpsc::{self, Receiver};
 
 use molar::prelude::*;
 
+use crate::errors::error_chain;
 use crate::trajectory::{LoadMsg, LoadOptions};
-
-/// Render an error with its full `source()` chain (molar nests
-/// `FileIoError` → `FileFormatError` → handler error), so the message is useful.
-fn chain(e: &dyn std::error::Error) -> String {
-    let mut s = e.to_string();
-    let mut src = e.source();
-    while let Some(e) = src {
-        s.push_str(": ");
-        s.push_str(&e.to_string());
-        src = e.source();
-    }
-    s
-}
 
 /// Walk the wanted frames — `from`, `from+stride`, … up to `to` — handing each
 /// to `sink`. Between wanted frames we use [`FileHandler::skip_to_frame`], which
@@ -50,7 +38,7 @@ fn walk_frames(
         match fh.skip_to_frame(target) {
             Ok(()) => {}
             Err(e) if is_eof(&e) => break,
-            Err(e) => return Err(chain(&e)),
+            Err(e) => return Err(error_chain(&e)),
         }
         match fh.read_state() {
             Ok(state) => {
@@ -60,7 +48,7 @@ fn walk_frames(
                 }
             }
             Err(e) if is_eof(&e) => break,
-            Err(e) => return Err(chain(&e)),
+            Err(e) => return Err(error_chain(&e)),
         }
         target += stride;
     }
@@ -77,7 +65,7 @@ pub fn read_frames_sync(
     opts: &LoadOptions,
     expected_atoms: usize,
 ) -> Result<Vec<State>, String> {
-    let mut fh = FileHandler::open(path).map_err(|e| chain(&e))?;
+    let mut fh = FileHandler::open(path).map_err(|e| error_chain(&e))?;
     let mut frames = Vec::new();
     walk_frames(&mut fh, opts, expected_atoms, |st| {
         frames.push(st);
@@ -103,7 +91,7 @@ pub fn spawn_async(
         let mut fh = match FileHandler::open(&path) {
             Ok(fh) => fh,
             Err(e) => {
-                let _ = tx.send(LoadMsg::Error(chain(&e)));
+                let _ = tx.send(LoadMsg::Error(error_chain(&e)));
                 return;
             }
         };

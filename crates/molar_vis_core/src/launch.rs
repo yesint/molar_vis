@@ -291,7 +291,7 @@ pub fn run_web() {
         // Surface a startup failure both to the console and into the page (the
         // `#loading` element), so the cause is visible without opening devtools.
         if let Err(e) = result {
-            let msg = format!("molar_vis failed to start: {e:?}");
+            let msg = format!("molar_vis failed to start: {}", crate::errors::js_error_chain(&e));
             log::error!("{msg}");
             if let Some(el) = document.get_element_by_id("loading") {
                 el.set_text_content(Some(&msg));

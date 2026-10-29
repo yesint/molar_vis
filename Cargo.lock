@@ -2147,7 +2147,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.4.0"
-source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
+source = "git+https://github.com/yesint/molar.git?rev=f0bd80b537d1948a24f66f808ddcbc26a812a127#f0bd80b537d1948a24f66f808ddcbc26a812a127"
 dependencies = [
  "anyhow",
  "clap",
@@ -2173,7 +2173,7 @@ dependencies = [
 [[package]]
 name = "molar_ff"
 version = "2.4.0"
-source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
+source = "git+https://github.com/yesint/molar.git?rev=f0bd80b537d1948a24f66f808ddcbc26a812a127#f0bd80b537d1948a24f66f808ddcbc26a812a127"
 dependencies = [
  "matrixmultiply",
  "molar",
@@ -2184,7 +2184,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.4.0"
-source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
+source = "git+https://github.com/yesint/molar.git?rev=f0bd80b537d1948a24f66f808ddcbc26a812a127#f0bd80b537d1948a24f66f808ddcbc26a812a127"
 dependencies = [
  "cc",
  "libloading",
@@ -2193,7 +2193,7 @@ dependencies = [
 [[package]]
 name = "molar_python"
 version = "2.4.0"
-source = "git+https://github.com/yesint/molar.git?rev=10880f0c22f35723544674910c112dba7db69817#10880f0c22f35723544674910c112dba7db69817"
+source = "git+https://github.com/yesint/molar.git?rev=f0bd80b537d1948a24f66f808ddcbc26a812a127#f0bd80b537d1948a24f66f808ddcbc26a812a127"
 dependencies = [
  "env_logger",
  "log",

@@ -39,7 +39,7 @@ pub(super) fn spawn(
         .name("molar_vis-ui".into())
         .spawn(move || run(ui_context))
         .map_err(|error| {
-            PyRuntimeError::new_err(format!("failed to start viewer thread: {error}"))
+            PyRuntimeError::new_err(format!("failed to start viewer thread: {}", molar_vis_core::error_chain(&error)))
         })?;
     registry.viewers.push(Viewer { context, thread });
     Ok(())

@@ -192,7 +192,7 @@ impl App {
                 .to_string_lossy()
                 .into_owned();
             self.begin_loading(move || {
-                let bytes = std::fs::read(&path).map_err(|e| format!("Could not read mesh: {e}"))?;
+                let bytes = std::fs::read(&path).map_err(|e| format!("Could not read mesh: {e}", e = crate::errors::error_chain(&e)))?;
                 import_ply(&bytes)
             }, move |app, source| {
                 if let Some(mi) = app.scene.mol_index(id) {
@@ -225,7 +225,7 @@ impl App {
             };
             match std::fs::write(&path, export_ply(&mesh.state.source)) {
                 Ok(()) => self.status = format!("Saved mesh to {}", path.display()),
-                Err(e) => self.status = format!("Could not save mesh: {e}"),
+                Err(e) => self.status = format!("Could not save mesh: {}", crate::errors::error_chain(&e)),
             }
         }
         #[cfg(target_arch = "wasm32")]

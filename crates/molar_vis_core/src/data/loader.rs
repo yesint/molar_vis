@@ -12,6 +12,7 @@ use glam::Vec3;
 use molar::prelude::*;
 
 use crate::data::bonds::{self, BondParams};
+use crate::errors::error_chain;
 use crate::scene::MoleculeSource;
 
 // We read molar positions (Point3<Float>) as f32 into GPU buffers, which is only
@@ -45,7 +46,7 @@ pub fn load(path: &Path) -> Result<RawMolecule, String> {
 /// program settings).
 pub fn load_with(path: &Path, bonds: &BondParams) -> Result<RawMolecule, String> {
     let system = System::from_file(path)
-        .map_err(|e| format!("failed to load {}: {e}", path.display()))?;
+        .map_err(|e| format!("failed to load {}: {}", path.display(), error_chain(&e)))?;
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -61,7 +62,7 @@ pub fn load_with(path: &Path, bonds: &BondParams) -> Result<RawMolecule, String>
 /// file can't be opened or a record is malformed; an empty file is an error.
 pub fn load_records(path: &Path, bonds: &BondParams) -> Result<Vec<RawMolecule>, String> {
     let mut fh = FileHandler::open(path)
-        .map_err(|e| format!("failed to load {}: {e}", path.display()))?;
+        .map_err(|e| format!("failed to load {}: {}", path.display(), error_chain(&e)))?;
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -74,7 +75,7 @@ pub fn load_records(path: &Path, bonds: &BondParams) -> Result<Vec<RawMolecule>,
             Ok((top, st)) => {
                 let i = out.len();
                 let system = System::new(top, st)
-                    .map_err(|e| format!("invalid record {} in {}: {e}", i + 1, path.display()))?;
+                    .map_err(|e| format!("invalid record {} in {}: {}", i + 1, path.display(), error_chain(&e)))?;
                 let name = record_name(&titles, i, &stem);
                 out.push(assemble(
                     system,
@@ -86,9 +87,10 @@ pub fn load_records(path: &Path, bonds: &BondParams) -> Result<Vec<RawMolecule>,
             Err(e) if matches!(e.kind(), FileFormatError::Eof) => break,
             Err(e) => {
                 return Err(format!(
-                    "failed to read record {} in {}: {e}",
+                    "failed to read record {} in {}: {}",
                     out.len() + 1,
-                    path.display()
+                    path.display(),
+                    error_chain(&e)
                 ))
             }
         }
@@ -102,7 +104,7 @@ pub fn load_records(path: &Path, bonds: &BondParams) -> Result<Vec<RawMolecule>,
 /// Multi-record loader over in-memory bytes (the browser path). Members carry a
 /// `Bytes` source (no path to reload from), so a wasm-loaded group can't be saved
 /// to a session — same limitation as any byte-sourced molecule.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(test, target_arch = "wasm32"))]
 pub fn load_records_from_bytes(
     name: &str,
     bytes: Vec<u8>,
@@ -112,14 +114,14 @@ pub fn load_records_from_bytes(
     let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name).to_string();
     let titles = std::str::from_utf8(&bytes).ok().map(sdf_titles).unwrap_or_default();
     let mut fh = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes))
-        .map_err(|e| format!("can't read {name}: {e}"))?;
+        .map_err(|e| format!("can't read {name}: {}", error_chain(&e)))?;
     let mut out = Vec::new();
     loop {
         match fh.read() {
             Ok((top, st)) => {
                 let i = out.len();
                 let system = System::new(top, st)
-                    .map_err(|e| format!("invalid record {} in {name}: {e}", i + 1))?;
+                    .map_err(|e| format!("invalid record {} in {name}: {}", i + 1, error_chain(&e)))?;
                 let rname = record_name(&titles, i, &stem);
                 out.push(assemble(
                     system,
@@ -129,7 +131,7 @@ pub fn load_records_from_bytes(
                 )?);
             }
             Err(e) if matches!(e.kind(), FileFormatError::Eof) => break,
-            Err(e) => return Err(format!("failed to read record {} in {name}: {e}", out.len() + 1)),
+            Err(e) => return Err(format!("failed to read record {} in {name}: {}", out.len() + 1, error_chain(&e))),
         }
     }
     if out.is_empty() {
@@ -173,11 +175,11 @@ pub fn load_from_bytes(name: &str, bytes: Vec<u8>, bonds: &BondParams) -> Result
         .unwrap_or("")
         .to_ascii_lowercase();
     let mut fh = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes))
-        .map_err(|e| format!("can't read {name}: {e}"))?;
+        .map_err(|e| format!("can't read {name}: {}", error_chain(&e)))?;
     let (top, st) = fh
         .read()
-        .map_err(|e| format!("failed to parse {name}: {e}"))?;
-    let system = System::new(top, st).map_err(|e| format!("invalid structure in {name}: {e}"))?;
+        .map_err(|e| format!("failed to parse {name}: {}", error_chain(&e)))?;
+    let system = System::new(top, st).map_err(|e| format!("invalid structure in {name}: {}", error_chain(&e)))?;
     assemble(
         system,
         name.to_string(),
@@ -255,7 +257,7 @@ impl RawMolecule {
             ..Default::default()
         };
         let system =
-            System::new(top, st).map_err(|e| format!("can't create drawn molecule: {e}"))?;
+            System::new(top, st).map_err(|e| format!("can't create drawn molecule: {}", error_chain(&e)))?;
         Ok(RawMolecule {
             name: mol_name.to_string(),
             source: MoleculeSource::Bytes { name: mol_name.to_string() },
@@ -265,6 +267,98 @@ impl RawMolecule {
             bbox_min: pos,
             bbox_max: pos,
         })
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod error_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const V3000: &str = "broken\n  molar_vis\n\n  0  0  0  0  0  0  0  0  0  0999 V3000\nM  V30 BEGIN CTAB\nM  V30 COUNTS 1 0 0 0 0\nM  V30 BEGIN ATOM\nM  V30 1 C broken 0 0 0\nM  V30 END ATOM\nM  V30 END CTAB\nM  END\n$$$$\n";
+    const V2000: &str = "valid\n  molar_vis\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n$$$$\n";
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(contents: &str) -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "molar-vis-load-error-{}-{}.sdf",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn record_errors_preserve_record_number_and_handler_cause() {
+        let contents = format!("{V2000}{V3000}");
+        let fixture = Fixture::new(&contents);
+        let bonds = BondParams::default();
+        for error in [
+            load_records(&fixture.0, &bonds).err().unwrap(),
+            load_records_from_bytes("mixed.sdf", contents.into_bytes(), &bonds).err().unwrap(),
+        ] {
+            assert!(error.contains("failed to read record 2 in"), "{error}");
+            assert!(error.contains("in sdf/mol format handler"), "{error}");
+            assert!(error.contains("invalid V3000 number in x coordinate"), "{error}");
+            assert!(error.ends_with("invalid float literal"), "{error}");
+            assert!(!error.contains("::"), "{error}");
+        }
+    }
+
+    #[test]
+    fn mixed_v2000_v3000_records_load_from_files_and_bytes() {
+        let contents = format!("{V2000}{}", V3000.replace("C broken", "C 1.5"));
+        let fixture = Fixture::new(&contents);
+        let bonds = BondParams::default();
+        for records in [
+            load_records(&fixture.0, &bonds).unwrap(),
+            load_records_from_bytes("mixed.sdf", contents.into_bytes(), &bonds).unwrap(),
+        ] {
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[1].n_atoms, 1);
+            assert!((records[1].system.state().coords[0].x - 0.15).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn structure_errors_preserve_numeric_parse_cause() {
+        let contents = V2000.replacen("0.0000", "broken", 1);
+        let fixture = Fixture::new(&contents);
+        let bonds = BondParams::default();
+        for error in [
+            load_with(&fixture.0, &bonds).err().unwrap(),
+            load_from_bytes("broken.sdf", contents.into_bytes(), &bonds).err().unwrap(),
+        ] {
+            assert!(error.contains("in sdf/mol format handler"), "{error}");
+            assert!(error.contains("malformed number in atom 0"), "{error}");
+            assert!(error.ends_with("invalid float literal"), "{error}");
+        }
+    }
+
+    #[test]
+    fn open_errors_preserve_os_cause() {
+        let fixture = Fixture::new(V2000);
+        let path = fixture.0.with_extension("missing.sdf");
+        let expected = std::fs::File::open(&path).unwrap_err().to_string();
+        for error in [
+            load_with(&path, &BondParams::default()).err().unwrap(),
+            load_records(&path, &BondParams::default()).err().unwrap(),
+        ] {
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(error.ends_with(&expected), "{error}");
+        }
     }
 }
 

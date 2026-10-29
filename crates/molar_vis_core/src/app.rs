@@ -591,7 +591,7 @@ impl App {
     }
 
     pub fn color_preferences_json(&self) -> Result<String, String> {
-        serde_json::to_string(&self.settings.colors).map_err(|e| e.to_string())
+        serde_json::to_string(&self.settings.colors).map_err(|e| crate::errors::error_chain(&e))
     }
 
     /// Apply a viewer color preset while retaining the discrete palette.
@@ -618,7 +618,7 @@ impl App {
     pub fn save_settings(&self) -> Result<(), String> {
         self.settings
             .save()
-            .map_err(|e| format!("could not save settings: {e}"))
+            .map_err(|e| format!("could not save settings: {e}", e = crate::errors::error_chain(&e)))
     }
 
     /// Run queued host jobs, releasing the receiver borrow before each callback.
@@ -868,10 +868,12 @@ impl App {
             );
             match self.renderer.capture_begin_raytrace(&rs, w, h, &self.camera, samples) {
                 Some(cap) => {
-                    let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                    if let Err(error) = rs.device.poll(wgpu::PollType::wait_indefinitely()) {
+                        log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+                    }
                     cap.read()
                         .save(path)
-                        .map_err(|e| format!("save image failed: {e}"))
+                        .map_err(|e| format!("save image failed: {e}", e = crate::errors::error_chain(&e)))
                 }
                 None => Err("ray tracing unavailable, or the scene is empty".to_string()),
             }
@@ -893,10 +895,12 @@ impl App {
                 self.camera.eye_depth_range(),
                 &self.scene,
             );
-            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+            if let Err(error) = rs.device.poll(wgpu::PollType::wait_indefinitely()) {
+                log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+            }
             cap.read()
                 .save(path)
-                .map_err(|e| format!("save image failed: {e}"))
+                .map_err(|e| format!("save image failed: {e}", e = crate::errors::error_chain(&e)))
         }
     }
 

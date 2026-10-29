@@ -9,6 +9,7 @@
 
 use molar::prelude::*;
 
+use crate::errors::error_chain;
 use crate::trajectory::LoadOptions;
 
 /// An in-progress incremental trajectory read from an in-memory buffer.
@@ -33,7 +34,7 @@ impl TrajStream {
     ) -> Result<Self, String> {
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         let fh = FileHandler::from_reader(&ext, std::io::Cursor::new(bytes))
-            .map_err(|e| format!("can't open {name}: {}", chain(&e)))?;
+            .map_err(|e| format!("can't open {name}: {}", error_chain(&e)))?;
         Ok(Self {
             fh,
             target: opts.from,
@@ -62,7 +63,7 @@ impl TrajStream {
                 }
                 Err(e) => {
                     self.done = true;
-                    return Err(chain(&e));
+                    return Err(error_chain(&e));
                 }
             }
             match self.fh.read_state() {
@@ -84,7 +85,7 @@ impl TrajStream {
                 }
                 Err(e) => {
                     self.done = true;
-                    return Err(chain(&e));
+                    return Err(error_chain(&e));
                 }
             }
             self.target += stride;
@@ -95,17 +96,4 @@ impl TrajStream {
 
 fn is_eof(e: &FileIoError) -> bool {
     matches!(e.kind(), FileFormatError::Eof)
-}
-
-/// Flatten an error's `source()` chain into one message (molar nests
-/// `FileIoError` → `FileFormatError` → handler error).
-fn chain(e: &dyn std::error::Error) -> String {
-    let mut s = e.to_string();
-    let mut src = e.source();
-    while let Some(e) = src {
-        s.push_str(": ");
-        s.push_str(&e.to_string());
-        src = e.source();
-    }
-    s
 }

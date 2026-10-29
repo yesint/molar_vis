@@ -58,7 +58,7 @@ impl Job {
         let started = feedback.started;
         std::thread::spawn(move || {
             let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
-                .map_err(|_| "file loading worker failed".to_string())
+                .map_err(|payload| format!("file loading worker failed: {}", crate::errors::panic_message(payload.as_ref())))
                 .and_then(|result| result)
                 .map(|loaded| Box::new(move |app: &mut App| apply(app, loaded)) as Commit);
             let _ = tx.send((started.elapsed(), loaded));
@@ -483,6 +483,17 @@ mod tests {
         release.send(()).unwrap();
         let (_, result) = job.result.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(result, Err(error) if error == "unreadable trajectory"));
+    }
+
+    #[test]
+    fn worker_failure_preserves_panic_details() {
+        let job = Job::spawn(
+            egui::Context::default(),
+            || -> Result<(), String> { panic!("specific parser panic"); },
+            |_, ()| panic!("a failed worker must not commit"),
+        );
+        let (_, result) = job.result.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(result, Err(error) if error == "file loading worker failed: specific parser panic"));
     }
 
     #[test]

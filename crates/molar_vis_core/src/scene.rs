@@ -726,7 +726,7 @@ impl Molecule {
             if n == 0 {
                 return Err("cannot add an empty molecule".to_string());
             }
-            let all = Sel::from_vec((0..n).collect()).map_err(|e| e.to_string())?;
+            let all = Sel::from_vec((0..n).collect()).map_err(|e| crate::errors::error_chain(&e))?;
             let bound = all.bind_to(topo, state);
             let (min, max) = bound.min_max();
             let mut positions = Vec::with_capacity(n);
@@ -852,7 +852,7 @@ impl Molecule {
             // Only an index out of range can fail, and `self.bonds` is maintained in
             // range by the mutators below; a stale bond would just be dropped silently.
             if let Err(e) = sys.set_bonds(bonds) {
-                log::warn!("could not publish bonds to the topology: {e}");
+                log::warn!("could not publish bonds to the topology: {}", crate::errors::error_chain(&e));
             }
         }
     }
@@ -866,9 +866,14 @@ impl Molecule {
             return;
         }
         let placeholder = State::new_fake(self.n_atoms);
-        if let Ok(real) = self.data.set_state(placeholder) {
-            self.trajectory.frames.push(real.clone());
-            let _ = self.data.set_state(real); // restore the live state
+        match self.data.set_state(placeholder) {
+            Ok(real) => {
+                self.trajectory.frames.push(real.clone());
+                if let Err(error) = self.data.set_state(real) {
+                    log::error!("cannot restore molecule state: {}", crate::errors::error_chain(&error));
+                }
+            }
+            Err(error) => log::error!("cannot capture initial frame: {}", crate::errors::error_chain(&error)),
         }
     }
 
@@ -1111,7 +1116,10 @@ impl Molecule {
                 self.interaction_hbond_chemistry.take();
                 Some(idx)
             }
-            Err(_) => None,
+            Err(error) => {
+                log::error!("cannot append atom: {}", crate::errors::error_chain(&error));
+                None
+            },
         }
     }
 
@@ -1127,7 +1135,7 @@ impl Molecule {
             &self.bonds
         };
         let source = bond_storage(source);
-        let all = Sel::from_vec((0..self.n_atoms).collect()).map_err(|e| e.to_string())?;
+        let all = Sel::from_vec((0..self.n_atoms).collect()).map_err(|e| crate::errors::error_chain(&e))?;
         let state = self.render_state();
         let bound = self.data.bind_with_state(&all, state);
         let positions: Vec<_> = bound.iter_pos().map(|p| [p.x, p.y, p.z]).collect();
@@ -1337,6 +1345,10 @@ impl Molecule {
         if i >= self.n_atoms {
             return self.n_atoms == 0;
         }
+        if let Err(error) = self.data.remove(std::iter::once(i)) {
+            log::error!("cannot remove atom: {}", crate::errors::error_chain(&error));
+            return false;
+        }
         let shift = |x: usize| if x > i { x - 1 } else { x };
         self.bonds = self
             .bonds
@@ -1344,7 +1356,6 @@ impl Molecule {
             .filter(|b| !b.contains(i)) // drop incident bonds
             .map(|b| Bond::with_order(shift(b.i1), shift(b.i2), b.order))
             .collect();
-        let _ = self.data.remove(std::iter::once(i));
         self.n_atoms = self.n_atoms.saturating_sub(1);
         self.hover_grid = None;
         self.structure_version += 1;
@@ -1502,12 +1513,12 @@ pub fn evaluate(system: &System, text: &str) -> Result<(SelectionExpr, Sel), Eva
             message: crate::suggest::concise_message(&info),
             span: Some(info.span),
         },
-        other => EvalError::Invalid { message: other.to_string(), span: None },
+        other => EvalError::Invalid { message: crate::errors::error_chain(&other), span: None },
     })?;
     match system.select(&expr) {
         Ok(sel) => Ok((expr, sel)),
         Err(e) if is_empty_selection(&e) => Err(EvalError::Empty),
-        Err(e) => Err(EvalError::Invalid { message: e.to_string(), span: None }),
+        Err(e) => Err(EvalError::Invalid { message: crate::errors::error_chain(&e), span: None }),
     }
 }
 

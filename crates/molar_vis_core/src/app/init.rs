@@ -832,10 +832,12 @@ impl App {
                         app.camera.eye_depth_range(),
                         &app.scene,
                     );
-                    let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                    if let Err(error) = rs.device.poll(wgpu::PollType::wait_indefinitely()) {
+                        log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+                    }
                     match cap.read().save(std::path::Path::new(&path)) {
                         Ok(()) => log::info!("debug: saved image ({w}x{h}) to {path}"),
-                        Err(e) => log::error!("debug save image failed: {e}"),
+                        Err(e) => log::error!("debug save image failed: {}", crate::errors::error_chain(&e)),
                     }
                 }
             }
@@ -871,12 +873,14 @@ impl App {
                     );
                     match app.renderer.capture_begin_raytrace(rs, w, h, &app.camera, samples) {
                         Some(cap) => {
-                            let _ = rs.device.poll(wgpu::PollType::wait_indefinitely());
+                            if let Err(error) = rs.device.poll(wgpu::PollType::wait_indefinitely()) {
+                                log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+                            }
                             match cap.read().save(std::path::Path::new(&path)) {
                                 Ok(()) => log::info!(
                                     "debug: saved raytraced image ({w}x{h}, {samples} spp) to {path}"
                                 ),
-                                Err(e) => log::error!("debug raytrace save failed: {e}"),
+                                Err(e) => log::error!("debug raytrace save failed: {}", crate::errors::error_chain(&e)),
                             }
                         }
                         None => log::error!(

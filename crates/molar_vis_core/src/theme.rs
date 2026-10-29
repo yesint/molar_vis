@@ -100,7 +100,7 @@ pub fn apply(ctx: &egui::Context, a: &AppearanceSettings) {
             if let Err(e) = sheet.apply(style, a.font_scale) {
                 // The built-in sheets are validated by `built_in_sheets_apply`, so this can only
                 // fire for a sheet loaded from elsewhere: keep the previous style and say so.
-                log::error!("theme {:?}: {e}", sheet.name);
+                log::error!("theme {:?}: {}", sheet.name, crate::errors::error_chain(&e));
                 return;
             }
             // The accent is a *setting*, so it overrides the sheet — on dark only, where the
@@ -212,7 +212,7 @@ fn load(which: &str, src: &str) -> StyleSheet {
     match StyleSheet::parse(src) {
         Ok(s) => s,
         Err(e) => {
-            log::error!("built-in {which} theme is invalid ({e}); falling back to egui's preset");
+            log::error!("built-in {which} theme is invalid ({}); falling back to egui's preset", crate::errors::error_chain(&e));
             let parent = if which == "light" { "light" } else { "dark" };
             StyleSheet::parse(&format!("name = \"fallback\"\nparent = \"{parent}\"\n"))
                 .expect("the minimal fallback sheet parses")

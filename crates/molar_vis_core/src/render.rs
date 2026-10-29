@@ -1327,7 +1327,9 @@ impl SceneRenderer {
     pub fn poll_pick(&mut self, rs: &RenderState) -> Option<Option<(usize, usize, usize)>> {
         self.pick_pending.as_ref()?; // nothing in flight → skip the device poll
         // Non-blocking: lets the map callback fire without stalling on the GPU.
-        let _ = rs.device.poll(wgpu::PollType::Poll);
+        if let Err(error) = rs.device.poll(wgpu::PollType::Poll) {
+            log::error!("GPU polling failed: {}", crate::errors::error_chain(&error));
+        }
         if !self
             .pick_pending
             .as_ref()
@@ -2002,7 +2004,7 @@ impl SceneRenderer {
         let error = std::sync::Arc::new(std::sync::Mutex::new(None));
         let map_error = error.clone();
         buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            if let Err(e) = res { *map_error.lock().unwrap() = Some(format!("GPU readback failed: {e}")); }
+            if let Err(e) = res { *map_error.lock().unwrap() = Some(format!("GPU readback failed: {}", crate::errors::error_chain(&e))); }
             flag.store(true, std::sync::atomic::Ordering::Release);
         });
         let bgra = matches!(

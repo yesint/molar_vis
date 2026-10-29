@@ -345,16 +345,16 @@ impl Reader<'_> {
             Self::Ascii(tokens) => {
                 let t = tokens.next().ok_or("truncated PLY data")?;
                 match ty {
-                    Scalar::I8 => t.parse::<i8>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::U8 => t.parse::<u8>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::I16 => t.parse::<i16>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::U16 => t.parse::<u16>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::I32 => t.parse::<i32>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::U32 => t.parse::<u32>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::F32 => t.parse::<f32>().map(|v| v as f64).map_err(|_| ()),
-                    Scalar::F64 => t.parse::<f64>().map_err(|_| ()),
+                    Scalar::I8 => t.parse::<i8>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::U8 => t.parse::<u8>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::I16 => t.parse::<i16>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::U16 => t.parse::<u16>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::I32 => t.parse::<i32>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::U32 => t.parse::<u32>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::F32 => t.parse::<f32>().map(|v| v as f64).map_err(|e| crate::errors::error_chain(&e)),
+                    Scalar::F64 => t.parse::<f64>().map_err(|e| crate::errors::error_chain(&e)),
                 }
-                .map_err(|_| format!("invalid PLY value: {t}"))?
+                .map_err(|e| format!("invalid PLY value {t}: {e}"))?
             }
             Self::Binary {
                 bytes,
@@ -420,7 +420,7 @@ pub fn import_ply(bytes: &[u8]) -> Result<MeshSource, String> {
             .position(|&b| b == b'\n')
             .ok_or("unterminated PLY header")?;
         let line = std::str::from_utf8(&tail[..len])
-            .map_err(|_| "invalid PLY header")?
+            .map_err(|e| format!("invalid PLY header: {}", crate::errors::error_chain(&e)))?
             .trim();
         offset += len + 1;
         if offset == len + 1 {
@@ -442,7 +442,7 @@ pub fn import_ply(bytes: &[u8]) -> Result<MeshSource, String> {
             ["element", name, count] => {
                 let count = count
                     .parse::<usize>()
-                    .map_err(|_| "invalid PLY element count")?;
+                    .map_err(|e| format!("invalid PLY element count: {}", crate::errors::error_chain(&e)))?;
                 // Each record must occupy at least one byte; reject absurd counts before allocation.
                 if count > bytes.len() || count > u32::MAX as usize {
                     return Err("PLY element count exceeds file size".into());
@@ -488,7 +488,7 @@ pub fn import_ply(bytes: &[u8]) -> Result<MeshSource, String> {
     let mut reader = match encoding.ok_or("missing PLY format")? {
         0 => Reader::Ascii(
             std::str::from_utf8(data)
-                .map_err(|_| "invalid ASCII PLY data")?
+                .map_err(|e| format!("invalid ASCII PLY data: {}", crate::errors::error_chain(&e)))?
                 .split_whitespace(),
         ),
         n => Reader::Binary {

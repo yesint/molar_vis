@@ -256,8 +256,8 @@ impl Plan {
         Ok(Self {
             src_mol,
             tgt_mol,
-            src_pair: Sel::from_vec(pairing.src).map_err(|e| e.to_string())?,
-            tgt_pair: Sel::from_vec(pairing.tgt).map_err(|e| e.to_string())?,
+            src_pair: Sel::from_vec(pairing.src).map_err(|e| crate::errors::error_chain(&e))?,
+            tgt_pair: Sel::from_vec(pairing.tgt).map_err(|e| crate::errors::error_chain(&e))?,
             tgt_frame,
             frames,
             moving,
@@ -278,7 +278,7 @@ impl Plan {
         let tr = {
             let sb = src.data.bind_with_state(&self.src_pair, state_at(src, frame));
             let tb = tgt.data.bind_with_state(&self.tgt_pair, state_at(tgt, self.tgt_frame));
-            molar::prelude::fit_transform(&sb, &tb).map_err(|e| e.to_string())?
+            molar::prelude::fit_transform(&sb, &tb).map_err(|e| crate::errors::error_chain(&e))?
         };
         let st = state_at(src, frame);
         Ok(self
@@ -300,7 +300,7 @@ impl Plan {
             .iter()
             .map(|&f| {
                 let sb = src.data.bind_with_state(&self.src_pair, state_at(src, f));
-                molar::prelude::rmsd(&sb, &tb).map_err(|e| e.to_string())
+                molar::prelude::rmsd(&sb, &tb).map_err(|e| crate::errors::error_chain(&e))
             })
             .collect()
     }

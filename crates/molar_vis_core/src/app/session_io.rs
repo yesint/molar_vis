@@ -1,5 +1,7 @@
 //! Save molecules / selections / sessions; view-state seam; load-demo; new/reset doc.
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::errors::error_chain;
 
 
 /// Write a molecule (whole, `rep = None`) or one representation's selection
@@ -15,9 +17,9 @@ pub(super) fn save_displayed(
     rep: Option<usize>,
 ) -> Result<(), String> {
     let displayed = mol.render_state().clone();
-    let prev = mol.data.set_state(displayed).map_err(|e| e.to_string())?;
+    let prev = mol.data.set_state(displayed).map_err(|e| crate::errors::error_chain(&e))?;
     let res = (|| -> Result<(), String> {
-        let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
+        let mut h = FileHandler::create(path).map_err(|e| error_chain(&e))?;
         match rep {
             Some(j) => {
                 let sel = mol.reps[j].sel.as_ref().ok_or("selection is empty")?;
@@ -26,12 +28,14 @@ pub(super) fn save_displayed(
                 // owned-only, so bind through the owned `System`.
                 let sys = mol.data.system().ok_or("cannot save a shared molecule directly")?;
                 let bound = sys.bind(sel);
-                h.write(&bound).map_err(|e| e.to_string())
+                h.write(&bound).map_err(|e| error_chain(&e))
             }
-            None => h.write(mol.data.system().ok_or("cannot save a shared molecule directly")?).map_err(|e| e.to_string()),
+            None => h.write(mol.data.system().ok_or("cannot save a shared molecule directly")?).map_err(|e| error_chain(&e)),
         }
     })();
-    let _ = mol.data.set_state(prev); // restore the System's own state
+    if let Err(error) = mol.data.set_state(prev) {
+        log::error!("cannot restore molecule state after saving: {}", crate::errors::error_chain(&error));
+    } // restore the System's own state
     res
 }
 
@@ -372,7 +376,7 @@ impl App {
 
         let result = session
             .to_json()
-            .and_then(|json| std::fs::write(path, json).map_err(|e| e.to_string()));
+            .and_then(|json| std::fs::write(path, json).map_err(|e| crate::errors::error_chain(&e)));
         match result {
             Ok(()) => {
                 let mut msg = format!("Saved session to {}", path.display());
@@ -419,7 +423,7 @@ impl App {
         };
         let bonds = self.settings.behavior.bond_params();
         self.begin_loading(move || {
-            let json = std::fs::read_to_string(&path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+            let json = std::fs::read_to_string(&path).map_err(|e| format!("can't read {}: {e}", path.display(), e = crate::errors::error_chain(&e)))?;
             Ok(PreparedSession::read(Session::from_json(&json)?, bonds))
         }, |app, prepared| { let _ = app.apply_prepared_session(prepared); });
     }
@@ -431,7 +435,7 @@ impl App {
         let json = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("can't read {}: {e}", path.display());
+                self.status = format!("can't read {}: {}", path.display(), crate::errors::error_chain(&e));
                 return;
             }
         };
@@ -448,7 +452,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_session_file(&mut self, path: &std::path::Path) -> Result<(), String> {
         let json = std::fs::read_to_string(path)
-            .map_err(|e| format!("can't read {}: {e}", path.display()))?;
+            .map_err(|e| format!("can't read {}: {e}", path.display(), e = crate::errors::error_chain(&e)))?;
         self.apply_session(Session::from_json(&json)?)
     }
 
@@ -653,7 +657,7 @@ impl Scene {
             Some(g) => g.members.clone(),
             None => return Err("no such group".to_string()),
         };
-        let mut h = FileHandler::create(path).map_err(|e| e.to_string())?;
+        let mut h = FileHandler::create(path).map_err(|e| error_chain(&e))?;
         let mut n = 0usize;
         for id in member_ids {
             let Some(mi) = self.mol_index(id) else { continue };
@@ -661,13 +665,15 @@ impl Scene {
             // Swap the displayed frame into the System around the write, restore after
             // (frames render by reference, not held in the System) — as save_displayed.
             let displayed = mol.render_state().clone();
-            let prev = mol.data.set_state(displayed).map_err(|e| e.to_string())?;
+            let prev = mol.data.set_state(displayed).map_err(|e| crate::errors::error_chain(&e))?;
             let w = mol
                 .data
                 .system()
                 .ok_or_else(|| "cannot save a shared molecule".to_string())
-                .and_then(|sys| h.write(sys).map_err(|e| e.to_string()));
-            let _ = mol.data.set_state(prev);
+                .and_then(|sys| h.write(sys).map_err(|e| error_chain(&e)));
+            if let Err(error) = mol.data.set_state(prev) {
+                log::error!("cannot restore molecule state after saving: {}", crate::errors::error_chain(&error));
+            }
             w?;
             n += 1;
         }

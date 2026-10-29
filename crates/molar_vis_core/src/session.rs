@@ -233,13 +233,13 @@ impl Session {
 
     /// Serialize to pretty JSON.
     pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string_pretty(self).map_err(|e| format!("failed to serialize session: {e}"))
+        serde_json::to_string_pretty(self).map_err(|e| format!("failed to serialize session: {}", crate::errors::error_chain(&e)))
     }
 
     /// Parse a session from JSON, validating the format marker.
     pub fn from_json(s: &str) -> Result<Session, String> {
         let session: Session =
-            serde_json::from_str(s).map_err(|e| format!("not a valid session file: {e}"))?;
+            serde_json::from_str(s).map_err(|e| format!("not a valid session file: {}", crate::errors::error_chain(&e)))?;
         // An empty marker is tolerated (hand-written / very old files); a wrong
         // non-empty marker means this isn't a molar_vis session.
         if !session.format.is_empty() && session.format != FORMAT_TAG {

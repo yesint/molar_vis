@@ -56,7 +56,7 @@ fn main() {
     };
 
     if let Err(err) = run(launch) {
-        eprintln!("molar_vis failed: {err}");
+        eprintln!("molar_vis failed: {}", molar_vis_core::error_chain(&err));
         std::process::exit(1);
     }
 }

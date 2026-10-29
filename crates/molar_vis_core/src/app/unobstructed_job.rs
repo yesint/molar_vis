@@ -136,7 +136,7 @@ impl App {
                 let _ = tx.send(direction);
                 repaint.request_repaint();
             })
-            .map_err(|e| format!("Cannot start unobstructed view: {e}"))?;
+            .map_err(|e| format!("Cannot start unobstructed view: {e}", e = crate::errors::error_chain(&e)))?;
         self.unobstructed_job = Some(ViewJob {
             started,
             cancelled,
