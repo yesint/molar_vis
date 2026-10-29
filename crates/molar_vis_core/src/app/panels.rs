@@ -996,15 +996,7 @@ impl App {
             Some(GroupAction::ShowMember(nc)) => {
                 // Optional partial focus for both the cycle bar and member names.
                 // When enabled, clicking the already-shown member also re-centers it.
-                self.scene.switch_group_member(gi, nc);
-                if let Some(&id) = self.scene.groups[gi].members.get(nc)
-                    .filter(|_| self.settings.behavior.group_switch_zoom)
-                {
-                    if let Some(mi) = self.scene.mol_index(id) {
-                        let (min, max) = self.scene.molecules[mi].current_bbox();
-                        self.center_camera_on(0.5 * (min + max));
-                    }
-                }
+                self.show_group_member_from_ui(gi, nc);
                 view_dirty = true;
             }
             Some(GroupAction::AddSharedRep) => {

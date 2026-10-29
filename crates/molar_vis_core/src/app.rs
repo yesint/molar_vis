@@ -1317,6 +1317,9 @@ impl eframe::App for App {
         self.draw_settings_dialog(&ctx, frame);
         self.draw_align_dialog(&ctx);
 
+        // Let input fields handle their keys before cycling the sole loaded group.
+        self.handle_group_navigation(&ctx);
+
         // Apply undo/redo after the panel so list indices stay stable during draw. Each
         // step is replayed individually (a structural delta must be inverted in order —
         // no jump-to-snapshot shortcut); undo/redo apply to the scene in place.

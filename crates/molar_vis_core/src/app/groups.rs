@@ -1,8 +1,48 @@
-//! Stable group handles for external hosts and movie timelines.
+//! Group navigation and stable handles for external hosts and movie timelines.
 use super::*;
 use crate::scene::GroupId;
 
 impl App {
+    /// Show a member from the UI, applying the optional camera centering setting.
+    pub(super) fn show_group_member_from_ui(&mut self, gi: usize, member: usize) {
+        self.scene.switch_group_member(gi, member);
+        if let Some(&id) = self.scene.groups[gi].members.get(member)
+            .filter(|_| self.settings.behavior.group_switch_zoom)
+        {
+            if let Some(mi) = self.scene.mol_index(id) {
+                let (min, max) = self.scene.molecules[mi].current_bbox();
+                self.center_camera_on(0.5 * (min + max));
+            }
+        }
+        self.view_dirty = true;
+    }
+
+    pub(super) fn handle_group_navigation(&mut self, ctx: &egui::Context) {
+        if self.scene.groups.len() != 1 || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let group = &self.scene.groups[0];
+        let count = group.members.len();
+        if count < 2 {
+            return;
+        }
+        let next = ctx.input_mut(|i| {
+            if !i.modifiers.is_none() {
+                return None;
+            }
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                Some((group.current + count - 1) % count)
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                Some((group.current + 1) % count)
+            } else {
+                None
+            }
+        });
+        if let Some(member) = next {
+            self.show_group_member_from_ui(0, member);
+        }
+    }
+
     pub fn group_ids(&self) -> Vec<u64> {
         self.scene.groups.iter().map(|g| g.id.0).collect()
     }
