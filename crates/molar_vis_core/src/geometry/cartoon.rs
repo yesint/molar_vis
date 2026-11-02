@@ -7,8 +7,8 @@
 //! morphs by DSSP class: a thin tube for coil/turn, a wide flat ribbon for
 //! helices and sheets. Each β-strand C-terminus gets an arrowhead: a sharp barb
 //! flaring to a wide base, then a linear taper to a point at the strand's last
-//! Cα. Helix and sheet Cα paths are Laplacian-smoothed first so ribbons run down
-//! the axis instead of corkscrewing along the raw Cα trace.
+//! Cα. β-strand interiors are smoothed to reduce the backbone zig-zag; their
+//! endpoints stay on the actual Cα atoms so strand tips meet the atomic model.
 
 use molar::prelude::*;
 
@@ -334,14 +334,17 @@ fn build_run(
     demote_singletons(&mut classes);
 
     // Spline control points. β-strands get their pleat zig-zag cancelled with a
-    // weighted neighbor average `(2·CAᵢ + CAᵢ₋₁ + CAᵢ₊₁)/4` (VMD); helix and coil
-    // keep the raw Cα — for all-atom the smooth helix ribbon comes from the carbonyl
-    // orientation, not from moving the centerline.
+    // weighted neighbor average `(2·CAᵢ + CAᵢ₋₁ + CAᵢ₊₁)/4` (VMD), but keep strand
+    // endpoints on their Cα so narrow tips do not detach from displayed bonds.
+    // Helix and coil keep the raw Cα — for all-atom the smooth helix ribbon comes
+    // from the carbonyl orientation, not from moving the centerline.
     let mut coords: Vec<Vector3f> = (0..n)
         .map(|i| {
-            if classes[i] == SsClass::Sheet {
-                let prev = run[i.saturating_sub(1)].ca;
-                let next = run[(i + 1).min(n - 1)].ca;
+            if i > 0 && i + 1 < n
+                && classes[i - 1..=i + 1].iter().all(|&c| c == SsClass::Sheet)
+            {
+                let prev = run[i - 1].ca;
+                let next = run[i + 1].ca;
                 run[i].ca * 0.5 + (prev + next) * 0.25
             } else {
                 run[i].ca
@@ -1284,6 +1287,52 @@ mod tests {
         assert_eq!(a.indices, b.indices);
         assert_eq!(a.vert_res, b.vert_res);
         assert_eq!(a.vert_atom, b.vert_atom);
+    }
+
+    #[test]
+    fn jak2_strand_endpoints_meet_ca_atoms() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/jak2.pdb");
+        let system = System::from_file(path).unwrap();
+        let bound = system.select_all_bound();
+        let ss = SsMap::compute(&bound, SsAlgorithm::Dssp);
+        let run: Vec<_> = bound.iter_particle()
+            .filter(|p| p.atom.get_chain() == 'A' && p.atom.get_name() == "CA"
+                && (920..=935).contains(&p.atom.get_resid()))
+            .map(|p| Residue {
+                ca: v3(p.pos), o: None, color: u32::MAX,
+                class: ss.class(p.atom.get_resindex()), chain: 'A',
+                resindex: p.atom.get_resindex(), trace: p.id as u32,
+            })
+            .collect();
+        let glu_atom = bound.iter_particle()
+            .find(|p| p.atom.get_chain() == 'A' && p.atom.get_resid() == 930
+                && p.atom.get_name() == "CA").unwrap().id as u32;
+        let end = run.iter().position(|r| r.trace == glu_atom).unwrap();
+        assert_eq!(run[end].class, SsClass::Sheet);
+        assert_eq!(run[end + 1].class, SsClass::Coil);
+        let mut start = end;
+        while start > 0 && run[start - 1].class == SsClass::Sheet { start -= 1; }
+        assert!(start > 0 && end > start + 1);
+
+        let shape = Shape {
+            coil_radius: 0.03, ribbon_width: 0.15,
+            ribbon_thickness: 0.03, bevel_height: 0.0,
+        };
+        let mut mesh = MeshData::default();
+        build_run(&run, &shape, 0, 0, None, false, &mut mesh);
+        // Measure the emitted mesh, including the narrow arrow tip at GLU 930.
+        let center = |i: usize| {
+            mesh.vertices[i * STEPS * RING..i * STEPS * RING + RING].iter()
+                .fold(Vector3f::zeros(), |sum, v| sum + Vector3f::from(v.pos)) / RING as f32
+        };
+        for i in [start, end, end + 1] {
+            assert!((center(i) - run[i].ca).norm() < 1e-5, "detached residue {}", run[i].resindex);
+        }
+        // Preserve the existing smoothing inside the strand.
+        let i = end - 1;
+        let smoothed = run[i].ca * 0.5 + (run[i - 1].ca + run[i + 1].ca) * 0.25;
+        assert!((center(i) - smoothed).norm() < 1e-5);
+        assert!((center(i) - run[i].ca).norm() > 0.01);
     }
 
     #[test]

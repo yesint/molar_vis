@@ -968,3 +968,7 @@ solid or gradient background. The explicit New Session action still restores def
 The JavaScript `add_file` API loads every parsed record as a normal viewer group.
 Shared-source groups use the same member visibility and shared representations as
 file-loaded groups, and failed member construction leaves the scene unchanged.
+
+Cartoon β-strand endpoints stay at their Cα positions while strand interiors retain
+their smoothing. This prevents narrow tips from separating from displayed atomic
+bonds, as at chain A GLU 930 in `tests/jak2.pdb`.

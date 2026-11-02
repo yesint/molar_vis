@@ -240,8 +240,9 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   flat — using the raw per-residue normal garbles them). **`g`/`D` must be at Ångström scale**
   (`NM_TO_ANGSTROM`): the average mixes unit `g` with `|D|∝length³`, so nm coords (|D|≈0.02)
   freeze the frame → rippled helices + ~90°-rotated sheets; Å (|D|≈17) is what VMD relies on.
-  Only β-strand coords are smoothed
-  (`(2·CAᵢ+CAᵢ₋₁+CAᵢ₊₁)/4`); helix/coil keep raw Cα. Elliptical cross-section (width axis =
+  Only β-strand interiors are smoothed
+  (`(2·CAᵢ+CAᵢ₋₁+CAᵢ₊₁)/4`); strand endpoints and helix/coil keep raw Cα so narrow
+  strand tips meet displayed atomic bonds. Elliptical cross-section (width axis =
   perp, thickness axis = tangent×perp) morphing by `SsClass` (helix=sheet flat ribbon, coil
   tube); emits indexed `MeshData`. Mirrors VMD `draw_cartoon_ribbons`. **β-arrowheads**
   (`arrow_regions`/`width_at`): per contiguous sheet run, a sharp barb (a width discontinuity at

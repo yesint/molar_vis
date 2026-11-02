@@ -389,15 +389,24 @@ impl App {
                 }
             }).response);
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if overlay_button(ui, icon::CARET_DOUBLE_LEFT, false)
-                    .on_hover_text("Collapse side panel")
-                    .clicked()
-                {
-                    self.side_panel_collapsed = true;
-                    ui.ctx().request_repaint();
-                }
-            });
+            // Reserve the button's full width before right-aligning it. Otherwise a
+            // narrow panel makes the right-to-left layout grow back over Help.
+            let collapse_height = dropdown_height(ui);
+            let collapse_width = (max_label_width(ui, [icon::CARET_DOUBLE_LEFT].into_iter())
+                + 2.0 * ui.spacing().button_padding.x).max(collapse_height);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width().max(collapse_width), collapse_height),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    if overlay_button(ui, icon::CARET_DOUBLE_LEFT, false)
+                        .on_hover_text("Collapse side panel")
+                        .clicked()
+                    {
+                        self.side_panel_collapsed = true;
+                        ui.ctx().request_repaint();
+                    }
+                },
+            );
 
             // Hover-switch: once any bar menu is open, moving the pointer onto a
             // different top-level button opens that menu (and closes the rest, since
