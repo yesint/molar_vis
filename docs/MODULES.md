@@ -49,31 +49,19 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
   - `app/commands.rs` — shared scene-command execution.
   - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.
-    A Draw session is **scoped to one representation** (`DrawSession::target_rep`, an index into
-    the target molecule's `reps`): hover / Draw / Erase only touch that rep's evaluated selection
-    (`App::draw_scope` → `pick::nearest_atom`/`nearest_bond` take an `allowed` atom set), so every
-    atom outside it — visible or not — is inert, and a freshly drawn atom is folded into that rep's
-    selection text (`Representation::include_atom`, coalescing a trailing `or index …` clause) so it
-    stays visible + editable. A blanket `all` scope means "the whole molecule"; a strict-subset scope
-    also **skips the whole-molecule auto-relax** (it would move atoms the selection excludes). The
-    scope is set by `open_rep_in_editor` (a rep's **Edit** menu item — editing is **per-rep** now, so
-    the molecule + group rows carry no pencil), by `start_drawn_molecule` (a fresh molecule's one `all`
-    rep), and by the **re-select-in-place** flow: choosing a pick mode no longer
-    drops the Draw session — it **suspends** it (the tool goes inert, picking runs; `viewport.rs`
-    gates on `pick_mode == Off`), and *confirming* the new selection re-scopes Draw to it. Confirm =
-    the pending stub's **Accept** *or* turning the pick method back off while drawing, both routed
-    through `App::accept_pending_into_draw` (accept → new rep → re-scope + pick mode Off). **In Draw
-    mode every non-active rep is greyed out** (`build::gray_out` desaturates + dims its colours at
-    build time; `rebuild_dirty` takes the active `(mol, rep)` and greys all others, and marks all reps
-    dirty when it changes — `App::draw_gray_active` / `last_gray_active`) so it reads as inactive and
-    non-interactive. The **edited rep is drawn first** within its molecule (`SceneRenderer::set_edit_active`
-    → `draw_reps`) so, with the `Less` depth test, it wins the coincident-depth tie against the grayed
-    context reps of the same atoms — otherwise the freshly created edit rep, appended last, z-loses and
-    hides behind them. The tools palette's **Clean up** (geometry optimization / relax to convergence)
-    is now **disabled with a reason** — not silently a no-op — when it cannot run: no molecule, a
-    shared molecule, no bonds, or a structure past `DRAW_AUTO_MAX_ATOMS` (the O(N²) relax is not run on
-    a large loaded structure). It is *not* gated on bond **orders** (`Unspecified`/`Single` optimize
-    fine). `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` opens a rep in Draw mode for headless checks.
+    A Draw session targets a molecule. `open_molecule_in_editor` is available from the
+    molecule menu or a group's **Edit shown molecule** menu item. Switching group members
+    moves the editor target to the shown molecule. `Molecule::visible_edit_atoms` forms the
+    union of its visible representation selections; Draw, Erase, dihedral rotation, H edits,
+    and cleanup use that set. Other molecules are gray. Newly drawn atoms enter the first
+    visible rep; new hydrogens enter visible reps that contain their parent. Accepting a
+    pending selection adds a visible rep and resumes editing its molecule.
+    Cleanup fixes atoms outside the editable set, but includes their interactions. The
+    existing O(N²) model still limits cleanup to `DRAW_AUTO_MAX_ATOMS` (300 atoms).
+    Automatic aromaticity perception runs only when all atoms are editable.
+    H+ and H− are separate actions and do not trigger automatic relaxation.
+    `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` opens a molecule for hidden UI checks;
+    the optional rep suffix is retained for compatibility and is ignored.
   - `app/dihedral.rs` — the **DihedralRotate tool** of edit (Draw) mode (alongside Draw/Erase; state
     in `DihedralState` on the active `DrawSession`, tool button in `draw_tools_panel`): click a
     **rotatable** bond (non-ring, non-terminal — found by cutting the bond and BFS-splitting the graph
@@ -344,7 +332,7 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   writing coords / rebuilding via `reconcile_structure`) and return the label; there is **no
   jump-to-committed shortcut** (each delta must be replayed in order). `RepState`/`StructureSnapshot`
   live here (see the *save/load* design in `session.rs`). Recording sites: `app/draw_input.rs`
-  `record_topology` wraps Draw/Erase + `toggle_hydrogens`; `drive_minimize` records the relax's
+  `record_topology` wraps Draw/Erase + `edit_hydrogens`; `drive_minimize` records the relax's
   `Coords`; `app/dihedral.rs` records the twist's `Coords` at drag end.
 - `session.rs` — **save/load visualization state** (M13). `Session { format, version, view:
   ViewState, molecules: Vec<MolSession> }`, serialized to JSON. The design goal is
@@ -771,3 +759,32 @@ source dependencies and computes current-source contact membership using active
 interaction settings. `interaction_source.rs` gathers chemical input shared by
 selection evaluation and drawing. `interactions.rs` returns contact geometry plus
 participant identities on both input sides for atom, ring and charge-group contacts.
+
+## Hydrogen editing and cleanup
+
+`hydrogens.rs` caches removed attached hydrogens with their full atom metadata,
+parent, bond order, coordinates, and local heavy-atom references. H+ restores these
+sites first, follows parent translation/rotation, then uses molar's valence and
+hydrogen-placement APIs to generate missing atoms. Placement respects local bond
+geometry, conjugated nitrogen and neighboring sp² planes; a free terminal torsion
+is chosen using nearby contacts. Existing atom coordinates do not change.
+
+Unspecified bond orders are perceived on a temporary system. If this fails,
+unchanged cached sites can still be restored, but new H generation stops with a
+status message. H editing requires an owned, single-frame molecule. The cache is
+part of structural undo; snapshots also preserve atom metadata and selection text.
+Batch deletion remaps explicit local index selections, and the remap shares the
+same undo step as the topology change.
+
+`minimize.rs` uses `molar_ff::amber::AmberModel`: GAFF2 bonded/LJ terms, Espaloma
+charges per connected component, and L-BFGS with an energy-decreasing line search.
+Ordinary LJ switches from 1.0 to 1.2 nm; ordinary Coulomb uses a shifted force at
+1.2 nm. Bonded exclusions and Amber 1–4 scaling are included; there is no PME.
+A temporary model receives perceived bond orders and missing hydrogens. Only
+visible original atom coordinates are copied back; hidden atoms, charges, types,
+bond orders, and hydrogen caches remain unchanged. Degenerate sketch coordinates
+are perturbed only in the private model. Failures produce a status message without
+changing the source. Success reports energy, maximum force, convergence state,
+and estimated-term count and retains the coordinate undo step. The synchronous
+editor-size limit remains 300 original atoms; shared and trajectory molecules
+cannot run cleanup. Both native and WebAssembly use the same backend.

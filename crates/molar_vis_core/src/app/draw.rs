@@ -142,10 +142,6 @@ pub(super) struct DrawSession {
     /// The molecule edits land in. `None` until the first atom is placed (which
     /// *creates* the molecule, since molar can't append to a 0-atom system).
     pub(super) target: Option<MolId>,
-    /// The **representation** Draw is scoped to (index into the target molecule's `reps`).
-    /// Draw/Erase/hover only touch that rep's selection, and a freshly drawn atom is folded
-    /// into it (so it stays visible + editable). `None` = unrestricted (the whole molecule).
-    pub(super) target_rep: Option<usize>,
     /// The active tool.
     pub(super) tool: DrawTool,
     /// The element placed by the Atom tool / a bonded end atom.
@@ -170,7 +166,6 @@ impl Default for DrawSession {
     fn default() -> Self {
         Self {
             target: None,
-            target_rep: None,
             tool: DrawTool::Draw,
             element: Element::C,
             bond_order: crate::minimize::BondOrder::Single,
@@ -218,7 +213,6 @@ impl App {
         session.target = Some(id);
         // A freshly drawn molecule has exactly one `all` rep — scope Draw to it, so new
         // atoms fold into that selection (an `all` scope means "the whole molecule").
-        session.target_rep = Some(0);
         self.view_dirty = true;
     }
 
@@ -231,6 +225,7 @@ impl App {
     /// selector, CPK-colored element chips, bond-order line icons, then Clean-up /
     /// New / Finish actions. Scrolls if the window is short.
     pub(super) fn draw_tools_panel(&mut self, ui: &mut egui::Ui) {
+        self.sync_draw_target();
         if self.draw.is_none() {
             return;
         }
@@ -321,18 +316,25 @@ impl App {
                             .and_then(|d| d.target)
                             .and_then(|id| self.scene.molecules.iter().position(|m| m.id == id));
                         let target = target_mi.map(|mi| &self.scene.molecules[mi]);
-                        let owned = target.is_some_and(|m| !m.data.is_shared());
+                        let hydrogen_block = match target {
+                            None => Some("Open a molecule in the editor first"),
+                            Some(m) if m.data.is_shared() => Some("The host program owns this molecule"),
+                            Some(m) if !m.trajectory.frames.is_empty() => Some("Hydrogen edits require a single-frame molecule"),
+                            _ => None,
+                        };
 
                         // — Clean up (geometry optimization: relax to convergence). Disabled —
                         // and the tooltip says why — when it cannot run: no molecule, a shared
                         // (externally-owned) molecule, no bonds to optimize, or a structure past
-                        // the small-fragment cap (the relax is O(N²) per step, so it is not run
-                        // on a large loaded molecule). NB it is *not* gated on bond *orders* —
-                        // `Unspecified`/`Single` optimize fine; it needs bonds, not their orders.
+                        // the small-fragment cap for synchronous preparation. Missing bond
+                        // orders are perceived on a private model; failures appear in status.
                         let cleanup_block: Option<&str> = match target {
                             None => Some("Clean up — draw or open a molecule first"),
                             Some(m) if m.data.is_shared() => {
                                 Some("Clean up — unavailable: this molecule is shared (edited elsewhere)")
+                            }
+                            Some(m) if !m.trajectory.frames.is_empty() => {
+                                Some("Clean up — requires a single-frame molecule")
                             }
                             Some(m) if m.bonds.is_empty() => {
                                 Some("Clean up — unavailable: the molecule has no bonds to optimize")
@@ -343,7 +345,7 @@ impl App {
                             Some(_) => None,
                         };
                         let cleanup_tip = cleanup_block
-                            .unwrap_or("Clean up — optimize the geometry (relax to convergence)");
+                            .unwrap_or("Clean up — GAFF2 with Espaloma charges; optimize visible atoms");
                         let cleanup = ui
                             .add_enabled_ui(cleanup_block.is_none(), |ui| {
                                 overlay_button(ui, icon::SPARKLE, false)
@@ -356,23 +358,18 @@ impl App {
                                 d.relax = Some(RelaxJob { remaining: 1, to_convergence: true });
                             }
                         }
-                        // — H+ : add explicit hydrogens to satisfy valence, or remove
-                        // them if the molecule already has any (toggle). Owned molecules only
-                        // (a shared molecule's atoms can't be added/removed here).
-                        let toggle_h = ui
-                            .add_enabled_ui(owned, |ui| {
-                                overlay_button(ui, "H+", false)
-                                    .on_hover_text("Add/remove explicit hydrogens")
-                                    .clicked()
-                            })
-                            .inner;
-                        if toggle_h {
-                            if let Some(mi) =
-                                self.draw.as_ref().and_then(|d| d.target).and_then(|id| {
-                                    self.scene.molecules.iter().position(|m| m.id == id)
-                                })
-                            {
-                                self.record_topology(mi, |s| s.toggle_hydrogens(mi));
+                        for (add, label, tip) in [
+                            (true, "H+", "Add missing hydrogens; restore removed hydrogens first"),
+                            (false, "H−", "Remove and cache hydrogens on atoms in visible representations"),
+                        ] {
+                            let clicked = ui.add_enabled_ui(hydrogen_block.is_none(), |ui| {
+                                overlay_button(ui, label, false)
+                                    .on_hover_text(hydrogen_block.unwrap_or(tip)).clicked()
+                            }).inner;
+                            if clicked {
+                                if let Some(mi) = target_mi {
+                                    self.record_topology(mi, |s| s.edit_hydrogens(mi, add));
+                                }
                             }
                         }
                         // — New: the next click starts a fresh molecule.
@@ -382,7 +379,6 @@ impl App {
                         {
                             if let Some(d) = self.draw.as_mut() {
                                 d.target = None;
-                                d.target_rep = None;
                                 d.drag = DrawDrag::Idle;
                             }
                         }

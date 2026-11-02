@@ -14,6 +14,8 @@ use super::loaders::pick_file;
 pub(super) enum GroupAction {
     /// Fold/unfold the group (shared reps + the "Molecules" sub-expander).
     ToggleExpand,
+    /// Edit the currently shown molecule.
+    Edit,
     /// Fold/unfold the nested member list.
     ToggleMembers,
     /// Show/hide the whole group.
@@ -454,6 +456,7 @@ impl App {
         // they don't conflict with the `&mut` molecule borrow.
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut save_mol: Option<usize> = None;
+        let mut edit_mol: Option<MolId> = None;
         let mut open_del_frames: Option<MolId> = None;
         let mut rename: Option<RenameDialog> = None;
         // A camera "zoom to fit" request (whole-molecule bbox), applied after the
@@ -506,6 +509,12 @@ impl App {
                         // Per-molecule menu (replaces the lone delete button): save,
                         // periodic-box toggle, delete frames, delete molecule.
                         ui.menu_button(icon::LIST, |ui| {
+                            if ui.add_enabled(!mol.data.is_shared(), egui::Button::new(
+                                format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
+                            )).on_hover_text("Edit atoms in all visible representations").clicked() {
+                                edit_mol = Some(mol.id);
+                                ui.close();
+                            }
                             if ui.button(format!("{}  Load mesh…", icon::CUBE_TRANSPARENT)).clicked() {
                                 load_mesh = Some(mol.id);
                                 ui.close();
@@ -553,7 +562,6 @@ impl App {
                         })
                         .response
                         .on_hover_text("Molecule menu");
-                        // (Edit/draw is now per-representation — see each rep row's menu.)
                         if icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, "Zoom to molecule")
                             .clicked()
                         {
@@ -655,6 +663,10 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         let _ = save_mol;
+        if let Some(mi) = edit_mol.and_then(|id| self.scene.mol_index(id)) {
+            self.open_molecule_in_editor(mi);
+            view_dirty = true;
+        }
         if let Some(id) = open_del_frames {
             self.delete_frames_dialog = Some(ModalState::new(DeleteFramesDialog::new(id)));
         }
@@ -734,6 +746,12 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 compact_actions(ui);
                 ui.menu_button(icon::LIST, |ui| {
+                    if ui.add_enabled(cur_mi.is_some_and(|mi| !self.scene.molecules[mi].data.is_shared()),
+                        egui::Button::new(format!("{}  Edit shown molecule", icon::PENCIL_SIMPLE)),
+                    ).on_hover_text("Edit atoms in all visible representations of the shown molecule").clicked() {
+                        action = Some(GroupAction::Edit);
+                        ui.close();
+                    }
                     #[cfg(not(target_arch = "wasm32"))]
                     if ui
                         .button(format!("{}  Save group…", icon::FLOPPY_DISK))
@@ -750,7 +768,6 @@ impl App {
                 })
                 .response
                 .on_hover_text("Group menu");
-                // (Edit/draw is now per-representation — see each member rep row's menu.)
                 if icon_button(
                     ui,
                     icon::MAGNIFYING_GLASS_PLUS,
@@ -978,6 +995,10 @@ impl App {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Some(GroupAction::Save) => self.save_group(gi),
+            Some(GroupAction::Edit) => {
+                if let Some(mi) = cur_mi { self.open_molecule_in_editor(mi); }
+                view_dirty = true;
+            }
             Some(GroupAction::ToggleEye) => {
                 self.scene.groups[gi].visible = !self.scene.groups[gi].visible;
                 self.scene.apply_group_visibility(gi);

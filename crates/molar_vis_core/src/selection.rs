@@ -931,6 +931,20 @@ mod tests {
     }
 
     #[test]
+    fn visible_edit_scope_uses_resolved_scene_references_and_excludes_invalid_reps() {
+        let mut scene = contact_scene();
+        scene.molecules[0].reps = vec![rep("within 0.5 of m1"), rep("index 1")];
+        scene.refresh_selections();
+        assert_eq!(scene.molecules[0].visible_edit_atoms(), vec![0, 1]);
+        scene.molecules[0].reps[1].visible = false;
+        assert_eq!(scene.molecules[0].visible_edit_atoms(), vec![0]);
+        scene.molecules[0].reps[0].sel_text = "invalid selection".into();
+        scene.molecules[0].reps[0].sel_dirty = true;
+        scene.refresh_selections();
+        assert!(scene.molecules[0].visible_edit_atoms().is_empty());
+    }
+
+    #[test]
     fn external_parser_owns_references_and_rejects_braces() {
         let scene = contact_scene();
         assert_eq!(ids(scene.select(0, "m0.r0").unwrap()), [0, 1]);
@@ -1540,5 +1554,107 @@ mod tree_source_tests {
         assert_eq!(Target::parse("m2").unwrap().molecule(&scene).unwrap(), 3);
         assert_eq!(scene.source_address(2), "m1");
         assert_eq!(scene.source_address(1), "m1[0]");
+    }
+}
+
+/// Keep explicit atom-index terms attached to the same atoms after deletion.
+/// Semantic predicates (residue, name, element, scene references) remain unchanged.
+pub(crate) fn remap_atom_indices(text: &str, map: &[Option<usize>]) -> String {
+    fn whitespace(bytes: &[u8], mut i: usize) -> usize {
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) { i += 1; }
+        i
+    }
+    fn integer(bytes: &[u8], mut i: usize) -> Option<(i64, usize)> {
+        let start = i;
+        if bytes.get(i).is_some_and(|c| matches!(c, b'+' | b'-')) { i += 1; }
+        while bytes.get(i).is_some_and(u8::is_ascii_digit) { i += 1; }
+        std::str::from_utf8(&bytes[start..i]).ok()?.parse().ok().map(|n| (n, i))
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut i = 0;
+    let mut quote = None;
+    let mut string_values = false;
+    let mut foreign_depth = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if let Some(q) = quote {
+            if c == q { quote = None; }
+            i += 1; continue;
+        }
+        if matches!(c, b'\'' | b'"' | b'/') { quote = Some(c); i += 1; continue; }
+        if foreign_depth != 0 {
+            if c == b'(' { foreign_depth += 1; }
+            if c == b')' { foreign_depth -= 1; }
+            i += text[i..].chars().next().unwrap().len_utf8(); continue;
+        }
+        if matches!(c, b'(' | b')' | b'&' | b'|') { string_values = false; }
+        let boundary = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+        let word_len = bytes[i..].iter().take_while(|c| c.is_ascii_alphanumeric() || **c == b'_').count();
+        let word = &text[i..i + word_len];
+        if boundary && matches!(word, "and" | "or") { string_values = false; }
+        if boundary && matches!(word, "name" | "resname") { string_values = true; }
+        if !string_values && boundary && c == b'm' {
+            // A source filter uses another molecule's atom numbering.
+            if let Some(head) = SceneVariables::default().parse_atom(text, i) {
+                let colon = whitespace(bytes, head.end);
+                if bytes.get(colon) == Some(&b':') {
+                    let paren = whitespace(bytes, colon + 1);
+                    if bytes.get(paren) == Some(&b'(') {
+                        foreign_depth = 1; i = paren + 1; continue;
+                    }
+                }
+            }
+        }
+        if string_values || !boundary || word != "index"
+            || bytes.get(i + 5).is_none_or(|c| !c.is_ascii_whitespace()) {
+            i += word_len.max(text[i..].chars().next().unwrap().len_utf8()); continue;
+        }
+        let start = i;
+        let mut end = i + 5;
+        let mut atoms = std::collections::BTreeSet::new();
+        let mut found = false;
+        loop {
+            let begin = whitespace(bytes, end);
+            let Some((lo, mut p)) = integer(bytes, begin) else { break };
+            let colon = whitespace(bytes, p);
+            let hi = if bytes.get(colon) == Some(&b':') {
+                let Some((hi, next)) = integer(bytes, whitespace(bytes, colon + 1)) else { break };
+                p = next; hi
+            } else { lo };
+            if bytes.get(p).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'.') { break; }
+            if hi >= 0 && hi >= lo {
+                for j in map.iter().take((hi as usize).saturating_add(1)).skip(lo.max(0) as usize).flatten() {
+                    atoms.insert(*j);
+                }
+            }
+            found = true; end = p;
+        }
+        if found {
+            out.push_str(&text[copied..start]);
+            let atoms: Vec<_> = atoms.into_iter().collect();
+            let term = crate::pick::index_selection_string(&atoms).unwrap_or_else(|| "not all".into());
+            out.push('('); out.push_str(&term); out.push(')');
+            copied = end; i = end;
+        } else { i += 5; }
+    }
+    out.push_str(&text[copied..]); out
+}
+
+#[cfg(test)]
+mod remap_tests {
+    use super::*;
+
+    #[test]
+    fn remaps_ranges_without_changing_names_regexes_or_foreign_filters() {
+        let map = [Some(0), None, Some(1), None, Some(2)];
+        assert_eq!(remap_atom_indices("index 0 : 4 and not index +2", &map),
+            "(index 0:2) and not (index 1)");
+        assert_eq!(remap_atom_indices("index 1 3", &map), "(not all)");
+        assert_eq!(remap_atom_indices("index -1:2", &map), "(index 0:1)");
+        let text = "(name index 4) or (resname /index 2/) or within 0.5 of m1:(index 4) or index 4";
+        assert_eq!(remap_atom_indices(text, &map),
+            "(name index 4) or (resname /index 2/) or within 0.5 of m1:(index 4) or (index 2)");
     }
 }

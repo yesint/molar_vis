@@ -183,8 +183,6 @@ pub(super) enum RepAction {
     Rearrange(usize),
     /// Move a picked-up rep to an insertion boundary.
     Reorder { from: usize, to: usize },
-    /// Open rep `j` in the drawing editor (Draw mode scoped to its selection).
-    Edit(usize),
     /// Duplicate rep `j`, inserting the copy just after it.
     Duplicate(usize),
     /// Rep `j` was switched to Interactions: re-insert `clone` (its old style, still visible)
@@ -935,13 +933,6 @@ impl App {
             Reveal::Pending(id) => id == mol_id,
             Reveal::Rep(id, j) => id == mol_id && (start..end).contains(&j),
         });
-        // The rep of *this* molecule currently open in the drawing editor — highlights the
-        // rep hamburger's Edit item so it's clear which selection Draw is scoped to.
-        let draw_target_rep = self
-            .draw
-            .as_ref()
-            .filter(|d| d.target == Some(mol_id))
-            .and_then(|d| d.target_rep);
         let mol = &mut self.scene.molecules[mi];
 
         // The single thing this pass asked for — see [`RepAction`]. Set from inside the row
@@ -1032,20 +1023,6 @@ impl App {
                                     // (edit · rearrange · duplicate · save · delete) live here so
                                     // the row stays uncluttered; zoom stays inline.
                                     ui.menu_button(icon::LIST, |ui| {
-                                        let editing = draw_target_rep == Some(j);
-                                        if ui
-                                            .selectable_label(
-                                                editing,
-                                                format!("{}  Edit (draw mode)", icon::PENCIL_SIMPLE),
-                                            )
-                                            .on_hover_text(
-                                                "Edit this selection in draw mode — sketch atoms/bonds within it",
-                                            )
-                                            .clicked()
-                                        {
-                                            action = Some(RepAction::Edit(j));
-                                            ui.close();
-                                        }
                                         if ui
                                             .add_enabled(
                                                 end - start > 1,
@@ -1412,10 +1389,6 @@ impl App {
                 }
                 RepAction::Delete(j) => {
                     self.scene.molecules[mi].delete_rep(j, is_shared);
-                    view_dirty = true;
-                }
-                RepAction::Edit(j) => {
-                    self.open_rep_in_editor(mi, j);
                     view_dirty = true;
                 }
                 RepAction::AcceptPending => {

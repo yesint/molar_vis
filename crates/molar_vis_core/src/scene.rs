@@ -590,6 +590,7 @@ pub struct Molecule {
     /// recorded order are `Unspecified`). Mutated only via the helper methods so it
     /// stays consistent.
     pub bonds: Vec<Bond>,
+    pub(crate) hydrogen_cache: Vec<crate::hydrogens::CachedHydrogen>,
     /// Source connectivity before distance guessing, retained for live settings edits.
     pub(crate) bond_guess_source: Vec<Bond>,
     pub(crate) bond_guess_version: u64,
@@ -785,6 +786,7 @@ impl Molecule {
             traj_loads: Vec::new(),
             data,
             bonds,
+            hydrogen_cache: Vec::new(),
             bond_guess_source,
             bond_guess_version: 0,
             structure_version: 0,
@@ -1040,7 +1042,9 @@ impl Molecule {
         }
         let mut cache = self.structure_cache.borrow_mut();
         if let Some((v, arc)) = cache.as_ref() {
-            if *v == self.structure_version {
+            if *v == self.structure_version
+                && arc.selections.iter().map(|(id, text)| (*id, text.as_str()))
+                    .eq(self.reps.iter().map(|r| (r.id, r.sel_text.as_str()))) {
                 return Some(arc.clone());
             }
         }
@@ -1099,6 +1103,24 @@ impl Molecule {
     // These are the single source of bond/atom mutation; they keep `bonds` and
     // `bond_orders` index-aligned and the same length. The molar `System` is the
     // source of truth for per-atom data, so atoms go in/out through it.
+
+    /// Union of all visible representation selections, evaluated before an edit.
+    /// Failed or empty selections contribute no atoms.
+    pub(crate) fn visible_edit_atoms(&self) -> Vec<usize> {
+        if !self.visible { return Vec::new(); }
+        let mut atoms = std::collections::BTreeSet::new();
+        for rep in self.reps.iter().filter(|r| r.visible) {
+            if !rep.sel_dirty && (rep.sel_error.is_some() || rep.sel_empty) { continue; }
+            if rep.sel_dirty || rep.sel.is_none() {
+                if let Ok((_, sel)) = self.data.evaluate(&rep.sel_text) {
+                    atoms.extend(sel.iter_index().filter(|&i| i < self.n_atoms));
+                }
+            } else if let Some(sel) = &rep.sel {
+                atoms.extend(sel.iter_index().filter(|&i| i < self.n_atoms));
+            }
+        }
+        atoms.into_iter().collect()
+    }
 
     /// Append a new atom (already built by the caller, e.g. from the element
     /// palette) at world position `pos` (nm). Returns its global index, or `None`
@@ -1342,38 +1364,39 @@ impl Molecule {
     /// bonds (endpoints `> i` shift down by one, mirroring molar's atom re-index).
     /// Returns `true` if the molecule is now **empty** (the caller should delete it).
     pub fn remove_atom(&mut self, i: usize) -> bool {
-        if i >= self.n_atoms {
-            return self.n_atoms == 0;
-        }
-        if let Err(error) = self.data.remove(std::iter::once(i)) {
-            log::error!("cannot remove atom: {}", crate::errors::error_chain(&error));
-            return false;
-        }
-        let shift = |x: usize| if x > i { x - 1 } else { x };
-        self.bonds = self
-            .bonds
-            .iter()
-            .filter(|b| !b.contains(i)) // drop incident bonds
-            .map(|b| Bond::with_order(shift(b.i1), shift(b.i2), b.order))
-            .collect();
-        self.n_atoms = self.n_atoms.saturating_sub(1);
-        self.hover_grid = None;
-        self.structure_version += 1;
-        // The atom columns shrank and the surviving bonds were renumbered above.
-        self.sync_bonds_to_topology();
-        self.refresh_bbox();
-        self.n_atoms == 0
+        self.remove_atoms(&[i])
     }
 
-    /// Remove several atoms (and their bonds). Returns `true` if the molecule is now
-    /// empty. Removes in descending index order so earlier indices stay valid.
+    /// Remove atoms in one transaction and remap bonds, cached H, and explicit selections.
     pub fn remove_atoms(&mut self, indices: &[usize]) -> bool {
-        let mut idx: Vec<usize> = indices.to_vec();
-        idx.sort_unstable();
-        idx.dedup();
-        for &i in idx.iter().rev() {
-            self.remove_atom(i);
+        if self.data.is_shared() { return false; }
+        let mut removed: Vec<_> = indices.iter().copied().filter(|&i| i < self.n_atoms).collect();
+        removed.sort_unstable(); removed.dedup();
+        if removed.is_empty() { return self.n_atoms == 0; }
+        let mut map = vec![None; self.n_atoms];
+        let mut next = 0;
+        for (i, entry) in map.iter_mut().enumerate() {
+            if removed.binary_search(&i).is_err() { *entry = Some(next); next += 1; }
         }
+        if let Err(error) = self.data.remove(removed.iter().copied()) {
+            log::error!("cannot remove atoms: {}", crate::errors::error_chain(&error));
+            return false;
+        }
+        self.bonds = self.bonds.iter().filter_map(|b|
+            Some(Bond::with_order(map[b.i1]?, map[b.i2]?, b.order))).collect();
+        self.hydrogen_cache.retain_mut(|h| h.remap(&map));
+        self.n_atoms = next;
+        self.structure_version += 1;
+        self.hover_grid = None;
+        self.sync_bonds_to_topology();
+        for rep in &mut self.reps {
+            rep.sel_text = crate::selection::remap_atom_indices(&rep.sel_text, &map);
+            rep.sel = None; rep.expr = None; rep.sel_dirty = true; rep.geom_dirty = true;
+            rep.ss_cache = None; rep.mesh_cache = None;
+        }
+        self.pending = None; self.hover = None; self.hover_detail = None;
+        self.glow_dirty = true; self.hover_dirty = true; self.hover_detail_dirty = true;
+        if self.n_atoms > 0 { self.refresh_bbox(); }
         self.n_atoms == 0
     }
 
@@ -1461,11 +1484,6 @@ impl Molecule {
         self.aromatic_rings = perc.aromatic_rings().cloned().collect();
         self.aromatic_dirty = true; // the ring-circle geometry must rebuild
         self.sync_bonds_to_topology(); // the orders changed
-    }
-
-    /// Implicit-hydrogen count per atom, over the editor's connectivity.
-    pub fn implicit_hydrogens(&self) -> Vec<u8> {
-        self.with_perception_topology(|top, adj| implicit_hydrogens(top, adj))
     }
 
     /// Lazily compute + cache the molecule's aromatic rings (atom-index loops) for

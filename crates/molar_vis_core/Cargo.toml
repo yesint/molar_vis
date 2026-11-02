@@ -24,6 +24,8 @@ bytemuck.workspace = true
 log.workspace = true
 web-time = "1"
 molar = { workspace = true }
+# GAFF2 mechanics and Espaloma charges run on native and WebAssembly.
+molar_ff = { workspace = true }
 egui-phosphor = "0.12.0"
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
@@ -43,11 +45,6 @@ rfd = "0.15"
 # Native geometry parallelism and bounded workers; browser builds retain serial paths.
 rayon = "1"
 directories = "5"
-# espaloma partial charges (the `Charge` coloring's [Compute charges] button). Native only:
-# the fixed Espaloma kernel runs on native builds. Charge *coloring*
-# itself is platform-independent and lives in `color.rs`.
-molar_ff = { workspace = true }
-
 # Browser runtime: the eframe `WebRunner` entry (`launch::run_web`) needs the
 # canvas + async glue; `wgpu`'s `webgl` feature gives a WebGL2 fallback for
 # browsers without WebGPU; `getrandom`'s `wasm_js` backend (+ the matching cfg in

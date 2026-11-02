@@ -113,15 +113,63 @@ impl RepState {
     }
 }
 
-/// The minimal per-atom fields needed to reconstruct a drawn molecule's `Atom`.
-/// (Mass/vdW are re-derived from the name by molar's `guess`; `atomic_number` is
-/// then pinned exactly so an unusual name can't mis-elementize the atom.)
+/// Atom data for structural undo and sessions. Legacy snapshots without properties
+/// derive defaults from the atom name; current snapshots retain all atom metadata.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct AtomLite {
     pub name: String,
     pub atomic_number: u8,
     pub resname: String,
     pub resid: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<AtomProperties>,
+}
+
+/// Preserve chemical and residue metadata across topology edits and H caching.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct AtomProperties {
+    pub resindex: usize,
+    pub mass: f32,
+    pub charge: f32,
+    pub chain: char,
+    pub bfactor: f32,
+    pub occupancy: f32,
+    pub formal_charge: Option<i32>,
+    pub type_name: Option<String>,
+    pub type_id: Option<u32>,
+    pub flags: Option<(bool, bool)>,
+}
+
+impl AtomLite {
+    pub(crate) fn capture(a: &impl AtomLike) -> Self {
+        Self {
+            name: a.get_name().into(), atomic_number: a.get_atomic_number(),
+            resname: a.get_resname().into(), resid: a.get_resid() as i32,
+            properties: Some(AtomProperties {
+                resindex: a.get_resindex(), mass: a.get_mass(), charge: a.get_charge(),
+                chain: a.get_chain(), bfactor: a.get_bfactor(), occupancy: a.get_occupancy(),
+                formal_charge: a.get_formal_charge(), type_name: a.get_type_name().map(str::to_owned),
+                type_id: a.get_type_id(),
+                flags: a.get_chem_flags().map(|f| (f.is_in_ring(), f.is_aromatic())),
+            }),
+        }
+    }
+
+    pub(crate) fn to_atom(&self) -> Atom {
+        let mut a = Atom::new().with_name(&self.name).with_resname(&self.resname)
+            .with_resid(self.resid).guess();
+        a.atomic_number = self.atomic_number;
+        if let Some(p) = &self.properties {
+            a.resindex = p.resindex; a.mass = p.mass; a.charge = p.charge; a.chain = p.chain;
+            a.bfactor = p.bfactor; a.occupancy = p.occupancy; a.formal_charge = p.formal_charge;
+            a.type_name = p.type_name.as_ref().map(|v| v.parse().expect("stored atom type"));
+            a.type_id = p.type_id;
+            a.chem_flags = p.flags.map(|(ring, aromatic)| {
+                let mut f = AtomChemFlags::default(); f.set_in_ring(ring); f.set_aromatic(aromatic); f
+            });
+        }
+        a
+    }
 }
 
 /// A full structure snapshot of an **editable** (drawn) molecule — atoms, their
@@ -135,6 +183,10 @@ pub struct StructureSnapshot {
     pub coords: Vec<[f32; 3]>,
     /// The bond graph with orders (molar's [`Bond`] derives serde directly).
     pub bonds: Vec<Bond>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hydrogen_cache: Vec<crate::hydrogens::CachedHydrogen>,
+    #[serde(skip)]
+    pub selections: Vec<(RepId, String)>,
 }
 
 impl StructureSnapshot {
@@ -145,12 +197,7 @@ impl StructureSnapshot {
         let topo = mol.data.topology();
         let atoms = (0..mol.n_atoms)
             .filter_map(|i| topo.get_atom(i))
-            .map(|a| AtomLite {
-                name: a.get_name().to_string(),
-                atomic_number: a.get_atomic_number(),
-                resname: a.get_resname().to_string(),
-                resid: a.get_resid() as i32,
-            })
+            .map(|a| AtomLite::capture(&a))
             .collect();
         let coords = mol
             .data
@@ -163,6 +210,8 @@ impl StructureSnapshot {
             atoms,
             coords,
             bonds: mol.bonds.clone(),
+            hydrogen_cache: mol.hydrogen_cache.clone(),
+            selections: mol.reps.iter().map(|r| (r.id, r.sel_text.clone())).collect(),
         }
     }
 }
@@ -424,15 +473,10 @@ impl EditState {
 fn reconcile_structure(mol: &mut Molecule, snap: &Arc<StructureSnapshot>) {
     let mut top = Topology::default();
     for lite in &snap.atoms {
-        let mut a = Atom::new()
-            .with_name(&lite.name)
-            .with_resname(&lite.resname)
-            .with_resid(lite.resid)
-            .guess();
-        a.atomic_number = lite.atomic_number; // pin the element exactly
-        top.atoms.push(&a);
+        top.atoms.push(&lite.to_atom());
     }
-    top.assign_resindex();
+    if snap.atoms.iter().any(|a| a.properties.is_none()) { top.assign_resindex(); }
+    top.bonds = crate::data::bonds::bond_storage(&snap.bonds);
     let st = State {
         coords: snap.coords.iter().map(|c| Pos::new(c[0], c[1], c[2])).collect(),
         ..Default::default()
@@ -440,10 +484,14 @@ fn reconcile_structure(mol: &mut Molecule, snap: &Arc<StructureSnapshot>) {
     if let Ok(sys) = System::new(top, st) {
         mol.data = crate::moldata::MolData::Owned(sys);
         mol.bonds = snap.bonds.clone();
+        mol.hydrogen_cache = snap.hydrogen_cache.clone();
         mol.n_atoms = snap.atoms.len();
         mol.hover_grid = None;
         mol.refresh_bbox();
         for rep in &mut mol.reps {
+            if let Some((_, text)) = snap.selections.iter().find(|(id, _)| *id == rep.id) {
+                rep.sel_text = text.clone();
+            }
             // The atom set changed, so any cached compiled selection holds indices
             // from the old (possibly larger) system — re-evaluate it against the new
             // one before building, else molar rejects the stale indices ("selection
@@ -700,7 +748,22 @@ impl History {
         if edits.is_empty() {
             return;
         }
+        for (mol, edit) in &edits { self.adopt_structure_selections(*mol, edit, true); }
         self.push_undo(Step::Struct(edits), label);
+    }
+
+    /// Index remaps and newly included atoms belong to the topology gesture, rather
+    /// than a second document step at frame settle.
+    fn adopt_structure_selections(&mut self, id: MolId, edit: &StructEdit, forward: bool) {
+        let StructEdit::Topology { before, after } = edit else { return };
+        let snap = if forward { after } else { before };
+        let reps = self.committed.mols.iter_mut().filter(|m| m.id == id).flat_map(|m| &mut m.reps)
+            .chain(self.committed.groups.iter_mut().flat_map(|g| &mut g.shared_reps));
+        for rep in reps {
+            if let Some((_, text)) = snap.selections.iter().find(|(id, _)| *id == rep.id) {
+                rep.sel_text = text.clone();
+            }
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -761,6 +824,7 @@ impl History {
                 // Reverse order, so a compound step unwinds exactly as it was applied.
                 for (mol, edit) in edits.iter().rev() {
                     edit.apply(scene, *mol, false);
+                    self.adopt_structure_selections(*mol, edit, false);
                 }
                 Entry { step: Step::Struct(edits), label }
             }
@@ -782,6 +846,7 @@ impl History {
             Step::Struct(edits) => {
                 for (mol, edit) in &edits {
                     edit.apply(scene, *mol, true);
+                    self.adopt_structure_selections(*mol, edit, true);
                 }
                 Entry { step: Step::Struct(edits), label: entry.label }
             }

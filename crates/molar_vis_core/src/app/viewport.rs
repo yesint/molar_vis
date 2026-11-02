@@ -51,6 +51,7 @@ impl App {
             // Grey-out bookkeeping: the rep open in the editor stays in colour, every other
             // rep is greyed out. When that rep changes (Draw toggled, scope re-pointed), re-mark
             // every rep dirty so the next rebuild applies or removes the grey-out.
+            self.sync_draw_target();
             let gray_active = self.draw_gray_active();
             if gray_active != self.last_gray_active {
                 for mol in &mut self.scene.molecules {
@@ -188,7 +189,6 @@ impl App {
             self.renderer
                 .set_glow_color(crate::theme::glow_color(ui.ctx(), &self.camera.background));
             // The edited rep draws first so it stays visible over the grayed context reps.
-            self.renderer.set_edit_active(gray_active);
 
             let has_animated_paths = self.scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter().any(|rep|
                 rep.visible && rep.params.has_animated_glowing_path() && rep.gpu.has_geometry()));

@@ -102,7 +102,7 @@ expand-caret + **name** (**bold** via `widgets::bold_name` — the embedded Ubun
 longer shown inline — they're a **hover tooltip** on the name: `N atoms / M frames`) + **Load-trajectory** (`FOLDER_OPEN`, left of the
 name), right-justified **add-rep** · **zoom-to-molecule** (`MAGNIFYING_GLASS_PLUS` →
 `Camera::focus_bbox`) · eye · a **per-molecule menu** (`LIST` hamburger, replacing the old
-standalone trash/box buttons): **Save molecule…** (`FLOPPY_DISK` → `save_molecule`, native),
+standalone trash/box buttons): **Edit (draw mode)** (all visible selections), **Save molecule…** (`FLOPPY_DISK` → `save_molecule`, native),
 **Load mesh…** (attach a PLY file to this molecule),
 **Rename…** (`PENCIL_SIMPLE` → `rename_mol` + the `draw_rename_dialog` modal; edits `mol.name`,
 persisted in sessions via `MolSession.name`), **Show periodic box** checkbox (`mol.show_box`),
@@ -240,11 +240,9 @@ via `dnd_hover_payload`/`dnd_release_payload`):
   against the compact action group) · right-justified compact actions
   (`Layout::right_to_left` + `compact_actions`): **zoom-to-selection** (`MAGNIFYING_GLASS_PLUS`
   → `Camera::focus_bbox` on the rep's `sel` bbox) · eye · a **per-rep menu** (`LIST` hamburger)
-  holding the less-frequent actions so the row stays uncluttered: **Edit (draw mode)** (`Edit`
-  action → `open_rep_in_editor` — Draw scoped to *this* rep's selection; the item is highlighted
-  when this rep is the active draw target), **Duplicate** (`COPY`), **Save selection…**
-  (`FLOPPY_DISK` → `save_rep_selection`, native), **Delete** (`TRASH`). (Editing/draw is now
-  per-representation — the molecule and group rows no longer carry a pencil.) The rep's
+  holding the less-frequent actions: **Duplicate** (`COPY`), **Save selection…**
+  (`FLOPPY_DISK` → `save_rep_selection`, native), and **Delete** (`TRASH`). Editing
+  is on the molecule menu; the group menu edits its currently shown member. The rep's
   **selection error** (if any) is shown in red on the next line, aligned under the field — and
   the **erroring span of the text is painted red in-place** (a `sel_text_edit` layouter colors
   from the molar caret offset to the end; see `suggest.rs`). Editing the field (`resp.changed()`)
@@ -314,3 +312,19 @@ Shift+RMB moves the scene through the front clipping plane. The far clipping pla
 automatically covers the visible scene, including when a small selection is framed.
 **Render → Reset clipping** fits the visible scene and clears the clipping offset
 while preserving the viewing orientation.
+
+The drawing palette has separate **H+** and **H−** buttons. H− caches removed
+hydrogens; H+ restores cached sites and then fills missing valences using local
+molecular geometry. These actions preserve existing coordinates. They operate on
+the union of visible selections of the edited molecule and do not run on shared
+or trajectory molecules. The tooltip explains a disabled action. A chemistry
+assignment failure appears in the status message.
+
+**Clean up** uses GAFF2 with Espaloma charges and an L-BFGS optimizer. It moves the
+union of visible selections of the active molecule. Hidden atoms exert forces but
+stay fixed. Missing hydrogens are completed in a temporary model; cleanup does not
+add atoms to the visible structure or change the hydrogen cache. Status reports
+energy, force, convergence/step-limit/line-search outcome, or a preparation error.
+Successful coordinate changes remain undoable. Cleanup requires an owned,
+single-frame molecule with at most 300 original atoms. The current nonbonded model
+uses a 1.0–1.2 nm LJ switch and shifted-force Coulomb with a 1.2 nm cutoff, without PME.

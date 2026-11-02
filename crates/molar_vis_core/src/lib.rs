@@ -25,6 +25,7 @@ mod geometry;
 #[cfg(not(target_arch = "wasm32"))]
 mod geometry_jobs;
 mod history;
+mod hydrogens;
 mod interactions;
 mod hbond;
 mod interaction_source;

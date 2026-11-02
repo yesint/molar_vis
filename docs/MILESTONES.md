@@ -972,3 +972,28 @@ file-loaded groups, and failed member construction leaves the scene unchanged.
 Cartoon β-strand endpoints stay at their Cα positions while strand interiors retain
 their smoothing. This prevents narrow tips from separating from displayed atomic
 bonds, as at chain A GLU 930 in `tests/jak2.pdb`.
+
+
+## Molecule editing and hydrogen restoration
+
+The molecule menu opens the drawing editor for all visible selections. A group
+opens its shown member and follows member switches. Draw, erase, dihedral rotation,
+and cleanup respect this union; cleanup holds all other atoms fixed.
+
+H− caches existing attached hydrogens. H+ restores cached coordinates and atom
+metadata before generating missing hydrogens with local bond geometry and planar
+conjugated groups. Existing atoms do not move. Atom-index remaps, hydrogen caches,
+and metadata survive structural undo. Unsupported bond-order perception reports
+an error and still permits restoration at unchanged cached sites.
+
+
+### GAFF2 geometry cleanup and cutoff nonbonded interactions
+
+Replaced the custom UFF-like/WCA/FIRE cleanup with molar_ff's GAFF2 bonded and LJ
+terms, per-component Espaloma charges, and f64 L-BFGS with a downhill line search.
+Cutoff cell lists, exclusions, and Amber-scaled 1–4 pairs replace all-pairs WCA.
+LJ uses a 1.0–1.2 nm potential switch; Coulomb uses shifted forces at 1.2 nm.
+These cutoff approximations do not include PME. Missing H is completed privately,
+visible atoms alone move, and errors leave the source unchanged. Status shows
+energy and convergence, and coordinate undo is preserved. The 300-atom synchronous
+editor limit remains. Native and WebAssembly use the same mechanics implementation.

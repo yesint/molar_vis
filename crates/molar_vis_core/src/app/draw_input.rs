@@ -1,12 +1,13 @@
 //! Draw-mode engine: input gestures, geometry, edits, minimization driver.
 use super::*;
+use molar::prelude::IndexProvider;
 use super::draw::*;
 use super::overlay::*;
 use super::widgets::px_to_ndc;
 
 
 /// Above this atom count, draw-mode edits skip the automatic whole-molecule
-/// perception + relax (relax is O(N²) per step). Editor-scale fragments relax/
+/// perception + relax. Preparation and optimization are synchronous, so fragments relax/
 /// aromatize live; a large loaded structure is edited without those.
 pub(super) const DRAW_AUTO_MAX_ATOMS: usize = 300;
 
@@ -112,55 +113,7 @@ impl Scene {
         }
     }
 
-    /// Add or remove explicit hydrogens on molecule `mi`: if it already has any H,
-    /// remove them all; otherwise add the implicit-hydrogen count to every heavy atom
-    /// (placed at rough offsets, to be relaxed by the caller).
-    pub(super) fn toggle_hydrogens(&mut self, mi: usize) {
-        let has_h = {
-            let mol = &self.molecules[mi];
-            let topo = mol.data.topology();
-            (0..mol.n_atoms).any(|i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
-        };
-        if has_h {
-            let mol = &mut self.molecules[mi];
-            let topo = mol.data.topology();
-            let h_idx: Vec<usize> = (0..mol.n_atoms)
-                .filter(|&i| topo.get_atom(i).is_some_and(|a| a.get_atomic_number() == 1))
-                .collect();
-            // Don't strip an all-hydrogen molecule down to nothing.
-            if !h_idx.is_empty() && h_idx.len() < mol.n_atoms {
-                mol.remove_atoms(&h_idx);
-            }
-        } else {
-            // Offset directions for placed H (FIRE relaxes them into real geometry); the
-            // per-H nudge breaks symmetry so e.g. methane doesn't start in a planar saddle.
-            const DIRS: [glam::Vec3; 6] = [
-                glam::Vec3::X, glam::Vec3::NEG_X, glam::Vec3::Y,
-                glam::Vec3::NEG_Y, glam::Vec3::Z, glam::Vec3::NEG_Z,
-            ];
-            let mol = &mut self.molecules[mi];
-            let counts = mol.implicit_hydrogens();
-            let parents: Vec<(usize, glam::Vec3, u8)> = (0..mol.n_atoms)
-                .filter_map(|i| {
-                    let c = *counts.get(i)?;
-                    let p = mol.data.state().coords.get(i)?;
-                    (c > 0).then_some((i, glam::vec3(p.x, p.y, p.z), c))
-                })
-                .collect();
-            let h_atom = Element::H.make_atom();
-            for (i, p, c) in parents {
-                for k in 0..c as usize {
-                    let k = k as f32;
-                    let dir = (DIRS[(c as usize - 1 + k as usize) % 6]
-                        + glam::vec3(0.01 * k, 0.013 * (k + 1.0), 0.017 * k))
-                    .normalize_or_zero();
-                    if let Some(hi) = mol.add_atom(&h_atom, p + dir * 0.11) {
-                        mol.add_bond(i, hi, crate::minimize::BondOrder::Single);
-                    }
-                }
-            }
-        }
-    }
+
 }
 
 impl App {
@@ -170,29 +123,31 @@ impl App {
         self.draw.as_ref().and_then(|d| d.plane_depth)
     }
 
-    /// The `(molecule, rep)` currently open in the drawing editor — the rep that stays in
-    /// full colour while every other rep is greyed out (see [`build::gray_out`]). `None` when
-    /// not drawing, or before the first click has scoped the session to a rep.
-    pub(super) fn draw_gray_active(&self) -> Option<(MolId, usize)> {
-        let d = self.draw.as_ref()?;
-        Some((d.target?, d.target_rep?))
+    /// The molecule open in the editor; all its visible representations remain colored.
+    pub(super) fn draw_gray_active(&self) -> Option<MolId> {
+        self.draw.as_ref()?.target
     }
 
-    /// The atom set the active draw session is **scoped** to — its target rep's evaluated
-    /// selection. Draw/Erase/hover only touch these atoms; everything else in the molecule
-    /// is inert. Returns `None` (unrestricted — the whole molecule) when there is no target
-    /// rep, the rep/selection is missing, or the rep is a blanket `all` (for which building a
-    /// full index set every hover frame would be wasteful and pointless). An empty set means
-    /// the rep matches nothing, so nothing is hoverable/editable.
-    fn draw_scope(&self, mi: usize) -> Option<std::collections::HashSet<usize>> {
-        let rep_idx = self.draw.as_ref()?.target_rep?;
-        let mol = self.scene.molecules.get(mi)?;
-        let rep = mol.reps.get(rep_idx)?;
-        if rep.sel_text.trim() == "all" {
-            return None; // whole molecule
+    /// Only atoms in visible representations of the target molecule can be edited.
+    pub(super) fn draw_scope(&self, mi: usize) -> Option<std::collections::HashSet<usize>> {
+        Some(self.scene.molecules.get(mi)?.visible_edit_atoms().into_iter().collect())
+    }
+
+    /// Follow the shown member when a molecular group changes pose.
+    pub(super) fn sync_draw_target(&mut self) {
+        let Some(target) = self.draw.as_ref().and_then(|d| d.target) else { return };
+        let Some(mi) = self.scene.mol_index(target) else {
+            self.draw = None;
+            return;
+        };
+        if let Some(gi) = self.scene.molecules[mi].group.and_then(|id| self.scene.group_index(id)) {
+            let g = &self.scene.groups[gi];
+            if let Some(&id) = g.members.get(g.current) {
+                if id != target {
+                    if let Some(mi) = self.scene.mol_index(id) { self.open_molecule_in_editor(mi); }
+                }
+            }
         }
-        rep.sel.as_ref()?; // needs an evaluated selection to scope against
-        Some(super::viewport::rep_atom_ids(mol, rep_idx).into_iter().collect())
     }
 
     /// Pointer handling for the active drawing tool (atom/bond/erase) + the bond
@@ -415,10 +370,13 @@ impl App {
         let mi = target.and_then(|id| self.scene.molecules.iter().position(|m| m.id == id));
         match mi {
             Some(mi) => {
+                if !self.scene.molecules[mi].visible || !self.scene.molecules[mi].reps.iter().any(|r| r.visible) {
+                    self.status = "Show a selection before adding atoms".into();
+                    return None;
+                }
                 let idx = self.scene.molecules[mi].add_atom(&element.make_atom(), pos)?;
-                // A freshly drawn atom must stay in the active selection so it displays and
-                // remains editable — fold it into the scoped rep's selection text.
-                if let Some(rep_idx) = self.draw.as_ref().and_then(|d| d.target_rep) {
+                // Keep a freshly drawn atom visible by including it in the first visible rep.
+                if let Some(rep_idx) = self.scene.molecules[mi].reps.iter().position(|r| r.visible) {
                     if let Some(rep) = self.scene.molecules[mi].reps.get_mut(rep_idx) {
                         rep.include_atom(idx);
                     }
@@ -596,28 +554,20 @@ impl App {
     /// point, and arm the debounced relax (only worth it once there's something to
     /// relax — more than a lone atom).
     pub(super) fn after_draw_edit(&mut self, mi: usize, plane: Option<glam::Vec3>) {
-        // A draw scope that is a strict subset of the molecule (a restricted rep
-        // selection) must not auto-relax: the whole-molecule minimizer would move atoms
-        // *outside* the active selection, which Draw mode has to leave untouched. A
-        // blanket `all` scope (or none) relaxes as before.
-        let scoped_subset = self.draw.as_ref().and_then(|d| d.target_rep).is_some_and(|r| {
-            self.scene.molecules[mi]
-                .reps
-                .get(r)
-                .is_some_and(|rep| rep.sel_text.trim() != "all")
-        });
         let worth_relaxing = {
             let mol = &mut self.scene.molecules[mi];
             mol.refresh_bbox();
             // Auto-perception + auto-relax only for editor-scale molecules: ring
-            // perception is cheap but relaxing the whole molecule is O(N²) per step, so
+            // preparation and optimization are synchronous, so
             // editing a large loaded structure (e.g. a protein) must NOT relax/aromatize
             // the whole thing on every click. Above the cap, edits apply instantly; the
             // user can still hand-build a small fragment.
             if mol.n_atoms <= DRAW_AUTO_MAX_ATOMS {
                 // Perceive rings + aromaticity: a freshly closed ring with alternating
                 // orders becomes aromatic (bonds → Aromatic, rings cached for the overlay).
-                mol.perceive_aromaticity();
+                if mol.visible_edit_atoms().len() == mol.n_atoms {
+                    mol.perceive_aromaticity();
+                }
                 mol.n_atoms > 1 || !mol.bonds.is_empty()
             } else {
                 false // skip the whole-molecule relax on large structures
@@ -629,17 +579,14 @@ impl App {
             if let Some(p) = plane {
                 d.plane_depth = Some(p);
             }
-            if worth_relaxing && !scoped_subset {
+            if worth_relaxing {
                 d.minimize_pending = true;
             }
         }
     }
 
-    /// Accept molecule `mi`'s pending selection into a new rep, reveal it, and — while a
-    /// Draw session is live — **re-scope Draw to that new rep** and resume drawing (pick
-    /// mode back to Off). This is the "confirm the selection → re-open Draw in the new
-    /// selection" flow, shared by the pending stub's Accept button and by turning the pick
-    /// method off while drawing. A no-op if there was nothing pending to accept.
+    /// Accept the pending selection into a visible rep and resume drawing on its
+    /// molecule. All visible reps contribute to the editable set.
     pub(super) fn accept_pending_into_draw(&mut self, mi: usize) {
         let id = self.scene.molecules[mi].id;
         let n_before = self.scene.molecules[mi].reps.len();
@@ -653,7 +600,6 @@ impl App {
         self.scene.reveal_rep(mi, new_rep);
         if let Some(d) = self.draw.as_mut() {
             d.target = Some(id);
-            d.target_rep = Some(new_rep);
             d.drag = DrawDrag::Idle;
             d.dihedral = super::dihedral::DihedralState::default();
             self.pick_mode = PickMode::Off;
@@ -681,23 +627,43 @@ impl App {
         }
     }
 
-    /// Toggle explicit hydrogens on the drawn molecule (see
-    /// [`Scene::toggle_hydrogens`]), then run the usual post-edit bookkeeping so the
-    /// change is perceived, relaxed and undoable like any draw edit.
-    pub(super) fn toggle_hydrogens(&mut self, mi: usize) {
-        let n_before = self.scene.molecules[mi].n_atoms;
-        self.scene.toggle_hydrogens(mi);
-        // Newly added H must join the active selection so they display and stay editable
-        // (removal shrinks the molecule, so only the growth case needs folding in).
-        if let Some(rep_idx) = self.draw.as_ref().and_then(|d| d.target_rep) {
-            let n_after = self.scene.molecules[mi].n_atoms;
-            if let Some(rep) = self.scene.molecules[mi].reps.get_mut(rep_idx) {
-                for idx in n_before..n_after {
-                    rep.include_atom(idx);
+    /// Hydrogen edits preserve existing coordinates and do not trigger auto-relax.
+    pub(super) fn edit_hydrogens(&mut self, mi: usize, add: bool) {
+        self.scene.refresh_selections();
+        let mol = &mut self.scene.molecules[mi];
+        let scope = mol.visible_edit_atoms();
+        let changed = if add {
+            let memberships: Vec<_> = mol.reps.iter().map(|r| {
+                if !r.visible { return std::collections::HashSet::new(); }
+                if r.sel_error.is_some() { return std::collections::HashSet::new(); }
+                r.sel.as_ref().map(|s| s.iter_index().collect()).unwrap_or_default()
+            }).collect();
+            let added = match mol.add_edit_hydrogens(&scope) {
+                Ok((added, warning)) => {
+                    if let Some(warning) = warning { self.status = warning; }
+                    added
+                },
+                Err(e) => { self.status = e; return; }
+            };
+            for (rep, atoms) in mol.reps.iter_mut().zip(memberships) {
+                for &(i, parent) in &added {
+                    if atoms.contains(&parent) { rep.include_atom(i); }
                 }
             }
+            added.len()
+        } else {
+            mol.remove_edit_hydrogens(&scope)
+        };
+        if changed == 0 { return; }
+        mol.refresh_bbox();
+        self.scene.flag_edit(mi);
+        self.view_dirty = true;
+        if let Some(d) = self.draw.as_mut() {
+            d.minimize_pending = false;
+            d.relax = None;
+            d.drag = DrawDrag::Idle;
+            d.dihedral = super::dihedral::DihedralState::default();
         }
-        self.after_draw_edit(mi, None);
     }
 
     /// Erase tool: a click deletes the nearest atom (and its bonds; deleting the
@@ -723,7 +689,6 @@ impl App {
                 self.scene.trash_molecule(mi);
                 if let Some(d) = self.draw.as_mut() {
                     d.target = None;
-                    d.target_rep = None;
                     d.drag = DrawDrag::Idle;
                     d.minimize_pending = false;
                 }
@@ -757,8 +722,10 @@ impl App {
     /// — the document's "delete molecule" step restores that from the trash. Coalesces all
     /// of `f`'s mutations into one step. (No atom-count cap: a topology snapshot is cheap
     /// and rare, and every owned molecule must be undoable — the [`DRAW_AUTO_MAX_ATOMS`]
-    /// cap gates only the O(N²) auto-relax, not undo.)
+    /// cap gates only synchronous auto-relax, not undo.)
     pub(super) fn record_topology<F: FnOnce(&mut Self)>(&mut self, mi: usize, f: F) {
+        // Keep any preceding UI selection change separate from this atom-index remap.
+        self.history.maybe_record(EditState::capture(&self.scene));
         let (before, id) = {
             let Some(mol) = self.scene.molecules.get(mi) else {
                 f(self);
@@ -813,14 +780,20 @@ impl App {
             None => None,
         };
         if let Some(kind) = kind {
+            self.scene.refresh_selections();
             if let Some(mi) = target.and_then(|id| self.scene.molecules.iter().position(|m| m.id == id)) {
                 let mol = &mut self.scene.molecules[mi];
-                // Relaxing is O(N²) per step (all-pairs vdW) — never auto-relax a large
-                // loaded structure; clear the job and leave coordinates as drawn.
+                // Keep synchronous preparation/optimization limited to editor-sized
+                // structures. The force-field evaluator itself uses cutoff cell lists.
                 if mol.n_atoms > DRAW_AUTO_MAX_ATOMS {
                     if let Some(d) = self.draw.as_mut() {
                         d.relax = None;
                     }
+                    return;
+                }
+                if mol.data.is_shared() || !mol.trajectory.frames.is_empty() {
+                    self.status = "Geometry optimization requires an owned, single-frame molecule".into();
+                    if let Some(d) = self.draw.as_mut() { d.relax = None; }
                     return;
                 }
                 // Snapshot coords before the relax so the move is undoable (owned System
@@ -830,11 +803,32 @@ impl App {
                 let before: Option<Vec<[f32; 3]>> = record.then(|| {
                     mol.data.state().coords.iter().map(|p| [p.x, p.y, p.z]).collect()
                 });
-                let _ = crate::minimize::relax_in_system(
+                let atoms = mol.visible_edit_atoms();
+                let optimization = crate::minimize::relax_in_system(
                     mol.data.system_mut().expect("drawn molecule is owned"),
                     &mol.bonds,
                     kind,
+                    &atoms,
                 );
+                let result = match optimization {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.status = error;
+                        if let Some(d) = self.draw.as_mut() { d.relax = None; }
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                };
+                let outcome = match result.stop_reason {
+                    molar_ff::amber::StopReason::Converged => "converged",
+                    molar_ff::amber::StopReason::StepLimit => "step limit reached",
+                    molar_ff::amber::StopReason::LineSearchStalled => "line search stopped",
+                };
+                self.status = format!(
+                    "GAFF2 / Espaloma: {outcome} after {} steps; E {:.2} → {:.2} kJ/mol; max force {:.2} kJ/mol/nm; {} estimated terms",
+                    result.steps, result.initial_energy, result.final_energy, result.final_force_norm, result.estimated_terms,
+                );
+                log::debug!("GAFF2 optimization used {} temporary hydrogens", result.temporary_hydrogens);
                 // relax_in_system mutates coords directly (not via set_coords/rotate_fragment),
                 // so bump the version to invalidate the structure_snapshot cache — else the
                 // next topology edit's `before` would snapshot the *pre*-relax coordinates.

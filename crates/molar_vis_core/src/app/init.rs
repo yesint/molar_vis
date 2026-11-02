@@ -720,14 +720,12 @@ impl App {
             app.debug_align(&spec);
         }
 
-        // Verification hook: MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>] opens that rep in Draw
-        // mode (scoped to its selection), so the rep-scoped editing + the grey-out of the
-        // non-active reps can be checked with MOLAR_VIS_DEBUG_SAVE_IMAGE. Defaults to rep 0.
+        // Open a molecule in Draw mode for hidden UI checks. The legacy rep suffix
+        // is ignored because all visible selections now contribute to the edit scope.
         if let Ok(spec) = std::env::var("MOLAR_VIS_DEBUG_DRAW_REP") {
             let mut it = spec.split(':').map(|s| s.trim().parse::<usize>().unwrap_or(0));
             let mol = it.next().unwrap_or(0);
-            let rep = it.next().unwrap_or(0);
-            app.open_rep_in_editor(mol, rep);
+            app.open_molecule_in_editor(mol);
         }
 
         // Verification hook: MOLAR_VIS_DEBUG_CHARGES=1 presses [Compute charges] on every
@@ -814,7 +812,6 @@ impl App {
                         gray_active,
             false,
                     );
-                    app.renderer.set_edit_active(gray_active);
                     let aspect = w as f32 / h as f32;
                     let view = app.camera.view();
                     let proj = app.camera.proj(aspect);
@@ -1122,7 +1119,12 @@ impl App {
                 mol.data.system_mut().expect("drawn molecule is owned"),
                 &mol.bonds,
                 RelaxKind::Cleanup,
+                &(0..mol.n_atoms).collect::<Vec<_>>(),
             );
+            let res = match res {
+                Ok(result) => result,
+                Err(error) => { log::error!("debug draw optimization: {error}"); self.status = error; return; }
+            };
             // A representative bond length after relaxation (the first bond).
             let len0 = mol.bonds.first().map(|bond| {
                 let (a, b) = (bond.i1, bond.i2);

@@ -732,7 +732,7 @@ fn queue_geometry(rep: &mut Representation, input: crate::geometry_jobs::Input) 
 pub(super) fn rebuild_dirty(
     scene: &mut Scene, renderer: &SceneRenderer, settings: &Settings,
     view_dirty: bool, rs: &eframe::egui_wgpu::RenderState,
-    gray_active: Option<(crate::scene::MolId, usize)>, background: bool,
+    gray_active: Option<crate::scene::MolId>, background: bool,
 ) -> bool {
     rebuild_dirty_inner(scene,renderer,settings,view_dirty,rs,gray_active,RebuildOptions { background, preserve_cached_ss: false })
 }
@@ -757,11 +757,11 @@ renderer: &SceneRenderer,
 settings: &Settings,
 view_dirty: bool,
 rs: &eframe::egui_wgpu::RenderState,
-// The rep currently open in the drawing editor, as `(molecule, rep index)`. When set,
-// every *other* visible rep is greyed out (built desaturated + dim) to show it's inactive
+// The molecule currently open in the drawing editor. When set,
+// representations of other molecules are greyed out to show they are inactive
 // in Draw mode. `None` when not drawing → nothing greyed. The caller marks all reps
 // `geom_dirty` when this changes, so a rebuild reaches every rep.
-gray_active: Option<(crate::scene::MolId, usize)>,
+gray_active: Option<crate::scene::MolId>,
 options: RebuildOptions,
 ) -> bool {
     let RebuildOptions { background, preserve_cached_ss } = options;
@@ -837,9 +837,9 @@ options: RebuildOptions,
         let mut rep_geom_changed = false;
         // Reuse each smoothing window within this rebuild; no stale frame cache.
         let mut smoothed_states = std::collections::HashMap::new();
-        for (j, rep) in mol.reps.iter_mut().enumerate() {
-            // Grey out every rep except the one open in the editor (Draw mode only).
-            let grayed = matches!(gray_active, Some((tid, tr)) if !(mol_id == tid && j == tr));
+        for rep in &mut mol.reps {
+            // Grey out representations of other molecules while editing.
+            let grayed = matches!(gray_active, Some(tid) if mol_id != tid);
             #[cfg(not(target_arch = "wasm32"))]
             let background_allowed = background && gray_active.is_none()
                 && mol.trajectory.frames.len() <= 1 && !mol.trajectory.playing

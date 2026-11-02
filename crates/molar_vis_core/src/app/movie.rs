@@ -247,7 +247,6 @@ impl App {
             false,
         );
         self.camera.depth_bounds = self.scene.visible_depth_bounds();
-        self.renderer.set_edit_active(gray);
         if job.options.raytrace {
             self.renderer.prepare_raytrace(
                 &rs,

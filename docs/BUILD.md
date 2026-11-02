@@ -138,9 +138,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   startup scene to / replace it from a JSON session file during `App::new` — drives the
   save/load-state round-trip headlessly, since the rfd dialogs can't be; a save→load→save
   round-trip is byte-identical) +
-  `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` (open that rep in **Draw mode**, scoped to its
-  selection — so the rep-scoped editing and the **grey-out of the non-active reps** can be checked
-  with `MOLAR_VIS_DEBUG_SAVE_IMAGE`; defaults to rep 0) +
+  `MOLAR_VIS_DEBUG_DRAW_REP=<mol>[:<rep>]` (open that molecule in **Draw mode**;
+  all visible selections are editable, and other molecules are gray. The optional
+  rep suffix is ignored; the name remains for compatibility) +
   `MOLAR_VIS_DEBUG_SAVE_MOL=<path>` (write mol 0 to a structure file at startup — exercises the
   molar `FileHandler` write + displayed-frame swap path headlessly) +
   `MOLAR_VIS_DEBUG_SAVE_GROUP=<path>` (write group 0's members to one multi-record file — exercises
@@ -222,7 +222,7 @@ glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **
 molar **2.4.1** (crates.io version pinned in `Cargo.toml`, `default-features=false` →
 `Float=f32`; **edition 2024, MSRV 1.85** — see [molar integration](MOLAR.md)),
 molar_ff **2.4.1** (the same registry release provides GAFF/GAFF2 typing and a fixed Espaloma
-charge kernel without `tract` or a general ONNX runtime; native-only in this viewer),
+charge kernel without `tract` or a general ONNX runtime; the cleanup backend runs on native and WebAssembly),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
 `../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature).
 **`molar_vis_py` only** (native Python module, M26):
@@ -259,3 +259,19 @@ Run the resolver tests with
 `MOLAR_VIS_DEBUG_PATH_TIME=<seconds>` sets the glowing-path animation phase for
 headless raster/trace captures. Enable `animate_glowing_path` in the loaded
 session, then vary this time to compare rotation with a fixed camera.
+
+## Developing the Amber cleanup backend
+
+The new `molar_ff::amber` nonbonded/minimizer API is in the adjacent MolAR checkout
+and is not in the published 2.4.1 release. Until the next MolAR release, build this
+work with local Cargo overrides (do not commit local paths or the resulting lockfile):
+
+```sh
+cargo test -p molar_vis_core \
+  --config 'patch.crates-io.molar.path="../molar/molar"' \
+  --config 'patch.crates-io.molar_ff.path="../molar/molar_ff"' \
+  --config 'patch.crates-io.molar_python.path="../molar/molar_python"'
+```
+
+Use the same overrides for native builds and the WebAssembly check. Update the
+registry versions together after MolAR publishes the API.

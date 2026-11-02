@@ -107,19 +107,18 @@ pub(super) fn pick_file(accept: &str, ctx: egui::Context, deliver: impl Fn(Strin
 }
 impl App {
 
-    /// Open **representation `rep_idx`** of molecule `mi` in the drawing editor: start a
-    /// Draw session scoped to that rep (its selection defines the editable atoms; new atoms
-    /// fold into it). Every molecule is editable + undoable now (no per-molecule flag), so
-    /// this just switches into edit mode. Mutually exclusive with picking.
-    pub(super) fn open_rep_in_editor(&mut self, mi: usize, rep_idx: usize) {
+    /// Edit the union of the molecule's visible representations.
+    pub(super) fn open_molecule_in_editor(&mut self, mi: usize) {
         let Some(mol) = self.scene.molecules.get(mi) else { return };
         let id = mol.id;
-        let target_rep = (rep_idx < mol.reps.len()).then_some(rep_idx);
+        if mol.data.is_shared() { return; }
         self.pick_mode = PickMode::Off;
         let mut session = self.draw.take().unwrap_or_default();
         session.target = Some(id);
-        session.target_rep = target_rep;
         session.drag = DrawDrag::Idle;
+        session.relax = None;
+        session.minimize_pending = false;
+        session.plane_depth = None;
         // Start this molecule with a clean editing slate: a leftover DihedralRotate tool +
         // its selected axis are keyed (by MolId) to the previously-edited molecule, so a
         // handle drag would keep rotating the *old* molecule instead of this one. Reset to

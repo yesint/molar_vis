@@ -680,11 +680,6 @@ pub struct SceneRenderer {
     /// Selection-glow color, set by the app from the active theme + viewport background
     /// ([`set_glow_color`](Self::set_glow_color)); rides the camera uniform into the glow shaders.
     glow_color: [f32; 4],
-    /// The `(molecule, rep)` open in the drawing editor, if any ([`set_edit_active`]). Its opaque
-    /// geometry is drawn **first** within its molecule so, with the `Less` depth test, it wins the
-    /// coincident-depth tie against the (grayed) context reps of the same atoms — the freshly
-    /// created edit rep is appended last, so without this it z-loses and hides behind them.
-    edit_active: Option<(crate::scene::MolId, usize)>,
     path_animation: [f32; 4],
 
     camera_bgl: wgpu::BindGroupLayout,
@@ -1094,7 +1089,6 @@ impl SceneRenderer {
             shadow_draw_count: 0,
             // Overwritten from the theme before the first render; this is the dark-backdrop cyan.
             glow_color: [0.51, 0.84, 1.0, 1.0],
-            edit_active: None,
             path_animation: crate::interactions::glowing_path_animation(0.0),
             camera_bgl,
             camera_buf,
@@ -2065,13 +2059,6 @@ impl SceneRenderer {
         self.glow_color = [f(c.r()), f(c.g()), f(c.b()), 1.0];
     }
 
-    /// Set the `(molecule, rep)` being edited in Draw mode (or `None`), so its opaque geometry
-    /// draws first within its molecule and stays visible over the grayed context reps. See the
-    /// `edit_active` field.
-    pub fn set_edit_active(&mut self, active: Option<(crate::scene::MolId, usize)>) {
-        self.edit_active = active;
-    }
-
     /// Whether the GPU ray tracer is available (WebGPU/native; not WebGL2).
     pub fn raytrace_supported(&self) -> bool {
         self.raytracer.is_some()
@@ -2487,21 +2474,7 @@ impl SceneRenderer {
             if !mol.visible {
                 continue;
             }
-            // Draw the rep being edited (Draw mode) FIRST within its molecule: with the `Less`
-            // depth test the first-drawn wins a coincident-depth tie, so the freshly created edit
-            // rep — appended last — stays visible on top of the grayed context reps of the same
-            // atoms instead of z-losing and hiding behind them. Outside Draw mode this is `None`
-            // and the order is the plain rep order (byte-identical to before).
-            let active = self
-                .edit_active
-                .and_then(|(id, r)| (mol.id == id && r < mol.reps.len()).then_some(r));
-            let order: Vec<usize> = match active {
-                Some(a) => std::iter::once(a)
-                    .chain((0..mol.reps.len()).filter(move |&j| j != a))
-                    .collect(),
-                None => (0..mol.reps.len()).collect(),
-            };
-            for j in order {
+            for j in 0..mol.reps.len() {
                 let rep = &mol.reps[j];
                 let path = rep.params.has_glowing_path();
                 let draw_base = rep.material.is_transparent() == transparent;

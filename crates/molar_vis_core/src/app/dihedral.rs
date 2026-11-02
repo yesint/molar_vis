@@ -69,7 +69,6 @@ pub(super) struct DihedralAxis {
 /// An in-progress handle drag: the fragment side being rotated, plus the axis frame
 /// and last-measured drag angle used to compute the per-frame rotation delta.
 pub(super) struct DihedralDrag {
-    pub(super) side: DihedralSide,
     /// Index of the grabbed handle (for the emphasized overlay).
     pub(super) handle: usize,
     /// A point on the rotation line (world nm) and its unit direction (`i → j`).
@@ -376,10 +375,12 @@ impl App {
         let ndc = px_to_ndc(cursor, rect);
         let mut best: Option<(usize, usize, f32)> = None;
         for (mi, mol) in self.scene.molecules.iter().enumerate() {
-            if !mol.visible || mol.data.is_shared() || mol.bonds.is_empty() {
+            if !mol.visible || mol.data.is_shared() || mol.bonds.is_empty()
+                || self.draw.as_ref().and_then(|d| d.target) != Some(mol.id) {
                 continue;
             }
-            if let Some((k, dist)) = pick::nearest_bond_dist(mol, view, proj, ndc, 0.02, None) {
+            let scope = self.draw_scope(mi);
+            if let Some((k, dist)) = pick::nearest_bond_dist(mol, view, proj, ndc, 0.02, scope.as_ref()) {
                 if best.is_none_or(|(_, _, bd)| dist < bd) {
                     best = Some((mi, k, dist));
                 }
@@ -399,7 +400,9 @@ impl App {
     ) -> Option<usize> {
         let axis = self.draw.as_ref()?.dihedral.axis.as_ref()?;
         let mut best: Option<(usize, f32)> = None;
+        let scope = self.draw_scope(mi);
         for (idx, h) in axis.handles.iter().enumerate() {
+            if !scope.as_ref().is_some_and(|s| s.contains(&h.atom)) { continue; }
             if let Some(p) = self
                 .scene
                 .atom_world(mi, h.atom)
@@ -424,7 +427,7 @@ impl App {
         rect: egui::Rect,
         size_px: [u32; 2],
     ) {
-        let (i, j, handle_atom, side, side_atoms) = {
+        let (i, j, handle_atom, side_atoms) = {
             let Some(axis) = self.draw.as_ref().and_then(|d| d.dihedral.axis.as_ref()) else {
                 return;
             };
@@ -435,11 +438,14 @@ impl App {
                 DihedralSide::I => axis.i_side.clone(),
                 DihedralSide::J => axis.j_side.clone(),
             };
-            (axis.i, axis.j, h.atom, h.side, side_atoms)
+            (axis.i, axis.j, h.atom, side_atoms)
         };
         // Capture the rotated side's coords + which store they live in, so the whole drag
         // records as one undoable delta at release. This works for any molecule: the frame
         // target keeps the undo correct even if the displayed frame changes afterward.
+        let scope = self.draw_scope(mi);
+        let side_atoms: Vec<_> = side_atoms.into_iter()
+            .filter(|i| scope.as_ref().is_some_and(|s| s.contains(i))).collect();
         let frame = self.scene.molecules[mi].coord_edit_target();
         let before = self.scene.displayed_coords_of(mi, &side_atoms);
         let edit_atoms = side_atoms;
@@ -471,7 +477,6 @@ impl App {
         let angle = self.camera.plane_angle(size_px, ndc, axis_point, u, e1, e2);
         if let Some(d) = self.draw.as_mut() {
             d.dihedral.drag = Some(DihedralDrag {
-                side,
                 handle: hidx,
                 axis_point,
                 axis_dir: u,
@@ -528,11 +533,11 @@ impl App {
             return;
         };
         let ndc = px_to_ndc(cursor, rect);
-        let (axis_point, u, e1, e2, side, last) = {
+        let (axis_point, u, e1, e2, last) = {
             let Some(d) = self.draw.as_ref().and_then(|d| d.dihedral.drag.as_ref()) else {
                 return;
             };
-            (d.axis_point, d.axis_dir, d.e1, d.e2, d.side, d.last_angle)
+            (d.axis_point, d.axis_dir, d.e1, d.e2, d.last_angle)
         };
         let Some(now) = self.camera.plane_angle(size_px, ndc, axis_point, u, e1, e2) else {
             // Edge-on axis: can't measure the angle this frame. Freeze and drop the
@@ -559,16 +564,9 @@ impl App {
         if delta == 0.0 {
             return;
         }
-        // The atoms of the grabbed side.
-        let atoms: Vec<usize> = {
-            let Some(axis) = self.draw.as_ref().and_then(|d| d.dihedral.axis.as_ref()) else {
-                return;
-            };
-            match side {
-                DihedralSide::I => axis.i_side.clone(),
-                DihedralSide::J => axis.j_side.clone(),
-            }
-        };
+        // Use the same visible atom set captured for undo at the start of the drag.
+        let Some(drag) = self.draw.as_ref().and_then(|d| d.dihedral.drag.as_ref()) else { return };
+        let atoms = drag.edit_atoms.clone();
         let mol = &mut self.scene.molecules[mi];
         mol.rotate_fragment(&atoms, axis_point, u, delta);
         mol.mark_coords_dirty(true);
@@ -617,7 +615,9 @@ impl App {
             .filter(|p| rect.contains(*p))
             .and_then(|px| self.dihedral_hovered_handle(mi, rect, size_px, px));
         let dragged = draw.dihedral.drag.as_ref().map(|dr| dr.handle);
+        let scope = self.draw_scope(mi);
         for (idx, h) in axis.handles.iter().enumerate() {
+            if !scope.as_ref().is_some_and(|s| s.contains(&h.atom)) { continue; }
             let (Some(anchor), Some(hp)) = (
                 self.scene.atom_world(mi, h.anchor).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),
                 self.scene.atom_world(mi, h.atom).and_then(|w| self.camera.world_to_pixel(w, rect, size_px)),

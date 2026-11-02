@@ -229,10 +229,10 @@ pub struct App {
     /// = Off`, and choosing any pick mode clears `draw`. See the Draw-mode types at
     /// the bottom of this file.
     draw: Option<DrawSession>,
-    /// The `(molecule, rep)` open in the drawing editor as of the last geometry rebuild.
+    /// The molecule open in the drawing editor as of the last geometry rebuild.
     /// When it changes (Draw toggled, scope re-pointed), every rep is re-marked dirty so the
-    /// grey-out of the non-active reps is applied or removed. See [`App::draw_gray_active`].
-    last_gray_active: Option<(MolId, usize)>,
+    /// gray colors on other molecules are applied or removed. See [`App::draw_gray_active`].
+    last_gray_active: Option<MolId>,
     /// External command channel for the native Python module (`molar_vis_py`) and the
     /// wasm JavaScript API (`molar_vis_js`): jobs queued from the host are drained + run
     /// with `&mut App` at the top of each `ui()`, so an external driver can control the
@@ -920,7 +920,6 @@ impl App {
             gray_active,
             false,
         );
-        self.renderer.set_edit_active(gray_active);
 
         if raytrace {
             if !self.renderer.raytrace_supported() {
@@ -1375,6 +1374,7 @@ impl eframe::App for App {
         #[cfg(target_arch = "wasm32")]
         self.poll_wasm_loaders(&ctx);
 
+        self.sync_draw_target();
         let panel_dirty = self.draw_left_panel(ui);
         self.view_dirty |= panel_dirty;
 
