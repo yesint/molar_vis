@@ -59,3 +59,36 @@ does not establish a performance gain. For example, quality-2 reference medians 
 163.327 to 221.163 ms and candidate medians ranged from 219.888 to 223.715 ms. The initial single
 pair showed an apparent 60% difference, which the alternating runs did not reproduce. Raw
 samples and p95 values are retained in each run's `metrics.json`.
+
+### 1. Reuse surface projection work (S3)
+
+The refinement loop now reuses the split decision's initial field sample for its first
+projection step. Relaxation computes normals only in its final iteration and counts fixed
+triangle incidences once. It retains all three projection steps, displacement limits, field
+arithmetic, neighbor accumulation order, and isolated-vertex behavior. The original routines
+remain in a test-only reference module.
+
+All 364 regular release tests passed. A new differential test compares every mesh vertex byte,
+index, and source owner across all five quality levels and overlapping/disconnected shapes.
+The wasm32 core check passed with its existing warnings. Ten physical-GPU before/after pairs,
+five in each execution order, passed exact parity for all 210 paired artifacts. The comparison
+sheet and a full-resolution candidate image were inspected; the surface shape, lighting, and
+colors match the reference.
+
+The paired, alternating-order stage benchmark measured relaxation at 0.9904 → 0.8684 ms
+(12.3% lower) and refinement at 1.7247 → 1.4996 ms (13.1% lower). Their p95 values changed from
+1.1201 → 1.0805 ms and 1.8390 → 1.6559 ms, respectively. Each stage retained byte-exact output
+through all 31 measured pairs.
+
+| Complete build | Reference median of run medians | Candidate median of run medians | Median paired change |
+| --- | --- | --- | --- |
+| Surface quality 0 | 22.775 ms | 22.067 ms | −3.3% |
+| Surface quality 2 | 210.470 ms | 141.365 ms | −15.3% |
+| Surface quality 4 | 661.693 ms | 625.995 ms | −3.8% |
+
+The full-build results are noisier than the paired stage measurements, especially at quality 2;
+they must not be treated as guaranteed application speedups. Unchanged raster workloads showed
+overlapping run distributions. The largest positive median paired raster difference was 5.1%
+for quality-4 orthographic rendering without effects, where reference medians ranged from
+1.734–1.956 ms and candidate medians from 1.678–1.984 ms. Reverse-order controls removed several
+larger apparent differences. No raster speedup is claimed for this CPU-only change.

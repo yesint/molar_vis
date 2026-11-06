@@ -28,6 +28,10 @@ use crate::color::Colorizer;
 use crate::geometry::MeshData;
 use crate::render::MeshVertex;
 
+#[cfg(test)]
+#[path = "surface_reference.rs"]
+mod reference;
+
 /// Cap on total grid voxels; above it the spacing is coarsened so a huge system
 /// can't exhaust memory.
 const MAX_VOXELS: usize = 32_000_000;
@@ -814,9 +818,13 @@ fn relax_on_field(mesh: &mut MeshData, field: &[f32], dims: [usize; 3], origin: 
     let _timing = crate::performance::span("surface-relaxation");
     let mut sums = vec![Vec3::ZERO; mesh.vertices.len()];
     let mut counts = vec![0u32; mesh.vertices.len()];
-    for _ in 0..2 {
+    // Connectivity stays fixed during relaxation. Each triangle contributes two
+    // neighbors to each of its vertices, including shared-edge multiplicities.
+    for tri in mesh.indices.chunks_exact(3) {
+        for &i in tri { counts[i as usize] += 2; }
+    }
+    for iteration in 0..2 {
         sums.fill(Vec3::ZERO);
-        counts.fill(0);
         for tri in mesh.indices.chunks_exact(3) {
             for &(i, j) in &[
                 (tri[0], tri[1]),
@@ -827,7 +835,6 @@ fn relax_on_field(mesh: &mut MeshData, field: &[f32], dims: [usize; 3], origin: 
                 (tri[2], tri[1]),
             ] {
                 sums[i as usize] += Vec3::from_array(mesh.vertices[j as usize].pos);
-                counts[i as usize] += 1;
             }
         }
         for (i, v) in mesh.vertices.iter_mut().enumerate() {
@@ -847,9 +854,13 @@ fn relax_on_field(mesh: &mut MeshData, field: &[f32], dims: [usize; 3], origin: 
                 p = old + (p - old).clamp_length_max(0.5);
             }
             v.pos = (origin + p * h).to_array();
-            v.normal = (-sample_gradient(field, dims, p))
-                .normalize_or_zero()
-                .to_array();
+            // The next relaxation iteration reads positions and the field only.
+            // Keep the final normal evaluation and leave isolated vertices alone.
+            if iteration == 1 {
+                v.normal = (-sample_gradient(field, dims, p))
+                    .normalize_or_zero()
+                    .to_array();
+            }
         }
     }
 }
@@ -892,8 +903,11 @@ fn refine_on_field(
                     return None;
                 }
                 let mut p = initial;
-                for _ in 0..3 {
-                    let (value, g) = sample_field_gradient(field, dims, p);
+                for iteration in 0..3 {
+                    // The split decision already sampled this exact initial point.
+                    // Later iterations must sample the newly projected position.
+                    let (value, g) = if iteration == 0 { (value, gradient) }
+                        else { sample_field_gradient(field, dims, p) };
                     if g.length_squared() < 1e-12 {
                         break;
                     }
@@ -973,6 +987,87 @@ fn refine_quad(vertices: &[MeshVertex], [a, b, c, d]: [u32; 4], indices: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual paired release benchmark against the original projection routines"]
+    fn benchmark_surface_projection_reuse() {
+        use std::{hint::black_box, time::Instant};
+        let dims = [25; 3];
+        let h = 0.05;
+        let origin = Vec3::splat(-0.6);
+        let mut field = Vec::new();
+        for z in 0..25 {
+            for y in 0..25 {
+                for x in 0..25 {
+                    let p = origin + Vec3::new(x as f32, y as f32, z as f32) * h;
+                    field.push((0.2 - p.length()).max(0.18 - (p - Vec3::X * 0.25).length()));
+                }
+            }
+        }
+        let mut seed = surface_nets(&field, &vec![0; field.len()], &[0xffffffff], &[0], dims, origin, h);
+        for stage in ["relaxation", "refinement"] {
+            let mut timings = [Vec::new(), Vec::new()];
+            for iteration in 0..32 {
+                let mut meshes = [seed.clone(), seed.clone()];
+                // Alternate order to reduce temperature/frequency ordering effects.
+                for slot in [iteration % 2, 1 - iteration % 2] {
+                    let start = Instant::now();
+                    match (stage, slot) {
+                        ("relaxation", 0) => reference::relax_on_field(&mut meshes[slot], &field, dims, origin, h),
+                        ("relaxation", _) => relax_on_field(&mut meshes[slot], &field, dims, origin, h),
+                        (_, 0) => reference::refine_on_field(&mut meshes[slot], &field, dims, origin, h, 4),
+                        (_, _) => refine_on_field(&mut meshes[slot], &field, dims, origin, h, 4),
+                    }
+                    black_box(&meshes[slot]);
+                    if iteration > 0 { timings[slot].push(start.elapsed().as_secs_f64() * 1000.0); }
+                }
+                assert_eq!(bytemuck::cast_slice::<_, u8>(&meshes[0].vertices),
+                    bytemuck::cast_slice::<_, u8>(&meshes[1].vertices));
+                assert_eq!(meshes[0].indices, meshes[1].indices);
+            }
+            for values in &mut timings { values.sort_by(f64::total_cmp); }
+            eprintln!("AUDIT {stage}: reference_median_ms={} candidate_median_ms={} reference_p95_ms={} candidate_p95_ms={}",
+                timings[0][15], timings[1][15], timings[0][29], timings[1][29]);
+            relax_on_field(&mut seed, &field, dims, origin, h);
+        }
+    }
+
+    #[test]
+    fn relaxation_and_refinement_match_original_mesh_bytes() {
+        let dims = [25; 3];
+        let h = 0.05;
+        let origin = Vec3::splat(-0.6);
+        for separation in [0.0, 0.15, 0.35, 0.55] {
+            let mut field = Vec::new();
+            for z in 0..25 {
+                for y in 0..25 {
+                    for x in 0..25 {
+                        let p = origin + Vec3::new(x as f32, y as f32, z as f32) * h;
+                        field.push((0.25 - p.length()).max(0.2 - (p - Vec3::X * separation).length()));
+                    }
+                }
+            }
+            let nearest = vec![0; field.len()];
+            let mut initial = surface_nets(&field, &nearest, &[0xff123456], &[7], dims, origin, h);
+            // A disconnected vertex must retain its original position and normal.
+            initial.vertices.push(vertex(Vec3::splat(0.55), 37.0));
+            initial.vert_atom.push(9);
+            for quality in 0..=4 {
+                let mut expected = initial.clone();
+                let mut actual = initial.clone();
+                reference::relax_on_field(&mut expected, &field, dims, origin, h);
+                relax_on_field(&mut actual, &field, dims, origin, h);
+                assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.vertices),
+                    bytemuck::cast_slice::<_, u8>(&expected.vertices));
+                reference::refine_on_field(&mut expected, &field, dims, origin, h, quality);
+                refine_on_field(&mut actual, &field, dims, origin, h, quality);
+                assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.vertices),
+                    bytemuck::cast_slice::<_, u8>(&expected.vertices));
+                assert_eq!(actual.indices, expected.indices);
+                assert_eq!(actual.vert_atom, expected.vert_atom);
+            }
+        }
+    }
 
     #[test]
     fn color_filter_preserves_shared_edge_weights_and_isolated_vertices() {
