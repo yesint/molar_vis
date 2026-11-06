@@ -34,16 +34,9 @@ serde_json = "1"
 egui-stylesheet = "0.1"
 # Published Molar packages use the same release so Rust and Python types unify.
 # The default coordinate precision is f32; the fixed Espaloma kernel needs no ONNX runtime.
-molar = { version = "=2.4.1", default-features = false }
-molar_python = { version = "=2.4.1" }
-molar_ff = { version = "=2.4.1", default-features = false }
-
-# Amber minimization was added after the 2.4.1 release. Use one pinned
-# revision for the core, force field and Python bindings until it is released.
-[patch.crates-io]
-molar = { git = "https://github.com/yesint/molar", rev = "b01d5f7a02bf7c594f022c4bc61a37075d2f1687" }
-molar_ff = { git = "https://github.com/yesint/molar", rev = "b01d5f7a02bf7c594f022c4bc61a37075d2f1687" }
-molar_python = { git = "https://github.com/yesint/molar", rev = "b01d5f7a02bf7c594f022c4bc61a37075d2f1687" }
+molar = { version = "=2.4.2", default-features = false }
+molar_python = { version = "=2.4.2" }
+molar_ff = { version = "=2.4.2", default-features = false }
 
 # Debuggable own-code, fast dependencies (wgpu/molar hot loops) in dev builds.
 [profile.dev]

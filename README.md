@@ -216,8 +216,8 @@ with interactions and receptor pocket lines. Both flags are required, in either
 order, and cannot be combined with ordinary molecule arguments. `--receptor` and
 `--ligand` are equivalent long options.
 
-Dependencies come from crates.io and a pinned MolAR Git revision for the Amber
-minimization API; no sibling repository checkouts are required.
+Dependencies come from crates.io. MolAR 2.4.2 provides the Amber minimization
+API; no sibling repository checkouts are required.
 Supported molecular formats are provided by MolAR, including PDB, GRO, XYZ,
 SDF/MOL and trajectory formats such as XTC, TRR and DCD. Availability of some
 formats depends on the platform and enabled MolAR features.
