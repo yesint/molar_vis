@@ -124,3 +124,34 @@ to timing variability. Tail latency remains noisy, including a 4% increase in th
 quality-2 p95. Repeated installation of a fitting mesh retains both buffers, eliminating two
 GPU buffer allocations per installation while transferring the same bytes. These are upload
 measurements, not claimed full surface-build or frame-rate improvements.
+
+### 3. Resolve progressive RT only when its completed image changes (R2)
+
+The tracer records the completed sample count and last destination view after a resolve.
+It skips repeated resolves during a partial sweep, initializes a changed destination, and
+clears the record on restart. It retains one texture-view handle, with no additional texture
+allocation. Dispatches, sample counts, random sequences, and accumulation arithmetic are unchanged.
+
+A physical-GPU differential test reproduces the former policy by clearing only this record
+before each reference step. All 33 displayed intermediate/final image comparisons passed for
+orthographic and perspective views, AO/shadows, and full GI. The test also covers destination
+switches during a partial sweep, cancellation, restart, resize, and completion in one call.
+The three saved final image pairs were inspected visually and match exactly. The existing scene
+and accumulator replacement GPU test passed, as did all 364 regular release tests and the
+wasm32 check (three existing warnings).
+
+Three benchmark runs each measured eleven alternating policy pairs after warmup, including GPU
+completion, at 64 samples per pixel. Final images also match after every measured pair.
+
+| Output and submissions per call | Reference median | Candidate median | Reference p95 | Candidate p95 |
+| --- | --- | --- | --- | --- |
+| 1536×1024, four tiles | 137.402 ms | 132.860 ms | 146.050 ms | 143.647 ms |
+| 1536×1024, 32 tiles (export) | 123.424 ms | 122.701 ms | 132.791 ms | 126.020 ms |
+| 256×192, 32 tiles | 4.694 ms | 4.341 ms | 5.912 ms | 5.650 ms |
+
+Values are medians across runs. The four-tile case reduced resolves from 13 to 3 and completed
+3.3% sooner. The controls retained three and one resolves respectively; their timing differences
+do not establish a speedup. A separate timestamp-enabled diagnostic measured large-image
+resolve passes at 0.413 ms median and 0.459 ms p95. Profiling overhead was excluded from the
+convergence measurements. These results establish the benefit for a simple nine-sphere scene;
+the relative gain will be smaller when ray intersection or shading dominates convergence.

@@ -1062,6 +1062,11 @@ pub struct Raytracer {
     read_idx: usize,
     /// Samples accumulated so far (the running-average weight). Reset on camera change.
     total_samples: u32,
+    /// The completed average already written to the last destination. Retain only
+    /// one view; changing destinations requires a resolve even during a partial sweep.
+    last_resolved: Option<(u32, wgpu::TextureView)>,
+    #[cfg(test)]
+    resolve_count: std::cell::Cell<u32>,
     /// In-progress tiled trace (a resumable cursor); `None` when idle. Driven a bounded
     /// number of tile-submits per frame so the trace spreads across frames (responsive UI +
     /// progressive refinement) instead of one blocking dispatch.
@@ -1263,6 +1268,9 @@ impl Raytracer {
             resolve_bindings: None,
             read_idx: 0,
             total_samples: 0,
+            last_resolved: None,
+            #[cfg(test)]
+            resolve_count: std::cell::Cell::new(0),
             cursor: None,
         })
     }
@@ -1439,6 +1447,8 @@ impl Raytracer {
     /// flag (`fs_resolve`). The accumulator at `read_idx` always holds a *complete* image (the
     /// last finished sample-chunk), so this is seam-free even mid-chunk.
     fn resolve_into(&self, rs: &RenderState, target: &wgpu::TextureView) {
+        #[cfg(test)]
+        self.resolve_count.set(self.resolve_count.get() + 1);
         if crate::performance::enabled() {
             crate::performance::counters("rt-resolve", serde_json::json!({
                 "samples": self.total_samples, "size": self.accum_size,
@@ -1492,6 +1502,7 @@ impl Raytracer {
         self.ensure_bindings(rs);
         self.total_samples = 0;
         self.read_idx = 0;
+        self.last_resolved = None;
         // Per-submit sample chunk, bounded by *BVH-ray traversals* counting the rays cast per
         // sample: AO + finite-light quadrature + GI bounces dominate the cost.
         // Keep the CPU budget in sync with the shader's secondary-ray counts.
@@ -1528,7 +1539,8 @@ impl Raytracer {
     }
 
     /// Advance the in-progress trace by up to `max_submits` tile dispatches, then resolve the
-    /// current (complete) average into `target`. Returns `true` once the sample target is
+    /// current complete average into `target` if that image or destination changed.
+    /// Returns `true` once the sample target is
     /// reached (the cursor is then cleared); `true` immediately if no trace is in progress.
     pub fn trace_step(&mut self, rs: &RenderState, target: &wgpu::TextureView, max_submits: u32) -> bool {
         let Some(mut cur) = self.cursor.take() else {
@@ -1584,8 +1596,12 @@ impl Raytracer {
             }
         }
         // Show the latest *complete* chunk (skip until the first one lands → no garbage frame).
-        if self.total_samples > 0 {
+        if self.total_samples > 0
+            && self.last_resolved.as_ref().is_none_or(|(samples, view)|
+                *samples != self.total_samples || view != target)
+        {
             self.resolve_into(rs, target);
+            self.last_resolved = Some((self.total_samples, target.clone()));
         }
         let done = self.total_samples >= cur.total;
         if !done {
@@ -1625,6 +1641,10 @@ impl Raytracer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "raytrace_audit_tests.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {
