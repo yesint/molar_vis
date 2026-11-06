@@ -88,6 +88,92 @@ fn audit_surface_and_render_baseline() {
 }
 
 #[test]
+#[ignore = "physical GPU endpoint performance and before/after image comparison"]
+fn audit_effect_endpoints() {
+    use crate::{geometry::{self, RepKind}, material::Material, scene::Representation};
+    let dir = std::path::PathBuf::from(std::env::var("MOLAR_VIS_AUDIT_OUTPUT").unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let rs = gpu();
+    assert_ne!(rs.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let rep = Representation::new(RepKind::Surface);
+    let mol = &scene.molecules[0];
+    let sel = mol.data.select_all();
+    let base = geometry::build(&mol.data.bind_with_state(&sel, mol.render_state()), mol.n_atoms,
+        &mol.bonds, &rep.params, rep.color_spec(), Material::Opaque, None, true);
+    let mut metrics = Vec::new();
+    for material in Material::ALL {
+        let mol = &mut scene.molecules[0];
+        let mut rep = Representation::new(RepKind::Surface);
+        rep.material = material;
+        let mut geom = geometry::GeometryData { mesh: base.mesh.clone(), ..Default::default() };
+        geometry::stamp_material(&mut geom, material);
+        rep.gpu = renderer.upload(&rs, &geom);
+        rep.sel = Some(mol.data.select_all());
+        rep.sel_dirty = false; rep.geom_dirty = false; rep.coords_dirty = false;
+        rep.cache_geometry(geom, mol.n_atoms, true, false);
+        mol.reps = vec![rep];
+        for projection in [Projection::Orthographic, Projection::Perspective] {
+            camera.projection = projection;
+            // Enabled global AO at zero must suppress intrinsic AO; disabled AO
+            // must still allow the Molecular Nodes material's intrinsic effect.
+            for (case, (ao_enabled, ao, shadow, gi)) in [
+                (true,0.0,0.0,0.0), (false,0.0,0.0,0.0), (true,0.6,0.0,0.0),
+                (true,0.0,0.7,0.0), (true,0.6,0.7,1.0), (true,0.6,0.7,0.5),
+                (true,0.00001,0.00001,0.99999),
+            ].into_iter().enumerate() {
+                camera.ao.enabled = ao_enabled; camera.ao.strength = ao;
+                camera.shadow.enabled = true; camera.shadow.strength = shadow;
+                camera.shadow.softness = 0.7; camera.gi = gi;
+                camera.background.kind = BgKind::Gradient;
+                camera.depth_cue.enabled = true;
+                let label = format!("{material:?}-{projection:?}-{case}");
+                let cap = renderer.capture_begin(&rs,192,144,camera.view(),camera.proj(4.0/3.0),
+                    camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),
+                    camera.shadow_uniform(),camera.background,camera.eye_depth_range(),&scene);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                cap.read().save(dir.join(format!("raster-{label}.png"))).unwrap();
+                renderer.prepare_raytrace(&rs,&scene,&camera,[192,144],true);
+                let cap = renderer.capture_begin_raytrace(&rs,192,144,&camera,8).unwrap();
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                cap.read().save(dir.join(format!("trace-{label}.png"))).unwrap();
+                if material != Material::Opaque || projection != Projection::Orthographic { continue; }
+                for trace in [false,true] {
+                    let mut samples = Vec::new();
+                    for iteration in 0..18 {
+                        // Rotate the view so moving-camera shadow work is included.
+                        let mut moving = camera;
+                        moving.orientation = glam::Quat::from_rotation_y(iteration as f32*0.01);
+                        let start = std::time::Instant::now();
+                        if trace {
+                            renderer.rt_still_begin(&rs,&moving,[192,144],16);
+                            while !renderer.rt_still_step(&rs,32) {
+                                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                            }
+                        } else {
+                            renderer.render_scene(&rs,[640,480],moving.view(),moving.proj(4.0/3.0),
+                                moving.is_perspective(),moving.cue_uniform(),moving.ao_uniform(),
+                                moving.shadow_uniform(),moving.background,moving.eye_depth_range(),1.0,&scene);
+                        }
+                        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                        if iteration >= 3 { samples.push(start.elapsed().as_secs_f64()*1000.0); }
+                    }
+                    samples.sort_by(f64::total_cmp);
+                    let record = serde_json::json!({"stage":format!("trace{trace}-{case}"),
+                        "median_ms":samples[7],"p95_ms":samples[14],"samples_ms":samples});
+                    eprintln!("EFFECT_BENCH {record}"); metrics.push(record);
+                }
+            }
+        }
+    }
+    std::fs::write(dir.join("metrics.json"),serde_json::to_vec_pretty(&metrics).unwrap()).unwrap();
+}
+
+#[test]
 fn shared_shaders_validate_without_a_gpu() {
     for (name, source) in [
         ("sphere", include_str!("shaders/sphere.wgsl")),
@@ -1806,9 +1892,22 @@ fn shadow_maps_reuse_only_matching_casters_and_light_inputs() {
     scene.molecules[0].reps[0].material = crate::material::Material::Opaque;
     capture(&mut renderer, &scene, &camera);
     assert_eq!(renderer.shadow_draw_count, 11);
+    camera.shadow.strength = 0.0;
+    camera.orientation = glam::Quat::from_rotation_y(0.7);
+    let zero = capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 11);
+    camera.shadow.enabled = false;
+    assert_eq!(zero, capture(&mut renderer, &scene, &camera));
+    camera.shadow.enabled = true;
+    camera.shadow.strength = 1.0;
+    let restored = capture(&mut renderer, &scene, &camera);
+    assert_eq!(renderer.shadow_draw_count, 12);
+    renderer.shadow_key = None;
+    assert_eq!(restored, capture(&mut renderer, &scene, &camera));
+    assert_eq!(renderer.shadow_draw_count, 13);
     scene.molecules.clear();
     capture(&mut renderer, &scene, &camera);
-    assert_eq!(renderer.shadow_draw_count, 12);
+    assert_eq!(renderer.shadow_draw_count, 14);
 }
 
 #[test]

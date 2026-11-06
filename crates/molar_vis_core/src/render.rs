@@ -1566,7 +1566,7 @@ impl SceneRenderer {
         // view space → the light's clip space for the deferred shadow test. The
         // light is a directional key; we fit an orthographic frustum to the scene's
         // bounding sphere (center/radius recovered from the view + `depth_range`).
-        let shadow_on = shadow[2] > 0.5 && self.ssao_pipeline.is_some();
+        let shadow_on = shadow[2] > 0.5 && shadow[0] != 0.0 && self.ssao_pipeline.is_some();
         let (shadow_light_idx, shadow_matrix) = if shadow_on {
             let (light_view, light_proj, _) = shadow_camera(view, depth_range);
             // Ortho (perspective = false) so the impostors ray-cast with parallel
@@ -1720,7 +1720,8 @@ impl SceneRenderer {
             mol.reps.iter().any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes)
             || mol.meshes.iter().any(|m| m.state.visible && m.state.material.preset() == crate::material::Material::MolecularNodes)
         ));
-        if ao[3] > 0.5 || shadow_on || material_ao {
+        // Enabled global AO at zero strength suppresses intrinsic material AO.
+        if (ao[3] > 0.5 && ao[2] > 0.0) || shadow_on || (ao[3] <= 0.5 && material_ao) {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
             let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };
             let su = SsaoUniform::new(

@@ -572,7 +572,7 @@ fn effect_sample(index: u32) -> vec2<f32> {
 }
 
 fn shadow_at(s: Surf, light: vec3<f32>, sample: vec2<f32>) -> f32 {
-    if (U.shadow.z <= 0.5) { return 1.0; }
+    if (U.shadow.z <= 0.5 || U.shadow.x == 0.0) { return 1.0; }
     let lc = U.shadow_matrix * vec4<f32>(s.p, 1.0);
     let ndc = lc.xyz / lc.w;
     if (any(ndc < vec3<f32>(-1.0, -1.0, 0.0)) || any(ndc > vec3<f32>(1.0))) { return 1.0; }

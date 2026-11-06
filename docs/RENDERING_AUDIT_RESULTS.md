@@ -155,3 +155,33 @@ do not establish a speedup. A separate timestamp-enabled diagnostic measured lar
 resolve passes at 0.413 ms median and 0.459 ms p95. Profiling overhead was excluded from the
 convergence measurements. These results establish the benefit for a simple nine-sphere scene;
 the relative gain will be smaller when ray intersection or shading dominates convergence.
+
+### 4. Effect endpoint checkpoint (R8; validation incomplete)
+
+Work stopped at the user's request, and this checkpoint is committed for later continuation.
+The current changes skip zero-strength shadow-map rendering and shadow sampling, and skip
+the deferred effects pass when neither global nor intrinsic material AO nor shadows contributes.
+Enabled global AO at zero strength still suppresses intrinsic material AO. The checkpoint also
+adds `audit_effect_endpoints`, covering all 14 material presets, both projections, zero and
+near-zero strengths, full and mixed GI, transparency, fog, and gradient backgrounds. The shadow
+cache regression now checks zero-strength suppression and restoration after camera movement.
+
+An experimental full-GI shortcut was compiled and tested together with these guards, but it
+was removed before this checkpoint. The first combined before/after run matched all 392 images
+exactly; selected comparison images were inspected visually. Three before/after timing pairs
+completed, but mixed-GI controls showed possible slowdowns alongside substantial between-run
+variation. These measurements do not establish acceptance of the current isolated guards.
+The shader after removal of the full-GI shortcut has not yet been rebuilt or validated, and
+the extended shadow-cache test, regular suite, and browser check remain pending for this step.
+
+Resume by validating the isolated zero-strength changes. A same-process alternating shader
+benchmark was proposed to separate GPU clock variation from shader regressions, but it was
+not implemented. Run the endpoint image comparisons, the extended shadow-cache GPU test,
+regular release tests, and wasm32 check before marking this step accepted or starting another
+optimization. The remaining audit items are still pending.
+
+Saved binaries `target/render-audit/bin/step4-before` and `step4` contain the original policy
+and the combined experimental candidate respectively; `step4` does not represent this
+checkpoint's final source. Logs and images are in `target/render-audit/step4-before-1..3` and
+`step4-after-1..3` (logs use the same names with `.log`). The first comparison report is
+`step4-comparison-1.log`, and the inspected subset is `step4-inspection.png`.

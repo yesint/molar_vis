@@ -26,7 +26,7 @@ struct Ssao {
 // (fully shadowed). `textureSampleCompareLevel` (no derivatives) is used so it's
 // valid in the per-pixel control flow below.
 fn shadow_factor(p_view: vec3<f32>, normal_view: vec3<f32>) -> f32 {
-    if (u.shadow_params.z < 0.5) {
+    if (u.shadow_params.z < 0.5 || u.shadow_params.x == 0.0) {
         return 1.0; // disabled
     }
     let lc = u.shadow_matrix * vec4<f32>(p_view, 1.0);
