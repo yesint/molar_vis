@@ -2147,8 +2147,7 @@ dependencies = [
 [[package]]
 name = "molar"
 version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51b03e6a10d481de0766ace7081577f71fc749dff1ea9a62cf09d6cee9147abc"
+source = "git+https://github.com/yesint/molar?rev=b01d5f7a02bf7c594f022c4bc61a37075d2f1687#b01d5f7a02bf7c594f022c4bc61a37075d2f1687"
 dependencies = [
  "anyhow",
  "clap",
@@ -2174,8 +2173,7 @@ dependencies = [
 [[package]]
 name = "molar_ff"
 version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dfafd7e3838ff0f24f9960c886853c8005283cbe4a00b295bd6477a6bbedcbd"
+source = "git+https://github.com/yesint/molar?rev=b01d5f7a02bf7c594f022c4bc61a37075d2f1687#b01d5f7a02bf7c594f022c4bc61a37075d2f1687"
 dependencies = [
  "matrixmultiply",
  "molar",
@@ -2186,8 +2184,7 @@ dependencies = [
 [[package]]
 name = "molar_gromacs"
 version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c82c4f7f6ea952f6d3a46f13edab2e58c3b7085298f542f16490b54816e75b9"
+source = "git+https://github.com/yesint/molar?rev=b01d5f7a02bf7c594f022c4bc61a37075d2f1687#b01d5f7a02bf7c594f022c4bc61a37075d2f1687"
 dependencies = [
  "cc",
  "libloading",
@@ -2196,8 +2193,7 @@ dependencies = [
 [[package]]
 name = "molar_python"
 version = "2.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f1325bbfbc8b0ac936fd02103196b239028768588e406708dcc2ce6a0b5151"
+source = "git+https://github.com/yesint/molar?rev=b01d5f7a02bf7c594f022c4bc61a37075d2f1687#b01d5f7a02bf7c594f022c4bc61a37075d2f1687"
 dependencies = [
  "env_logger",
  "log",
@@ -2289,8 +2285,7 @@ dependencies = [
 [[package]]
 name = "molly"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75dccedc345e14623ecc79262729c65fb6a7262751e1ad7e4230664475c7957b"
+source = "git+https://github.com/ma3ke/molly.git#da06147efe4a4c7f30df2fba9c979431b093f9f7"
 
 [[package]]
 name = "moxcms"
@@ -3077,8 +3072,7 @@ dependencies = [
 [[package]]
 name = "powersasa"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a1073b929b2cd79502edb9ed1e64aa5dd859466b696dbfe3c0fbf33eb1f4111"
+source = "git+https://github.com/yesint/powersasa-llm.git#2b9465029fe9da4432b4a0cf64a2d9a86621da3c"
 dependencies = [
  "nalgebra",
  "thiserror 2.0.19",

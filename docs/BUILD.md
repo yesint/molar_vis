@@ -219,9 +219,9 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),
 glam **0.32** (GPU/camera math), nalgebra **0.34** (molar boundary), bytemuck **1.25**,
-molar **2.4.1** (crates.io version pinned in `Cargo.toml`, `default-features=false` →
+molar **2.4.1 + Amber development API** (Git revision pinned in `Cargo.toml`, `default-features=false` →
 `Float=f32`; **edition 2024, MSRV 1.85** — see [molar integration](MOLAR.md)),
-molar_ff **2.4.1** (the same registry release provides GAFF/GAFF2 typing and a fixed Espaloma
+molar_ff **2.4.1 + Amber development API** (the same Git revision provides GAFF/GAFF2 typing and a fixed Espaloma
 charge kernel without `tract` or a general ONNX runtime; the cleanup backend runs on native and WebAssembly),
 **egui-stylesheet 0.1** (the theme sheets — our own published crate, developed in the sibling repo
 `../egui-stylesheet` outside this workspace; it pulls `toml` and turns on egui's `serde` feature).
@@ -229,8 +229,11 @@ charge kernel without `tract` or a general ONNX runtime; the cleanup backend run
 pyo3 **0.27** (`extension-module`) + `molar_python` (rlib, the pymolar bindings) + winit **0.30**,
 built as a wheel with **maturin**. GROMACS 2026.1 available as `gmx`.
 
-Viewer 0.3.0 uses crates.io dependencies. The workspace pins all three Molar
-packages to version `2.4.1` so Python and core molecular types match.
+The published viewer 0.3.0 uses crates.io dependencies. This development tree
+patches all three Molar packages to Git revision
+`b01d5f7a02bf7c594f022c4bc61a37075d2f1687`, which provides the Amber minimization
+API missing from the published Molar 2.4.1 release. Python and core molecular
+types use the same revision.
 `Cargo.lock` pins the full dependency graph. Install the viewer with
 `cargo install molar_vis --version 0.3.0 --locked`.
 For local development, use temporary `[patch.crates-io]` entries pointing to
@@ -262,16 +265,16 @@ session, then vary this time to compare rotation with a fixed camera.
 
 ## Developing the Amber cleanup backend
 
-The new `molar_ff::amber` nonbonded/minimizer API is in the adjacent MolAR checkout
-and is not in the published 2.4.1 release. Until the next MolAR release, build this
-work with local Cargo overrides (do not commit local paths or the resulting lockfile):
+The `molar_ff::amber` nonbonded/minimizer API is not in the published 2.4.1
+release. The workspace therefore pins MolAR Git revision
+`b01d5f7a02bf7c594f022c4bc61a37075d2f1687` through `[patch.crates-io]`.
+Normal Cargo commands fetch this revision automatically; no local checkout or
+command-line override is needed:
 
 ```sh
-cargo test -p molar_vis_core \
-  --config 'patch.crates-io.molar.path="../molar/molar"' \
-  --config 'patch.crates-io.molar_ff.path="../molar/molar_ff"' \
-  --config 'patch.crates-io.molar_python.path="../molar/molar_python"'
+cargo run -p molar_vis -- tests/2lao.pdb
+cargo test -p molar_vis_core
 ```
 
-Use the same overrides for native builds and the WebAssembly check. Update the
-registry versions together after MolAR publishes the API.
+After MolAR publishes the API, update the registry versions together, remove
+these Git patches, and regenerate `Cargo.lock`.

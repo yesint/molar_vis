@@ -55,6 +55,7 @@ pub fn build(
     ribbon_width: f32,
     ribbon_thickness: f32,
     bevel_height: f32,
+    cutouts: bool,
     pbox: Option<&PeriodicBox>,
 ) -> MeshData {
     // Group atoms by residue (BTreeMap keeps ascending resindex order).
@@ -114,6 +115,7 @@ pub fn build(
         ribbon_width,
         ribbon_thickness,
         bevel_height,
+        cutouts,
     };
     build_residues(&residues, &shape, pbox, cg, false)
 }
@@ -211,7 +213,7 @@ impl Cache {
         params: &super::RepParams, color: crate::color::ColorSpec,
         material: crate::material::Material, ss: Option<&SsMap>,
     ) -> Option<Self> {
-        let super::RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } = *params else { return None; };
+        let super::RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts } = *params else { return None; };
         let ss = ss.expect("ss computed for cartoon");
         let colors = Colorizer::new(color, bound, n_atoms, Some(ss));
         let mut by_res = BTreeMap::new();
@@ -230,7 +232,7 @@ impl Cache {
         let residues = by_res.into_iter().filter_map(|(resindex, (trace, orientation, chain))| {
             trace.map(|(trace, color)| CachedResidue { trace, orientation, chain, resindex, color, class: ss.class(resindex) })
         }).collect();
-        Some(Self { residues, shape: Shape { coil_radius, ribbon_width, ribbon_thickness, bevel_height }, cg, material })
+        Some(Self { residues, shape: Shape { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts }, cg, material })
     }
 
     pub(crate) fn build(&self, state: &State, dashed: bool) -> super::GeometryData {
@@ -301,6 +303,7 @@ struct Shape {
     ribbon_width: f32,
     ribbon_thickness: f32,
     bevel_height: f32,
+    cutouts: bool,
 }
 
 impl Shape {
@@ -542,7 +545,8 @@ fn build_run(
         }
     }
 
-    emit(&rings, &ring_owner, shape.bevel_height, mesh);
+    let windows = if shape.cutouts { ribbon_windows(&ctx, &rings, ext_lo, ext_hi) } else { Vec::new() };
+    emit_windows(&rings, &ring_owner, shape.bevel_height, &windows, mesh);
 }
 
 /// The `[start, end]` residue index span of the contiguous helix run containing
@@ -955,13 +959,26 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
 /// `owner[i]` is the source residue of ring `i`: its `resindex` and trace atom are
 /// stamped onto every vertex of that ring (and the adjacent end cap) into
 /// `mesh.vert_res` / `mesh.vert_atom`.
+#[cfg(test)]
 fn emit(rings: &[Ring], owner: &[&Residue], bevel_height: f32, mesh: &mut MeshData) {
+    emit_windows(rings, owner, bevel_height, &[], mesh);
+}
+
+fn emit_windows(rings: &[Ring], owner: &[&Residue], bevel_height: f32, windows: &[RibbonWindow], mesh: &mut MeshData) {
     // Duplicate face endpoints for sharp ridge normals. Keep the same topology
     // throughout a run, including coils and transitions, for trajectory updates.
     let bevel_height = if bevel_height.is_finite() { bevel_height.max(0.0) } else { 0.0 };
     let edge_ridges = bevel_height > 0.0;
     let ring_size = if edge_ridges { 2 * RING } else { RING };
     let base = mesh.vertices.len() as u32;
+    // Windows have disjoint longitudinal spans. Index them by spline strip so
+    // clipping stays linear in the size of the ribbon.
+    let mut strip_windows = vec![None; rings.len() - 1];
+    for window in windows {
+        let start = (window.min[0] * STEPS as f32).floor() as usize;
+        let end = ((window.max[0] * STEPS as f32).ceil() as usize).min(strip_windows.len());
+        for slot in strip_windows.iter_mut().take(end).skip(start) { *slot = Some(window); }
+    }
 
     for (ri, r) in rings.iter().enumerate() {
         // A flat ribbon (helix/sheet: half-thickness ≪ half-width) is shaded as a true
@@ -1021,7 +1038,12 @@ fn emit(rings: &[Ring], owner: &[&Residue], bevel_height: f32, mesh: &mut MeshDa
             let b = a0 + k2 as u32;
             let c = b0 + k2 as u32;
             let d = b0 + k as u32;
-            mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+            if let Some(window) = strip_windows[r] {
+                cut_window_quad(mesh, [a, b, c, d], [&rings[r], &rings[r + 1]],
+                    r, edge_ridges, k / if edge_ridges { 2 } else { 1 }, window);
+            } else {
+                mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+            }
         }
     }
 
@@ -1043,6 +1065,342 @@ fn emit(rings: &[Ring], owner: &[&Residue], bevel_height: f32, mesh: &mut MeshDa
         ring_size,
         false,
     );
+}
+
+/// A vertex in ribbon coordinates, with the matching point on the lower face.
+/// Clipping the existing triangles preserves the original spline surface.
+#[derive(Clone)]
+struct WindowVertex {
+    uv: [f32; 2],
+    pos: Vector3f,
+    bottom: Vector3f,
+    normal: Vector3f,
+    color: u32,
+    residue: u32,
+    atom: u32,
+    /// Clipping planes this vertex lies on. Shared bits identify real hole
+    /// edges without confusing nearby triangle seams with short corner edges.
+    boundary_planes: u32,
+}
+
+impl WindowVertex {
+    fn mix(&self, other: &Self, t: f32) -> Self {
+        let owner = if t < 0.5 { self } else { other };
+        Self {
+            uv: [self.uv[0] * (1.0 - t) + other.uv[0] * t,
+                 self.uv[1] * (1.0 - t) + other.uv[1] * t],
+            pos: self.pos * (1.0 - t) + other.pos * t,
+            bottom: self.bottom * (1.0 - t) + other.bottom * t,
+            normal: self.normal * (1.0 - t) + other.normal * t,
+            color: lerp_color(self.color, other.color, t),
+            residue: owner.residue, atom: owner.atom,
+            boundary_planes: self.boundary_planes & other.boundary_planes,
+        }
+    }
+}
+
+/// An opening in spline coordinates. Physical width coordinates let the
+/// triangular opening retain its shape as the surrounding arrow widens.
+struct RibbonWindow {
+    #[cfg(test)]
+    boundary: Vec<[f32; 2]>,
+    pieces: Vec<WindowPiece>,
+    min: [f32; 2],
+    max: [f32; 2],
+}
+
+impl RibbonWindow {
+    fn new(boundary: Vec<[f32; 2]>) -> Self {
+        let mut min = [f32::INFINITY; 2];
+        let mut max = [f32::NEG_INFINITY; 2];
+        for p in &boundary {
+            for axis in 0..2 {
+                min[axis] = min[axis].min(p[axis]);
+                max[axis] = max[axis].max(p[axis]);
+            }
+        }
+        let pieces = window_pieces(&boundary);
+        Self { #[cfg(test)] boundary, pieces, min, max }
+    }
+}
+
+struct WindowPiece {
+    boundary: Vec<[f32; 2]>,
+    wall_edges: u32,
+}
+
+/// Decompose a simple counterclockwise outline into convex pieces. Only the
+/// original perimeter gets walls; shared partition edges remain open.
+fn window_pieces(boundary: &[[f32; 2]]) -> Vec<WindowPiece> {
+    let convex = |ids: &[usize]| (0..ids.len()).all(|i| {
+        window_distance(boundary[ids[(i + 2) % ids.len()]], boundary[ids[i]],
+            boundary[ids[(i + 1) % ids.len()]]) >= 0.0
+    });
+    let all: Vec<_> = (0..boundary.len()).collect();
+    let mut polygons = Vec::new();
+    if all.len() <= 32 && convex(&all) {
+        polygons.push(all);
+    } else {
+        let mut remaining = all;
+        while remaining.len() > 3 {
+            let ear = (0..remaining.len()).find(|&i| {
+                let ids = [remaining[(i + remaining.len() - 1) % remaining.len()],
+                    remaining[i], remaining[(i + 1) % remaining.len()]];
+                if window_distance(boundary[ids[2]], boundary[ids[0]], boundary[ids[1]]) <= 0.0 { return false; }
+                !remaining.iter().any(|j| !ids.contains(j) && (0..3).all(|k| {
+                    window_distance(boundary[*j], boundary[ids[k]], boundary[ids[(k + 1) % 3]]) >= 0.0
+                }))
+            }).expect("rounded window outline must be simple");
+            polygons.push(vec![remaining[(ear + remaining.len() - 1) % remaining.len()],
+                remaining[ear], remaining[(ear + 1) % remaining.len()]]);
+            remaining.remove(ear);
+        }
+        polygons.push(remaining);
+        // Merge adjacent triangles to keep per-frame clipping inexpensive.
+        'merge: loop {
+            for a in 0..polygons.len() {
+                for b in a + 1..polygons.len() {
+                    let (p, q) = (&polygons[a], &polygons[b]);
+                    for i in 0..p.len() {
+                        for j in 0..q.len() {
+                            if p[i] != q[(j + 1) % q.len()] || p[(i + 1) % p.len()] != q[j] { continue; }
+                            let joined: Vec<_> = (0..p.len()).map(|k| p[(i + 1 + k) % p.len()])
+                                .chain((1..q.len() - 1).map(|k| q[(j + 1 + k) % q.len()])).collect();
+                            if joined.len() <= 32 && convex(&joined) {
+                                polygons[a] = joined;
+                                polygons.remove(b);
+                                continue 'merge;
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+    polygons.into_iter().map(|ids| {
+        let wall_edges = (0..ids.len()).fold(0, |mask, i| {
+            if (ids[i] + 1) % boundary.len() == ids[(i + 1) % ids.len()] { mask | (1 << i) } else { mask }
+        });
+        WindowPiece { boundary: ids.iter().map(|&i| boundary[i]).collect(), wall_edges }
+    }).collect()
+}
+
+fn ribbon_windows(c: &RunCtx, rings: &[Ring], ext_lo: usize, ext_hi: usize) -> Vec<RibbonWindow> {
+    let mut windows = Vec::new();
+    let n = c.classes.len();
+    for i in ext_lo..n - 1 - ext_hi {
+        if c.classes[i] == SsClass::Coil || c.classes[i] != c.classes[i + 1] { continue; }
+        let arrow = c.strands.iter().copied().find(|&(base, tip)| {
+            let midpoint = i as f32 + 0.5;
+            midpoint >= base && midpoint < tip
+        });
+        let in_arrow = arrow.is_some();
+        // Keep the broad base just inside the sampled barb and extend the
+        // apex toward the arrow tip. Scale its length and base width together
+        // so the triangle sides follow the arrow's taper. A Cα boundary must
+        // not truncate the triangular outline.
+        let (lo, hi) = if let Some((base, tip)) = arrow {
+            let after_barb = (base * STEPS as f32).ceil() / STEPS as f32 + 0.02;
+            let lo = (i as f32 + 0.22).max(after_barb);
+            // Move the head–stem junction forward while retaining the apex.
+            (lo + 0.10, (lo + 0.48 * (tip - lo)).min(tip - 0.25))
+        } else {
+            (i as f32 + 0.12, i as f32 + 0.88)
+        };
+        if hi - lo < 0.25 { continue; }
+        let (first, last) = if in_arrow {
+            (i * STEPS, (i + 1) * STEPS)
+        } else {
+            ((lo * STEPS as f32).floor() as usize, (hi * STEPS as f32).ceil() as usize)
+        };
+        let span = &rings[first..=last];
+        if span.iter().any(|r| r.hw <= 2.0 * r.ht) { continue; }
+        let width = span.iter().map(|r| r.hw).fold(f32::INFINITY, f32::min);
+        let boundary = if in_arrow {
+            // Size the base from the head at the opening, not from the narrow
+            // shaft elsewhere in this residue interval.
+            let head_width = 0.48 * width_at(c, lo);
+            let stem_lo = (lo - 0.40).max(i as f32 + 0.10);
+            let stem_width = (head_width * 0.55).min(width * 0.48);
+            rounded_stem_arrow_window(stem_lo, lo, hi, head_width, stem_width)
+        } else {
+            window_boundary(lo, hi, width)
+        };
+        windows.push(RibbonWindow::new(boundary));
+    }
+    windows
+}
+
+#[cfg(test)]
+fn rounded_arrow_window(lo: f32, hi: f32, half_width: f32) -> Vec<[f32; 2]> {
+    rounded_window_outline(&[[lo, half_width], [lo, -half_width], [hi, 0.0]])
+}
+
+fn rounded_stem_arrow_window(stem_lo: f32, lo: f32, hi: f32, half_width: f32, stem_width: f32) -> Vec<[f32; 2]> {
+    rounded_window_outline(&[
+        [lo, half_width], [lo, stem_width], [stem_lo, stem_width],
+        [stem_lo, -stem_width], [lo, -stem_width], [lo, -half_width], [hi, 0.0],
+    ])
+}
+
+fn rounded_window_outline(corners: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut points = Vec::with_capacity(corners.len() * 7);
+    for i in 0..corners.len() {
+        let corner = corners[i];
+        let prev = corners[(i + corners.len() - 1) % corners.len()];
+        let next = corners[(i + 1) % corners.len()];
+        let start = [corner[0] * 0.92 + prev[0] * 0.08, corner[1] * 0.92 + prev[1] * 0.08];
+        let end = [corner[0] * 0.92 + next[0] * 0.08, corner[1] * 0.92 + next[1] * 0.08];
+        for step in 0..=6 {
+            let t = step as f32 / 6.0;
+            let a = (1.0 - t) * (1.0 - t);
+            let b = 2.0 * t * (1.0 - t);
+            let d = t * t;
+            points.push([a * start[0] + b * corner[0] + d * end[0],
+                         a * start[1] + b * corner[1] + d * end[1]]);
+        }
+    }
+    points
+}
+
+fn window_boundary(lo: f32, hi: f32, width: f32) -> Vec<[f32; 2]> {
+    // Counterclockwise rounded rectangle in (residue coordinate, physical width).
+    // The straight sections leave bridges at each Cα and rails at both edges.
+    let mut points = Vec::with_capacity(24);
+    for (u, x, start) in [(hi - 0.09, 0.32, 0.0_f32), (lo + 0.09, 0.32, 90.0),
+                           (lo + 0.09, -0.32, 180.0), (hi - 0.09, -0.32, 270.0)] {
+        for step in 0..=5 {
+            let angle = (start + step as f32 * 18.0).to_radians();
+            points.push([u + 0.09 * angle.cos(), width * (x + 0.16 * angle.sin())]);
+        }
+    }
+    points
+}
+
+fn window_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+}
+
+fn window_clip(poly: &[WindowVertex], a: [f32; 2], b: [f32; 2], plane: usize, inside: bool) -> Vec<WindowVertex> {
+    let mut out = Vec::new();
+    if poly.is_empty() { return out; }
+    let mut prev = poly.last().unwrap();
+    let sign = if inside { 1.0 } else { -1.0 };
+    let mut prev_d = sign * window_distance(prev.uv, a, b);
+    for next in poly {
+        let next_d = sign * window_distance(next.uv, a, b);
+        if (prev_d >= 0.0) != (next_d >= 0.0) {
+            let mut intersection = prev.mix(next, prev_d / (prev_d - next_d));
+            intersection.boundary_planes |= 1 << plane;
+            out.push(intersection);
+        }
+        if next_d >= 0.0 {
+            let mut vertex = next.clone();
+            if next_d == 0.0 { vertex.boundary_planes |= 1 << plane; }
+            out.push(vertex);
+        }
+        prev = next;
+        prev_d = next_d;
+    }
+    out
+}
+
+fn push_window_vertex(mesh: &mut MeshData, v: &WindowVertex, pos: Vector3f, normal: Vector3f) -> u32 {
+    let index = mesh.vertices.len() as u32;
+    mesh.vertices.push(MeshVertex { pos: pos.to_array(), normal: normal.normalize_or_zero().to_array(), color: v.color, mat: 0 });
+    mesh.vert_res.push(v.residue);
+    mesh.vert_atom.push(v.atom);
+    index
+}
+
+fn emit_window_polygon(mesh: &mut MeshData, poly: &[WindowVertex]) {
+    if poly.len() < 3 { return; }
+    let base = mesh.vertices.len() as u32;
+    for v in poly { push_window_vertex(mesh, v, v.pos, v.normal); }
+    for i in 1..poly.len() - 1 {
+        if (poly[i].pos - poly[0].pos).cross(&(poly[i + 1].pos - poly[0].pos)).norm_squared() > 1e-18 {
+            mesh.indices.extend_from_slice(&[base, base + i as u32, base + i as u32 + 1]);
+        }
+    }
+}
+
+fn cut_window_quad(mesh: &mut MeshData, ids: [u32; 4], rings: [&Ring; 2], step: usize, ridges: bool, face: usize, window: &RibbonWindow) {
+    let top = if ridges { face < 5 } else { face < RING / 2 };
+    let vertices: Vec<_> = ids.iter().enumerate().map(|(i, &id)| {
+        let r = rings[usize::from(i >= 2)];
+        let v = &mesh.vertices[id as usize];
+        let pos = Vector3f::from(v.pos);
+        // The orientation axes can be slightly nonorthogonal, so obtain the
+        // exact profile coordinates rather than projecting world positions.
+        let k = (face + usize::from(i == 1 || i == 2)) % RING;
+        let (x, y) = if ridges {
+            ridge_point(r, k, 0.0) // ridge heights do not change profile x
+        } else {
+            let (s, c) = (std::f32::consts::TAU * k as f32 / RING as f32).sin_cos();
+            (r.hw * c, r.ht * s)
+        };
+        WindowVertex {
+            uv: [(step + usize::from(i >= 2)) as f32 / STEPS as f32, x],
+            pos, bottom: pos - r.normal * (2.0 * y), normal: Vector3f::from(v.normal),
+            color: v.color, residue: mesh.vert_res[id as usize], atom: mesh.vert_atom[id as usize],
+            boundary_planes: 0,
+        }
+    }).collect();
+    // Most quads are outside the window's bounding rectangle.
+    if step as f32 / STEPS as f32 >= window.max[0] || (step + 1) as f32 / STEPS as f32 <= window.min[0]
+        || vertices.iter().all(|v| v.uv[1] >= window.max[1])
+        || vertices.iter().all(|v| v.uv[1] <= window.min[1]) {
+        mesh.indices.extend_from_slice(&[ids[0], ids[1], ids[2], ids[0], ids[2], ids[3]]);
+        return;
+    }
+    // Mirror the diagonal on the lower face so inner walls meet both surfaces.
+    let triangles = if top { [[0, 1, 2], [0, 2, 3]] } else { [[0, 1, 3], [1, 2, 3]] };
+    for triangle in triangles {
+        let mut exterior = vec![triangle.iter().map(|&i| vertices[i].clone()).collect::<Vec<_>>()];
+        for piece in &window.pieces {
+            let boundary = &piece.boundary;
+            let mut next_exterior = Vec::new();
+            for mut remaining in exterior {
+                for vertex in &mut remaining { vertex.boundary_planes = 0; }
+                for i in 0..boundary.len() {
+                    let a = boundary[i];
+                    let b = boundary[(i + 1) % boundary.len()];
+                    let outside = window_clip(&remaining, a, b, i, false);
+                    if outside.len() >= 3 { next_exterior.push(outside); }
+                    remaining = window_clip(&remaining, a, b, i, true);
+                    if remaining.len() < 3 { break; }
+                }
+                if !top || remaining.len() < 3 { continue; }
+                // Adjacent pieces can touch along an edge without sharing
+                // area. Such degenerate intersections must not emit walls.
+                let origin = remaining[0].uv;
+                let area: f64 = (1..remaining.len() - 1).map(|j| {
+                    let a = remaining[j].uv;
+                    let b = remaining[j + 1].uv;
+                    (a[0] as f64 - origin[0] as f64) * (b[1] as f64 - origin[1] as f64)
+                        - (a[1] as f64 - origin[1] as f64) * (b[0] as f64 - origin[0] as f64)
+                }).sum();
+                if area.abs() < 1e-12 { continue; }
+                // Only edges on the hole boundary need walls; triangle and ring seams
+                // inside the opening are deliberately excluded.
+                for i in 0..remaining.len() {
+                    let a = &remaining[i];
+                    let b = &remaining[(i + 1) % remaining.len()];
+                    if (b.pos - a.pos).norm_squared() < 1e-16 { continue; }
+                    if a.boundary_planes & b.boundary_planes & piece.wall_edges == 0 { continue; }
+                    let normal = (b.pos - a.pos).cross(&(a.pos - a.bottom)).normalize_or_zero();
+                    let ia = push_window_vertex(mesh, a, a.pos, normal);
+                    let ib = push_window_vertex(mesh, a, a.bottom, normal);
+                    let ic = push_window_vertex(mesh, b, b.bottom, normal);
+                    let id = push_window_vertex(mesh, b, b.pos, normal);
+                    mesh.indices.extend_from_slice(&[ia, ib, ic, ia, ic, id]);
+                }
+            }
+            exterior = next_exterior;
+        }
+        for polygon in exterior { emit_window_polygon(mesh, &polygon); }
+    }
 }
 
 /// A flat ribbon with triangular raised rails on both faces of each edge.
@@ -1290,6 +1648,156 @@ mod tests {
     }
 
     #[test]
+    fn window_walls_cover_only_the_cutout_perimeter() {
+        // A flat broad face makes the expected wall area exact: perimeter ×
+        // thickness. Extra walls along triangle/ring seams increase this area.
+        // Large residue indices exercise the precision of spline coordinates.
+        for residue in [0, 100, 1000] {
+            for boundary in [
+                rounded_arrow_window(residue as f32 + 0.12, residue as f32 + 0.88, 0.072),
+                rounded_stem_arrow_window(residue as f32 + 0.12, residue as f32 + 0.4,
+                    residue as f32 + 0.88, 0.072, 0.036),
+                window_boundary(residue as f32 + 0.12, residue as f32 + 0.88, 0.15),
+            ] {
+                let window = RibbonWindow::new(boundary);
+                let mut mesh = MeshData::default();
+                for step in 0..STEPS {
+                    let rings: Vec<_> = [step, step + 1].into_iter().map(|s| Ring {
+                        center: Vector3f::new(0.0, 0.0, s as f32 / STEPS as f32),
+                        tangent: Vector3f::z(), width: Vector3f::x(), normal: Vector3f::y(),
+                        hw: 0.15, ht: 0.03, color: u32::MAX,
+                    }).collect();
+                    let mut ids = [0; 4];
+                    for (i, (r, k)) in [(0, 2), (0, 3), (1, 3), (1, 2)].into_iter().enumerate() {
+                        let (x, y) = ridge_point(&rings[r], k, 0.0);
+                        ids[i] = mesh.vertices.len() as u32;
+                        mesh.vertices.push(MeshVertex {
+                            pos: (rings[r].center + Vector3f::new(x, y, 0.0)).to_array(),
+                            normal: [0.0, 1.0, 0.0], color: u32::MAX, mat: 0,
+                        });
+                        mesh.vert_res.push(residue as u32);
+                        mesh.vert_atom.push(42);
+                    }
+                    cut_window_quad(&mut mesh, ids, [&rings[0], &rings[1]],
+                        residue * STEPS + step, true, 2, &window);
+                }
+                let perimeter: f32 = (0..window.boundary.len()).map(|i| {
+                    let a = window.boundary[i];
+                    let b = window.boundary[(i + 1) % window.boundary.len()];
+                    (b[0] - a[0]).hypot(b[1] - a[1])
+                }).sum();
+                let area: f32 = mesh.indices.chunks_exact(3).filter_map(|tri| {
+                    let a = mesh.vertices[tri[0] as usize];
+                    if a.normal[1].abs() > 0.1 { return None; }
+                    let b = Vector3f::from(mesh.vertices[tri[1] as usize].pos);
+                    let c = Vector3f::from(mesh.vertices[tri[2] as usize].pos);
+                    let a = Vector3f::from(a.pos);
+                    Some((b - a).cross(&(c - a)).norm() * 0.5)
+                }).sum();
+                let expected = perimeter * 0.06;
+                assert!((area - expected).abs() < expected * 0.002,
+                    "residue {residue}: inner wall area {area}, expected {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn windows_are_open_with_solid_bridges_rails_and_inner_walls() {
+        use glam::Vec3;
+        for bevel in [0.0, 0.02] {
+            for rotation in [glam::Quat::IDENTITY, glam::Quat::from_rotation_x(0.7) * glam::Quat::from_rotation_z(0.9)] {
+                let turn = |p: [f32; 3]| Vector3f::from((rotation * Vec3::from(p)).to_array());
+                let residue = Residue { ca: Vector3f::zeros(), o: None, color: u32::MAX,
+                    class: SsClass::Helix, chain: 'A', resindex: 7, trace: 42 };
+                let rings: Vec<_> = (0..=STEPS).map(|i| Ring {
+                    center: turn([0.0, 0.0, 0.38 * i as f32 / STEPS as f32]),
+                    tangent: turn([0.0, 0.0, 1.0]), width: turn([1.0, 0.0, 0.0]),
+                    normal: turn([0.0, 1.0, 0.0]), hw: 0.15, ht: 0.03, color: u32::MAX,
+                }).collect();
+                let owners = vec![&residue; rings.len()];
+                let mut mesh = MeshData::default();
+                emit_windows(&rings, &owners, bevel, &[RibbonWindow::new(window_boundary(0.12, 0.88, 0.15))], &mut mesh);
+                let ray = |x, z| crate::pick::ray_mesh(&mesh,
+                    rotation * Vec3::new(x, -1.0, z), rotation * Vec3::Y);
+                assert!(ray(0.0, 0.19).is_none(), "window center is open");
+                assert!(ray(0.0, 0.06).is_none(), "window extends along the ribbon");
+                assert!(ray(0.0, 0.32).is_none(), "window extends at both ends");
+                assert!(ray(0.0, 0.02).is_some(), "Cα bridge remains solid");
+                assert!(ray(0.12, 0.19).is_some(), "edge rail remains solid");
+                assert!(ray(0.069, 0.049).is_some(), "rounded corner retains material");
+                assert!(ray(0.04, 0.11).is_none(), "opening extends beside the corner");
+                for direction in [Vec3::X, -Vec3::X, Vec3::Z, -Vec3::Z] {
+                    let hit = crate::pick::ray_mesh(&mesh, rotation * Vec3::new(0.0, 0.0, 0.19), rotation * direction).unwrap();
+                    assert!(hit.0 < 0.16, "ray from opening must hit an inner wall");
+                    assert_eq!(hit.1, 42);
+                }
+                assert_eq!(mesh.vertices.len(), mesh.vert_atom.len());
+                assert_eq!(mesh.vertices.len(), mesh.vert_res.len());
+                for v in &mesh.vertices {
+                    assert!(v.pos.iter().chain(v.normal.iter()).all(|x| x.is_finite()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cutouts_apply_to_helices_and_sheets_but_leave_coils_solid() {
+        for class in [SsClass::Coil, SsClass::Helix, SsClass::Sheet] {
+            let residues: Vec<_> = (0..8).map(|i| Residue {
+                ca: Vector3f::new(0.0, 0.0, i as f32 * 0.38),
+                o: Some(Vector3f::new(0.15, 0.0, i as f32 * 0.38)),
+                color: u32::MAX, class, chain: 'A', resindex: i, trace: i as u32,
+            }).collect();
+            let mut shape = Shape { coil_radius: 0.03, ribbon_width: 0.15,
+                ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false };
+            let solid = build_residues(&residues, &shape, None, false, false);
+            shape.cutouts = true;
+            let windows = build_residues(&residues, &shape, None, false, false);
+            if class == SsClass::Coil { assert_mesh_equal(&solid, &windows); }
+            else { assert!(windows.indices.len() > solid.indices.len()); }
+        }
+    }
+
+    #[test]
+    fn sheet_arrow_window_has_a_connected_stem_and_head() {
+        use glam::Vec3;
+        let residues: Vec<_> = (0..8).map(|i| Residue {
+            ca: Vector3f::new(0.0, 0.0, i as f32 * 0.38),
+            o: Some(Vector3f::new(0.15, 0.0, i as f32 * 0.38)),
+            color: u32::MAX, class: SsClass::Sheet, chain: 'A', resindex: i, trace: i as u32,
+        }).collect();
+        for bevel_height in [0.0, 0.02] {
+            let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15,
+                ribbon_thickness: 0.03, bevel_height, cutouts: true };
+            let mesh = build_residues(&residues, &shape, None, false, false);
+            let ray = |x: f32, r: f32| crate::pick::ray_mesh(&mesh, Vec3::new(x, -1.0, r * 0.38), Vec3::Y);
+            assert!(ray(0.0, 5.5).is_none(), "the original arrow cutout remains open");
+            assert!(ray(0.07, 5.55).is_none(), "the triangle base uses the broad head width");
+            assert!(ray(0.0, 5.25).is_none(), "the rectangular stem extends into the shaft");
+            assert!(ray(0.09, 5.25).is_some(), "the stem is narrower than the head");
+            assert!(ray(0.08, 5.6).is_none(), "the head widens beyond the stem");
+            let through_join = crate::pick::ray_mesh(&mesh,
+                Vec3::new(0.0, 0.0, 5.25 * 0.38), Vec3::Z).unwrap();
+            assert!(through_join.0 > 0.30 && through_join.0 < 0.42,
+                "the head–stem junction must be open, without an internal wall");
+            assert!(ray(0.0, 5.75).is_none(), "the triangle points along the arrow");
+            assert!(ray(0.08, 5.75).is_some(), "the opening narrows toward its apex");
+            assert!(ray(0.0, 5.1).is_some(), "the bridge before the arrow remains solid");
+            assert!(ray(0.13, 5.55).is_some(), "extending the apex does not widen the base");
+            assert!(ray(0.0, 5.9).is_none(), "the apex extends along the arrowhead");
+            assert!(ray(0.0, 6.0).is_none(), "the residue boundary does not truncate the triangle");
+            assert!(ray(0.05, 6.0).is_some(), "the extension tapers toward its point");
+            assert!(ray(0.0, 6.3).is_some(), "the opening does not fill the arrowhead");
+            assert!(ray(0.0, 6.5).is_some(), "no extra opening is added near the arrow tip");
+            assert!(ray(0.0, 6.9).is_some(), "the arrow tip remains solid");
+            for dir in [Vec3::X, -Vec3::X] {
+                let hit = crate::pick::ray_mesh(&mesh, Vec3::new(0.0, 0.0, 5.6 * 0.38), dir).unwrap();
+                assert!(hit.0 < 0.11, "the compact triangular opening has inner walls");
+            }
+        }
+    }
+
+    #[test]
     fn jak2_strand_endpoints_meet_ca_atoms() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/jak2.pdb");
         let system = System::from_file(path).unwrap();
@@ -1316,7 +1824,7 @@ mod tests {
 
         let shape = Shape {
             coil_radius: 0.03, ribbon_width: 0.15,
-            ribbon_thickness: 0.03, bevel_height: 0.0,
+            ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false,
         };
         let mut mesh = MeshData::default();
         build_run(&run, &shape, 0, 0, None, false, &mut mesh);
@@ -1374,23 +1882,26 @@ mod tests {
             let sel = mol.data.select_all();
             let bound = mol.data.bind_with_state(&sel, mol.render_state());
             let ss = SsMap::compute(&bound, Default::default());
-            let params = super::super::RepParams::for_kind(super::super::RepKind::Cartoon);
-            for color in crate::color::ColorMethod::ALL {
-                let cache = Cache::new(&bound, mol.n_atoms, &params, color.into(), crate::material::Material::Transparent, Some(&ss)).unwrap();
-                for frame in 0..3 {
-                    let mut state = mol.render_state().clone();
-                    state.pbox = match frame {
-                        0 => None,
-                        1 => Some(PeriodicBox::from_vectors_angles(2.0, 2.0, 2.0, 90.0,90.0,90.0).unwrap()),
-                        _ => Some(PeriodicBox::from_vectors_angles(0.1,0.1,0.1,90.0,90.0,90.0).unwrap()),
-                    };
-                    for (i,p) in state.coords.iter_mut().enumerate() {
-                        p.x += (i as f32 * 0.17 + frame as f32).sin() * 0.03;
+            for enabled in [false, true] {
+                let mut params = super::super::RepParams::for_kind(super::super::RepKind::Cartoon);
+                if let super::super::RepParams::Cartoon { cutouts, .. } = &mut params { *cutouts = enabled; }
+                for color in crate::color::ColorMethod::ALL {
+                    let cache = Cache::new(&bound, mol.n_atoms, &params, color.into(), crate::material::Material::Transparent, Some(&ss)).unwrap();
+                    for frame in 0..3 {
+                        let mut state = mol.render_state().clone();
+                        state.pbox = match frame {
+                            0 => None,
+                            1 => Some(PeriodicBox::from_vectors_angles(2.0, 2.0, 2.0, 90.0,90.0,90.0).unwrap()),
+                            _ => Some(PeriodicBox::from_vectors_angles(0.1,0.1,0.1,90.0,90.0,90.0).unwrap()),
+                        };
+                        for (i,p) in state.coords.iter_mut().enumerate() {
+                            p.x += (i as f32 * 0.17 + frame as f32).sin() * 0.03;
+                        }
+                        let moved = mol.data.bind_with_state(&sel, &state);
+                        let expected = super::super::build(&moved, mol.n_atoms, &mol.bonds, &params,
+                            color.into(), crate::material::Material::Transparent, Some(&ss), true);
+                        assert_mesh_equal(&cache.build(&state, true).mesh, &expected.mesh);
                     }
-                    let moved = mol.data.bind_with_state(&sel, &state);
-                    let expected = super::super::build(&moved, mol.n_atoms, &mol.bonds, &params,
-                        color.into(), crate::material::Material::Transparent, Some(&ss), true);
-                    assert_mesh_equal(&cache.build(&state, true).mesh, &expected.mesh);
                 }
             }
         }
@@ -1404,11 +1915,13 @@ mod tests {
             color: u32::MAX, class: if i % 100 < 40 { SsClass::Helix } else if i % 100 < 60 { SsClass::Sheet } else { SsClass::Coil },
             chain: char::from_u32('A' as u32 + i as u32 / 512).unwrap(), resindex: i, trace: i as u32 * 3,
         }).collect();
-        let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness:0.025, bevel_height:0.015 };
-        for cg in [false, true] {
-            let serial = build_residues(&residues, &shape, None, cg, false);
-            let parallel = build_residues(&residues, &shape, None, cg, true);
-            assert_mesh_equal(&parallel, &serial);
+        for cutouts in [false, true] {
+            let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness:0.025, bevel_height:0.015, cutouts };
+            for cg in [false, true] {
+                let serial = build_residues(&residues, &shape, None, cg, false);
+                let parallel = build_residues(&residues, &shape, None, cg, true);
+                assert_mesh_equal(&parallel, &serial);
+            }
         }
     }
 
@@ -1493,8 +2006,9 @@ mod tests {
         let old = r#"{"Cartoon":{"coil_radius":0.03,"ribbon_width":0.15,"ribbon_thickness":0.03}}"#;
         let mut params: RepParams = serde_json::from_str(old).unwrap();
         assert_eq!(params, RepParams::for_kind(RepKind::Cartoon));
-        if let RepParams::Cartoon { bevel_height, .. } = &mut params {
+        if let RepParams::Cartoon { bevel_height, cutouts, .. } = &mut params {
             *bevel_height = 0.045;
+            *cutouts = true;
         }
         for field in ["edge_ridges", "bevel_edges"] {
             for (enabled, height) in [(false, 0.0), (true, 0.0195)] {

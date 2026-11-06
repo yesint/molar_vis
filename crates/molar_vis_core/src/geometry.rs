@@ -135,6 +135,9 @@ pub enum RepParams {
         #[serde(default, alias = "edge_ridges", alias = "bevel_edges",
             deserialize_with = "deserialize_bevel_height")]
         bevel_height: f32,
+        /// Rounded windows between trace atoms in helices and sheets.
+        #[serde(default)]
+        cutouts: bool,
     },
     Surface {
         /// Probe radius added to each vdW radius (nm). 0 → vdW surface, 0.14 → SAS.
@@ -213,7 +216,7 @@ impl RepParams {
                     + bond_smoothing.clamp(0.0, 1.0) * ball / 3.0
             }
             Self::Lines { .. } => LINES_CROSS_HALF_LEN,
-            Self::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } =>
+            Self::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, .. } =>
                 coil_radius.max(ribbon_width.hypot(ribbon_thickness + bevel_height)),
             Self::Surface { probe, .. } => vdw + probe,
             Self::Interactions { .. } => 0.0,
@@ -236,6 +239,7 @@ impl RepParams {
                 ribbon_width: 0.15,
                 ribbon_thickness: 0.03,
                 bevel_height: 0.0,
+                cutouts: false,
             },
             RepKind::Surface => RepParams::Surface {
                 probe: 0.14,
@@ -413,7 +417,7 @@ pub(crate) fn build_with_reference(
                 ..Default::default()
             }
         }
-        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
+        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts } => {
             let ss = ss.expect("ss computed for cartoon");
             GeometryData {
                 mesh: cartoon::build(
@@ -424,6 +428,7 @@ pub(crate) fn build_with_reference(
                     ribbon_width,
                     ribbon_thickness,
                     bevel_height,
+                    cutouts,
                     pbox,
                 ),
                 ..Default::default()

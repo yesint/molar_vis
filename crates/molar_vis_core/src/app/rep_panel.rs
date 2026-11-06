@@ -272,7 +272,7 @@ pub(super) fn draw_rep_params(
     }
 
     // --- [Style] tab: per-style geometry parameters. ---
-    let mut changed = draw_style_options(ui, &mut rep.params);
+    let mut changed = draw_style_dimensions(ui, &mut rep.params);
 
     // Secondary-structure algorithm — used by the Cartoon shape and the
     // "Structure" color scheme; offer the two sensible choices.
@@ -296,6 +296,8 @@ pub(super) fn draw_rep_params(
                 });
         });
     }
+
+    changed |= draw_style_toggles(ui, &mut rep.params);
 
     // Restore this style's default parameters.
     ui.add_space(2.0);
@@ -1772,6 +1774,22 @@ mod picker_panel_fit_tests {
 
 /// Shared geometry controls for representation edits and persisted style defaults.
 pub(super) fn draw_style_options(ui: &mut egui::Ui, params: &mut RepParams) -> bool {
+    let mut changed = draw_style_dimensions(ui, params);
+    changed |= draw_style_toggles(ui, params);
+    changed
+}
+
+fn draw_style_toggles(ui: &mut egui::Ui, params: &mut RepParams) -> bool {
+    let RepParams::Cartoon { cutouts, .. } = params else { return false; };
+    ui.horizontal(|ui| {
+        ui.label("Ribbon cutouts");
+        ui.checkbox(cutouts, "")
+            .on_hover_text("Rounded rectangular windows between adjacent backbone atoms in helices and sheets.")
+            .changed()
+    }).inner
+}
+
+fn draw_style_dimensions(ui: &mut egui::Ui, params: &mut RepParams) -> bool {
     let mut changed = false;
     egui::Grid::new("rep_params")
         .num_columns(2)
@@ -1822,7 +1840,7 @@ pub(super) fn draw_style_options(ui: &mut egui::Ui, params: &mut RepParams) -> b
                     .on_hover_text("0: sharp color split at the midpoint. 1: smooth gradient along the entire bond.").changed();
                 ui.end_row();
             }
-            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height } => {
+            RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, .. } => {
                 ui.label("Coil radius (nm)");
                 changed |= ui.add(egui::Slider::new(coil_radius, 0.02..=0.08)).changed();
                 ui.end_row();

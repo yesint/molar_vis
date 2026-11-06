@@ -1462,7 +1462,7 @@ mod unobstructed_render_tests {
         app.last_size = [640, 360];
         app.set_rep_style(0, 0, "cartoon").unwrap();
         let protein = &mut app.scene.molecules[0].reps[0];
-        protein.params = RepParams::Cartoon { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness: 0.03, bevel_height: 0.0 };
+        protein.params = RepParams::Cartoon { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false };
         protein.sel_text = "not apolh".into();
         protein.sel_dirty = true;
         protein.color = ColorMethod::Solid([140,140,140,255]);

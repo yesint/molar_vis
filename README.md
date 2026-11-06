@@ -50,8 +50,13 @@ or reordered independently.
 | Surface | Molecular shape, cavities and solvent-excluded surfaces |
 
 Cartoons support all-atom and coarse-grained proteins. Secondary structure can be
-assigned with DSSP or the PyMOL-derived `dss` algorithm. Molecular surfaces have
-adjustable probe radius, resolution and smoothing, so you can choose the level of
+assigned with DSSP or the PyMOL-derived `dss` algorithm. Enable **Ribbon cutouts**
+in the Cartoon settings to add rounded rectangular windows between adjacent
+backbone atoms in helices and sheets. The windows follow the ribbon orientation;
+cutouts within β-strand arrowheads have a triangular head joined to a short
+rectangular stem, with rounded corners. Coils, transitions and arrow tips remain
+solid. This option is off by default. Molecular surfaces have adjustable probe
+radius, resolution and smoothing, so you can choose the level of
 detail appropriate for the system.
 
 Atom and bond rendering is GPU accelerated and supports systems with hundreds of
@@ -211,8 +216,8 @@ with interactions and receptor pocket lines. Both flags are required, in either
 order, and cannot be combined with ordinary molecule arguments. `--receptor` and
 `--ligand` are equivalent long options.
 
-Dependencies come from crates.io and a pinned molar Git revision for the new selection
-resolver API; no sibling repository checkouts are required.
+Dependencies come from crates.io and a pinned MolAR Git revision for the Amber
+minimization API; no sibling repository checkouts are required.
 Supported molecular formats are provided by MolAR, including PDB, GRO, XYZ,
 SDF/MOL and trajectory formats such as XTC, TRR and DCD. Availability of some
 formats depends on the platform and enabled MolAR features.
