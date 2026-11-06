@@ -1,5 +1,9 @@
 # Remaining rendering performance work
 
+The [2026-11-06 shader, rendering, and surface audit](RENDERING_AUDIT_2026-11-06.md)
+provides the current actionable follow-up plan. This document retains the October implementation
+record; descriptions below that record can refer to the earlier, pre-implementation code.
+
 Status: 2026-10-09. This plan follows the performance changes currently in the working tree.
 The items below are proposed work unless marked complete. Priority is based on code inspection,
 not a measured ranking of GPU bottlenecks. Profile representative scenes before choosing the

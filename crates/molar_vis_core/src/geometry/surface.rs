@@ -66,6 +66,7 @@ pub(crate) struct Input {
 impl Input {
     pub(crate) fn new(bound: &impl ParticleIterProvider, colorizer: &Colorizer,
         probe: f32, quality: u32, smoothing: u32) -> Self {
+    let _timing = crate::performance::span("surface-input");
     // Gather atom spheres (SAS radius = vdW + probe) + per-atom color.
     let mut centers: Vec<Vec3> = Vec::new();
     let mut radii: Vec<f32> = Vec::new();
@@ -84,6 +85,7 @@ impl Input {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn atom_count(&self) -> usize { self.centers.len() }
     pub(crate) fn build(self, cancelled: impl Fn() -> bool) -> MeshData {
+        let _timing = crate::performance::span("surface-build");
         let Self { centers, radii, colors, ids, probe, quality, smoothing } = self;
         if cancelled() { return MeshData::default(); }
     if centers.is_empty() {
@@ -124,10 +126,17 @@ impl Input {
     let dims = dims_at(h);
     let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
     let n = nx * ny * nz;
+    if crate::performance::enabled() {
+        crate::performance::counters("surface-grid", serde_json::json!({
+            "atoms": centers.len(), "dimensions": dims, "voxels": n,
+            "spacing_nm": h, "quality": quality, "smoothing": smoothing,
+        }));
+    }
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
 
     // --- Pass 1: SAS occupancy + nearest atom per voxel (seeds the initial vertex
     // color, which is then Laplacian-smoothed along the mesh). ---
+    let occupancy_timing = crate::performance::span("surface-occupancy");
     let mut inside = vec![false; n];
     let mut nearest = vec![u32::MAX; n];
     let mut best_d2 = vec![f32::INFINITY; n];
@@ -163,6 +172,7 @@ impl Input {
     }
 
     drop(best_d2);
+    drop(occupancy_timing);
 
     // --- Pass 2: exact EDT from each inside voxel to the nearest outside voxel. ---
     // Seed: 0 at outside (feature) voxels, +inf at inside; the separable transform
@@ -176,9 +186,11 @@ impl Input {
     // The EDT measures to solvent voxel centers, half a cell beyond the boundary.
     // Correct that offset; retain negative values outside even for a zero-radius probe.
     let mut field = g;
+    let conversion_timing = crate::performance::span("surface-field-conversion");
     for d2 in &mut field {
         *d2 = d2.sqrt() * h - 0.5 * h - probe;
     }
+    drop(conversion_timing);
 
     // Light separable [1,2,1] blur of the distance field: the binary occupancy makes
     // the EDT (and its gradient = our normals) stair-step at voxel resolution, which
@@ -209,6 +221,11 @@ impl Input {
     laplacian_smooth(&mut mesh, color_iters);
     if cancelled() { return MeshData::default(); }
     refine_on_field(&mut mesh, &field, dims, lo, h, quality);
+    if crate::performance::enabled() {
+        crate::performance::counters("surface-result", serde_json::json!({
+            "vertices": mesh.vertices.len(), "triangles": mesh.indices.len() / 3,
+        }));
+    }
     mesh
     }
 }
@@ -216,6 +233,7 @@ impl Input {
 /// Blend colors along mesh edges so nearest-atom patches become continuous gradients
 /// without bleeding across spatially close but disconnected surface regions.
 fn laplacian_smooth(mesh: &mut MeshData, color_iters: usize) {
+    let _timing = crate::performance::span("surface-color");
     if mesh.vertices.is_empty() || mesh.indices.len() < 3 {
         return;
     }
@@ -538,6 +556,7 @@ fn surface_nets(
     origin: Vec3,
     h: f32,
 ) -> MeshData {
+    let _timing = crate::performance::span("surface-extraction");
     let (nx, ny, nz) = (dims[0], dims[1], dims[2]);
     let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
     // Cell (x,y,z) spans corners x..x+1 etc.; (nx-1)×(ny-1)×(nz-1) cells.
@@ -792,6 +811,7 @@ fn sample_gradient(field: &[f32], dims: [usize; 3], p: Vec3) -> Vec3 {
 /// Relax irregular Surface Nets cells tangentially, then project back to the SES
 /// level set. Projection prevents the shrinkage of unconstrained Laplacian smoothing.
 fn relax_on_field(mesh: &mut MeshData, field: &[f32], dims: [usize; 3], origin: Vec3, h: f32) {
+    let _timing = crate::performance::span("surface-relaxation");
     let mut sums = vec![Vec3::ZERO; mesh.vertices.len()];
     let mut counts = vec![0u32; mesh.vertices.len()];
     for _ in 0..2 {
@@ -845,6 +865,7 @@ fn refine_on_field(
     h: f32,
     quality: u32,
 ) {
+    let _timing = crate::performance::span("surface-refinement");
     let quality = quality.min(4) as usize;
     let cosine = [40.0_f32, 30.0, 22.0, 16.0, 12.0][quality]
         .to_radians()

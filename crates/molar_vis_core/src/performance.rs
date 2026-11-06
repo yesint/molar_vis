@@ -59,6 +59,16 @@ pub(crate) fn counters(stage: &str, values: serde_json::Value) {
     }
 }
 
+/// Keep JSON construction out of the normal (profiling-disabled) upload path.
+pub(crate) fn upload(stage: &str, bytes: usize, allocations: usize, capacity: u64) {
+    if enabled() {
+        counters(stage, serde_json::json!({
+            "upload_bytes": bytes, "buffer_allocations": allocations,
+            "capacity_bytes": capacity,
+        }));
+    }
+}
+
 /// Each instrumented submission owns its query/readback buffers. At most four
 /// readbacks can be pending globally; a busy GPU drops measurements, never work.
 pub(crate) struct GpuFrame {

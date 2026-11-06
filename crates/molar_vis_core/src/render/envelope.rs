@@ -51,6 +51,7 @@ impl Tree {
         }
     }
     fn build(geom: &GeometryData) -> Self {
+        let _timing = crate::performance::span("envelope-build");
         let mut tree = Self::from_geometry(geom);
         let mut ids: Vec<_> = (0..tree.primitives.len() as u32).collect();
         if !ids.is_empty() {
@@ -59,6 +60,7 @@ impl Tree {
         tree
     }
     fn refit(&mut self) {
+        let _timing = crate::performance::span("envelope-refit");
         // The leaf ordering stays valid as coordinates move. Refit bottom-up in
         // linear time instead of sorting/building a fresh tree for each frame.
         for i in (0..self.nodes.len()).rev() {
@@ -175,6 +177,7 @@ impl Gpu {
     pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, geom: &GeometryData) -> Self {
         let tree = Tree::build(geom);
         let buffer = |label, bytes: &[u8], usage| {
+            crate::performance::upload(label, bytes.len(), 1, bytes.len() as u64);
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
                 contents: bytes,
@@ -246,6 +249,10 @@ impl Gpu {
             self.tree.primitives = next.primitives;
             self.tree.spheres = next.spheres;
             self.tree.refit();
+            crate::performance::upload("envelope-update",
+                std::mem::size_of_val(self.tree.nodes.as_slice())
+                    + std::mem::size_of_val(self.tree.primitives.as_slice()) + 16,
+                0, self.nodes.size() + self.primitives.size() + self.config.size());
             queue.write_buffer(&self.nodes, 0, bytemuck::cast_slice(&self.tree.nodes));
             queue.write_buffer(
                 &self.primitives,

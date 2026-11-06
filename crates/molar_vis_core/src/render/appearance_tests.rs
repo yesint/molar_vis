@@ -2,6 +2,91 @@
 use super::*;
 use crate::camera::{BgKind, Camera, Projection};
 
+/// Reproducible end-to-end baseline for the rendering efficiency work. Run the
+/// saved before/after release binaries alternately on the same adapter.
+#[test]
+#[ignore = "manual release performance and exact image/mesh comparison"]
+fn audit_surface_and_render_baseline() {
+    use crate::{geometry, scene::Representation};
+    use std::{hint::black_box, time::Instant};
+    let dir = std::path::PathBuf::from(std::env::var("MOLAR_VIS_AUDIT_OUTPUT")
+        .expect("set MOLAR_VIS_AUDIT_OUTPUT to a separate before/after directory"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rs = gpu();
+    assert_ne!(rs.adapter.get_info().device_type, wgpu::DeviceType::Cpu,
+        "performance acceptance requires a physical GPU");
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"));
+    let raw = crate::data::load(path).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mut metrics = Vec::new();
+    let mut measure = |name: String, mut samples: Vec<f64>| {
+        samples.sort_by(f64::total_cmp);
+        let record = serde_json::json!({"stage": name, "n": samples.len(),
+            "median_ms": samples[samples.len()/2],
+            "p95_ms": samples[(samples.len()*95).div_ceil(100)-1], "samples_ms": samples});
+        eprintln!("AUDIT {record}");
+        metrics.push(record);
+    };
+    for quality in [0, 2, 4] {
+        let mol = &mut scene.molecules[0];
+        let mut rep = Representation::new(geometry::RepKind::Surface);
+        if let geometry::RepParams::Surface { quality: q, .. } = &mut rep.params { *q = quality; }
+        let sel = mol.data.select_all();
+        let bound = mol.data.bind_with_state(&sel, mol.render_state());
+        let mut times = Vec::new();
+        let mut last = None;
+        for iteration in 0..8 {
+            let start = Instant::now();
+            let geom = black_box(geometry::build(&bound, mol.n_atoms, &mol.bonds,
+                &rep.params, rep.color_spec(), rep.material, None, true));
+            if iteration > 0 { times.push(start.elapsed().as_secs_f64()*1000.0); }
+            last = Some(geom);
+        }
+        measure(format!("surface-q{quality}"), times);
+        let geom = last.unwrap();
+        std::fs::write(dir.join(format!("surface-q{quality}-vertices.bin")), bytemuck::cast_slice(&geom.mesh.vertices)).unwrap();
+        std::fs::write(dir.join(format!("surface-q{quality}-indices.bin")), bytemuck::cast_slice(&geom.mesh.indices)).unwrap();
+        std::fs::write(dir.join(format!("surface-q{quality}-owners.bin")), bytemuck::cast_slice(&geom.mesh.vert_atom)).unwrap();
+        rep.gpu = renderer.upload(&rs, &geom);
+        rep.sel = Some(sel);
+        rep.sel_dirty = false;
+        rep.geom_dirty = false;
+        rep.coords_dirty = false;
+        rep.cache_geometry(geom, mol.n_atoms, true, false);
+        mol.reps = vec![rep];
+        for projection in [Projection::Orthographic, Projection::Perspective] {
+            camera.projection = projection;
+            for effects in [false, true] {
+                camera.ao.enabled = effects;
+                camera.shadow.enabled = effects;
+                let mut times = Vec::new();
+                for iteration in 0..24 {
+                    // Exercise camera movement and shadow invalidation, excluding startup.
+                    camera.orientation = glam::Quat::from_rotation_y(iteration as f32 * 0.01);
+                    let start = Instant::now();
+                    renderer.render_scene(&rs, [640,480], camera.view(), camera.proj(4.0/3.0),
+                        camera.is_perspective(), camera.cue_uniform(), camera.ao_uniform(),
+                        camera.shadow_uniform(), camera.background, camera.eye_depth_range(), 1.0, &scene);
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    if iteration >= 4 { times.push(start.elapsed().as_secs_f64()*1000.0); }
+                }
+                let label = format!("q{quality}-{projection:?}-effects{effects}");
+                measure(format!("raster-{label}"), times);
+                camera.orientation = glam::Quat::from_rotation_y(0.23);
+                let cap = renderer.capture_begin(&rs, 640,480, camera.view(), camera.proj(4.0/3.0),
+                    camera.is_perspective(), camera.cue_uniform(), camera.ao_uniform(),
+                    camera.shadow_uniform(), camera.background, camera.eye_depth_range(), &scene);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                cap.read().save(dir.join(format!("{label}.png"))).unwrap();
+            }
+        }
+    }
+    std::fs::write(dir.join("metrics.json"), serde_json::to_vec_pretty(&metrics).unwrap()).unwrap();
+}
+
 #[test]
 fn shared_shaders_validate_without_a_gpu() {
     for (name, source) in [

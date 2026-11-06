@@ -532,17 +532,20 @@ fn update_buf<T: bytemuck::Pod>(
 }
 
 fn upload_mesh(device: &wgpu::Device, mesh: &crate::geometry::MeshData) -> Option<MeshBuffers> {
-    upload_indexed(device, &mesh.vertices, &mesh.indices)
+    upload_indexed(device, &mesh.vertices, &mesh.indices, "mesh")
 }
 
 fn upload_indexed<T: bytemuck::Pod>(
     device: &wgpu::Device,
     vertices: &[T],
     indices: &[u32],
+    label: &str,
 ) -> Option<MeshBuffers> {
     if indices.is_empty() {
         return None;
     }
+    let bytes = std::mem::size_of_val(vertices) + std::mem::size_of_val(indices);
+    crate::performance::upload(label, bytes, 2, bytes as u64);
     Some(MeshBuffers {
         vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh-verts"),
@@ -566,6 +569,7 @@ fn update_indexed<T: bytemuck::Pod>(
     slot: &mut Option<MeshBuffers>,
     vertices: &[T],
     indices: &[u32],
+    label: &str,
 ) {
     match slot {
         Some(m)
@@ -573,12 +577,15 @@ fn update_indexed<T: bytemuck::Pod>(
                 && std::mem::size_of_val(indices) as u64 <= m.indices.size()
                 && !indices.is_empty() =>
         {
+            crate::performance::upload(label,
+                std::mem::size_of_val(vertices) + std::mem::size_of_val(indices),
+                0, m.vertices.size() + m.indices.size());
             queue.write_buffer(&m.vertices, 0, bytemuck::cast_slice(vertices));
             queue.write_buffer(&m.indices, 0, bytemuck::cast_slice(indices));
             m.vertex_count = vertices.len() as u32;
             m.index_count = indices.len() as u32;
         }
-        _ => *slot = upload_indexed(device, vertices, indices),
+        _ => *slot = upload_indexed(device, vertices, indices, label),
     }
 }
 
@@ -1376,7 +1383,7 @@ impl SceneRenderer {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn update_pick(&self, rs: &RenderState, gpu: &mut RepGpu, pick: &PickGeometry) {
         update_buf(&rs.device, &rs.queue, &mut gpu.spheres, &pick.spheres, "pick-spheres");
-        update_indexed(&rs.device, &rs.queue, &mut gpu.mesh, &pick.vertices, &pick.indices);
+        update_indexed(&rs.device, &rs.queue, &mut gpu.mesh, &pick.vertices, &pick.indices, "pick-mesh");
     }
 
     /// Incrementally update a representation's existing GPU buffers from new
@@ -1389,7 +1396,7 @@ impl SceneRenderer {
         update_buf(device, queue, &mut gpu.cylinders, &geom.cylinders, "cylinders");
         update_buf(device, queue, &mut gpu.lines, &geom.lines, "lines");
         update_buf(device, queue, &mut gpu.points, &geom.points, "points");
-        update_indexed(device, queue, &mut gpu.mesh, &geom.mesh.vertices, &geom.mesh.indices);
+        update_indexed(device, queue, &mut gpu.mesh, &geom.mesh.vertices, &geom.mesh.indices, "mesh");
         if let Some(layout) = self.envelope_bgl.as_ref().filter(|_| envelope::needed(geom) && envelope::fits(device, geom)) {
             match &mut gpu.envelope {
                 Some(envelope) => envelope.update(device, queue, layout, geom),

@@ -1306,8 +1306,10 @@ impl Raytracer {
             let zeros = [0u8; 80];
             let bytes = if bytes.is_empty() { &zeros[..stride] } else { bytes };
             if let Some(buffer) = slot.as_ref().filter(|b| b.size() >= bytes.len() as u64) {
+                crate::performance::upload(label, bytes.len(), 0, buffer.size());
                 rs.queue.write_buffer(buffer, 0, bytes);
             } else {
+                crate::performance::upload(label, bytes.len(), 1, bytes.len() as u64);
                 *slot = Some(rs.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some(label), contents: bytes,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
@@ -1437,6 +1439,11 @@ impl Raytracer {
     /// flag (`fs_resolve`). The accumulator at `read_idx` always holds a *complete* image (the
     /// last finished sample-chunk), so this is seam-free even mid-chunk.
     fn resolve_into(&self, rs: &RenderState, target: &wgpu::TextureView) {
+        if crate::performance::enabled() {
+            crate::performance::counters("rt-resolve", serde_json::json!({
+                "samples": self.total_samples, "size": self.accum_size,
+            }));
+        }
         let resolve_bg = &self.resolve_bindings.as_ref().unwrap()[self.read_idx];
         let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
             let mut encoder = rs
@@ -1538,6 +1545,12 @@ impl Raytracer {
             let trace_bg = &self.trace_bindings.as_ref().unwrap()[read_idx];
             let tw = cur.tile_size.min(w - cur.ox);
             let th = cur.tile_size.min(h - cur.oy);
+            if crate::performance::enabled() {
+                crate::performance::counters("rt-dispatch", serde_json::json!({
+                    "origin": [cur.ox, cur.oy], "size": [tw, th],
+                    "samples": chunk, "prior_samples": prior,
+                }));
+            }
             let mut u = cur.uniform;
             u.dims = [w, h, chunk, prior];
             u.accum = [prior, u32::from(reset), cur.ox, cur.oy];
