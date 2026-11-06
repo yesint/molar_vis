@@ -92,3 +92,35 @@ overlapping run distributions. The largest positive median paired raster differe
 for quality-4 orthographic rendering without effects, where reference medians ranged from
 1.734–1.956 ms and candidate medians from 1.678–1.984 ms. Reverse-order controls removed several
 larger apparent differences. No raster speedup is claimed for this CPU-only change.
+
+### 2. Reuse synchronous surface GPU storage (S2)
+
+Synchronous surface builds now use the existing update path, which uploads both vertex and
+index arrays, retains sufficient capacity, reallocates on growth, and releases empty geometry.
+CPU surface construction is unchanged. Storage retains the largest installed mesh capacity
+until growth or removal; this change adds no geometric over-allocation or retained mesh copies.
+
+The new physical-GPU integration test rebuilds real surfaces through qualities 2/0/2/3/0 with
+alternating smoothing. It verifies buffer identities and capacities, compares each rendered
+image with a fresh upload, and covers empty selections and switching to an atomic representation.
+All five image pairs were byte-exact and their comparison sheet was inspected visually.
+The existing equal-count changed-index image test also passed. All 364 regular release tests
+passed, and the wasm32 check passed with its three existing warnings.
+
+Five same-process benchmark runs each measured 31 alternating fresh/reused upload pairs per
+mesh after warmup. Timing includes queue submission and waiting for transfer completion.
+The following values are medians across runs; p95 columns are medians of each run's p95.
+
+| Mesh step | Fresh median | Reused median | Fresh p95 | Reused p95 |
+| --- | --- | --- | --- | --- |
+| Initial quality 2 | 0.4809 ms | 0.4428 ms | 0.7285 ms | 0.7607 ms |
+| Quality 0 after shrink | 0.1565 ms | 0.1539 ms | 0.2549 ms | 0.2190 ms |
+| Quality 2 after regrowth | 0.4942 ms | 0.4421 ms | 0.7703 ms | 0.6885 ms |
+| Quality 3 | 1.0092 ms | 0.7908 ms | 1.4402 ms | 1.2674 ms |
+| Quality 0 after second shrink | 0.1758 ms | 0.1710 ms | 0.3541 ms | 0.2546 ms |
+
+The reduction is 8–11% at quality 2 and 22% at quality 3; quality-0 changes are small relative
+to timing variability. Tail latency remains noisy, including a 4% increase in the initial
+quality-2 p95. Repeated installation of a fitting mesh retains both buffers, eliminating two
+GPU buffer allocations per installation while transferring the same bytes. These are upload
+measurements, not claimed full surface-build or frame-rate improvements.

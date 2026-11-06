@@ -906,8 +906,8 @@ options: RebuildOptions,
             };
 
             if rep.geom_dirty {
-                // Full structural rebuild: (re)compute secondary structure
-                // into the cache, build geometry, recreate GPU buffers.
+                // Recompute structural geometry. Surface connectivity can change,
+                // but its existing GPU storage can still hold the new arrays.
                 let (geom, fresh_ss, primitive_cache, cartoon_cache) = {
                     let bound = mol.data.bind_with_state(sel, state);
                     let ss = geometry::needs_ss(&rep.params, rep.color).then(|| {
@@ -947,7 +947,11 @@ options: RebuildOptions,
                     #[cfg(not(target_arch = "wasm32"))]
                     GeometryBuild::Background(input) => { queue_geometry(rep, input); continue; }
                 };
-                rep.gpu = renderer.upload(rs, &geom);
+                if rep.kind == RepKind::Surface {
+                    renderer.update(rs, &mut rep.gpu, &geom);
+                } else {
+                    rep.gpu = renderer.upload(rs, &geom);
+                }
                 rep.cache_geometry(geom, n_atoms, dashed, grayed);
                 rep.geom_dirty = false;
                 rep.coords_dirty = false;
@@ -1340,6 +1344,92 @@ mod unobstructed_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod geometry_job_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires native GPU; verifies synchronous surface uploads and image parity"]
+    fn synchronous_surfaces_reuse_capacity_and_match_fresh_images() {
+        let rs = crate::render::test_gpu();
+        let settings = Settings::default();
+        let mut renderer = SceneRenderer::new(&rs, &settings.rendering);
+        let raw = crate::data::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+        let mut camera = crate::camera::Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+        camera.ao.enabled = true;
+        camera.shadow.enabled = true;
+        let mut scene = Scene::default();
+        scene.add(raw, &settings.reps);
+        scene.molecules[0].reps = vec![Representation::new(RepKind::Surface)];
+        let mut previous: Option<(wgpu::Buffer, wgpu::Buffer)> = None;
+        for (step, quality) in [2, 0, 2, 3, 0].into_iter().enumerate() {
+            let rep = &mut scene.molecules[0].reps[0];
+            rep.params = RepParams::Surface { probe: 0.14, quality, smoothing: step as u32 % 2 };
+            rep.geom_dirty = true;
+            rebuild_dirty(&mut scene, &renderer, &settings, step == 0, &rs, None, false);
+            let rep = &scene.molecules[0].reps[0];
+            let mesh = rep.mesh_cache.as_ref().unwrap().mesh.clone();
+            let buffers = rep.gpu.test_mesh_buffers().unwrap();
+            if let Some((vertices, indices)) = &previous {
+                let fits = vertices.size() >= std::mem::size_of_val(mesh.vertices.as_slice()) as u64
+                    && indices.size() >= std::mem::size_of_val(mesh.indices.as_slice()) as u64;
+                assert_eq!(buffers.0 == *vertices && buffers.1 == *indices, fits,
+                    "surface installation must retain sufficient capacity");
+            }
+            previous = Some(buffers);
+            let capture = |renderer: &mut SceneRenderer, scene: &Scene| {
+                let cap = renderer.capture_begin(&rs, 320, 240, camera.view(), camera.proj(4.0/3.0),
+                    camera.is_perspective(), camera.cue_uniform(), camera.ao_uniform(),
+                    camera.shadow_uniform(), camera.background, camera.eye_depth_range(), scene);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                cap.read()
+            };
+            let updated = capture(&mut renderer, &scene);
+            let geom = geometry::GeometryData { mesh, ..Default::default() };
+            let fresh_gpu = renderer.upload(&rs, &geom);
+            let reused = std::mem::replace(&mut scene.molecules[0].reps[0].gpu, fresh_gpu);
+            let fresh = capture(&mut renderer, &scene);
+            scene.molecules[0].reps[0].gpu = reused;
+            assert_eq!(updated, fresh);
+            assert!(scene.molecules[0].pick_gpu.has_geometry());
+            // Alternate order in one process; include completion of queued writes.
+            let mut timings = [Vec::new(), Vec::new()];
+            for iteration in 0..36 {
+                for mode in if iteration % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    let start = std::time::Instant::now();
+                    let allocated = if mode == 0 {
+                        Some(renderer.upload(&rs, &geom))
+                    } else {
+                        renderer.update(&rs, &mut scene.molecules[0].reps[0].gpu, &geom);
+                        None
+                    };
+                    rs.queue.submit([]);
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    if iteration >= 5 { timings[mode].push(start.elapsed().as_secs_f64() * 1000.0); }
+                    drop(allocated);
+                }
+            }
+            for (mode, samples) in timings.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("UPLOAD {}", serde_json::json!({"step":step,"quality":quality,
+                    "mode":if mode == 0 {"fresh"} else {"reuse"},
+                    "median_ms":samples[15],"p95_ms":samples[29],"samples_ms":samples}));
+            }
+            if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                updated.save(format!("{dir}/surface-upload-{step}-reused.png")).unwrap();
+                fresh.save(format!("{dir}/surface-upload-{step}-fresh.png")).unwrap();
+            }
+        }
+        let rep = &mut scene.molecules[0].reps[0];
+        rep.sel_text = "name NONEXISTENT".into();
+        rep.sel_dirty = true;
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
+        assert!(!scene.molecules[0].reps[0].gpu.has_geometry());
+        assert!(!scene.molecules[0].pick_gpu.has_geometry());
+        scene.molecules[0].reps[0] = Representation::new(RepKind::Vdw);
+        rebuild_dirty(&mut scene, &renderer, &settings, false, &rs, None, false);
+        assert!(scene.molecules[0].reps[0].gpu.has_geometry());
+        assert!(scene.molecules[0].reps[0].gpu.test_mesh_buffers().is_none());
+    }
 
     #[test]
     #[ignore = "requires native GPU; verifies palette edits invalidate primitive, surface, and cartoon caches"]

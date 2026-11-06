@@ -471,6 +471,11 @@ pub struct RepGpu {
 }
 
 impl RepGpu {
+    #[cfg(test)]
+    pub(crate) fn test_mesh_buffers(&self) -> Option<(wgpu::Buffer, wgpu::Buffer)> {
+        self.mesh.as_ref().map(|m| (m.vertices.clone(), m.indices.clone()))
+    }
+
     /// Whether any buffer holds drawable geometry (used to skip empty glow passes).
     pub fn has_geometry(&self) -> bool {
         self.spheres.is_some()

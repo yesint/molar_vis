@@ -915,9 +915,8 @@ impl Molecule {
             } else if matches!(rep.kind, RepKind::Surface)
                 || (rep.ss_per_frame && crate::geometry::needs_ss(&rep.params, rep.color))
             {
-                // The surface mesh is rebuilt from scratch each frame (its topology
-                // changes with the coordinates), so it can't use the in-place
-                // coords-only GPU update.
+                // Rebuild the surface mesh because its topology can change.
+                // Installation uploads both new arrays and reuses GPU capacity.
                 rep.geom_dirty = true;
             } else {
                 rep.coords_dirty = true;
