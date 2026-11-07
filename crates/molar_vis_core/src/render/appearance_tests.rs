@@ -174,6 +174,62 @@ fn audit_effect_endpoints() {
 }
 
 #[test]
+#[ignore = "physical GPU paired raster shader timing and image comparison"]
+fn zero_strength_raster_shader_paired_benchmark() {
+    let rs = gpu();
+    assert_ne!(rs.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let mut renderer = SceneRenderer::new(&rs,&crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/2lao.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min,raw.bbox_max,0.8);
+    camera.ao.enabled = true; camera.shadow.enabled = true;
+    camera.shadow.strength = 0.7; camera.shadow.softness = 0.7;
+    let mut scene = Scene::default(); scene.add(raw,&crate::settings::RepDefaults::default());
+    populate_rep(&renderer,&rs,&mut scene,crate::geometry::RepKind::Surface,crate::material::Material::Opaque);
+    let current = renderer.ssao_pipeline.as_ref().unwrap().clone();
+    let source = lit_shader_source(include_str!("shaders/ssao.wgsl"));
+    let guard = "u.shadow_params.z < 0.5 || u.shadow_params.x == 0.0";
+    assert_eq!(source.matches(guard).count(),1);
+    let original = ssao::build_pipeline_with_source(&rs.device,renderer.color_format,
+        &renderer.ssao_bgl,&source.replace(guard,"u.shadow_params.z < 0.5"));
+    let pipelines = [original,current];
+    for ao in [0.0,0.6] {
+        camera.ao.strength = ao;
+        let mut times = [Vec::new(),Vec::new()];
+        let mut paired = Vec::new();
+        for iteration in 0..56 {
+            camera.orientation = glam::Quat::from_rotation_y(iteration as f32 * 0.003);
+            let mut elapsed = [0.0;2];
+            for mode in if iteration%2 == 0 { [0,1] } else { [1,0] } {
+                renderer.ssao_pipeline = Some(pipelines[mode].clone());
+                renderer.shadow_key = None;
+                let start = std::time::Instant::now();
+                renderer.render_scene(&rs,[640,480],camera.view(),camera.proj(4.0/3.0),
+                    camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),
+                    camera.shadow_uniform(),camera.background,camera.eye_depth_range(),1.0,&scene);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                elapsed[mode] = start.elapsed().as_secs_f64()*1000.0;
+                if iteration>=5 { times[mode].push(elapsed[mode]); }
+            }
+            if iteration>=5 { paired.push(100.0*(elapsed[1]/elapsed[0]-1.0)); }
+        }
+        let images = pipelines.each_ref().map(|pipeline| {
+            renderer.ssao_pipeline = Some(pipeline.clone());
+            let cap = renderer.capture_begin(&rs,192,144,camera.view(),camera.proj(4.0/3.0),
+                camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),
+                camera.shadow_uniform(),camera.background,camera.eye_depth_range(),&scene);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap(); cap.read()
+        });
+        assert_eq!(images[0],images[1]);
+        paired.sort_by(f64::total_cmp);
+        for (mode,samples) in times.iter_mut().enumerate() {
+            samples.sort_by(f64::total_cmp);
+            eprintln!("RASTER_GUARD {}",serde_json::json!({"ao":ao,"mode":mode,
+                "median_ms":samples[25],"p95_ms":samples[48],"median_paired_percent":paired[25]}));
+        }
+    }
+}
+
+#[test]
 fn shared_shaders_validate_without_a_gpu() {
     for (name, source) in [
         ("sphere", include_str!("shaders/sphere.wgsl")),

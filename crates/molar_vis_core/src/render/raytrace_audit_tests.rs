@@ -3,6 +3,83 @@ use super::*;
 use crate::{camera::Camera, render::{SceneRenderer, SphereInstance}};
 
 #[test]
+#[ignore = "physical GPU alternating shader timing and exact pixel comparison"]
+fn zero_strength_shadow_shader_paired_benchmark() {
+    use crate::{geometry, material::Material, scene::Representation};
+    let rs = crate::render::test_gpu();
+    assert_ne!(rs.adapter.get_info().device_type, wgpu::DeviceType::Cpu);
+    let renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.8);
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    let mol = &scene.molecules[0];
+    let rep = Representation::new(geometry::RepKind::Surface);
+    let sel = mol.data.select_all();
+    let geom = geometry::build(&mol.data.bind_with_state(&sel, mol.render_state()),
+        mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(), Material::Opaque, None, true);
+    let data = RtScene::from_test_mesh(&geom.mesh, geometry::RepKind::Surface);
+    let mut traces = [Raytracer::new(&rs, renderer.color_format).unwrap(),
+        Raytracer::new(&rs, renderer.color_format).unwrap()];
+    let source = super::super::lit_shader_source(include_str!("shaders/raytrace.wgsl"));
+    let guard = "U.shadow.z <= 0.5 || U.shadow.x == 0.0";
+    assert_eq!(source.matches(guard).count(), 1);
+    let original = source.replace(guard, "U.shadow.z <= 0.5");
+    let shader = rs.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shadow-guard-reference"), source: wgpu::ShaderSource::Wgsl(original.into()),
+    });
+    let layout = rs.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None, bind_group_layouts: &[Some(&traces[0].trace_bgl)], immediate_size: 0,
+    });
+    traces[0].trace_pipeline = rs.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("shadow-guard-reference"), layout: Some(&layout), module: &shader,
+        entry_point: Some("cs_trace"), compilation_options: Default::default(), cache: None,
+    });
+    for rt in &mut traces { rt.upload(&rs, &data); }
+    let size = [192,144];
+    let targets = [0,1].map(|_| rs.device.create_texture(&wgpu::TextureDescriptor {
+        label: None, size: wgpu::Extent3d { width:size[0],height:size[1],depth_or_array_layers:1 },
+        mip_level_count:1,sample_count:1,dimension:wgpu::TextureDimension::D2,
+        format:renderer.color_format,
+        usage:wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats:&[],
+    }));
+    let views = targets.each_ref().map(|t| t.create_view(&Default::default()));
+    for (case, (ao,shadow,gi)) in [(0.0,0.0,0.0),(0.6,0.0,0.0),(0.0,0.7,0.0),
+        (0.6,0.7,0.5),(0.6,0.7,1.0),(0.00001,0.00001,0.99999)].into_iter().enumerate() {
+        camera.ao.enabled = true; camera.ao.strength = ao;
+        camera.shadow.enabled = true; camera.shadow.strength = shadow;
+        camera.shadow.softness = 0.7;
+        let uniform = SceneRenderer::rt_uniform(&camera,size[0],size[1],16,0,gi,2048);
+        let mut times = [Vec::new(),Vec::new()];
+        let mut paired = Vec::new();
+        for iteration in 0..36 {
+            let mut elapsed = [0.0;2];
+            for mode in if iteration % 2 == 0 { [0,1] } else { [1,0] } {
+                let start = std::time::Instant::now();
+                traces[mode].render_tiled(&rs,&views[mode],size,uniform,16);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                elapsed[mode] = start.elapsed().as_secs_f64()*1000.0;
+                if iteration >= 5 { times[mode].push(elapsed[mode]); }
+            }
+            if iteration >= 5 { paired.push(100.0*(elapsed[1]/elapsed[0]-1.0)); }
+        }
+        let images = targets.each_ref().map(|tex| {
+            let cap = renderer.begin_readback(&rs,tex,size,size);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap(); cap.read()
+        });
+        assert_eq!(images[0],images[1],"case {case}");
+        paired.sort_by(f64::total_cmp);
+        for (mode,samples) in times.iter_mut().enumerate() {
+            samples.sort_by(f64::total_cmp);
+            eprintln!("SHADOW_GUARD {}",serde_json::json!({"case":case,"mode":mode,
+                "median_ms":samples[15],"p95_ms":samples[29],"median_paired_percent":paired[15],
+                "samples_ms":samples}));
+        }
+    }
+}
+
+#[test]
 #[ignore = "physical GPU performance and progressive image parity"]
 fn progressive_resolve_parity_and_performance() {
     let rs = crate::render::test_gpu();

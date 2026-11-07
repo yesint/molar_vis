@@ -185,3 +185,39 @@ and the combined experimental candidate respectively; `step4` does not represent
 checkpoint's final source. Logs and images are in `target/render-audit/step4-before-1..3` and
 `step4-after-1..3` (logs use the same names with `.log`). The first comparison report is
 `step4-comparison-1.log`, and the inspected subset is `step4-inspection.png`.
+
+### 4a. Isolated zero-strength effect guards accepted (2026-11-07)
+
+The checkpoint's zero-strength changes passed validation after removal of the full-GI
+experiment. A fresh reference/candidate run matched all 392 endpoint images exactly. The
+comparison sheet and a six-case subset were inspected visually. The extended shadow-cache
+test passed, including restoration after camera movement. All 364 regular release tests and
+the wasm32 check passed; the browser check retained its three existing warnings.
+
+Two new same-process tests alternate original and guarded shaders, preserving identical
+geometry, camera, and submission work. The RT test measures 31 pairs after warmup per case;
+the raster test measures 51 pairs and forces an equal shadow-map rebuild for both modes.
+Both tests also require exact reference/candidate pixels. These tests separate shader costs
+from the substantial between-process variation seen in the earlier experiment.
+
+| Paired RT workload | Reference median / p95 | Guarded median / p95 | Median paired change |
+| --- | --- | --- | --- |
+| Zero shadows, zero AO | 39.497 / 40.732 ms | 6.736 / 7.425 ms | −82.9% |
+| Zero shadows, AO strength 0.6 | 56.380 / 59.154 ms | 25.695 / 26.859 ms | −55.0% |
+| Shadows 0.7, zero AO | 39.462 / 40.700 ms | 39.404 / 40.532 ms | −0.3% |
+| Shadows 0.7, AO 0.6, GI 0.5 | 95.388 / 99.576 ms | 94.875 / 99.502 ms | +0.5% |
+| Shadows 0.7, AO 0.6, GI 1.0 | 96.374 / 99.538 ms | 96.332 / 101.290 ms | −0.2% |
+| Near-zero effects, GI 0.99999 | 98.950 / 109.364 ms | 97.870 / 106.923 ms | −1.1% |
+
+Nonzero-shadow raster controls had median paired changes of −0.6% and −1.1%, with AO off
+and on respectively. No control showed a reproducible slowdown. The full renderer's moving
+camera benchmark measured zero-strength shadows at 3.489 → 1.190 ms with enabled zero AO,
+3.927 → 1.261 ms with AO disabled, and 7.188 → 4.713 ms with AO strength 0.6. Corresponding
+p95 values were 3.717 → 1.407, 4.464 → 1.792, and 7.669 → 6.706 ms. These frame measurements
+include CPU submission and GPU completion; the shader tests isolate the unchanged controls.
+No additional retained memory is introduced. Sample counts and random sequences are unchanged.
+
+The full-GI shortcut and fog guard remain unimplemented. The accepted source is saved in
+`target/render-audit/bin/step4-isolated`; logs and comparison artifacts use the
+`target/render-audit/step4-isolated-*` prefix. Future shader edits must preserve the paired
+tests' original-policy reference or update it explicitly.
