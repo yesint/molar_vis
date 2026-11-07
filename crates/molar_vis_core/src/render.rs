@@ -314,6 +314,17 @@ impl Targets {
         size: [u32; 2],
         full_oit: bool,
     ) -> Self {
+        Self::new_with_optional_targets(device, color_format, oit_bgl, size, full_oit, true)
+    }
+
+    fn new_with_optional_targets(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        oit_bgl: &wgpu::BindGroupLayout,
+        size: [u32; 2],
+        full_oit: bool,
+        full_normal: bool,
+    ) -> Self {
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
@@ -342,7 +353,7 @@ impl Targets {
         );
         // The depth target is sampled by the SSAO pass, so it also needs TEXTURE_BINDING.
         let depth_tex = make("scene-depth", DEPTH_FORMAT, attach_sample);
-        let normal_tex = make("scene-normal", NORMAL_FORMAT, attach_sample);
+        let normal_tex = Self::make_normal(device, if full_normal { size } else { [1, 1] });
         let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
         let (accum_view, reveal_view, oit_bind_group) = Self::make_oit(
             device, oit_bgl, if full_oit { size } else { [1, 1] });
@@ -359,6 +370,25 @@ impl Targets {
             _depth_tex: depth_tex,
             _normal_tex: normal_tex,
         }
+    }
+
+    fn make_normal(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene-normal"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: NORMAL_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    }
+
+    /// Return whether the SSAO binding must be updated to a new normal view.
+    fn ensure_normal(&mut self, device: &wgpu::Device) -> bool {
+        if [self._normal_tex.width(), self._normal_tex.height()] == self.size { return false; }
+        self._normal_tex = Self::make_normal(device, self.size);
+        self.normal_view = self._normal_tex.create_view(&Default::default());
+        true
     }
 
     fn make_oit(device: &wgpu::Device, oit_bgl: &wgpu::BindGroupLayout, size: [u32; 2])
@@ -1481,6 +1511,28 @@ impl SceneRenderer {
         }
     }
 
+    /// Return whether deferred effects run and whether the opaque pass needs normals.
+    fn effect_targets(&self, scene: &Scene, ao: [f32; 4], shadow: [f32; 4]) -> (bool, bool) {
+        let material_ao = scene.molecules.iter().any(|mol| mol.visible && (
+            mol.reps.iter().any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes)
+            || mol.meshes.iter().any(|m| m.state.visible && m.state.material.preset() == crate::material::Material::MolecularNodes)
+        ));
+        // Enabled global AO at zero strength suppresses intrinsic material AO.
+        let effects = self.ssao_pipeline.is_some()
+            && ((ao[3] > 0.5 && ao[2] > 0.0) || (shadow[2] > 0.5 && shadow[0] != 0.0) || (ao[3] <= 0.5 && material_ao));
+        // On the measured late-depth path, removing an analytic impostor's
+        // second output can slow its fragment shader. Keep that path unchanged;
+        // mesh-only scenes and early-depth impostors can omit the unused target.
+        let late_impostors = !effects && !self.early_depth_test && self.oit_enabled
+            && scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter().any(|rep|
+                rep.visible && !rep.material.is_transparent()
+                    && (rep.gpu.spheres.is_some() || rep.gpu.cylinders.is_some())));
+        let normals = self.oit_enabled && (effects || late_impostors);
+        #[cfg(test)]
+        let normals = normals || (self.oit_enabled && self.force_normal);
+        (effects, normals)
+    }
+
     /// Render every visible representation of every visible molecule into the
     /// offscreen target with the given camera. Returns the egui texture id.
     pub fn render_scene(
@@ -1524,8 +1576,9 @@ impl SceneRenderer {
             }));
         }
         if render_size != self.targets.size {
-            self.targets = Targets::new_with_oit(&rs.device, self.color_format, &self.oit_bgl,
-                render_size, self.oit_enabled && has_transparent_geometry(scene));
+            self.targets = Targets::new_with_optional_targets(&rs.device, self.color_format, &self.oit_bgl,
+                render_size, self.oit_enabled && has_transparent_geometry(scene),
+                self.effect_targets(scene, ao, shadow).1);
             // The SSAO bind group references the (new) depth view → recreate it.
             self.ssao_bind_group = make_ssao_bind_group(
                 &rs.device,
@@ -1691,23 +1744,12 @@ impl SceneRenderer {
         // Opaque-only targets keep minimal valid textures for the unused bindings.
         if use_oit { self.targets.ensure_oit(&rs.device, &self.oit_bgl); }
 
-        let material_ao = scene.molecules.iter().any(|mol| mol.visible && (
-            mol.reps.iter().any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes)
-            || mol.meshes.iter().any(|m| m.state.visible && m.state.material.preset() == crate::material::Material::MolecularNodes)
-        ));
-        // Enabled global AO at zero strength suppresses intrinsic material AO.
-        let effects = self.ssao_pipeline.is_some()
-            && ((ao[3] > 0.5 && ao[2] > 0.0) || shadow_on || (ao[3] <= 0.5 && material_ao));
-        // On the measured late-depth path, removing an analytic impostor's
-        // second output can slow its fragment shader. Keep that path unchanged;
-        // mesh-only scenes and early-depth impostors can omit the unused target.
-        let late_impostors = !effects && !self.early_depth_test && self.oit_enabled
-            && scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter().any(|rep|
-                rep.visible && !rep.material.is_transparent()
-                    && (rep.gpu.spheres.is_some() || rep.gpu.cylinders.is_some())));
-        let normals = self.oit_enabled && (effects || late_impostors);
-        #[cfg(test)]
-        let normals = normals || (self.oit_enabled && self.force_normal);
+        let (effects, normals) = self.effect_targets(scene, ao, shadow);
+        if normals && self.targets.ensure_normal(&rs.device) {
+            self.ssao_bind_group = make_ssao_bind_group(&rs.device, &self.ssao_bgl,
+                &self.targets.depth_view, &self.targets.normal_view, &self.ssao_buf,
+                &self.shadow_depth_view, &self.shadow_sampler);
+        }
         let opaque_pipeline = if normals { 0 } else { 3 };
 
         let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
@@ -2013,8 +2055,9 @@ impl SceneRenderer {
         // swap the live targets back. The copy below is submitted *before* the swap-back,
         // so the temp texture stays alive — wgpu retains resources used by submitted work
         // until it completes — even though its Rust handle is dropped here.
-        let temp = Targets::new_with_oit(&rs.device, self.color_format, &self.oit_bgl,
-            render_size, self.oit_enabled && has_transparent_geometry(scene));
+        let temp = Targets::new_with_optional_targets(&rs.device, self.color_format, &self.oit_bgl,
+            render_size, self.oit_enabled && has_transparent_geometry(scene),
+            self.effect_targets(scene, ao, shadow).1);
         let temp_ssao = make_ssao_bind_group(
             &rs.device,
             &self.ssao_bgl,

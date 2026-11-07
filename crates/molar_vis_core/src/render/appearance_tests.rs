@@ -324,6 +324,117 @@ fn transparency_targets_allocate_on_demand() {
 }
 
 #[test]
+#[ignore = "physical GPU normal allocation lifecycle, timing, and image parity"]
+fn normal_targets_allocate_on_demand() {
+    use crate::{geometry::RepKind,material::Material};
+    let rs = gpu();
+    assert_ne!(rs.adapter.get_info().device_type,wgpu::DeviceType::Cpu);
+    let settings = crate::settings::RenderingSettings::default();
+    let mut renderers = [SceneRenderer::new(&rs,&settings),SceneRenderer::new(&rs,&settings)];
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/2lao.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min,raw.bbox_max,0.8);
+    camera.background.kind = BgKind::Gradient;
+    camera.shadow.enabled = false;
+    let mut scene = Scene::default(); scene.add(raw,&crate::settings::RepDefaults::default());
+    let install = |renderer: &mut SceneRenderer,size,full| {
+        renderer.targets = Targets::new_with_optional_targets(&rs.device,renderer.color_format,&renderer.oit_bgl,size,false,full);
+        renderer.ssao_bind_group = make_ssao_bind_group(&rs.device,&renderer.ssao_bgl,
+            &renderer.targets.depth_view,&renderer.targets.normal_view,&renderer.ssao_buf,
+            &renderer.shadow_depth_view,&renderer.shadow_sampler);
+    };
+    for ssaa in [1,2] {
+        for renderer in &mut renderers { renderer.ssaa=ssaa; install(renderer,[1,1],false); }
+        let mut retained = None;
+        for (case,(material,enabled,strength,size,full)) in [
+            (Material::Opaque,false,0.0,[160,120],false),
+            (Material::Opaque,true,0.6,[160,120],true),
+            (Material::Opaque,false,0.0,[160,120],true),
+            (Material::MolecularNodes,true,0.0,[192,144],false),
+            (Material::MolecularNodes,false,0.0,[192,144],true),
+            (Material::Opaque,false,0.0,[160,120],false),
+        ].into_iter().enumerate() {
+            populate_rep(&renderers[1],&rs,&mut scene,RepKind::Surface,material);
+            camera.ao.enabled=enabled; camera.ao.strength=strength;
+            let full_size=size.map(|n| n*ssaa);
+            if renderers[0].targets.size!=full_size {install(&mut renderers[0],full_size,true);}
+            let mut pictures=Vec::new();
+            for renderer in &mut renderers {
+                renderer.render_scene(&rs,size,camera.view(),camera.proj(4.0/3.0),camera.is_perspective(),
+                    camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),camera.background,
+                    camera.eye_depth_range(),1.0,&scene);
+                let cap=renderer.begin_readback(&rs,&renderer.targets.color_tex,full_size,size);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();pictures.push(cap.read());
+            }
+            assert_eq!(pictures[0],pictures[1],"ssaa {ssaa} case {case}");
+            let renderer=&mut renderers[1];
+            assert_eq!([renderer.targets._normal_tex.width(),renderer.targets._normal_tex.height()],
+                if full {full_size} else {[1,1]});
+            if case==1 {retained=Some(renderer.targets.normal_view.clone());}
+            if case==2 {assert_eq!(retained.as_ref().unwrap(),&renderer.targets.normal_view);}
+            let live=renderer.targets.normal_view.clone();
+            // A temporary capture may need normals even while the live view does not.
+            let mut capture_camera=camera; capture_camera.ao.enabled=true;capture_camera.ao.strength=0.6;
+            let mut captures=Vec::new();
+            for renderer in &mut renderers {
+                let cap=renderer.capture_begin(&rs,192,144,capture_camera.view(),capture_camera.proj(4.0/3.0),
+                    capture_camera.is_perspective(),capture_camera.cue_uniform(),capture_camera.ao_uniform(),
+                    capture_camera.shadow_uniform(),capture_camera.background,capture_camera.eye_depth_range(),&scene);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();captures.push(cap.read());
+            }
+            assert_eq!(captures[0],captures[1]);
+            assert_eq!(live,renderers[1].targets.normal_view,"capture restores live normal bindings");
+            // Render the live scene again to exercise the restored bind group.
+            let renderer=&mut renderers[1];
+            renderer.render_scene(&rs,size,camera.view(),camera.proj(4.0/3.0),camera.is_perspective(),
+                camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),camera.background,
+                camera.eye_depth_range(),1.0,&scene);
+            let cap=renderer.begin_readback(&rs,&renderer.targets.color_tex,full_size,size);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();assert_eq!(pictures[0],cap.read());
+            if let Ok(dir)=std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                for (mode,picture) in pictures.iter().enumerate() {
+                    picture.save(format!("{dir}/normal-{ssaa}-{case}-{mode}.png")).unwrap();
+                }
+            }
+        }
+    }
+    populate_rep(&renderers[1],&rs,&mut scene,RepKind::Surface,Material::Opaque);
+    for renderer in &mut renderers { renderer.ssaa=2; }
+    for size in [[640,480],[1920,1080]] {
+        let aspect=size[0] as f32/size[1] as f32;
+        for (effects,resize,first_use) in [(false,true,false),(false,false,false),(true,true,false),(true,false,true)] {
+            camera.ao.enabled=effects;camera.ao.strength=0.6;
+            let mut times=[Vec::new(),Vec::new()]; let mut paired=Vec::new();
+            for iteration in 0..36 {
+                let mut elapsed=[0.0;2];
+                for mode in if iteration%2==0 {[0,1]} else {[1,0]} {
+                    let renderer=&mut renderers[mode];
+                    // Keep steady targets; reset before timing first activation of effects.
+                    if first_use || (iteration==0 && !resize) {
+                        install(renderer,size.map(|n|n*2),mode==0 || (effects && !first_use));
+                    }
+                    let start=std::time::Instant::now();
+                    if resize {install(renderer,size.map(|n|n*2),mode==0 || effects);}
+                    renderer.render_scene(&rs,size,camera.view(),camera.proj(aspect),camera.is_perspective(),
+                        camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),camera.background,
+                        camera.eye_depth_range(),1.0,&scene);
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    elapsed[mode]=start.elapsed().as_secs_f64()*1000.0;
+                    if iteration>=5 {times[mode].push(elapsed[mode]);}
+                }
+                if iteration>=5 {paired.push(100.0*(elapsed[1]/elapsed[0]-1.0));}
+            }
+            paired.sort_by(f64::total_cmp);
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("NORMAL_TARGETS {}",serde_json::json!({"size":size,"effects":effects,"resize":resize,
+                    "first_use":first_use,"mode":mode,"median_ms":samples[15],"p95_ms":samples[29],"paired_percent":paired[15]}));
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "physical GPU normal attachment parity, frame timing, and startup cost"]
 fn unused_normal_attachment_parity_and_performance() {
     use crate::{geometry::RepKind,material::Material};

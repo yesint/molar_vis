@@ -304,3 +304,49 @@ passed, with the same three browser warnings.
 The final executable is `target/render-audit/bin/step6-cached`. Accepted measurements and
 images use `step6-accepted-standard` and `step6-accepted-early`; regular test results are in
 `step6-accepted-unit.log`, and the inspected sheet is `step6-accepted-inspection.png`.
+
+### 7. Allocate normal textures on demand (R1, remaining allocation)
+
+A target set now keeps a 1×1 normal texture until its render path needs full-size normals.
+The allocation decision uses the same effects and late-depth-impostor policy as the opaque
+pass. First use replaces the SSAO binding, and later toggles retain the texture until resize.
+Capture allocates its own matching targets and restores both live textures and bindings.
+
+The new lifecycle test compares eager and on-demand targets through first use, retention,
+resize, intrinsic Molecular Nodes AO, and the enabled-zero-AO override at 1× and 2× SSAA.
+It also compares captures and renders again after capture to check restored bindings. All
+comparisons passed, and the six-case surface sheet was inspected visually. The broader
+material/representation test passed all 402 image pairs across late and early depth modes.
+The wasm32 check passed with its three existing warnings.
+
+Five same-process runs measured 31 alternating pairs per case after warmup, including two
+runs with early depth tests. The table gives medians of run medians and run p95 values at 2×
+SSAA. The host was under greater load than during step 6, so these absolute times must not be
+compared across steps. All comparisons below use eager and on-demand targets in the same run.
+
+| Viewport and workload | Eager median / p95 | On-demand median / p95 | Median paired change |
+| --- | --- | --- | --- |
+| 640×480, effects off, resize + frame | 2.895 / 3.937 ms | 2.894 / 4.818 ms | +0.1% |
+| 640×480, effects off, steady frame | 2.746 / 4.752 ms | 2.745 / 5.141 ms | +0.4% |
+| 640×480, effects on, resize + frame | 21.017 / 28.863 ms | 21.337 / 28.123 ms | +0.5% |
+| 640×480, first effects activation | 23.536 / 29.166 ms | 21.765 / 30.833 ms | +0.9% |
+| 1920×1080, effects off, resize + frame | 39.928 / 59.485 ms | 9.991 / 12.502 ms | −72.1% |
+| 1920×1080, effects off, steady frame | 9.632 / 12.652 ms | 9.634 / 11.166 ms | 0.0% |
+| 1920×1080, effects on, resize + frame | 99.986 / 104.790 ms | 100.280 / 104.154 ms | +0.2% |
+| 1920×1080, first effects activation | 100.158 / 108.686 ms | 99.755 / 105.658 ms | −0.3% |
+
+One small-viewport resize run had a +19.2% paired difference; the other four were −0.2% to
++0.4%. No reproducible slowdown was found. First use adds an allocation and binding rebuild,
+while subsequent toggles reuse them. The large-viewport resize improvement reproduced in all
+five runs; no steady-frame speedup is claimed.
+
+The unused normal format would require 9,830,400 bytes at 640×480 with 2× SSAA. The placeholder
+uses eight bytes of image texels, avoiding about 9.4 MiB of format-based storage. At a 4K
+viewport with 2× SSAA this saves about 253 MiB. These are texture-format calculations, not
+measured driver allocation or RSS reductions. The retained texture is bounded by current target
+size, and late-depth opaque impostors keep their full normal target under the accepted policy.
+
+The executable is `target/render-audit/bin/step7`. Allocation logs use `step7-normal`,
+`step7-early`, and `step7-repeat*`; broader parity logs use `step7-parity-*`. The inspected
+comparison sheet is `step7-inspection.png`.
+All 364 regular release tests passed (`step7-unit.log`).
