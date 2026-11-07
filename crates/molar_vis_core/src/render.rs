@@ -741,14 +741,17 @@ pub struct SceneRenderer {
     // cyan over the color target, depth-test `≤` against the scene, no depth-write).
     // The OIT pipelines are resolved into the color target by `composite_pipeline`
     // after the transparent pass; the glow pipelines run in a final pass.
+    // Slot 3 is the opaque color-only variant, also used by the hover lens.
     envelope_bgl: Option<wgpu::BindGroupLayout>,
     empty_envelope: Option<envelope::Gpu>,
-    sphere_pipeline: [wgpu::RenderPipeline; 3],
-    cylinder_pipeline: [wgpu::RenderPipeline; 3],
-    line_pipeline: [wgpu::RenderPipeline; 3],
-    point_pipeline: [wgpu::RenderPipeline; 3],
-    mesh_pipeline: [wgpu::RenderPipeline; 3],
-    path_mesh_pipeline: [wgpu::RenderPipeline; 3],
+    sphere_pipeline: [wgpu::RenderPipeline; 4],
+    cylinder_pipeline: [wgpu::RenderPipeline; 4],
+    line_pipeline: [wgpu::RenderPipeline; 4],
+    point_pipeline: [wgpu::RenderPipeline; 4],
+    mesh_pipeline: [wgpu::RenderPipeline; 4],
+    path_mesh_pipeline: [wgpu::RenderPipeline; 4],
+    #[cfg(test)]
+    force_normal: bool,
     sphere_shadow_pipeline: wgpu::RenderPipeline,
     cylinder_shadow_pipeline: wgpu::RenderPipeline,
     mesh_shadow_pipeline: wgpu::RenderPipeline,
@@ -771,12 +774,13 @@ pub struct SceneRenderer {
     /// Fullscreen background-gradient pass (drawn first in the opaque pass when the
     /// background is a gradient; a solid background just uses the clear color).
     bg_buf: wgpu::Buffer,
-    bg_pipeline: wgpu::RenderPipeline,
+    bg_pipeline: [wgpu::RenderPipeline; 2],
     bg_bind_group: wgpu::BindGroup,
     /// Whether the device supports weighted-blended OIT (needs `INDEPENDENT_BLEND`).
     /// False on WebGL2: transparent reps then render with plain alpha blending in the
     /// opaque pass, and the OIT/composite passes are skipped.
     oit_enabled: bool,
+    early_depth_test: bool,
     /// GPU ray tracer (compute + storage buffers); `None` on WebGL2 (no compute). Drives
     /// the raytraced "Save image" and the in-place incremental render.
     raytracer: Option<raytrace::Raytracer>,
@@ -863,6 +867,10 @@ fn make_pick_targets(
 
 impl SceneRenderer {
     pub fn new(rs: &RenderState, settings: &crate::settings::RenderingSettings) -> Self {
+        Self::new_with_color_only(rs, settings, true)
+    }
+
+    fn new_with_color_only(rs: &RenderState, settings: &crate::settings::RenderingSettings, color_only: bool) -> Self {
         let _timing = crate::performance::span("renderer-init");
         let device = &rs.device;
         if crate::performance::enabled() {
@@ -949,9 +957,13 @@ impl SceneRenderer {
         // Glow depth-tests `≤` (the glow geometry is identical to the scene's, so it
         // sits at exactly the scene depth → it must pass on equality), no depth-write.
         let lequal = wgpu::CompareFunction::LessEqual;
-        let triple = |b: &dyn Fn(&[Option<wgpu::ColorTargetState>], bool, wgpu::CompareFunction, &str) -> wgpu::RenderPipeline| {
+        let pipelines = |b: &dyn Fn(&[Option<wgpu::ColorTargetState>], bool, wgpu::CompareFunction, &str) -> wgpu::RenderPipeline| {
+            let main = b(&opaque_t, true, less, "fs_main");
+            let color = if color_only && oit_enabled {
+                b(&opaque_targets(f, false), true, less, "fs_main")
+            } else { main.clone() };
             [
-                b(&opaque_t, true, less, "fs_main"),
+                main,
                 // OIT slot. Without INDEPENDENT_BLEND this pipeline would fail to
                 // create, so build a harmless single-target placeholder (never bound:
                 // `render_scene` skips the OIT pass when `oit_enabled` is false).
@@ -961,6 +973,7 @@ impl SceneRenderer {
                     b(&opaque_t, true, less, "fs_main")
                 },
                 b(&glow_t, false, lequal, "fs_glow"),
+                color,
             ]
         };
         // Early-Z applies only to the opaque pass (`fs_main`); the OIT/glow slots
@@ -970,39 +983,52 @@ impl SceneRenderer {
             .then(|| envelope::layout(device));
         let empty_envelope = envelope_bgl.as_ref()
             .map(|layout| envelope::Gpu::new(device, layout, &GeometryData::default()));
-        let sphere_pipeline = triple(&|t, dw, dc, fs| {
-            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), t, dw, dc, fs, early_z && fs == "fs_main")
+        // Share modules across pass variants during this renderer's construction.
+        // Early-depth attributes affect only opaque/shadow entry points; other
+        // entry points in the same module keep their original depth behavior.
+        let compile = |label, source: String| device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let cylinder_pipeline = triple(&|t, dw, dc, fs| {
-            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), t, dw, dc, fs, early_z && fs == "fs_main")
+        let sphere_shader = color_only.then(|| compile("sphere-shader", inject_early_z(
+            &envelope::shader(include_str!("render/shaders/sphere.wgsl"), envelope_bgl.is_some()), early_z).into_owned()));
+        let cylinder_shader = color_only.then(|| compile("cylinder-shader", inject_early_z(
+            &envelope::shader(include_str!("render/shaders/cylinder.wgsl"), envelope_bgl.is_some()), early_z).into_owned()));
+        let line_shader = color_only.then(|| compile("line-shader", lit_shader_source(include_str!("render/shaders/line.wgsl"))));
+        let point_shader = color_only.then(|| compile("point-shader", lit_shader_source(include_str!("render/shaders/point.wgsl"))));
+        let mesh_shader = color_only.then(|| compile("mesh-shader", lit_shader_source(include_str!("render/shaders/mesh.wgsl"))));
+        let sphere_pipeline = pipelines(&|t, dw, dc, fs| {
+            sphere::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), t, dw, dc, fs, early_z && fs == "fs_main", sphere_shader.as_ref())
         });
-        let line_pipeline = triple(&|t, dw, dc, fs| {
-            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        let cylinder_pipeline = pipelines(&|t, dw, dc, fs| {
+            cylinder::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), t, dw, dc, fs, early_z && fs == "fs_main", cylinder_shader.as_ref())
         });
-        let point_pipeline = triple(&|t, dw, dc, fs| {
-            point::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        let line_pipeline = pipelines(&|t, dw, dc, fs| {
+            line::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, line_shader.as_ref())
         });
-        let mesh_pipeline = triple(&|t, dw, dc, fs| {
-            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs)
+        let point_pipeline = pipelines(&|t, dw, dc, fs| {
+            point::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, point_shader.as_ref())
         });
-        let path_mesh_pipeline = triple(&|t, dw, dc, fs| {
+        let mesh_pipeline = pipelines(&|t, dw, dc, fs| {
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, fs, mesh_shader.as_ref())
+        });
+        let path_mesh_pipeline = pipelines(&|t, dw, dc, fs| {
             let entry = match fs { "fs_main" => "fs_path_main", "fs_oit" => "fs_path_oit", _ => fs };
-            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, entry)
+            mesh::build_pipeline(device, DEPTH_FORMAT, &camera_bgl, t, dw, dc, entry, mesh_shader.as_ref())
         });
         let sphere_shadow_pipeline = sphere::build_pipeline(
             device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), &[], true, less,
-            "fs_shadow", early_z,
+            "fs_shadow", early_z, sphere_shader.as_ref(),
         );
         let cylinder_shadow_pipeline = cylinder::build_pipeline(
             device, DEPTH_FORMAT, &camera_bgl, envelope_bgl.as_ref(), &[], true, less,
-            "fs_shadow", early_z,
+            "fs_shadow", early_z, cylinder_shader.as_ref(),
         );
         let mesh_shadow_pipeline = mesh::build_pipeline(
-            device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow",
+            device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow", mesh_shader.as_ref(),
         );
 
         let open_mesh_shadow_pipeline = mesh::build_pipeline(
-            device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow_open",
+            device, DEPTH_FORMAT, &camera_bgl, &[], true, less, "fs_shadow_open", mesh_shader.as_ref(),
         );
 
         // OIT resolve: a fullscreen pass that reads the accum + reveal targets
@@ -1099,7 +1125,12 @@ impl SceneRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bg_pipeline = background::build_pipeline(device, color_format, DEPTH_FORMAT, &bg_bgl, oit_enabled);
+        let bg_shader = color_only.then(|| compile("bg-shader", include_str!("render/shaders/background.wgsl").into()));
+        let bg_pipeline = background::build_pipeline(device, color_format, DEPTH_FORMAT, &bg_bgl, oit_enabled, bg_shader.as_ref());
+        let bg_color_pipeline = if color_only && oit_enabled {
+            background::build_pipeline(device, color_format, DEPTH_FORMAT, &bg_bgl, false, bg_shader.as_ref())
+        } else { bg_pipeline.clone() };
+        let bg_pipeline = [bg_pipeline, bg_color_pipeline];
         let bg_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bg-bg"),
             layout: &bg_bgl,
@@ -1149,6 +1180,8 @@ impl SceneRenderer {
             point_pipeline,
             mesh_pipeline,
             path_mesh_pipeline,
+            #[cfg(test)]
+            force_normal: !color_only,
             sphere_shadow_pipeline,
             cylinder_shadow_pipeline,
             mesh_shadow_pipeline,
@@ -1166,6 +1199,7 @@ impl SceneRenderer {
             bg_pipeline,
             bg_bind_group,
             oit_enabled,
+            early_depth_test: early_z,
             raytracer,
             #[cfg(not(target_arch = "wasm32"))]
             unobstructed: None,
@@ -1657,6 +1691,25 @@ impl SceneRenderer {
         // Opaque-only targets keep minimal valid textures for the unused bindings.
         if use_oit { self.targets.ensure_oit(&rs.device, &self.oit_bgl); }
 
+        let material_ao = scene.molecules.iter().any(|mol| mol.visible && (
+            mol.reps.iter().any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes)
+            || mol.meshes.iter().any(|m| m.state.visible && m.state.material.preset() == crate::material::Material::MolecularNodes)
+        ));
+        // Enabled global AO at zero strength suppresses intrinsic material AO.
+        let effects = self.ssao_pipeline.is_some()
+            && ((ao[3] > 0.5 && ao[2] > 0.0) || shadow_on || (ao[3] <= 0.5 && material_ao));
+        // On the measured late-depth path, removing an analytic impostor's
+        // second output can slow its fragment shader. Keep that path unchanged;
+        // mesh-only scenes and early-depth impostors can omit the unused target.
+        let late_impostors = !effects && !self.early_depth_test && self.oit_enabled
+            && scene.molecules.iter().any(|mol| mol.visible && mol.reps.iter().any(|rep|
+                rep.visible && !rep.material.is_transparent()
+                    && (rep.gpu.spheres.is_some() || rep.gpu.cylinders.is_some())));
+        let normals = self.oit_enabled && (effects || late_impostors);
+        #[cfg(test)]
+        let normals = normals || (self.oit_enabled && self.force_normal);
+        let opaque_pipeline = if normals { 0 } else { 3 };
+
         let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
         let mut encoder = rs
             .device
@@ -1707,7 +1760,7 @@ impl SceneRenderer {
                             store: wgpu::StoreOp::Store,
                         },
                     }),
-                    self.oit_enabled.then_some(wgpu::RenderPassColorAttachment {
+                    normals.then_some(wgpu::RenderPassColorAttachment {
                         view: &self.targets.normal_view,
                         resolve_target: None,
                         depth_slice: None,
@@ -1733,16 +1786,16 @@ impl SceneRenderer {
             if background.is_gradient() {
                 let bgu = BgUniform { top: background.top, bottom: background.bottom };
                 rs.queue.write_buffer(&self.bg_buf, 0, bytemuck::bytes_of(&bgu));
-                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_pipeline(&self.bg_pipeline[usize::from(!normals)]);
                 pass.set_bind_group(0, &self.bg_bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
-            self.draw_reps(&mut pass, scene, false, 0, &images);
+            self.draw_reps(&mut pass, scene, false, opaque_pipeline, &images);
             // No-OIT fallback (WebGL2): draw transparent reps here too, with the
             // opaque pipeline (alpha blend, depth-write on) — order-dependent, but it
             // renders. With OIT they go to the dedicated pass below instead.
             if has_transparent && !self.oit_enabled {
-                self.draw_reps(&mut pass, scene, true, 0, &images);
+                self.draw_reps(&mut pass, scene, true, opaque_pipeline, &images);
             }
         }
 
@@ -1752,12 +1805,7 @@ impl SceneRenderer {
         // both AO and shadows are off and no material supplies intrinsic AO.
         // AO with strength 0 (when disabled) is a no-op
         // so the pass can run for shadows alone.
-        let material_ao = scene.molecules.iter().any(|mol| mol.visible && (
-            mol.reps.iter().any(|rep| rep.visible && rep.material.preset() == crate::material::Material::MolecularNodes)
-            || mol.meshes.iter().any(|m| m.state.visible && m.state.material.preset() == crate::material::Material::MolecularNodes)
-        ));
-        // Enabled global AO at zero strength suppresses intrinsic material AO.
-        if (ao[3] > 0.5 && ao[2] > 0.0) || shadow_on || (ao[3] <= 0.5 && material_ao) {
+        if effects {
             if let Some(ssao_pipeline) = &self.ssao_pipeline {
             let ao_eff = if ao[3] > 0.5 { ao } else { [ao[0], ao[1], 0.0, ao[3]] };
             let su = SsaoUniform::new(
@@ -1914,7 +1962,7 @@ impl SceneRenderer {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
-                })],
+                }), None],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.targets.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -2481,8 +2529,8 @@ impl SceneRenderer {
     }
 
     /// Draw the hover detail lens (each molecule's `hover_detail_gpu` ball-and-stick)
-    /// with the opaque pipelines (alpha-blend + depth-test) at the base camera, so
-    /// the faded geometry blends over the scene and the ribbon occludes it.
+    /// with color-only opaque pipelines at the base camera. The pass clears depth
+    /// so faded atoms blend over the scene while still occluding one another.
     fn draw_hover_detail(&self, pass: &mut wgpu::RenderPass, scene: &Scene) {
         pass.set_bind_group(0, &self.camera_bind_group, &[0]);
         for mol in &scene.molecules {
@@ -2490,13 +2538,14 @@ impl SceneRenderer {
                 continue;
             }
             let g = &mol.hover_detail_gpu;
+            self.bind_envelope(pass, g.envelope.as_ref());
             if let Some(s) = &g.spheres {
-                pass.set_pipeline(&self.sphere_pipeline[0]);
+                pass.set_pipeline(&self.sphere_pipeline[3]);
                 pass.set_vertex_buffer(0, s.buffer.slice(..));
                 pass.draw(0..4, 0..s.count);
             }
             if let Some(c) = &g.cylinders {
-                pass.set_pipeline(&self.cylinder_pipeline[0]);
+                pass.set_pipeline(&self.cylinder_pipeline[3]);
                 pass.set_vertex_buffer(0, c.buffer.slice(..));
                 pass.draw(0..4, 0..c.count);
             }
@@ -2504,7 +2553,8 @@ impl SceneRenderer {
     }
 
     /// Draw every visible representation whose transparency matches `transparent`,
-    /// using pipeline-array slot `pipeline_idx` (0 = opaque, 1 = OIT). These are
+    /// using pipeline-array slot `pipeline_idx` (0 = opaque with normals,
+    /// 1 = OIT, 3 = opaque color-only). These are
     /// decoupled so the WebGL2 fallback can draw transparent reps with the *opaque*
     /// pipeline (alpha blend, depth-write on). Each rep is drawn once per periodic
     /// image listed in `images[mi][j]`, selecting that image's camera via a dynamic
@@ -2605,7 +2655,7 @@ impl SceneRenderer {
                     box_cams.sort_unstable();
                     box_cams.dedup();
                     if !box_cams.is_empty() {
-                        pass.set_pipeline(&self.line_pipeline[0]);
+                        pass.set_pipeline(&self.line_pipeline[i]);
                         pass.set_vertex_buffer(0, l.buffer.slice(..));
                         for cam in box_cams {
                             pass.set_bind_group(0, &self.camera_bind_group, &[cam * stride]);
@@ -2616,7 +2666,7 @@ impl SceneRenderer {
                 // Aromatic-ring circles (depth-tested grey lines, base camera): present
                 // only for molecules perceived in the editor.
                 if let Some(l) = &mol.aromatic_gpu.lines {
-                    pass.set_pipeline(&self.line_pipeline[0]);
+                    pass.set_pipeline(&self.line_pipeline[i]);
                     pass.set_vertex_buffer(0, l.buffer.slice(..));
                     pass.set_bind_group(0, &self.camera_bind_group, &[0]);
                     pass.draw(0..4, 0..l.count / 2);

@@ -37,11 +37,16 @@ pub fn build_pipeline(
     depth_format: wgpu::TextureFormat,
     bgl: &wgpu::BindGroupLayout,
     normal_target: bool,
+    precompiled: Option<&wgpu::ShaderModule>,
 ) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("bg-shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/background.wgsl").into()),
-    });
+    let owned_shader;
+    let shader = if let Some(shader) = precompiled { shader } else {
+        owned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bg-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/background.wgsl").into()),
+        });
+        &owned_shader
+    };
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bg-layout"),
         bind_group_layouts: &[Some(bgl)],
@@ -51,7 +56,7 @@ pub fn build_pipeline(
         label: Some("bg-pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: shader,
             entry_point: Some("vs_main"),
             buffers: &[],
             compilation_options: Default::default(),
@@ -67,7 +72,7 @@ pub fn build_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: shader,
             entry_point: Some("fs_main"),
             targets: &[
                 Some(wgpu::ColorTargetState {

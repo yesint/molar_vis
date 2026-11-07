@@ -41,14 +41,19 @@ pub fn build_pipeline(
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
     fs_entry: &str,
+    precompiled: Option<&wgpu::ShaderModule>,
 ) -> wgpu::RenderPipeline {
     let _timing = crate::performance::span("pipeline-point");
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("point-shader"),
-        source: wgpu::ShaderSource::Wgsl(
-            super::lit_shader_source(include_str!("shaders/point.wgsl")).into(),
-        ),
-    });
+    let owned_shader;
+    let shader = if let Some(shader) = precompiled { shader } else {
+        owned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("point-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                super::lit_shader_source(include_str!("shaders/point.wgsl")).into(),
+            ),
+        });
+        &owned_shader
+    };
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("point-pipepoint-layout"),
@@ -60,7 +65,7 @@ pub fn build_pipeline(
         label: Some("point-pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: shader,
             entry_point: Some("vs_main"),
             buffers: &[PointInstance::LAYOUT],
             compilation_options: Default::default(),
@@ -79,7 +84,7 @@ pub fn build_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: shader,
             entry_point: Some(fs_entry),
             targets,
             compilation_options: Default::default(),

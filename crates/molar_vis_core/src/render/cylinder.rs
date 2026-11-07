@@ -101,15 +101,20 @@ pub fn build_pipeline(
     depth_compare: wgpu::CompareFunction,
     fs_entry: &str,
     early_z: bool,
+    precompiled: Option<&wgpu::ShaderModule>,
 ) -> wgpu::RenderPipeline {
     let _timing = crate::performance::span("pipeline-cylinder");
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("cylinder-shader"),
-        source: wgpu::ShaderSource::Wgsl(super::inject_early_z(
-            &super::envelope::shader(include_str!("shaders/cylinder.wgsl"), envelope_bgl.is_some()),
-            early_z,
-        )),
-    });
+    let owned_shader;
+    let shader = if let Some(shader) = precompiled { shader } else {
+        owned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cylinder-shader"),
+            source: wgpu::ShaderSource::Wgsl(super::inject_early_z(
+                &super::envelope::shader(include_str!("shaders/cylinder.wgsl"), envelope_bgl.is_some()),
+                early_z,
+            )),
+        });
+        &owned_shader
+    };
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("cylinder-pipeline-layout"),
@@ -121,7 +126,7 @@ pub fn build_pipeline(
         label: Some("cylinder-pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: shader,
             entry_point: Some("vs_main"),
             buffers: &[CylinderInstance::LAYOUT],
             compilation_options: Default::default(),
@@ -140,7 +145,7 @@ pub fn build_pipeline(
         }),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: shader,
             entry_point: Some(fs_entry),
             targets,
             compilation_options: Default::default(),

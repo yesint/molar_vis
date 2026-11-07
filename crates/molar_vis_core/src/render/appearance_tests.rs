@@ -324,6 +324,105 @@ fn transparency_targets_allocate_on_demand() {
 }
 
 #[test]
+#[ignore = "physical GPU normal attachment parity, frame timing, and startup cost"]
+fn unused_normal_attachment_parity_and_performance() {
+    use crate::{geometry::RepKind,material::Material};
+    let rs = gpu();
+    assert_ne!(rs.adapter.get_info().device_type,wgpu::DeviceType::Cpu);
+    let settings = crate::settings::RenderingSettings::default();
+    let mut startup = [Vec::new(),Vec::new()];
+    for iteration in 0..14 {
+        for mode in if iteration%2 == 0 { [0,1] } else { [1,0] } {
+            let start = std::time::Instant::now();
+            let renderer = SceneRenderer::new_with_color_only(&rs,&settings,mode==1);
+            if iteration>=3 { startup[mode].push(start.elapsed().as_secs_f64()*1000.0); }
+            drop(renderer);
+        }
+    }
+    for (mode,times) in startup.iter_mut().enumerate() {
+        times.sort_by(f64::total_cmp);
+        eprintln!("NORMAL_STARTUP {}",serde_json::json!({"mode":mode,"median_ms":times[5],"p95_ms":times[10]}));
+    }
+    let mut renderers = [SceneRenderer::new_with_color_only(&rs,&settings,false),SceneRenderer::new(&rs,&settings)];
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/2lao.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min,raw.bbox_max,0.8);
+    camera.background.kind = BgKind::Gradient;
+    let mut scene = Scene::default(); scene.add(raw,&crate::settings::RepDefaults::default());
+    let capture = |renderer:&mut SceneRenderer,scene:&Scene,camera:&Camera| {
+        let cap = renderer.capture_begin(&rs,192,144,camera.view(),camera.proj(4.0/3.0),
+            camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),
+            camera.background,camera.eye_depth_range(),scene);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap(); cap.read()
+    };
+    for style in [RepKind::Vdw,RepKind::Licorice,RepKind::Lines,RepKind::Cartoon,RepKind::Surface] {
+        for material in [Material::Opaque,Material::MolecularNodes,Material::FlatOutline,Material::Velvet,Material::Transparent] {
+            populate_rep(&renderers[1],&rs,&mut scene,style,material);
+            for projection in [Projection::Orthographic,Projection::Perspective] {
+                camera.projection = projection;
+                for (case,(enabled,strength,shadow)) in [(false,0.0,false),(true,0.0,false),
+                    (true,0.6,false),(false,0.0,true)].into_iter().enumerate() {
+                    camera.ao.enabled=enabled;camera.ao.strength=strength;camera.shadow.enabled=shadow;
+                    let before = capture(&mut renderers[0],&scene,&camera);
+                    let after = capture(&mut renderers[1],&scene,&camera);
+                    assert_eq!(before,after,"{style:?}/{material:?}/{projection:?}/{case}");
+                    if style==RepKind::Surface && projection==Projection::Orthographic {
+                        if let Ok(dir)=std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                            std::fs::create_dir_all(&dir).unwrap();
+                            before.save(format!("{dir}/{material:?}-{case}-before.png")).unwrap();
+                            after.save(format!("{dir}/{material:?}-{case}-after.png")).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for style in [RepKind::Vdw,RepKind::Surface] {
+        populate_rep(&renderers[1],&rs,&mut scene,style,Material::Opaque);
+        camera.projection=Projection::Orthographic;
+        for effects in [false,true] {
+            camera.ao.enabled=effects;camera.ao.strength=0.6;camera.shadow.enabled=effects;
+            let mut times=[Vec::new(),Vec::new()];
+            let mut paired=Vec::new();
+            for iteration in 0..36 {
+                camera.orientation=glam::Quat::from_rotation_y(iteration as f32*0.003);
+                let mut elapsed=[0.0;2];
+                for mode in if iteration%2==0 { [0,1] } else { [1,0] } {
+                    // Use identical target allocations for both attachment policies.
+                    // Module sharing changes construction, not the resulting shader.
+                    let renderer = &mut renderers[1];
+                    renderer.force_normal = mode==0;
+                    renderer.shadow_key = None;
+                    let start=std::time::Instant::now();
+                    renderer.render_scene(&rs,[640,480],camera.view(),camera.proj(4.0/3.0),
+                        camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),
+                        camera.background,camera.eye_depth_range(),1.0,&scene);
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    elapsed[mode]=start.elapsed().as_secs_f64()*1000.0;
+                    if iteration>=5 {times[mode].push(elapsed[mode]);}
+                }
+                if iteration>=5 {paired.push(100.0*(elapsed[1]/elapsed[0]-1.0));}
+            }
+            paired.sort_by(f64::total_cmp);
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("NORMAL_FRAME {}",serde_json::json!({"style":format!("{style:?}"),"effects":effects,
+                    "mode":mode,"median_ms":samples[15],"p95_ms":samples[29],"paired_percent":paired[15]}));
+            }
+        }
+    }
+    // The hover lens has a color-only render pass even when the base scene has effects.
+    renderers[1].force_normal = false;
+    // Give the legacy reference these compatible lens pipelines as well.
+    renderers[0].sphere_pipeline[3]=renderers[1].sphere_pipeline[3].clone();
+    renderers[0].cylinder_pipeline[3]=renderers[1].cylinder_pipeline[3].clone();
+    let spheres = GeometryData { spheres:vec![SphereInstance {center:camera.target.to_array(),
+        radius:0.2,color:0x80ff80ff,mat:Material::Opaque.pack_lighting(),pick:[0,0]}],..Default::default() };
+    scene.molecules[0].hover_detail_gpu=renderers[1].upload(&rs,&spheres);
+    scene.molecules[0].glow_gpu=renderers[1].upload(&rs,&spheres);
+    assert_eq!(capture(&mut renderers[0],&scene,&camera),capture(&mut renderers[1],&scene,&camera));
+}
+
+#[test]
 fn shared_shaders_validate_without_a_gpu() {
     for (name, source) in [
         ("sphere", include_str!("shaders/sphere.wgsl")),
@@ -399,11 +498,15 @@ pub(super) fn gpu() -> RenderState {
             .await
             .unwrap();
         eprintln!("Rendering on {:?}", adapter.get_info());
+        let early_z = if std::env::var_os("MOLAR_VIS_TEST_EARLY_Z").is_some() {
+            assert!(adapter.features().contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST));
+            wgpu::Features::SHADER_EARLY_DEPTH_TEST
+        } else { wgpu::Features::empty() };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: if crate::performance::enabled() {
                     adapter.features() & wgpu::Features::TIMESTAMP_QUERY
-                } else { wgpu::Features::empty() },
+                } else { wgpu::Features::empty() } | early_z,
                 ..Default::default()
             })
             .await
@@ -1635,6 +1738,7 @@ fn depth_only_shadows_match_opaque_pipeline_depth() {
             true,
             wgpu::CompareFunction::Less,
             "fs_shadow",
+            None,
         ),
     ];
     let extent = wgpu::Extent3d {

@@ -259,3 +259,48 @@ current target dimensions, with a separate temporary target during capture.
 
 The saved executable is `target/render-audit/bin/step5`; logs and images use the
 `target/render-audit/step5-*` prefix. R1's unused normal attachment remains a separate change.
+
+### 6. Omit unused normal output and share shader modules (R1)
+
+Opaque passes now select color-only pipelines when SSAO does not consume normals. The
+late-depth sphere and cylinder path retains its original normal attachment: repeated paired
+measurements showed possible slowdowns with color-only output on that path. Mesh-only scenes
+and devices with early depth tests use color-only output when effects are absent. The global
+AO override and intrinsic Molecular Nodes AO retain their existing behavior. Normal textures
+remain allocated at full size; allocation is a separate pending change.
+
+Each geometry shader module is now created once during renderer construction and shared by
+its pipeline variants. This offsets the cost of the added color-only variants. In 11 alternating
+constructor pairs after warmup, median construction time fell from 178.637 to 94.691 ms without
+early depth tests, and from 327.139 to 167.988 ms with early depth tests (47.0% and 48.6%).
+The original per-pipeline module construction remains available only as the test reference.
+
+Frame tests alternate attachment policies on the same renderer and targets, with 31 measured
+pairs after warmup. Times include submission and GPU completion at 640×480 with 2× SSAA.
+
+| Depth path and workload | Original median / p95 | Candidate median / p95 | Median paired change |
+| --- | --- | --- | --- |
+| Late depth, surface, effects off | 1.162 / 1.409 ms | 0.772 / 1.180 ms | −32.7% |
+| Early depth, surface, effects off | 1.133 / 1.746 ms | 0.867 / 1.486 ms | −20.2% |
+| Late depth, spheres, effects off (retained policy) | 2.012 / 2.379 ms | 1.942 / 2.847 ms | +0.7% |
+| Early depth, spheres, effects off | 1.440 / 2.613 ms | 1.553 / 2.368 ms | −7.1% |
+| Late depth, surface, effects on (control) | 7.419 / 10.156 ms | 7.400 / 11.157 ms | −0.1% |
+| Early depth, surface, effects on (control) | 9.645 / 12.569 ms | 9.752 / 14.225 ms | −2.6% |
+
+Sphere effects-on controls had paired changes of −2.0% and +3.4% for late and early depth.
+Frame timings fluctuate, including differences between paired ratios and ratios of medians;
+no sphere speedup is claimed. The retained late-depth path executes the original attachment
+policy. The surface improvement and construction improvement were consistent across repeats.
+
+Both depth modes passed 201 exact image comparisons, covering five representation styles,
+five materials, two projections, four effect settings, and selection glow with a hover lens.
+The final surface comparison sheet was inspected visually. Lens validation also exposed and
+fixed incompatible render-pass attachment slots and a missing envelope bind group. The lens
+reference uses compatible color-only pipelines; parity with the previously invalid lens pass
+is not claimed. Existing shadow-depth, transparent-envelope, supplied-mesh, COSMO-style,
+glowing-path, and shadow-cache GPU tests passed. All 364 regular tests and the wasm32 check
+passed, with the same three browser warnings.
+
+The final executable is `target/render-audit/bin/step6-cached`. Accepted measurements and
+images use `step6-accepted-standard` and `step6-accepted-early`; regular test results are in
+`step6-accepted-unit.log`, and the inspected sheet is `step6-accepted-inspection.png`.
