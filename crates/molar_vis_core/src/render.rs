@@ -220,6 +220,13 @@ fn opaque_targets(color_format: wgpu::TextureFormat, normal_target: bool) -> Vec
     ]
 }
 
+fn has_transparent_geometry(scene: &Scene) -> bool {
+    scene.molecules.iter().any(|m| {
+        m.visible && (m.reps.iter().any(|r| r.visible && (r.material.is_transparent() || r.params.has_glowing_path()))
+            || m.meshes.iter().any(|s| s.state.visible && s.transparent()))
+    })
+}
+
 /// Color-target descriptors for the weighted-blended OIT pass: `accum` is purely
 /// additive, `reveal` multiplies the destination by `1 - src` (revealage).
 fn oit_targets() -> Vec<Option<wgpu::ColorTargetState>> {
@@ -297,6 +304,16 @@ impl Targets {
         oit_bgl: &wgpu::BindGroupLayout,
         size: [u32; 2],
     ) -> Self {
+        Self::new_with_oit(device, color_format, oit_bgl, size, false)
+    }
+
+    fn new_with_oit(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        oit_bgl: &wgpu::BindGroupLayout,
+        size: [u32; 2],
+        full_oit: bool,
+    ) -> Self {
         let extent = wgpu::Extent3d {
             width: size[0],
             height: size[1],
@@ -326,14 +343,37 @@ impl Targets {
         // The depth target is sampled by the SSAO pass, so it also needs TEXTURE_BINDING.
         let depth_tex = make("scene-depth", DEPTH_FORMAT, attach_sample);
         let normal_tex = make("scene-normal", NORMAL_FORMAT, attach_sample);
-        let accum_tex = make("oit-accum", ACCUM_FORMAT, attach_sample);
-        let reveal_tex = make("oit-reveal", REVEAL_FORMAT, attach_sample);
-
         let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
-        let accum_view = view(&accum_tex);
-        let reveal_view = view(&reveal_tex);
+        let (accum_view, reveal_view, oit_bind_group) = Self::make_oit(
+            device, oit_bgl, if full_oit { size } else { [1, 1] });
 
-        let oit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        Self {
+            size,
+            color_view: view(&color_tex),
+            depth_view: view(&depth_tex),
+            normal_view: view(&normal_tex),
+            accum_view,
+            reveal_view,
+            oit_bind_group,
+            color_tex,
+            _depth_tex: depth_tex,
+            _normal_tex: normal_tex,
+        }
+    }
+
+    fn make_oit(device: &wgpu::Device, oit_bgl: &wgpu::BindGroupLayout, size: [u32; 2])
+        -> (wgpu::TextureView, wgpu::TextureView, wgpu::BindGroup)
+    {
+        let view = |label, format| device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }).create_view(&Default::default());
+        let accum_view = view("oit-accum", ACCUM_FORMAT);
+        let reveal_view = view("oit-reveal", REVEAL_FORMAT);
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("oit-composite-bg"),
             layout: oit_bgl,
             entries: &[
@@ -348,17 +388,12 @@ impl Targets {
             ],
         });
 
-        Self {
-            size,
-            color_view: view(&color_tex),
-            depth_view: view(&depth_tex),
-            normal_view: view(&normal_tex),
-            accum_view,
-            reveal_view,
-            oit_bind_group,
-            color_tex,
-            _depth_tex: depth_tex,
-            _normal_tex: normal_tex,
+        (accum_view, reveal_view, bind_group)
+    }
+
+    fn ensure_oit(&mut self, device: &wgpu::Device, oit_bgl: &wgpu::BindGroupLayout) {
+        if [self.accum_view.texture().width(), self.accum_view.texture().height()] != self.size {
+            (self.accum_view, self.reveal_view, self.oit_bind_group) = Self::make_oit(device, oit_bgl, self.size);
         }
     }
 }
@@ -1455,7 +1490,8 @@ impl SceneRenderer {
             }));
         }
         if render_size != self.targets.size {
-            self.targets = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
+            self.targets = Targets::new_with_oit(&rs.device, self.color_format, &self.oit_bgl,
+                render_size, self.oit_enabled && has_transparent_geometry(scene));
             // The SSAO bind group references the (new) depth view → recreate it.
             self.ssao_bind_group = make_ssao_bind_group(
                 &rs.device,
@@ -1615,11 +1651,11 @@ impl SceneRenderer {
         // visible (idle scenes pay nothing for the transparency machinery). When the
         // device can't do OIT (WebGL2), transparent reps are drawn in the opaque pass
         // with plain alpha blending instead, so the dedicated OIT pass never runs.
-        let has_transparent = scene.molecules.iter().any(|m| {
-            m.visible && (m.reps.iter().any(|r| r.visible && (r.material.is_transparent() || r.params.has_glowing_path()))
-                || m.meshes.iter().any(|s| s.state.visible && s.transparent()))
-        });
+        let has_transparent = has_transparent_geometry(scene);
         let use_oit = has_transparent && self.oit_enabled;
+        // Retain full-size targets after first use, and release them on resize.
+        // Opaque-only targets keep minimal valid textures for the unused bindings.
+        if use_oit { self.targets.ensure_oit(&rs.device, &self.oit_bgl); }
 
         let mut gpu_timing = crate::performance::GpuFrame::begin(&rs.device);
         let mut encoder = rs
@@ -1929,7 +1965,8 @@ impl SceneRenderer {
         // swap the live targets back. The copy below is submitted *before* the swap-back,
         // so the temp texture stays alive — wgpu retains resources used by submitted work
         // until it completes — even though its Rust handle is dropped here.
-        let temp = Targets::new(&rs.device, self.color_format, &self.oit_bgl, render_size);
+        let temp = Targets::new_with_oit(&rs.device, self.color_format, &self.oit_bgl,
+            render_size, self.oit_enabled && has_transparent_geometry(scene));
         let temp_ssao = make_ssao_bind_group(
             &rs.device,
             &self.ssao_bgl,

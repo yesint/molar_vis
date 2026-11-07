@@ -221,3 +221,41 @@ The full-GI shortcut and fog guard remain unimplemented. The accepted source is 
 `target/render-audit/bin/step4-isolated`; logs and comparison artifacts use the
 `target/render-audit/step4-isolated-*` prefix. Future shader edits must preserve the paired
 tests' original-policy reference or update it explicitly.
+
+### 5. Allocate transparency targets on demand (R1, allocation portion)
+
+Opaque-only target sets now use 1×1 OIT textures. Full-size accumulation and reveal textures
+are allocated when visible transparency or a glowing path first needs them, retained for later
+toggles, and released on resize. A resize or capture that already needs transparency allocates
+the full textures directly. Normal-target allocation and attachment behavior are unchanged.
+
+The texture extents are asserted in a new GPU lifecycle test covering hidden transparent
+geometry, first use, return to opaque rendering, resize, effects, and capture restoration.
+All six eager/lazy image pairs and their captures matched exactly; their comparison sheet was
+inspected. Existing transparent-envelope, supplied-mesh, and glowing-path GPU tests passed.
+All 364 regular release tests and the wasm32 check passed (three existing browser warnings).
+
+Three same-process runs each measured 31 alternating eager/lazy pairs per case after warmup.
+The table reports medians across runs and medians of each run's p95.
+
+| Workload | Eager median / p95 | On-demand median / p95 |
+| --- | --- | --- |
+| Opaque resize and completed frame | 1.400 / 1.864 ms | 1.403 / 1.850 ms |
+| Opaque steady frame | 1.243 / 1.416 ms | 1.235 / 1.323 ms |
+| Transparent resize and completed frame | 1.359 / 2.196 ms | 1.376 / 2.133 ms |
+| Transparent steady frame | 1.192 / 1.523 ms | 1.179 / 1.361 ms |
+| First transparency use after opaque allocation | 1.220 / 1.507 ms | 1.230 / 1.381 ms |
+
+Steady and resize timings remain within measurement noise. First transparency activation has
+a small allocation cost; its median paired difference was +2.7%, while its median completed
+frame time increased by approximately 0.010 ms. Later toggles reuse the textures.
+
+At the measured 640×480 viewport with 2× SSAA, the two texture formats require 12,288,000 bytes
+at full size, versus 10 bytes of image texels for placeholders. This avoids about 11.7 MiB of
+format-based texture storage for an opaque-only target set. Actual driver allocations include
+alignment and pooling; no equivalent process-RSS reduction is claimed. At a 4K viewport with
+2× SSAA, the corresponding format-based saving is about 316 MiB. Retention is bounded to the
+current target dimensions, with a separate temporary target during capture.
+
+The saved executable is `target/render-audit/bin/step5`; logs and images use the
+`target/render-audit/step5-*` prefix. R1's unused normal attachment remains a separate change.

@@ -230,6 +230,100 @@ fn zero_strength_raster_shader_paired_benchmark() {
 }
 
 #[test]
+#[ignore = "physical GPU target allocation, first-use timing, and image parity"]
+fn transparency_targets_allocate_on_demand() {
+    use crate::{geometry::RepKind,material::Material};
+    let rs = gpu();
+    assert_ne!(rs.adapter.get_info().device_type,wgpu::DeviceType::Cpu);
+    let settings = crate::settings::RenderingSettings::default();
+    let mut renderers = [SceneRenderer::new(&rs,&settings),SceneRenderer::new(&rs,&settings)];
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/2lao.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min,raw.bbox_max,0.8);
+    camera.background.kind = BgKind::Gradient;
+    let mut scene = Scene::default(); scene.add(raw,&crate::settings::RepDefaults::default());
+    let install = |renderer: &mut SceneRenderer,size,full| {
+        renderer.targets = Targets::new_with_oit(&rs.device,renderer.color_format,&renderer.oit_bgl,size,full);
+        renderer.ssao_bind_group = make_ssao_bind_group(&rs.device,&renderer.ssao_bgl,
+            &renderer.targets.depth_view,&renderer.targets.normal_view,&renderer.ssao_buf,
+            &renderer.shadow_depth_view,&renderer.shadow_sampler);
+    };
+    let mut retained = None;
+    for (case,(material,visible,size,effects)) in [
+        (Material::Opaque,true,[160,120],false),
+        (Material::Transparent,false,[160,120],false),
+        (Material::Transparent,true,[160,120],true),
+        (Material::Opaque,true,[160,120],true),
+        (Material::Opaque,true,[192,144],false),
+        (Material::Transparent,true,[192,144],false),
+    ].into_iter().enumerate() {
+        populate_rep(&renderers[1],&rs,&mut scene,RepKind::Surface,material);
+        scene.molecules[0].reps[0].visible = visible;
+        camera.ao.enabled = effects; camera.shadow.enabled = effects;
+        let full_size = size.map(|n| n*settings.ssaa);
+        if renderers[0].targets.size != full_size { install(&mut renderers[0],full_size,true); }
+        let mut pictures = Vec::new();
+        for renderer in &mut renderers {
+            renderer.render_scene(&rs,size,camera.view(),camera.proj(4.0/3.0),
+                camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),
+                camera.background,camera.eye_depth_range(),1.0,&scene);
+            let cap = renderer.begin_readback(&rs,&renderer.targets.color_tex,full_size,size);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap(); pictures.push(cap.read());
+        }
+        assert_eq!(pictures[0],pictures[1],"case {case}");
+        let candidate = &mut renderers[1];
+        let actual_size = [candidate.targets.accum_view.texture().width(),candidate.targets.accum_view.texture().height()];
+        assert_eq!(actual_size,if matches!(case,0|1|4) { [1,1] } else { full_size });
+        if case == 2 { retained = Some(candidate.targets.accum_view.clone()); }
+        if case == 3 { assert_eq!(retained.as_ref().unwrap(),&candidate.targets.accum_view); }
+        let live = candidate.targets.accum_view.clone();
+        let cap = candidate.capture_begin(&rs,size[0],size[1],camera.view(),camera.proj(4.0/3.0),
+            camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),
+            camera.background,camera.eye_depth_range(),&scene);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        assert_eq!(pictures[0],cap.read());
+        assert_eq!(live,candidate.targets.accum_view,"capture must restore live targets");
+        if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+            std::fs::create_dir_all(&dir).unwrap();
+            for (mode,picture) in pictures.iter().enumerate() {
+                picture.save(format!("{dir}/oit-{case}-{mode}.png")).unwrap();
+            }
+        }
+    }
+    camera.ao.enabled = false; camera.shadow.enabled = false;
+    for transparent in [false,true] {
+        populate_rep(&renderers[1],&rs,&mut scene,RepKind::Surface,
+            if transparent { Material::Transparent } else { Material::Opaque });
+        for (resize,first_use) in [(true,false),(false,false),(false,true)] {
+            if first_use && !transparent { continue; }
+            let mut times = [Vec::new(),Vec::new()];
+            let mut paired = Vec::new();
+            for iteration in 0..36 {
+                let mut elapsed = [0.0;2];
+                for mode in if iteration%2 == 0 { [0,1] } else { [1,0] } {
+                    let renderer = &mut renderers[mode];
+                    if first_use { install(renderer,[640*settings.ssaa,480*settings.ssaa],mode==0); }
+                    let start = std::time::Instant::now();
+                    if resize || (iteration == 0 && !first_use) { install(renderer,[640*settings.ssaa,480*settings.ssaa],mode==0 || transparent); }
+                    renderer.render_scene(&rs,[640,480],camera.view(),camera.proj(4.0/3.0),
+                        camera.is_perspective(),camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),
+                        camera.background,camera.eye_depth_range(),1.0,&scene);
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    elapsed[mode] = start.elapsed().as_secs_f64()*1000.0;
+                    if iteration>=5 { times[mode].push(elapsed[mode]); }
+                }
+                if iteration>=5 { paired.push(100.0*(elapsed[1]/elapsed[0]-1.0)); }
+            }
+            paired.sort_by(f64::total_cmp);
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("OIT_TARGETS {}",serde_json::json!({"transparent":transparent,"resize":resize,"first_use":first_use,
+                    "mode":mode,"median_ms":samples[15],"p95_ms":samples[29],"paired_percent":paired[15]}));
+            }
+        }
+    }
+}
+
+#[test]
 fn shared_shaders_validate_without_a_gpu() {
     for (name, source) in [
         ("sphere", include_str!("shaders/sphere.wgsl")),
