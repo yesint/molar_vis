@@ -610,3 +610,31 @@ The experimental executables are `target/render-audit/bin/step14`, `step14-final
 The timestamped run is `step14-large-profile.log`. Saved PNGs are in `step14-final-images`
 and `step14-large-images`. The last executable adds only a test viewport-size switch; its
 scheduler regression test also passed independently.
+
+### 15. Bounded RT submission batching (rejected 2026-11-08)
+
+An experiment packed up to four unchanged compute dispatches into each command encoder,
+using aligned dynamic uniform records. It preserved the caller's dispatch limit, sample
+chunks, tile order, accumulator transitions, and resolve policy. Six dispatches used two
+submissions instead of six; the opaque control used one submission instead of two.
+
+All 373 regular tests and the wasm32 check passed. A short GPU test compared partial sweeps,
+accumulator swaps, target changes, and cancellation/restart at three viewport sizes. All
+displayed complete images matched exactly. Final opaque and intrinsic-AO captures also
+matched exactly and passed visual inspection. The first GPU process, including pipeline
+initialization, took 5.61 seconds. Subsequent timing processes took 0.84–1.36 seconds, with
+one-second gaps and a 15-second timeout for each process.
+
+Five 256×256 intrinsic-AO runs used six alternating pairs each and discarded the first pair.
+CPU submission time improved in all five runs: medians of run medians were 1.426 and 1.077 ms.
+Full completion times were 57.765 and 58.176 ms, with mixed changes from −1.3% to +1.9%.
+Eight opaque control runs showed increased completion time in six runs, despite generally
+lower CPU submission time. The initial five runs and three follow-up runs both showed this
+tradeoff. These measurements do not support a whole-render improvement, and the change does
+not pass the no-regression gate. The implementation and experimental tests were removed.
+Intrinsic-AO scheduling therefore remains unaccepted; batching has not resolved its cost.
+
+The experimental binaries are `target/render-audit/bin/step15` and `step15-timed`. Timing
+logs use `step15-timed-large` and `step15-timed-opaque`; partial-sweep evidence uses
+`step15-partial`. The inspected comparison is `step15-inspection.png`. The saved experiment
+is `/tmp/step15-batching.patch`; it is not part of the accepted source.
