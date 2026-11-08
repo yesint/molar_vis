@@ -513,3 +513,29 @@ The executable is `target/render-audit/bin/step11`. Logs use the `step11-pick`,
 `step11-material`, `step11-unit`, `step11-wasm`, and `step11-gpu` prefixes. Images are in
 `step11-images`; the inspected comparison is `step11-inspection.png`. A triangle BVH remains
 conditional on evidence that rays entering mesh bounds cause unacceptable picking latency.
+
+### 12. Shared surface transpose and early volume release (S5, rejected 2026-11-08)
+
+An experiment shared the transient transpose allocation between EDT and field filtering,
+released it before extraction, and released the nearest-atom volume immediately after
+extraction. All 372 regular tests passed, including exact complete meshes and partial-tile
+grid comparisons with one and two workers. The wasm32 check also passed.
+
+Five paired CPU benchmark runs at two Rayon workers showed effectively unchanged full-build
+times at qualities 0 and 3. Their median paired changes were +0.40% and −1.07%, respectively.
+However, five alternating separate-process quality-4 probes showed a repeatable slowdown:
+median elapsed time increased from 2.12 to 2.38 seconds. Three further profiled pairs showed
+median full-build time increasing from 2.071 to 2.382 seconds, with the largest increase in
+refinement. These profiles locate the regression but do not establish its allocator or cache
+cause.
+
+The quality-4 grid contained 4,400,291 voxels. Median peak process RSS fell from 76.79 to
+66.91 MiB, measured with `/usr/bin/time`; the reference range was 71.06–77.27 MiB and the
+candidate range was 66.84–67.13 MiB. The memory reduction does not meet the user's requirement
+when accompanied by the observed slowdown. Both implementation changes were therefore
+removed before proceeding, and no GPU test was needed for this failed performance gate.
+
+The experimental executable remains in `target/render-audit/bin/step12`. CPU, memory, and
+stage logs use `step12-cpu`, `step12-memory`, and `step12-profile` prefixes. The two lifetime
+changes can be investigated separately later; neither is accepted here. Byte-based job
+admission and cancellation improvements remain separate pending work.
