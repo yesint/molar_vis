@@ -350,3 +350,40 @@ The executable is `target/render-audit/bin/step7`. Allocation logs use `step7-no
 `step7-early`, and `step7-repeat*`; broader parity logs use `step7-parity-*`. The inspected
 comparison sheet is `step7-inspection.png`.
 All 364 regular release tests passed (`step7-unit.log`).
+
+### 8. Cache primitive bounds during envelope construction (R5, accepted 2026-11-08)
+
+The change computes each primitive's conservative bounds once during initial tree
+construction, then reuses those values for node bounds and split comparisons. The arithmetic,
+comparison keys, primitive ordering, tree layout, upload contents, and refit code are unchanged.
+The temporary array occupies 24 bytes per primitive and is released when construction returns;
+it adds no retained tree or GPU storage. The audit's separate refit-quality policy is not part
+of this change.
+
+Five paired CPU benchmark runs completed before testing was stopped. Each run compared 31
+alternating reference/candidate builds after warmup and required identical primitive and node
+bytes. Median paired reductions ranged from 64.8–70.9% for eight primitives, 82.0–86.4% for
+1,024 primitives, and 83.6–96.2% for 16,384 primitives. Host contention caused very large timing
+outliers, especially for the largest case; these measurements establish repeated work savings
+but do not establish representative interactive latency or a raster-frame speedup. Raw medians
+and p95 values are retained in `target/render-audit/step8-cpu-1.log` through `step8-cpu-5.log`.
+The 16,384-primitive case uses 384 KiB of temporary bound storage.
+
+Native release compilation and the wasm32 check passed; the latter retained its three existing
+warnings. All 365 regular CPU tests passed at low priority on one CPU (`step8-unit.log`).
+The differential regression test covers empty, single, mixed, coincident, shifted-lane, smoothed,
+and degenerate primitives, and verifies exact tree bytes after refitting moved coordinates.
+
+After the user authorized short GPU checks on 2026-11-08, the reference and candidate each
+rendered three 320×240 captures at 2× SSAA, with no benchmark loop. The tests completed in
+0.52 and 0.43 seconds respectively on the physical Radeon GPU. All three RGBA image pairs
+matched exactly, and the reference/candidate/difference sheet was inspected visually. A
+separate short GPU containment test passed for internal faces, shared caps, spheres, rotated
+views, and shifted bond lanes. The byte-exact CPU tree tests cover larger and coincident inputs.
+No GPU frame-time improvement is claimed for this CPU construction change.
+
+The accepted candidate is `target/render-audit/bin/step8`. GPU logs and images use the
+`target/render-audit/step8-short-*` prefix; the inspected sheet is
+`step8-short-inspection.png`. Earlier molecule-preview reference images remain available in
+`step8-before-images`, but that sustained capture/benchmark test was not repeated. Future GPU
+checks should remain short, with sustained benchmark loops avoided while the desktop is in use.

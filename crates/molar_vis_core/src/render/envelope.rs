@@ -55,10 +55,21 @@ impl Tree {
         let mut tree = Self::from_geometry(geom);
         let mut ids: Vec<_> = (0..tree.primitives.len() as u32).collect();
         if !ids.is_empty() {
-            tree.subtree(&mut ids);
+            // Sorting compares each primitive repeatedly. Compute the conservative
+            // bound once, preserving the original arithmetic and split ordering.
+            let bounds: Vec<_> = ids.iter().map(|&id| tree.bounds(id)).collect();
+            tree.subtree(&mut ids, &bounds);
         }
         tree
     }
+    #[cfg(test)]
+    fn build_reference(geom: &GeometryData) -> Self {
+        let mut tree = Self::from_geometry(geom);
+        let mut ids: Vec<_> = (0..tree.primitives.len() as u32).collect();
+        if !ids.is_empty() { tree.subtree_reference(&mut ids); }
+        tree
+    }
+
     fn refit(&mut self) {
         let _timing = crate::performance::span("envelope-refit");
         // The leaf ordering stays valid as coordinates move. Refit bottom-up in
@@ -89,7 +100,49 @@ impl Tree {
         let extent = Vec3::splat(p.a[3].max(flare) + (p.lane[0] * p.lane[1]).abs() + 1e-5);
         (a.min(b) - extent, a.max(b) + extent)
     }
-    fn subtree(&mut self, ids: &mut [u32]) {
+    fn subtree(&mut self, ids: &mut [u32], bounds: &[(Vec3, Vec3)]) {
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for &id in ids.iter() {
+            let (a, b) = bounds[id as usize];
+            lo = lo.min(a);
+            hi = hi.max(b);
+        }
+        let index = self.nodes.len();
+        self.nodes.push(Node {
+            lo: lo.to_array(),
+            hi: hi.to_array(),
+            primitive: u32::MAX,
+            escape: 0,
+        });
+        if ids.len() == 1 {
+            self.nodes[index].primitive = ids[0];
+        } else {
+            let size = hi - lo;
+            let axis = if size.x >= size.y && size.x >= size.z {
+                0
+            } else if size.y >= size.z {
+                1
+            } else {
+                2
+            };
+            let mid = ids.len() / 2;
+            ids.select_nth_unstable_by(mid, |a, b| {
+                let center = |id| {
+                    let (lo, hi) = bounds[id as usize];
+                    lo[axis] + hi[axis]
+                };
+                center(*a).total_cmp(&center(*b))
+            });
+            let (left, right) = ids.split_at_mut(mid);
+            self.subtree(left, bounds);
+            self.subtree(right, bounds);
+        }
+        self.nodes[index].escape = self.nodes.len() as u32;
+    }
+
+    #[cfg(test)]
+    fn subtree_reference(&mut self, ids: &mut [u32]) {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
         for &id in ids.iter() {
@@ -124,8 +177,8 @@ impl Tree {
                 center(*a).total_cmp(&center(*b))
             });
             let (left, right) = ids.split_at_mut(mid);
-            self.subtree(left);
-            self.subtree(right);
+            self.subtree_reference(left);
+            self.subtree_reference(right);
         }
         self.nodes[index].escape = self.nodes.len() as u32;
     }
@@ -321,6 +374,80 @@ mod tests {
             ..Default::default()
         }
     }
+    fn mixed_geometry(count: usize) -> GeometryData {
+        let base=geometry();
+        let mut geom=GeometryData::default();
+        let mut seed=42u32;
+        let mut next=|| {seed=seed.wrapping_mul(1664525).wrapping_add(1013904223); (seed >> 8) as f32 / 16777216.0};
+        for i in 0..count {
+            let center=[next()*20.0-10.0,next()*20.0-10.0,next()*20.0-10.0];
+            if i%3==0 {
+                let mut s=base.spheres[0];s.center=center;s.radius=next()*0.4;
+                geom.spheres.push(s);
+            } else {
+                let mut c=base.cylinders[0];c.p0=center;
+                c.p1=(Vec3::from_array(center)+Vec3::new(next(),next(),next())).to_array();
+                c.radius=next()*0.2;c.offset=[(i%5) as f32-2.0,0.04];
+                if i%2==0 {c.profile=[0.2,0.1,0.7,0.2];c.smoothing=0.7;}
+                if i%7==0 {c.p1=c.p0;}
+                geom.cylinders.push(c);
+            }
+        }
+        geom
+    }
+
+    fn assert_same_tree(a: &Tree,b: &Tree) {
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&a.primitives),bytemuck::cast_slice::<_,u8>(&b.primitives));
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&a.nodes),bytemuck::cast_slice::<_,u8>(&b.nodes));
+        assert_eq!(a.spheres,b.spheres);
+    }
+
+    #[test]
+    fn cached_bounds_preserve_exact_tree_and_refit() {
+        for count in [0,1,8,256,2048] {
+            let mut geom=mixed_geometry(count);
+            let mut a=Tree::build_reference(&geom);let mut b=Tree::build(&geom);
+            assert_same_tree(&a,&b);
+            // Coincident primitives exercise stable comparison ties.
+            geom.spheres.extend(geom.spheres.clone());geom.cylinders.extend(geom.cylinders.clone());
+            assert_same_tree(&Tree::build_reference(&geom),&Tree::build(&geom));
+            for tree in [&mut a,&mut b] {
+                for p in &mut tree.primitives {p.a[0]+=0.3;p.b[1]-=0.2;}
+                tree.refit();
+            }
+            assert_same_tree(&a,&b);
+        }
+    }
+
+    #[test]
+    #[ignore = "release CPU benchmark for envelope construction"]
+    fn cached_bounds_paired_benchmark() {
+        for count in [8,1024,16384] {
+            let geom=mixed_geometry(count);
+            let mut times=[Vec::new(),Vec::new()];let mut paired=Vec::new();
+            for iteration in 0..36 {
+                let mut elapsed=[0.0;2];
+                let mut results=[None,None];
+                for mode in if iteration%2==0 {[0,1]} else {[1,0]} {
+                    let start=std::time::Instant::now();
+                    let tree=if mode==0 {Tree::build_reference(&geom)} else {Tree::build(&geom)};
+                    elapsed[mode]=start.elapsed().as_secs_f64()*1000.0;
+                    results[mode]=Some(tree);
+                    if iteration>=5 {times[mode].push(elapsed[mode]);}
+                }
+                assert_same_tree(results[0].as_ref().unwrap(),results[1].as_ref().unwrap());
+                if iteration>=5 {paired.push(100.0*(elapsed[1]/elapsed[0]-1.0));}
+            }
+            paired.sort_by(f64::total_cmp);
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("ENVELOPE_BUILD {}",serde_json::json!({"count":count,"mode":mode,
+                    "median_ms":samples[15],"p95_ms":samples[29],"paired_percent":paired[15],
+                    "bounds_scratch_bytes":count*std::mem::size_of::<(Vec3,Vec3)>()}));
+            }
+        }
+    }
+
     #[test]
     fn tree_bounds_and_escape_links_cover_every_primitive() {
         let mut geom = geometry();
