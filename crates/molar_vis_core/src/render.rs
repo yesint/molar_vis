@@ -2095,6 +2095,13 @@ impl SceneRenderer {
         cap
     }
 
+    /// Read the live viewport so tests can include the selection pulse, which
+    /// file captures deliberately suppress.
+    #[cfg(test)]
+    pub(crate) fn read_live_for_test(&self, rs: &RenderState, out: [u32; 2]) -> CaptureReadback {
+        self.begin_readback(rs, &self.targets.color_tex, self.targets.size, out)
+    }
+
     /// Copy `color_tex` into a mappable buffer (rows padded to the 256-byte
     /// `copy_texture_to_buffer` alignment) and request the async map → a
     /// [`CaptureReadback`] that `read`s back at output size `out` (downsampling from the

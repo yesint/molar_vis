@@ -437,3 +437,46 @@ retained and that cached and explicitly rebuilt ray-trace inputs follow separate
 The accepted binary is `target/render-audit/bin/step9`; validation logs are `step9-unit.log`,
 `step9-wasm-final.log`, and `step9-gpu-verified.log`. Images are in `step9-images`, and the
 inspected sheet is `step9-inspection.png`. No sustained GPU benchmark loop was used.
+
+### 10. Omit unused surface glow color work (S6, accepted 2026-11-08)
+
+Surface selection and hover glows now use a uniform placeholder color. This skips atom-color
+lookup work and mesh color diffusion, which the glow shader does not consume. The builder still
+constructs the same selected-atom surface, applies the same normal displacement, and retains
+the representation's material tag. Other representation styles retain their existing colors.
+No parent-mesh subset approximation or additional retained cache is introduced.
+
+Exact CPU comparisons passed for single-atom, residue, and larger selections at qualities 0,
+2, and 4, including a mixed Surface/Licorice case. Positions, normals, connectivity, source
+owners, and material tags match the original builder. Only unused glow RGB values differ.
+
+Five CPU runs each measured seven alternating full-molecule reference/candidate pairs after
+two warmup pairs at quality 2, with one Rayon worker and reduced process priority. The table
+reports medians of run medians and run p95 values; the final column is the median of each run's
+median paired percentage change.
+
+| Source color scheme | Original median / p95 | Candidate median / p95 | Median paired change |
+| --- | --- | --- | --- |
+| Element colors | 126.071 / 172.481 ms | 124.084 / 156.873 ms | −6.6% |
+| Uniform color (control) | 121.350 / 125.795 ms | 120.107 / 126.188 ms | −3.5% |
+
+No run showed a positive median paired change. Whole-build timings varied substantially, and
+the uniform control also shifted, so the complete-build percentage must not be treated as an
+isolated color-diffusion speedup. A separate profiled run measured the color stage at a median
+2.967 ms for element colors and about 0.00005 ms when skipped. Both uniform-color paths were
+about 0.00004 ms. This establishes removal of the unused color stage; no idle-rendering or GPU
+frame-time improvement is claimed. The color-filter scratch arrays are no longer allocated
+for surface glows, but no peak-RSS reduction is claimed.
+
+CPU logs use `target/render-audit/step10-cpu*`; stage measurements are in `step10-profile.log`.
+
+All 369 regular release tests and the wasm32 check passed (three existing browser warnings).
+The short physical-GPU test completed in 0.26 seconds. It compared six 160×120 image pairs
+for single-atom hover, residue selection, and the larger selection in both projections. All
+pairs matched exactly, and the comparison sheet was inspected. The whole-selection case also
+requires a visible difference from the unhighlighted scene. The test reads the live viewport
+with a nonzero pulse because file captures intentionally suppress the pending-selection glow.
+
+The executable is `target/render-audit/bin/step10`; remaining validation logs are
+`step10-shape.log`, `step10-unit.log`, `step10-wasm.log`, and `step10-gpu.log`. Images are in
+`step10-images`, and the inspected sheet is `step10-inspection.png`.

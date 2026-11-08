@@ -104,10 +104,23 @@ pub(super) fn gray_out(geom: &mut geometry::GeometryData) {
 /// rep's selection intersected with the highlighted `atoms`, built in that rep's
 /// own style/params, merged into one geometry. Used for both the pending (lasso)
 /// selection and the hover highlight. The element colors/materials are irrelevant
-/// (the glow shaders emit a fixed cyan Fresnel rim), so the rep's own values are
-/// reused. Cartoon/SecStruct reps are skipped until their SS cache exists (it's
+/// (the glow shaders emit a fixed cyan Fresnel rim). Surface glows use a uniform
+/// color to omit color diffusion, while retaining their ordinary material tags.
+/// Cartoon/SecStruct reps are skipped until their SS cache exists (it's
 /// filled by the same `rebuild_dirty` pass, just before this).
 pub(super) fn build_glow(
+    data: &crate::moldata::MolData,
+    bonds: &[Bond],
+    reps: &[Representation],
+    atoms: &[usize],
+    state: &State,
+    n_atoms: usize,
+    dashed_pbc: bool,
+) -> geometry::GeometryData {
+    build_glow_impl::<true>(data,bonds,reps,atoms,state,n_atoms,dashed_pbc)
+}
+
+fn build_glow_impl<const UNIFORM_SURFACE: bool>(
     data: &crate::moldata::MolData,
     bonds: &[Bond],
     reps: &[Representation],
@@ -149,8 +162,12 @@ pub(super) fn build_glow(
             .filter(|id| highlighted.contains(id)).collect();
         let Ok(sel) = molar::prelude::Sel::from_vec(ids) else { continue };
         let bound = data.bind_with_state(&sel, state);
+        let mut color = rep.color_spec();
+        if UNIFORM_SURFACE && matches!(rep.params, RepParams::Surface { .. }) {
+            color.method = ColorMethod::Solid([255; 4]);
+        }
         let mut geom = geometry::build_with_reference(
-            &bound, n_atoms, bonds, &rep.params, rep.color_spec(), rep.material,
+            &bound, n_atoms, bonds, &rep.params, color, rep.material,
             rep.ss_cache.as_ref(), dashed_pbc, Some(data.state()));
         // Surface re-builds the glow over the *subset* of selected atoms, so its mesh
         // nearly — but not exactly — coincides with the parent's (the grid isosurface
@@ -1357,6 +1374,128 @@ mod unobstructed_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod geometry_job_tests {
     use super::*;
+
+    fn surface_glow_scene(selection: &str) -> Scene {
+        let raw=crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/2lao.pdb"))).unwrap();
+        let mut scene=Scene::default();scene.add(raw,&Settings::default().reps);
+        let mut rep=Representation::new(RepKind::Surface);
+        rep.params=RepParams::Surface {probe:0.14,quality:0,smoothing:1};
+        rep.sel_text=selection.into();rep.color=ColorMethod::Element;
+        scene.molecules[0].reps=vec![rep];scene.refresh_selections();scene
+    }
+
+    fn surface_glow_subsets(mol: &crate::scene::Molecule) -> [Vec<usize>;3] {
+        let all=mol.reps[0].sel.as_ref().unwrap().get_index_slice();
+        let topo=mol.data.topology();let residue=topo.get_atom(all[0]).unwrap().get_resindex();
+        [vec![all[0]],all.iter().copied().filter(|&i|topo.get_atom(i).unwrap().get_resindex()==residue).collect(),all.to_vec()]
+    }
+
+    fn glow_build<const UNIFORM: bool>(mol: &crate::scene::Molecule, atoms: &[usize]) -> geometry::GeometryData {
+        build_glow_impl::<UNIFORM>(&mol.data,&mol.bonds,&mol.reps,atoms,mol.render_state(),mol.n_atoms,false)
+    }
+
+    fn assert_glow_shape(a: &geometry::GeometryData,b: &geometry::GeometryData) {
+        assert_eq!(a.mesh.indices,b.mesh.indices);assert_eq!(a.mesh.vert_atom,b.mesh.vert_atom);
+        assert_eq!(a.mesh.vert_res,b.mesh.vert_res);assert_eq!(a.mesh.vertices.len(),b.mesh.vertices.len());
+        for (a,b) in a.mesh.vertices.iter().zip(&b.mesh.vertices) {
+            assert_eq!(a.pos,b.pos);assert_eq!(a.normal,b.normal);assert_eq!(a.mat,b.mat);
+        }
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&a.spheres),bytemuck::cast_slice::<_,u8>(&b.spheres));
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&a.cylinders),bytemuck::cast_slice::<_,u8>(&b.cylinders));
+    }
+
+    #[test]
+    fn surface_glow_uniform_color_preserves_geometry() {
+        let mut scene=surface_glow_scene("resid 1:3");
+        let mol=&mut scene.molecules[0];let subsets=surface_glow_subsets(mol);
+        for quality in [0,2,4] {
+            mol.reps[0].params=RepParams::Surface {probe:0.14,quality,smoothing:1};
+            for atoms in &subsets {assert_glow_shape(&glow_build::<false>(mol,atoms),&glow_build::<true>(mol,atoms));}
+        }
+        // Other representation styles keep their original color and material data.
+        let mut rep=Representation::new(RepKind::Licorice);
+        rep.sel=Some(mol.data.evaluate("resid 1:3").unwrap().1);rep.color=ColorMethod::Element;
+        mol.reps.push(rep);
+        assert_glow_shape(&glow_build::<false>(mol,&subsets[2]),&glow_build::<true>(mol,&subsets[2]));
+    }
+
+    #[test]
+    #[ignore = "CPU measurement of surface glow color work"]
+    fn surface_glow_color_paired_benchmark() {
+        let mut scene=surface_glow_scene("all");let mol=&mut scene.molecules[0];
+        mol.reps[0].params=RepParams::Surface {probe:0.14,quality:2,smoothing:1};
+        let atoms=mol.reps[0].sel.as_ref().unwrap().get_index_slice().to_vec();
+        for uniform in [false,true] {
+            mol.reps[0].color=if uniform {ColorMethod::Solid([90,120,180,255])} else {ColorMethod::Element};
+            let mut times=[Vec::new(),Vec::new()];let mut paired=Vec::new();
+            for iteration in 0..9 {
+                let mut results=[None,None];let mut elapsed=[0.0;2];
+                for mode in if iteration%2==0 {[0,1]} else {[1,0]} {
+                    eprintln!("GLOW_CASE {uniform} {iteration} {mode}");
+                    let start=std::time::Instant::now();
+                    let geom=if mode==0 {glow_build::<false>(mol,&atoms)} else {glow_build::<true>(mol,&atoms)};
+                    elapsed[mode]=start.elapsed().as_secs_f64()*1000.0;
+                    if iteration>=2 {times[mode].push(elapsed[mode]);}
+                    results[mode]=Some(geom);
+                }
+                assert_glow_shape(results[0].as_ref().unwrap(),results[1].as_ref().unwrap());
+                if iteration>=2 {paired.push(100.0*(elapsed[1]/elapsed[0]-1.0));}
+            }
+            paired.sort_by(f64::total_cmp);
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("GLOW_BUILD {}",serde_json::json!({"uniform":uniform,"mode":mode,
+                    "median_ms":samples[3],"p95_ms":samples[6],"paired_percent":paired[3]}));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "short GPU surface selection and hover glow parity check"]
+    fn surface_glow_uniform_color_matches_images() {
+        let rs=crate::render::test_gpu();let settings=Settings::default();
+        let mut renderer=SceneRenderer::new(&rs,&settings.rendering);
+        let mut scene=surface_glow_scene("resid 1:20");
+        let subsets=surface_glow_subsets(&scene.molecules[0]);
+        let mol=&mut scene.molecules[0];
+        let rep=&mol.reps[0];
+        let geom=geometry::build(&mol.data.bind_with_state(rep.sel.as_ref().unwrap(),mol.data.state()),
+            mol.n_atoms,&mol.bonds,&rep.params,rep.color_spec(),rep.material,None,false);
+        let lo=geom.mesh.vertices.iter().fold(glam::Vec3::splat(f32::INFINITY),|a,v|a.min(glam::Vec3::from_array(v.pos)));
+        let hi=geom.mesh.vertices.iter().fold(glam::Vec3::splat(f32::NEG_INFINITY),|a,v|a.max(glam::Vec3::from_array(v.pos)));
+        mol.reps[0].gpu=renderer.upload(&rs,&geom);
+        let mut camera=crate::camera::Camera::frame_bbox(lo,hi,0.8);
+        camera.ao.enabled=false;camera.shadow.enabled=false;
+        let capture=|renderer:&mut SceneRenderer,scene:&Scene,camera:&crate::camera::Camera| {
+            renderer.render_scene(&rs,[160,120],camera.view(),camera.proj(4.0/3.0),camera.is_perspective(),
+                camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),camera.background,camera.eye_depth_range(),1.0,scene);
+            let cap=renderer.read_live_for_test(&rs,[160,120]);
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();cap.read()
+        };
+        for (case,atoms) in subsets.iter().enumerate() {
+            let before=glow_build::<false>(&scene.molecules[0],atoms);
+            let after=glow_build::<true>(&scene.molecules[0],atoms);assert_glow_shape(&before,&after);
+            for projection in [crate::camera::Projection::Orthographic,crate::camera::Projection::Perspective] {
+                camera.projection=projection;
+                let mut pictures=Vec::new();
+                for geom in [&before,&after] {
+                    let mol=&mut scene.molecules[0];
+                    if case==0 {mol.hover_gpu=renderer.upload(&rs,geom);} else {mol.glow_gpu=renderer.upload(&rs,geom);}
+                    pictures.push(capture(&mut renderer,&scene,&camera));
+                }
+                assert_eq!(pictures[0],pictures[1],"glow {case} {projection:?}");
+                if case==2 {
+                    scene.molecules[0].glow_gpu=Default::default();
+                    assert_ne!(pictures[0],capture(&mut renderer,&scene,&camera),"the comparison must contain visible glow");
+                }
+                if let Ok(dir)=std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    for (mode,picture) in pictures.iter().enumerate() {picture.save(format!("{dir}/glow-{case}-{projection:?}-{mode}.png")).unwrap();}
+                }
+            }
+            scene.molecules[0].hover_gpu=Default::default();scene.molecules[0].glow_gpu=Default::default();
+        }
+    }
 
     #[test]
     #[ignore = "short GPU checks for cached surface material edits, undo, and ray-trace invalidation"]
