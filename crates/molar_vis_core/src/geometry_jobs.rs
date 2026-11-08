@@ -18,7 +18,7 @@ impl Input {
             Self::Cartoon(input) => input.residue_count() >= 1024,
         }
     }
-    fn build(self, cancel: &AtomicBool) -> GeometryData {
+    pub(crate) fn build(self, cancel: &AtomicBool) -> GeometryData {
         match self {
             Self::Surface(input, material) => {
                 let mut geom = GeometryData {

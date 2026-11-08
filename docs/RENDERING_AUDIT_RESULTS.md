@@ -638,3 +638,39 @@ The experimental binaries are `target/render-audit/bin/step15` and `step15-timed
 logs use `step15-timed-large` and `step15-timed-opaque`; partial-sweep evidence uses
 `step15-partial`. The inspected comparison is `step15-inspection.png`. The saved experiment
 is `/tmp/step15-batching.patch`; it is not part of the accepted source.
+
+### 16. Reuse prepared inputs for small geometry builds (S4, accepted 2026-11-08)
+
+When native background building is enabled, small surfaces and cartoons now consume their
+already prepared owned input synchronously. Previously the offload-size check discarded
+that input and the synchronous builder gathered coordinates and colors again. The offload
+thresholds, background-job admission, cancellation behavior, and synchronous-only/browser
+paths are unchanged. This change adds no retained cache or GPU allocation.
+
+Five release CPU runs used one Rayon worker and 21 alternating measured pairs after two
+warmup pairs, with eight complete builds per sample. Timings exclude fixture loading and
+the unchanged cartoon topology/secondary-structure caches. The table reports medians of
+run medians and run p95 values.
+
+| Scene | Original median / p95 | Candidate median / p95 |
+| --- | --- | --- |
+| Eight-atom surface, quality 0 | 0.272 / 0.279 ms | 0.213 / 0.221 ms |
+| 128-atom surface, quality 0 | 2.992 / 3.244 ms | 2.940 / 3.115 ms |
+| Twenty-residue cartoon | 0.126 / 0.132 ms | 0.125 / 0.133 ms |
+| Complete 2lao cartoon | 1.725 / 1.838 ms | 1.724 / 1.801 ms |
+| 128-atom Vdw control | 0.0499 / 0.0518 ms | 0.0500 / 0.0547 ms |
+
+Surface builds improved in every run: 21.3–23.5% for eight atoms and 1.7–1.9% for 128 atoms.
+Cartoon changes were mixed, from −7.4% to +2.0% for the complete molecule, so no cartoon
+speedup is claimed. Vdw median changes were −0.04% to +0.34%. Absolute times varied with
+system conditions; the paired surface gains persisted across that variation.
+
+All 374 regular tests passed, including exact complete geometry, material tags, source IDs,
+gray-out results, synchronous fallback, and the 255/256-atom offload boundary. The wasm32
+check passed with its three existing warnings. A 0.52-second physical-GPU check compared
+12 pairs at 160×120, covering surfaces/cartoons, both projections, opaque/glass/intrinsic-AO
+materials, AO, and shadows. Every image matched exactly and passed visual inspection.
+
+The executable is `target/render-audit/bin/step16`. Logs use the `step16` prefix; saved images
+are in `step16-images`, and the comparison sheet is `step16-inspection.png`. Grid-based job
+scheduling, byte-based admission, and cancellation within long surface stages remain pending.

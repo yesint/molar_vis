@@ -715,8 +715,14 @@ fn prepare_geometry(
         } else {
             None
         };
-        if let Some(input) = input.filter(|i| i.worth_offloading()) {
-            return GeometryBuild::Background(input);
+        if let Some(input) = input {
+            return if input.worth_offloading() {
+                GeometryBuild::Background(input)
+            } else {
+                // The owned snapshot is already complete. Small builds can consume it
+                // here instead of gathering the same coordinates and colors again.
+                GeometryBuild::Ready(input.build(&std::sync::atomic::AtomicBool::new(false)))
+            };
         }
     }
     #[cfg(target_arch = "wasm32")]
@@ -1370,6 +1376,10 @@ mod unobstructed_tests {
         assert!(!r.sel_dirty);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "preparation_audit_tests.rs"]
+mod preparation_audit_tests;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod geometry_job_tests {
