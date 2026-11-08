@@ -577,3 +577,36 @@ The accepted executable is `target/render-audit/bin/step13-storage`. Final logs 
 use the `step13-storage` prefix; the comparison sheet is `step13-storage-inspection.png`.
 Deduplication of equal periodic transforms, reuse of nested image-index vectors, and geometric
 GPU buffer growth remain separate candidates. They are not included in this change.
+
+### 14. Intrinsic-AO dispatch accounting (R9, not accepted yet, 2026-11-08)
+
+An experiment detected factory and edited Molecular Nodes material tags in uploaded RT data
+and included their intrinsic AO when global AO was disabled. The original transparency and
+GI cost estimates remained unchanged. A spatial-only variant preserved accumulation grouping
+but increased completion time by 17–29% in the first short test, so it was rejected.
+
+A second variant reduced sample chunks according to the actual tile extent, shrinking the
+tile only when one sample exceeded the estimated ray budget. It retained every sample and
+its random sequence but changed floating-point summation grouping. Before testing, the image
+limit was set to one 8-bit channel level in at most 0.1% of pixels. All tested images were
+actually byte-exact: factory and edited intrinsic-AO materials, perspective projection,
+enabled global AO at zero strength, ordinary opaque material, transparency, and GI.
+
+All 374 regular tests and the wasm32 check passed. GPU tests used three alternating pairs
+per process, discarded the first pair for timing, paused briefly between pairs, and used
+one-second gaps between processes. Each process took 0.58–0.93 seconds. No sustained large
+viewport benchmark was used.
+
+Five 160×120 runs gave median convergence times of 23.83 ms before and 23.99 ms after, with
+mixed paired changes. Five 256×256 runs, where dispatch count increased from two to six,
+gave 58.08 and 59.85 ms; every run increased by 0.5–6.1%. A separate timestamped run measured
+median maximum GPU dispatch durations of 55.07 and 11.80 ms after warmup. Thus dispatch
+latency improved substantially, but the repeatable convergence cost did not satisfy the
+no-regression requirement. The scheduler change was removed pending a separate investigation
+of submission overhead. No completed implementation of R9 is claimed.
+
+The experimental executables are `target/render-audit/bin/step14`, `step14-final`, and
+`step14-sized`. Final small-image logs use `step14-final`; full-tile logs use `step14-large`.
+The timestamped run is `step14-large-profile.log`. Saved PNGs are in `step14-final-images`
+and `step14-large-images`. The last executable adds only a test viewport-size switch; its
+scheduler regression test also passed independently.
