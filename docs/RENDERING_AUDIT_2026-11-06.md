@@ -11,8 +11,10 @@ agent at xhigh reasoning effort reviewed surface computation and its rendering c
 parallel. No rendering implementation was changed during the audit.
 
 The findings identify redundant work and candidates for measurement; they are not measured
-speedup claims. This environment has no `/dev/dri` device, and this audit did not run hardware
-GPU benchmarks or the application test suite. Priorities describe the recommended order of
+speedup claims. At source-review time, hardware GPU access had not been established, and this
+audit did not run hardware GPU benchmarks or the application test suite. Later implementation
+tests obtained physical GPU access outside the sandbox; the results log records the adapter
+and measurements. Priorities describe the recommended order of
 investigation, not a measured ranking of frame-time costs. All source paths below are relative
 to the repository root, and line numbers refer to the audited revision.
 
@@ -428,5 +430,6 @@ for material updates, recoloring, and larger algorithm changes.
 - [ ] The documentation distinguishes implemented changes from experiments and retains a
   reference path until the corresponding behavior and performance gates pass.
 
-This audit is complete as a source review and implementation plan. Implementation, new
-regression tests, and comparative performance measurements remain future work.
+This audit is complete as a source review and implementation plan. Implementation is in
+progress. The [results log](RENDERING_AUDIT_RESULTS.md) records the current package status,
+accepted changes, rejected experiments, validation, and remaining work.

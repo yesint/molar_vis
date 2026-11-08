@@ -4,6 +4,34 @@ This log follows the [2026-11-06 audit plan](RENDERING_AUDIT_2026-11-06.md). Eac
 change must pass its relevant performance and visual parity checks before it is committed and
 the next change starts. Conditional experiments remain subject to the audit's measurement gates.
 
+## Current implementation status (2026-11-08)
+
+The implementation plan is not finished. The accepted changes and remaining work are distinct:
+
+| Work package | Accepted implementation | Remaining work or rejected experiment |
+| --- | --- | --- |
+| R1, optional render resources | Demand-allocated OIT/normal targets, selective normal output, shared shader modules. | Late-depth sphere/cylinder normal-output removal failed its control tests. |
+| R2, progressive RT resolves | Unchanged completed images are not resolved again to the same destination. | No remaining implementation in this package. |
+| R3, transparent blockers | None. | Both early-opacity-filter variants slowed opaque controls; step 17 records the rejection. |
+| R4, RT preparation scope | None. | Per-representation conversion caches and changed-range uploads remain pending. |
+| R5, envelope trees | Initial bounds are computed once per primitive. | Tree-quality measurement and a calibrated rebuild trigger remain pending. |
+| R6, camera preparation | Hidden representations are omitted; camera entries and upload bytes reuse bounded storage. | Equal-transform deduplication and nested-index/GPU-capacity reuse remain candidates. |
+| R7, native picking | None. | Spatial submission groups require hover-workload measurements. |
+| R8, no-op shader work | Zero-strength effect guards. | The full-strength GI experiment was rejected; further shader changes require measurements. |
+| R9, intrinsic-AO scheduling | None. | Smaller dispatches increased convergence time; submission batching also failed controls. |
+| S1, surface appearance | Material-only edits reuse cached geometry. | Exact color replay remains pending. |
+| S2, surface GPU storage | Synchronous surface builds reuse sufficient buffer capacity. | Geometric capacity growth remains conditional. |
+| S3, surface sampling | Repeated projection samples and unused intermediate normals are removed. | Further algorithm changes require stage profiles. |
+| S4, surface scheduling | Small synchronous builds reuse their prepared inputs. | Grid-based scheduling and cancellation inside long stages remain pending. |
+| S5, surface memory | None. | Shared scratch plus early volume release regressed quality-4 builds; byte-based job admission remains pending. |
+| S6, glow geometry | Surface glows omit unused color diffusion. | No remaining implementation in this package. |
+| S7, browser picking | Conservative mesh bounds reject missed meshes. | A triangle BVH remains conditional on hover profiles. |
+
+The next major implementation candidates are R4 and the remaining S4/S5 scheduling work.
+Rejected experiments must not be restored without new evidence that resolves their regressions.
+GPU tests now use small captures and short, separately timed processes with idle gaps; the
+earlier sustained baseline commands below are historical methods, not the current test policy.
+
 ## Test environment and method
 
 The physical adapter is AMD Radeon Graphics, RADV REMBRANDT, Mesa 26.2.5. The sandbox exposes
@@ -674,3 +702,38 @@ materials, AO, and shadows. Every image matched exactly and passed visual inspec
 The executable is `target/render-audit/bin/step16`. Logs use the `step16` prefix; saved images
 are in `step16-images`, and the comparison sheet is `step16-inspection.png`. Grid-based job
 scheduling, byte-based admission, and cancellation within long surface stages remain pending.
+
+### 17. Early transparent-blocker rejection (R3, rejected 2026-11-08)
+
+An experiment rejected fully subthreshold primitives before secondary-ray intersection.
+Spheres used their single packed alpha; cylinders and triangles required every endpoint or
+vertex alpha to be below 255. Mixed-alpha primitives retained the existing hit-position
+opacity test. The experiment did not change source exclusions, exit rules, or tie handling.
+
+A 1.04-second physical-GPU differential test passed 1,280 rays. It compared closest and
+opaque-only hits, exact distances/barycentrics, and any-hit queries at three distance limits
+with both exit policies. Inputs included smooth cylinders, alpha values 0/127/254/255,
+gradient triangles, and source-triangle exclusions. Four 128×96 render cases also matched
+exactly and passed visual inspection: transparent, opaque, mixed-alpha perspective, and
+opaque surface scenes. Timings used six alternating pairs, discarding the first pair, with
+20 ms pauses between pairs and one-second pauses between processes.
+
+The initial filter improved the transparent and mixed cases by about 12–13% in their first
+probes, but slowed opaque primitives by 32% and the opaque surface by 47%. A second variant
+used the existing scene transparency classification to gate the checks through an unused
+uniform lane. Its transparent and mixed probes improved by 9.3% and 11.3%, but three opaque
+control runs still slowed by 27.2–30.3%, and three surface controls slowed by 23.3–33.7%.
+The guard did not remove the regression. These results do not establish its compiler or
+register-allocation cause.
+
+Both variants were removed. Their release builds passed, but the failed performance gate
+made additional full-suite/browser checks unnecessary. Each GPU process had a 15-second
+timeout. Cold pipeline initialization made the first process for each variant take about
+six seconds; subsequent rendering probes took 0.64–0.95 seconds. No accepted shader change
+results from this experiment.
+
+The executables are `target/render-audit/bin/step17` and `step17-gated`; logs and images use
+the corresponding prefixes. The inspected comparison is `step17-inspection.png`. Source
+experiments are saved as `/tmp/step17-ungated.patch`, `/tmp/step17-gated.patch`, and their
+`-tests.rs` companion files. A future specialization approach would also need to measure
+pipeline initialization and first-use latency before it could pass the acceptance gate.
