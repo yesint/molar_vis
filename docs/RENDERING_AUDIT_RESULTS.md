@@ -539,3 +539,41 @@ The experimental executable remains in `target/render-audit/bin/step12`. CPU, me
 stage logs use `step12-cpu`, `step12-memory`, and `step12-profile` prefixes. The two lifetime
 changes can be investigated separately later; neither is accepted here. Byte-based job
 admission and cancellation improvements remain separate pending work.
+
+### 13. Skip hidden periodic cameras and reuse camera storage (R6, accepted 2026-11-08)
+
+Camera preparation now omits hidden molecules and representations while keeping the nested
+molecule/representation indices used by draws. Visible transforms, central and hover cameras,
+light-camera placement, draw order, and repeated box rendering retain their existing behavior.
+The renderer also reuses its camera-entry vector and packed upload-byte vector. Each retained
+allocation is capped at 2 MiB; larger allocations are released after use. This adds at most
+4 MiB of retained CPU capacity per renderer. GPU camera-buffer growth is unchanged.
+
+Visibility filtering alone showed a small repeated overhead in the all-visible control.
+The accepted implementation includes storage reuse, which removed that regression. Five
+release CPU runs each measured 21 alternating pairs after two warmup pairs, with 32 preparations
+per timing sample. Timings include camera construction, image-index lists, and byte packing;
+they exclude GPU uploads and rendering. The table reports medians of run medians and run p95s.
+
+| Scene | Original median / p95 | Candidate median / p95 | Median paired change |
+| --- | --- | --- | --- |
+| Eight molecules, 24 periodic representations each, mostly hidden | 0.816 / 0.848 ms | 0.127 / 0.133 ms | −84.4% |
+| Same scene, all visible | 0.815 / 0.834 ms | 0.770 / 0.781 ms | −5.5% |
+| One visible representation, no periodic box | 0.658 / 0.667 µs | 0.623 / 0.626 µs | −5.2% |
+
+All five runs improved in every case. The hidden case reduced uploaded camera entries from
+4,994 to 834 and packed bytes from 1,278,464 to 213,504, excluding a light entry when shadows
+are enabled. Run-to-run frequency variation affected absolute times. These measurements do
+not establish a whole-frame or GPU timing improvement.
+
+All 373 regular tests passed, including exact visible camera uniforms, unchanged index lookup,
+box removal, visibility changes, storage growth/shrink, and zero upload padding. The wasm32
+check passed with its three existing warnings. The final physical-GPU test took 0.47 seconds.
+Eight 160×120 image pairs covered both projections, visibility changes, different periodic
+boxes, opaque and transparent representations, AO, shadows, and box wireframes. All pairs
+matched exactly, also matched captures made before storage reuse, and passed visual inspection.
+
+The accepted executable is `target/render-audit/bin/step13-storage`. Final logs and images
+use the `step13-storage` prefix; the comparison sheet is `step13-storage-inspection.png`.
+Deduplication of equal periodic transforms, reuse of nested image-index vectors, and geometric
+GPU buffer growth remain separate candidates. They are not included in this change.

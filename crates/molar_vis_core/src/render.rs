@@ -10,6 +10,8 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod appearance_tests;
 #[cfg(all(test, not(target_arch = "wasm32")))]
+mod camera_audit_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn test_gpu() -> RenderState { appearance_tests::gpu() }
 mod background;
 pub(crate) mod bond_profile;
@@ -102,6 +104,70 @@ fn shadow_camera(view: Mat4, depth_range: [f32; 2]) -> (Mat4, Mat4, f32) {
         Mat4::orthographic_rh(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5),
         radius,
     )
+}
+
+/// Keep molecule/representation indices stable while omitting cameras for hidden draws.
+/// The test-only reference instantiation preserves the previous preparation policy.
+fn prepare_periodic_cameras<const VISIBLE_ONLY: bool>(
+    scene: &Scene, view: Mat4, cameras: &mut Vec<CameraUniform>,
+    make_cam: impl Fn(Mat4) -> CameraUniform,
+) -> Vec<Vec<Vec<u32>>> {
+    let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
+    for mol in &scene.molecules {
+        if VISIBLE_ONLY && !mol.visible {
+            images.push(vec![Vec::new(); mol.reps.len()]);
+            continue;
+        }
+        let box_vecs = mol.data.state().pbox.as_ref().map(|pb| {
+            let m = pb.get_matrix();
+            // Columns of the box matrix are the lattice vectors a, b, c (nm).
+            [
+                Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
+                Vec3::new(m[(0, 1)], m[(1, 1)], m[(2, 1)]),
+                Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
+            ]
+        });
+        let mut mol_imgs = Vec::with_capacity(mol.reps.len());
+        for rep in &mol.reps {
+            if VISIBLE_ONLY && !rep.visible {
+                mol_imgs.push(Vec::new());
+                continue;
+            }
+            let mut idxs: Vec<u32> = Vec::new();
+            match box_vecs {
+                Some([a, b, c]) => {
+                    // One camera per drawn image; the central (zero) offset reuses
+                    // the base camera (entry 0). Shares `offsets` with the picker.
+                    for off in rep.periodic.offsets(a, b, c) {
+                        if off == Vec3::ZERO {
+                            idxs.push(0);
+                        } else {
+                            cameras.push(make_cam(view * Mat4::from_translation(off)));
+                            idxs.push(cameras.len() as u32 - 1);
+                        }
+                    }
+                }
+                // No box → periodic display is meaningless; just the central copy.
+                None => idxs.push(0),
+            }
+            mol_imgs.push(idxs);
+        }
+        images.push(mol_imgs);
+    }
+    images
+}
+
+// Bound each retained CPU camera allocation; unusually large scenes keep the
+// existing transient-allocation behavior instead of retaining their peak size.
+const MAX_CAMERA_SCRATCH_BYTES: usize = 2 * 1024 * 1024;
+
+fn pack_camera_bytes(cameras: &[CameraUniform], bytes: &mut Vec<u8>) {
+    bytes.resize(cameras.len() * CAMERA_STRIDE as usize, 0);
+    for (idx, cam) in cameras.iter().enumerate() {
+        let off = idx * CAMERA_STRIDE as usize;
+        bytes[off..off + std::mem::size_of::<CameraUniform>()]
+            .copy_from_slice(bytemuck::bytes_of(cam));
+    }
 }
 
 /// Bind-group binding size for one camera entry (the actual `CameraUniform`).
@@ -764,6 +830,10 @@ pub struct SceneRenderer {
     camera_bind_group: wgpu::BindGroup,
     /// Number of camera entries `camera_buf` can hold (grows with periodic images).
     camera_capacity: u32,
+    camera_entries: Vec<CameraUniform>,
+    camera_bytes: Vec<u8>,
+    #[cfg(test)]
+    audit_include_hidden_cameras: bool,
 
     // Each geometry has an opaque pipeline `[0]` (single alpha-blended target,
     // depth-write on), a weighted-blended OIT pipeline `[1]` (accum+reveal targets,
@@ -1202,6 +1272,10 @@ impl SceneRenderer {
             camera_buf,
             camera_bind_group,
             camera_capacity,
+            camera_entries: Vec::new(),
+            camera_bytes: Vec::new(),
+            #[cfg(test)]
+            audit_include_hidden_cameras: false,
             envelope_bgl,
             empty_envelope,
             sphere_pipeline,
@@ -1645,44 +1719,20 @@ impl SceneRenderer {
         // Entry 0 = base camera with the (animated) glow pulse; entry 1 = the same
         // base camera but with a *steady* pulse (1.0), used to draw the hover
         // highlight without it breathing. Periodic-image cameras follow from index 2.
-        let mut cameras: Vec<CameraUniform> = vec![
+        let mut cameras = std::mem::take(&mut self.camera_entries);
+        cameras.clear();
+        cameras.extend([
             make_cam(view),
             CameraUniform::new(view, proj, perspective, viewport, cue, fog, depth_range, 1.0, glow),
-        ];
-        let mut images: Vec<Vec<Vec<u32>>> = Vec::with_capacity(scene.molecules.len());
-        for mol in &scene.molecules {
-            let box_vecs = mol.data.state().pbox.as_ref().map(|pb| {
-                let m = pb.get_matrix();
-                // Columns of the box matrix are the lattice vectors a, b, c (nm).
-                [
-                    Vec3::new(m[(0, 0)], m[(1, 0)], m[(2, 0)]),
-                    Vec3::new(m[(0, 1)], m[(1, 1)], m[(2, 1)]),
-                    Vec3::new(m[(0, 2)], m[(1, 2)], m[(2, 2)]),
-                ]
-            });
-            let mut mol_imgs = Vec::with_capacity(mol.reps.len());
-            for rep in &mol.reps {
-                let mut idxs: Vec<u32> = Vec::new();
-                match box_vecs {
-                    Some([a, b, c]) => {
-                        // One camera per drawn image; the central (zero) offset reuses
-                        // the base camera (entry 0). Shares `offsets` with the picker.
-                        for off in rep.periodic.offsets(a, b, c) {
-                            if off == Vec3::ZERO {
-                                idxs.push(0);
-                            } else {
-                                cameras.push(make_cam(view * Mat4::from_translation(off)));
-                                idxs.push(cameras.len() as u32 - 1);
-                            }
-                        }
-                    }
-                    // No box → periodic display is meaningless; just the central copy.
-                    None => idxs.push(0),
-                }
-                mol_imgs.push(idxs);
-            }
-            images.push(mol_imgs);
-        }
+        ]);
+        #[cfg(not(test))]
+        let images = prepare_periodic_cameras::<true>(scene, view, &mut cameras, make_cam);
+        #[cfg(test)]
+        let images = if self.audit_include_hidden_cameras {
+            prepare_periodic_cameras::<false>(scene, view, &mut cameras, make_cam)
+        } else {
+            prepare_periodic_cameras::<true>(scene, view, &mut cameras, make_cam)
+        };
 
         // Cast-shadow map: add a light-space camera entry (rendered into the shadow
         // depth target below) and compute `shadow_matrix`, which maps any image's
@@ -1726,13 +1776,11 @@ impl SceneRenderer {
             self.camera_bind_group =
                 make_camera_bind_group(&rs.device, &self.camera_bgl, &self.camera_buf);
         }
-        let mut bytes = vec![0u8; cameras.len() * CAMERA_STRIDE as usize];
-        for (idx, cam) in cameras.iter().enumerate() {
-            let off = idx * CAMERA_STRIDE as usize;
-            bytes[off..off + std::mem::size_of::<CameraUniform>()]
-                .copy_from_slice(bytemuck::bytes_of(cam));
+        pack_camera_bytes(&cameras, &mut self.camera_bytes);
+        rs.queue.write_buffer(&self.camera_buf, 0, &self.camera_bytes);
+        if self.camera_bytes.capacity() > MAX_CAMERA_SCRATCH_BYTES {
+            self.camera_bytes = Vec::new();
         }
-        rs.queue.write_buffer(&self.camera_buf, 0, &bytes);
 
         // Skip the OIT + composite passes entirely when nothing transparent is
         // visible (idle scenes pay nothing for the transparency machinery). When the
@@ -2021,6 +2069,9 @@ impl SceneRenderer {
         }
 
         crate::performance::submit(rs, encoder, gpu_timing);
+        if cameras.capacity() * std::mem::size_of::<CameraUniform>() <= MAX_CAMERA_SCRATCH_BYTES {
+            self.camera_entries = cameras;
+        }
     }
 
     /// Render the scene at `out_w × out_h` (× SSAA internally) into a throwaway target
