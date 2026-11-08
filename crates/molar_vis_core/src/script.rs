@@ -65,8 +65,7 @@ pub fn apply_scene_command(
             let mat = parse_material(&name).ok_or_else(|| format!("unknown material '{name}'"))?;
             let (mi, ri) = resolve_rep(scene, mol, rep)?;
             let r = &mut scene.molecules[mi].reps[ri];
-            r.material = mat;
-            r.geom_dirty = true;
+            r.set_material(mat);
             Ok(())
         }
         Command::AddRep { mol } => {

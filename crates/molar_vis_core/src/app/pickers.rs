@@ -687,12 +687,11 @@ pub(super) fn material_cell(ui: &mut egui::Ui, material: Material, selected: boo
 
 /// A drawn material icon + label button that opens a **grid** of material previews
 /// (each a two-sphere-and-bond fragment shaded with that material). A material
-/// change forces a geometry rebuild (opacity/lighting are baked per geometry element).
+/// change updates cached surface appearance or rebuilds other geometry.
 pub(super) fn material_picker(ui: &mut egui::Ui, rep: &mut Representation, defaults: &RepDefaults) {
     let mut selected = rep.material;
     if material_selector(ui, &mut selected, defaults) {
-        rep.material = defaults.material_for(selected);
-        rep.geom_dirty = true;
+        rep.set_material(defaults.material_for(selected));
     }
 }
 

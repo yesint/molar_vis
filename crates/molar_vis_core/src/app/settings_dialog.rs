@@ -996,7 +996,10 @@ impl App {
                 mol.set_detected_bonds(bonds);
             }
         }
-        let reps_changed = force || previous.reps != next.reps;
+        let mut previous_geometry = previous.reps.clone();
+        previous_geometry.material = next.reps.material;
+        previous_geometry.materials = next.reps.materials.clone();
+        let reps_changed = force || previous_geometry != next.reps;
         let preferences = std::sync::Arc::new(next.colors.clone());
         if previous.appearance != next.appearance {
             crate::theme::apply(ctx, &next.appearance);
@@ -1030,13 +1033,13 @@ impl App {
                     rep.color = next.reps.color;
                 }
                 if force || previous.reps.material != next.reps.material {
-                    rep.material = next.reps.material_for(next.reps.material);
+                    rep.set_material(next.reps.material_for(next.reps.material));
                 }
                 if force || previous.reps.style_params(rep.kind) != next.reps.style_params(rep.kind) {
                     rep.params = next.reps.style_params(rep.kind);
                 }
                 if previous.reps.materials != next.reps.materials {
-                    rep.material = next.reps.material_for(rep.material.preset());
+                    rep.set_material(next.reps.material_for(rep.material.preset()));
                 }
                 if force || previous.reps.ss_algo != next.reps.ss_algo { rep.ss_algo = next.reps.ss_algo; }
                 if force || previous.reps.selection != next.reps.selection {
@@ -1289,6 +1292,13 @@ impl SettingsDialog {
             if let Some(mol) = scene.molecules.iter_mut().find(|m| m.id == *id) {
                 if self.reps_changed {
                     for (rep, original) in mol.reps.iter_mut().zip(reps) {
+                        if rep.kind == original.kind && rep.params == original.params
+                            && rep.color == original.color && rep.ss_algo == original.ss_algo
+                            && rep.sel_text == original.sel_text
+                        {
+                            rep.set_material(original.material);
+                            continue;
+                        }
                         rep.kind = original.kind;
                         rep.params = original.params;
                         rep.color = original.color;
@@ -1321,6 +1331,34 @@ mod live_settings_tests {
             &crate::settings::RepDefaults::default(),
         );
         scene
+    }
+
+    #[test]
+    fn reverting_material_settings_reuses_the_surface_mesh() {
+        let mut scene=scene();
+        let mut rep=Representation::new(RepKind::Surface);
+        rep.sel_text="resid 1:3".into();
+        rep.params=RepParams::Surface {probe:0.14,quality:0,smoothing:1};
+        scene.molecules[0].reps=vec![rep];
+        scene.refresh_selections();
+        let mol=&mut scene.molecules[0];
+        let rep=&mut mol.reps[0];
+        let geom=geometry::build(&mol.data.bind_with_state(rep.sel.as_ref().unwrap(),mol.data.state()),
+            mol.n_atoms,&mol.bonds,&rep.params,rep.color_spec(),rep.material,None,false);
+        let original=geom.mesh.clone();
+        rep.cache_geometry(geom,mol.n_atoms,false,false);rep.geom_dirty=false;
+        let mut dialog=SettingsDialog::capture(Settings::default(),&scene,SettingsPage::Appearance);
+        dialog.reps_changed=true;
+        let mol=&mut scene.molecules[0];let rep=&mut mol.reps[0];
+        rep.set_material(crate::material::Material::Glass);
+        let geom=rep.take_material_update(false).unwrap();
+        rep.cache_material_update(geom,mol.n_atoms,false);
+        dialog.restore_scene(&mut scene);
+        let rep=&mut scene.molecules[0].reps[0];
+        assert!(rep.appearance_dirty && !rep.geom_dirty && !rep.sel_dirty);
+        let restored=rep.take_material_update(false).unwrap();
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&original.vertices),bytemuck::cast_slice::<_,u8>(&restored.mesh.vertices));
+        assert_eq!(original.indices,restored.mesh.indices);
     }
 
     #[test]

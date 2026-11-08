@@ -533,13 +533,16 @@ fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
                 || cur.kind != s.kind
                 || cur.params != s.params
                 || cur.color != s.color
+                || cur.charge_kind != s.charge_kind
+                || cur.partner != s.partner
                 || cur.ss_algo != s.ss_algo
                 || cur.sel_text != s.sel_text
-                || cur.material != s.material
+                || (cur.material != s.material && cur.kind != crate::geometry::RepKind::Surface)
         };
         if needs_rebuild {
             mol.reps[i] = s.to_representation();
         } else {
+            mol.reps[i].set_material(s.material);
             // Cheap, no-geometry changes (periodic display is render-only too).
             mol.reps[i].visible = s.visible;
             mol.reps[i].dynamic = s.dynamic;

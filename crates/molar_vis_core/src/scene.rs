@@ -285,6 +285,10 @@ pub struct Representation {
     /// Last displayed primitive geometry. Mesh storage remains in `mesh_cache`.
     geometry_cache: Option<geometry::GeometryData>,
     geometry_cache_dashed: Option<bool>,
+    geometry_cache_material: Option<Material>,
+    // Proven before material multiplication; enables exact opacity replacement.
+    surface_base_opaque: bool,
+    pub(crate) appearance_dirty: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) geometry_job: Option<crate::geometry_jobs::Job>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -311,6 +315,42 @@ pub struct Representation {
 }
 
 impl Representation {
+    /// Material-only surface edits can reuse a displayed, ungrayed mesh. Other
+    /// edits and in-flight builds keep the full rebuild path.
+    pub(crate) fn set_material(&mut self, material: Material) {
+        if self.material == material { return; }
+        let reusable = self.kind == RepKind::Surface && self.sel.is_some() && !self.sel_dirty
+            && !self.geom_dirty && !self.coords_dirty && !self.geometry_pending()
+            && self.geometry_cache.is_some() && self.mesh_cache.is_some()
+            && (self.surface_base_opaque || self.geometry_cache_material
+                .is_some_and(|old| old.opacity_u8() == material.opacity_u8()));
+        self.material = material;
+        if reusable { self.appearance_dirty = true; } else { self.geom_dirty = true; }
+    }
+
+    pub(crate) fn take_material_update(&mut self, dashed: bool) -> Option<geometry::GeometryData> {
+        if !self.appearance_dirty || self.kind != RepKind::Surface || self.sel.is_none() || self.sel_dirty
+            || self.geom_dirty || self.coords_dirty || self.geometry_pending()
+            || self.geometry_cache_dashed != Some(dashed) || self.mesh_cache.is_none()
+        { return None; }
+        let mut geom = self.geometry_cache.take()?;
+        geom.mesh = self.mesh_cache.take().unwrap().mesh;
+        let lighting = self.material.pack_lighting();
+        let alpha = (self.material.opacity_u8() as u32) << 24;
+        for v in &mut geom.mesh.vertices {
+            v.mat = lighting;
+            if self.surface_base_opaque { v.color = (v.color & 0x00ff_ffff) | alpha; }
+        }
+        Some(geom)
+    }
+
+    pub(crate) fn cache_material_update(&mut self, geom: geometry::GeometryData, n_atoms: usize, dashed: bool) {
+        // Keep the known original alpha even through a fully transparent material.
+        let base_opaque = self.surface_base_opaque;
+        self.cache_geometry(geom, n_atoms, dashed, false);
+        self.surface_base_opaque = base_opaque;
+    }
+
     pub(crate) fn geometry_pending(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         { self.geometry_job.is_some() || self.geometry_waiting }
@@ -323,6 +363,15 @@ impl Representation {
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         { self.geometry_job = None; self.geometry_waiting = false; }
+        self.appearance_dirty = false;
+        self.geometry_cache_material = Some(self.material);
+        let opacity = self.material.opacity_u8();
+        // For nonzero opacity, floor(base_alpha * opacity / 255) == opacity
+        // proves base_alpha == 255. Unknown/custom alpha keeps the rebuild path
+        // for opacity changes; lighting-only edits preserve those alpha bytes.
+        self.surface_base_opaque = self.kind == RepKind::Surface && opacity > 0
+            && !geom.mesh.vertices.is_empty()
+            && geom.mesh.vertices.iter().all(|v| v.color >> 24 == opacity as u32);
         self.mesh_cache = (self.kind.draws_mesh() && !geom.mesh.vertices.is_empty())
             .then(|| MeshCache::new(std::mem::take(&mut geom.mesh), n_atoms));
         // Draw-mode gray colors must never enter a normal ray-traced image.
@@ -335,7 +384,7 @@ impl Representation {
     }
 
     pub(crate) fn cached_geometry(&self, dashed: bool) -> Option<geometry::GeometryRef<'_>> {
-        if self.geometry_pending() || self.sel_dirty || self.geom_dirty || self.coords_dirty || self.sel.is_none()
+        if self.geometry_pending() || self.sel_dirty || self.geom_dirty || self.coords_dirty || self.appearance_dirty || self.sel.is_none()
             || self.geometry_cache_dashed != Some(dashed)
         {
             return None;
@@ -489,6 +538,9 @@ impl Representation {
             cartoon_cache: None,
             geometry_cache: None,
             geometry_cache_dashed: None,
+            geometry_cache_material: None,
+            surface_base_opaque: false,
+            appearance_dirty: false,
             #[cfg(not(target_arch = "wasm32"))]
             geometry_job: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1999,6 +2051,121 @@ mod tests {
         let mut recs = crate::data::load_records(&fixture(name), &BondParams::default())
             .expect("load records");
         Molecule::new(MolId(0), recs.remove(0), &RepDefaults::default())
+    }
+
+    fn surface_material_fixture(color: ColorMethod, quality: u32) -> (Molecule, Representation) {
+        let raw=crate::data::load(&fixture("2lao.pdb")).unwrap();
+        let mol=Molecule::new(MolId(0),raw,&RepDefaults::default());
+        let mut rep=Representation::new(RepKind::Surface);
+        rep.color=color;
+        rep.params=RepParams::Surface {probe:0.14,quality,smoothing:1};
+        rep.sel=Some(mol.data.evaluate("resid 1:3").unwrap().1);
+        rep.sel_dirty=false;rep.geom_dirty=false;
+        let geom=fresh_surface_material(&mol,&rep);
+        rep.cache_geometry(geom,mol.n_atoms,false,false);
+        (mol,rep)
+    }
+
+    fn fresh_surface_material(mol: &Molecule, rep: &Representation) -> geometry::GeometryData {
+        geometry::build(&mol.data.bind_with_state(rep.sel.as_ref().unwrap(),mol.render_state()),
+            mol.n_atoms,&mol.bonds,&rep.params,rep.color_spec(),rep.material,None,false)
+    }
+
+    fn assert_material_mesh(a: &geometry::MeshData,b: &geometry::MeshData) {
+        assert_eq!(bytemuck::cast_slice::<_,u8>(&a.vertices),bytemuck::cast_slice::<_,u8>(&b.vertices));
+        assert_eq!(a.indices,b.indices);assert_eq!(a.vert_atom,b.vert_atom);
+    }
+
+    #[test]
+    fn surface_material_updates_match_fresh_meshes_and_alpha() {
+        let mut options=Material::Opaque.options();options.opacity=0.0;
+        let zero=Material::Opaque.with_options(options);
+        for color in [ColorMethod::Element,ColorMethod::Solid([50,120,210,80])] {
+            for quality in [0,1] {
+                let (mol,mut rep)=surface_material_fixture(color,quality);
+                for material in Material::ALL.into_iter().chain([zero,Material::Opaque]) {
+                    if material==rep.material {continue;}
+                    let revision=rep.geometry_revision;
+                    rep.set_material(material);
+                    assert!(rep.cached_geometry(false).is_none());
+                    let fresh=fresh_surface_material(&mol,&rep);
+                    if let Some(updated)=rep.take_material_update(false) {
+                        assert_material_mesh(&updated.mesh,&fresh.mesh);
+                        rep.cache_material_update(updated,mol.n_atoms,false);
+                    } else {
+                        assert!(rep.geom_dirty);
+                        rep.cache_geometry(fresh,mol.n_atoms,false,false);
+                        rep.geom_dirty=false;
+                    }
+                    assert!(rep.geometry_revision!=revision);
+                    assert!(!rep.appearance_dirty);
+                    assert!(rep.cached_geometry(false).is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn surface_material_reuse_rejects_stale_or_gray_geometry() {
+        for case in 0..6 {
+            let (mol,mut rep)=surface_material_fixture(ColorMethod::Element,0);
+            match case {
+                0=>rep.sel_dirty=true,
+                1=>rep.coords_dirty=true,
+                2=>rep.geom_dirty=true,
+                3=>{let geom=fresh_surface_material(&mol,&rep);rep.cache_geometry(geom,mol.n_atoms,false,true);},
+                4=>{rep.mesh_cache=None;},
+                _=>{rep.sel=None;},
+            }
+            rep.set_material(Material::Glass);
+            assert!(rep.geom_dirty);
+            assert!(rep.take_material_update(false).is_none());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (_,mut rep)=surface_material_fixture(ColorMethod::Element,0);
+            rep.geometry_waiting=true;
+            rep.set_material(Material::Glass);
+            assert!(rep.geom_dirty && rep.take_material_update(false).is_none());
+        }
+        let (_,mut rep)=surface_material_fixture(ColorMethod::Element,0);
+        rep.set_material(Material::Glass);
+        assert!(rep.take_material_update(true).is_none(),"changed bond policy must not consume a stale cache");
+        assert!(rep.take_material_update(false).is_some());
+    }
+
+    #[test]
+    #[ignore = "CPU surface material edit benchmark"]
+    fn surface_material_edit_paired_benchmark() {
+        for quality in [0,2] {
+            let (mol,mut rep)=surface_material_fixture(ColorMethod::Element,quality);
+            rep.sel=Some(mol.data.evaluate("all").unwrap().1);
+            rep.cache_geometry(fresh_surface_material(&mol,&rep),mol.n_atoms,false,false);
+            let mut times=[Vec::new(),Vec::new()];
+            for iteration in 0..12 {
+                let material=if iteration%2==0 {Material::Glass} else {Material::Opaque};
+                let mut fresh=None;
+                for mode in if iteration%2==0 {[0,1]} else {[1,0]} {
+                    let start=std::time::Instant::now();
+                    if mode==0 {
+                        let old=rep.material;rep.material=material;
+                        fresh=Some(fresh_surface_material(&mol,&rep));rep.material=old;
+                    } else {
+                        rep.set_material(material);
+                        let geom=rep.take_material_update(false).unwrap();
+                        rep.cache_material_update(geom,mol.n_atoms,false);
+                    }
+                    if iteration>=2 {times[mode].push(start.elapsed().as_secs_f64()*1000.0);}
+                }
+                assert_material_mesh(&fresh.unwrap().mesh,&rep.mesh_cache.as_ref().unwrap().mesh);
+            }
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("SURFACE_MATERIAL {}",serde_json::json!({"quality":quality,"mode":mode,
+                    "median_ms":(samples[4]+samples[5])*0.5,"p95_ms":samples[9],
+                    "vertices":rep.mesh_cache.as_ref().unwrap().mesh.vertices.len()}));
+            }
+        }
     }
 
     #[test]

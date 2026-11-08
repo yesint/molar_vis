@@ -387,3 +387,53 @@ The accepted candidate is `target/render-audit/bin/step8`. GPU logs and images u
 `step8-short-inspection.png`. Earlier molecule-preview reference images remain available in
 `step8-before-images`, but that sustained capture/benchmark test was not repeated. Future GPU
 checks should remain short, with sustained benchmark loops avoided while the desktop is in use.
+
+### 9. Reuse surface geometry for material edits (S1, accepted 2026-11-08)
+
+Material-only edits now mark a displayed Surface representation for an appearance update.
+The update restamps cached mesh vertices, reuses GPU capacity, and advances the geometry
+revision for ray-trace and shadow invalidation. Positions, normals, connectivity, source owners,
+and RGB values remain unchanged. Picking and glow geometry do not rebuild for this update.
+The picker, script/API command, ordinary representation undo, live material defaults, and
+settings restoration use the same material setter. Group-history reconstruction retains its
+existing full-build behavior.
+
+Exact opacity replacement requires known original alpha. A cached vertex with nonzero
+material opacity can prove an original alpha of 255 when its stored alpha equals that opacity.
+If every vertex satisfies this condition, later opacity changes are exact, including a change
+through zero opacity. Otherwise only equal-opacity lighting changes reuse the cache; opacity
+changes rebuild the surface. This preserves custom color alpha without retaining another mesh
+or an alpha array. Only fixed per-representation metadata is added.
+
+Selection, coordinate, color, surface-parameter, and gray-mode changes retain full rebuilds.
+Material edits during a pending background build also use the existing cancellation/rebuild
+path. Material updates cannot consume stale selection or bond-policy caches. Exact color replay
+is still pending; this change does not optimize color edits.
+
+The CPU benchmark uses the complete `2lao.pdb` molecule, ten alternating reference/cached
+pairs after two warmup pairs, and one CPU at reduced process priority. The cached timing
+includes material stamping and CPU cache installation; the fresh timing includes complete
+geometry construction. GPU uploads are excluded. Every pair requires exact vertex bytes,
+indices, and source-owner arrays.
+
+| Surface quality | Vertices | Fresh build median / p95 | Cached update median / p95 |
+| --- | --- | --- | --- |
+| 0 | 5,368 | 48.855 / 54.949 ms | 0.044 / 0.081 ms |
+| 2 | 31,985 | 818.474 / 1,660.529 ms | 0.248 / 0.459 ms |
+
+Host contention affected the full-build tail. These timings demonstrate the removed surface
+construction work, not a guaranteed application latency or a steady-rendering speedup. Raw
+results are in `target/render-audit/step9-cpu-full.log`. The earlier small-surface measurement
+is in `step9-cpu-bench.log` and independently showed exact output with lower edit cost.
+
+All 368 regular release tests passed, including exact material updates across all presets,
+custom alpha, zero opacity, stale-cache rejection, and settings restoration. The wasm32 check
+passed with its three existing warnings. The short physical-GPU integration test completed in
+0.29 seconds: five material/edit states, including script commands and undo, each compared
+160×120 raster images and 96×72 two-sample ray-traced images. All ten image pairs were exact,
+and their comparison sheet was inspected. The test verifies that the vertex allocation is
+retained and that cached and explicitly rebuilt ray-trace inputs follow separate paths.
+
+The accepted binary is `target/render-audit/bin/step9`; validation logs are `step9-unit.log`,
+`step9-wasm-final.log`, and `step9-gpu-verified.log`. Images are in `step9-images`, and the
+inspected sheet is `step9-inspection.png`. No sustained GPU benchmark loop was used.

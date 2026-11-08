@@ -813,7 +813,7 @@ options: RebuildOptions,
         let any_rep_dirty = mol
             .reps
             .iter()
-            .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty || r.geometry_pending());
+            .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty || r.appearance_dirty || r.geometry_pending());
         if !(any_rep_dirty
             || (mol.show_box && mol.box_dirty)
             || mol.aromatic_dirty
@@ -886,9 +886,22 @@ options: RebuildOptions,
             if matches!(rep.kind, RepKind::Interactions) {
                 continue;
             }
+            if rep.appearance_dirty && !rep.geom_dirty && !rep.coords_dirty {
+                if !grayed {
+                    if let Some(geom) = rep.take_material_update(dashed) {
+                        renderer.update(rs, &mut rep.gpu, &geom);
+                        rep.cache_material_update(geom, n_atoms, dashed);
+                        changed = true;
+                        // Positions, pick ownership, and glow geometry are unchanged.
+                        continue;
+                    }
+                }
+                rep.geom_dirty = true;
+            }
             let Some(sel) = &rep.sel else {
                 rep.geom_dirty = false;
                 rep.coords_dirty = false;
+                rep.appearance_dirty = false;
                 continue;
             };
 
@@ -1344,6 +1357,79 @@ mod unobstructed_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod geometry_job_tests {
     use super::*;
+
+    #[test]
+    #[ignore = "short GPU checks for cached surface material edits, undo, and ray-trace invalidation"]
+    fn surface_material_edits_preserve_images_and_geometry() {
+        use crate::{history::{History,EditState},material::Material,script::{Command,RepRef}};
+        let rs=crate::render::test_gpu();
+        let settings=Settings::default();
+        let mut renderer=SceneRenderer::new(&rs,&settings.rendering);
+        let raw=crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/../../tests/2lao.pdb"))).unwrap();
+        let mut scene=Scene::default();scene.add(raw,&settings.reps);
+        let mut rep=Representation::new(RepKind::Surface);
+        rep.params=RepParams::Surface {probe:0.14,quality:0,smoothing:1};
+        rep.sel_text="resid 1:3".into();
+        scene.molecules[0].reps=vec![rep];
+        rebuild_dirty(&mut scene,&renderer,&settings,true,&rs,None,false);
+        let mesh=&scene.molecules[0].reps[0].mesh_cache.as_ref().unwrap().mesh;
+        let lo=mesh.vertices.iter().fold(glam::Vec3::splat(f32::INFINITY),|a,v|a.min(glam::Vec3::from_array(v.pos)));
+        let hi=mesh.vertices.iter().fold(glam::Vec3::splat(f32::NEG_INFINITY),|a,v|a.max(glam::Vec3::from_array(v.pos)));
+        let mut camera=crate::camera::Camera::frame_bbox(lo,hi,0.8);
+        camera.ao.enabled=false;camera.shadow.enabled=false;
+        let mut history=History::new(EditState::capture(&scene));
+        let mut old_revision=scene.molecules[0].reps[0].geometry_revision;
+        for (step,name) in ["Glossy","Glass","Opaque",Material::MolecularNodes.label(),"undo"].into_iter().enumerate() {
+            let vertex_ptr=scene.molecules[0].reps[0].mesh_cache.as_ref().unwrap().mesh.vertices.as_ptr();
+            if name=="undo" {history.undo(&mut scene);} else {
+                crate::script::apply_scene_command(&mut scene,&mut camera,&settings.reps,
+                    Command::Material {mol:0,rep:RepRef::Index(0),name:name.into()}).unwrap();
+                history.maybe_record(EditState::capture(&scene));
+            }
+            assert!(scene.molecules[0].reps[0].appearance_dirty);
+            assert!(!scene.molecules[0].reps[0].geom_dirty);
+            assert!(rebuild_dirty(&mut scene,&renderer,&settings,false,&rs,None,false));
+            let mol=&scene.molecules[0];let rep=&mol.reps[0];
+            let mesh=&rep.mesh_cache.as_ref().unwrap().mesh;
+            assert_eq!(vertex_ptr,mesh.vertices.as_ptr(),"material edit must reuse the mesh allocation");
+            assert_ne!(rep.geometry_revision,old_revision);old_revision=rep.geometry_revision;
+            let fresh=geometry::build(&mol.data.bind_with_state(rep.sel.as_ref().unwrap(),mol.render_state()),
+                mol.n_atoms,&mol.bonds,&rep.params,rep.color_spec(),rep.material,None,settings.behavior.dashed_pbc_bonds);
+            assert_eq!(bytemuck::cast_slice::<_,u8>(&mesh.vertices),bytemuck::cast_slice::<_,u8>(&fresh.mesh.vertices));
+            assert_eq!(mesh.indices,fresh.mesh.indices);assert_eq!(mesh.vert_atom,fresh.mesh.vert_atom);
+            let capture=|renderer:&mut SceneRenderer,scene:&Scene| {
+                let cap=renderer.capture_begin(&rs,160,120,camera.view(),camera.proj(4.0/3.0),camera.is_perspective(),
+                    camera.cue_uniform(),camera.ao_uniform(),camera.shadow_uniform(),camera.background,camera.eye_depth_range(),scene);
+                rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();cap.read()
+            };
+            let cached=capture(&mut renderer,&scene);
+            let fresh_gpu=renderer.upload(&rs,&fresh);
+            let saved=std::mem::replace(&mut scene.molecules[0].reps[0].gpu,fresh_gpu);
+            let reference=capture(&mut renderer,&scene);
+            scene.molecules[0].reps[0].gpu=saved;
+            assert_eq!(cached,reference,"raster {name}");
+            // Compare cache-based RT preparation with an explicit fresh CPU build.
+            assert!(scene.molecules[0].reps[0].cached_geometry(settings.behavior.dashed_pbc_bonds).is_some());
+            renderer.prepare_raytrace(&rs,&scene,&camera,[96,72],settings.behavior.dashed_pbc_bonds);
+            let cap=renderer.capture_begin_raytrace(&rs,96,72,&camera,2).unwrap();
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();let rt_cached=cap.read();
+            scene.molecules[0].reps[0].geom_dirty=true;
+            assert!(scene.molecules[0].reps[0].cached_geometry(settings.behavior.dashed_pbc_bonds).is_none());
+            renderer.prepare_raytrace(&rs,&scene,&camera,[96,72],settings.behavior.dashed_pbc_bonds);
+            let cap=renderer.capture_begin_raytrace(&rs,96,72,&camera,2).unwrap();
+            rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();let rt_reference=cap.read();
+            scene.molecules[0].reps[0].geom_dirty=false;
+            assert_eq!(rt_cached,rt_reference,"ray trace {name}");
+            if let Ok(dir)=std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                cached.save(format!("{dir}/material-{step}-cached.png")).unwrap();
+                reference.save(format!("{dir}/material-{step}-fresh.png")).unwrap();
+                rt_cached.save(format!("{dir}/trace-{step}-cached.png")).unwrap();
+                rt_reference.save(format!("{dir}/trace-{step}-fresh.png")).unwrap();
+            }
+        }
+        assert_eq!(scene.molecules[0].reps[0].material,Material::Opaque);
+    }
 
     #[test]
     #[ignore = "requires native GPU; verifies synchronous surface uploads and image parity"]
