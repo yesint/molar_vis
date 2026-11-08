@@ -480,3 +480,36 @@ with a nonzero pulse because file captures intentionally suppress the pending-se
 The executable is `target/render-audit/bin/step10`; remaining validation logs are
 `step10-shape.log`, `step10-unit.log`, `step10-wasm.log`, and `step10-gpu.log`. Images are in
 `step10-images`, and the inspected sheet is `step10-inspection.png`.
+
+### 11. Reject CPU picking rays outside mesh bounds (S7, accepted 2026-11-08)
+
+Each installed mesh now stores finite vertex bounds. CPU picking first tests the ray against
+expanded bounds using double-precision slab arithmetic. Rays that pass this test use the
+unchanged triangle scan, including its two-sided intersections, source-owner choice, missing
+owners, and first-triangle tie rule. Periodic images share the bounds and translate the ray
+as before. Invalid positions or rays disable the rejection. Native GPU picking is unchanged.
+
+Bounds require one vertex scan when installing new geometry and fixed metadata per mesh;
+there is no triangle tree or retained duplicate geometry. Material-only updates now preserve
+the source-atom list and bounds, avoiding their allocation and reconstruction. Tests verify
+that both the mesh allocation and source-atom allocation survive these updates.
+
+Five CPU benchmark runs each measured 15 alternating pairs after three warmup pairs. Each
+pair picked 32 rays against 20,002 triangles. Missed bounds reduced the median of run medians
+from 9.011 ms to 0.000831 ms. For rays that entered the bounds, the corresponding medians were
+9.051 and 8.999 ms; median paired changes ranged from −1.29% to +2.08%, with no consistent
+regression. Host scheduling produced large timing tails. These are native CPU measurements
+of the shared picking algorithm, not measured browser hover latency. Material-update spot
+checks also showed lower cost after retaining metadata; they are not a separate speedup claim.
+
+All 371 regular release tests passed. Differential tests compare exact pick distances and
+owners for 6,000 seeded random rays, boundary and degenerate cases, three coordinate scales,
+both camera projections, and translated periodic images of a real surface. The wasm32 check
+passed with its three existing warnings. The physical-GPU material integration check took
+0.35 seconds. All ten raster/ray-traced image pairs matched exactly, also matched the saved
+pre-change captures, and passed visual inspection.
+
+The executable is `target/render-audit/bin/step11`. Logs use the `step11-pick`,
+`step11-material`, `step11-unit`, `step11-wasm`, and `step11-gpu` prefixes. Images are in
+`step11-images`; the inspected comparison is `step11-inspection.png`. A triangle BVH remains
+conditional on evidence that rays entering mesh bounds cause unacceptable picking latency.

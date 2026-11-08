@@ -251,7 +251,7 @@ pub(crate) fn pick_interaction<'a>(
         let (ro, rd) = cursor_ray(view, proj, ndc.x, ndc.y);
         let rep = &scene.molecules[hit.mol].reps[hit.rep];
         let t = if rep.kind.draws_mesh() {
-            rep.mesh_cache.as_ref().and_then(|cache| ray_mesh(&cache.mesh, ro, rd).map(|(t, _)| t))
+            rep.mesh_cache.as_ref().and_then(|cache| ray_cached_mesh(cache, ro, rd).map(|(t, _)| t))
         } else {
             ray_sphere(ro, rd, hit.display, hit.radius)
         };
@@ -512,7 +512,7 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
                 // the same mesh shifted by its offset (= the ray shifted back).
                 let Some(cache) = &rep.mesh_cache else { continue };
                 for &off in &offsets {
-                    let Some((t, aid)) = ray_mesh(&cache.mesh, ro - off, rd) else { continue };
+                    let Some((t, aid)) = ray_cached_mesh(cache, ro - off, rd) else { continue };
                     if t >= best_t {
                         continue;
                     }
@@ -565,6 +565,34 @@ pub fn pick(scene: &Scene, view: Mat4, proj: Mat4, ndc_x: f32, ndc_y: f32) -> Op
         }
     }
     best
+}
+
+/// Reject only rays that miss expanded vertex bounds. Use f64 slab arithmetic
+/// and an origin/coordinate-scaled f32 rounding margin; parallel rays need no
+/// reciprocal. Invalid bounds or rays retain the original triangle scan.
+fn ray_cached_mesh(cache: &crate::scene::MeshCache, ro: Vec3, rd: Vec3) -> Option<(f32, usize)> {
+    if let Some([lo, hi]) = cache.bounds {
+        if ro.is_finite() && rd.is_finite() {
+            let scale = (ro.abs().max_element() as f64)
+                .max(lo.abs().max_element() as f64).max(hi.abs().max_element() as f64).max(1.0);
+            let pad = scale * 32.0 * f32::EPSILON as f64;
+            let mut near = 0.0f64;
+            let mut far = f64::INFINITY;
+            for axis in 0..3 {
+                let (o, d) = (ro[axis] as f64, rd[axis] as f64);
+                let (lower, upper) = (lo[axis] as f64 - pad, hi[axis] as f64 + pad);
+                if d == 0.0 {
+                    if o < lower || o > upper { return None; }
+                } else {
+                    let (a, b) = ((lower - o) / d, (upper - o) / d);
+                    near = near.max(a.min(b));
+                    far = far.min(a.max(b));
+                    if far < near { return None; }
+                }
+            }
+        }
+    }
+    ray_mesh(&cache.mesh, ro, rd)
 }
 
 /// Nearest hit of the ray `(ro, rd)` on `mesh`: the ray distance and the source atom
@@ -758,6 +786,108 @@ pub fn index_selection_string(atoms: &[usize]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bounds_test_mesh(n: usize) -> crate::geometry::MeshData {
+        let mut mesh=crate::geometry::MeshData::default();
+        for y in 0..=n {for x in 0..=n {
+            mesh.vertices.push(crate::render::MeshVertex {pos:[x as f32,y as f32,0.0],normal:[0.0,0.0,1.0],color:u32::MAX,mat:0});
+            mesh.vert_atom.push(if (x+y)%7==0 {crate::geometry::NO_ATOM} else {((x+y)%8) as u32});
+        }}
+        let w=(n+1) as u32;
+        for y in 0..n as u32 {for x in 0..n as u32 {
+            let a=x+y*w;mesh.indices.extend([a,a+1,a+w,a+1,a+w+1,a+w]);
+        }}
+        // Coincident faces with distinct owners retain the first-triangle tie rule.
+        let base=mesh.vertices.len() as u32;
+        mesh.vertices.extend([mesh.vertices[0],mesh.vertices[1],mesh.vertices[w as usize]]);
+        mesh.vert_atom.extend([99;3]);mesh.indices.extend([base,base+1,base+2,0,0,0]);
+        mesh
+    }
+
+    fn exact_pick(a: Option<(f32,usize)>,b: Option<(f32,usize)>) {
+        assert_eq!(a.map(|(t,id)|(t.to_bits(),id)),b.map(|(t,id)|(t.to_bits(),id)));
+    }
+
+    #[test]
+    fn cached_mesh_bounds_preserve_ray_hits_and_ties() {
+        let base=bounds_test_mesh(12);
+        let mut seed=73u32;
+        let mut random=|| {seed=seed.wrapping_mul(1664525).wrapping_add(1013904223);(seed>>8) as f32/16777216.0};
+        for scale in [0.001,1.0,10000.0] {
+            let mut mesh=base.clone();
+            let offset=Vec3::new(17.0,-9.0,4.0)*scale;
+            for v in &mut mesh.vertices {v.pos=(Vec3::from_array(v.pos)*scale+offset).to_array();}
+            let cache=crate::scene::MeshCache::new(mesh,100);
+            for _ in 0..2000 {
+                let ro=offset+Vec3::new(random()*30.0-9.0,random()*30.0-9.0,random()*20.0-10.0)*scale;
+                let rd=Vec3::new(random()*2.0-1.0,random()*2.0-1.0,random()*2.0-1.0).normalize_or_zero();
+                exact_pick(ray_mesh(&cache.mesh,ro,rd),ray_cached_mesh(&cache,ro,rd));
+            }
+            for local in [Vec3::ZERO,Vec3::X,Vec3::new(0.5,0.5,0.0),Vec3::new(12.0,12.0,0.0),Vec3::new(-0.000001,0.5,0.0)] {
+                for height in [-10.0,0.0,10.0] {
+                    let ro=offset+(local+Vec3::Z*height)*scale;
+                    for rd in [Vec3::Z,-Vec3::Z,Vec3::X,Vec3::ZERO,Vec3::new(1.0,0.0,-1e-10).normalize()] {
+                        exact_pick(ray_mesh(&cache.mesh,ro,rd),ray_cached_mesh(&cache,ro,rd));
+                    }
+                }
+            }
+        }
+        let empty=crate::scene::MeshCache::new(Default::default(),0);
+        exact_pick(ray_mesh(&empty.mesh,Vec3::ZERO,Vec3::Z),ray_cached_mesh(&empty,Vec3::ZERO,Vec3::Z));
+        let mut invalid=base;invalid.vertices[0].pos[0]=f32::NAN;
+        let cache=crate::scene::MeshCache::new(invalid,100);assert!(cache.bounds.is_none());
+        exact_pick(ray_mesh(&cache.mesh,Vec3::new(1.0,1.0,10.0),-Vec3::Z),
+            ray_cached_mesh(&cache,Vec3::new(1.0,1.0,10.0),-Vec3::Z));
+    }
+
+    #[test]
+    fn cached_surface_bounds_match_camera_and_periodic_rays() {
+        let path=format!("{}/../../tests/2lao.pdb",env!("CARGO_MANIFEST_DIR"));
+        let scene=scene_from(&path,RepKind::Surface,"resid 1:20");
+        let cache=scene.molecules[0].reps[0].mesh_cache.as_ref().unwrap();
+        let [lo,hi]=cache.bounds.unwrap();
+        let mut camera=crate::camera::Camera::frame_bbox(lo,hi,0.8);
+        for projection in [crate::camera::Projection::Orthographic,crate::camera::Projection::Perspective] {
+            camera.projection=projection;
+            for off in [Vec3::ZERO,Vec3::new(3.0,-2.0,1.0)] {
+                for y in -6..=6 {for x in -6..=6 {
+                    let (ro,rd)=cursor_ray(camera.view(),camera.proj(4.0/3.0),x as f32/5.0,y as f32/5.0);
+                    exact_pick(ray_mesh(&cache.mesh,ro-off,rd),ray_cached_mesh(cache,ro-off,rd));
+                }}
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "CPU mesh-picking broad-phase benchmark"]
+    fn cached_mesh_bounds_paired_benchmark() {
+        let cache=crate::scene::MeshCache::new(bounds_test_mesh(100),100);
+        for misses in [true,false] {
+            let rays:Vec<_>=(0..32).map(|i|Vec3::new(if misses {-2.0-i as f32*0.01} else {i as f32+0.25},25.25,10.0)).collect();
+            for &ro in &rays {exact_pick(ray_mesh(&cache.mesh,ro,-Vec3::Z),ray_cached_mesh(&cache,ro,-Vec3::Z));}
+            let mut times=[Vec::new(),Vec::new()];let mut paired=Vec::new();
+            for iteration in 0..18 {
+                let mut elapsed=[0.0;2];
+                for mode in if iteration%2==0 {[0,1]} else {[1,0]} {
+                    let start=std::time::Instant::now();
+                    for &ro in &rays {
+                        std::hint::black_box(if mode==0 {ray_mesh(std::hint::black_box(&cache.mesh),ro,-Vec3::Z)}
+                            else {ray_cached_mesh(std::hint::black_box(&cache),ro,-Vec3::Z)});
+                    }
+                    elapsed[mode]=start.elapsed().as_secs_f64()*1000.0;
+                    if iteration>=3 {times[mode].push(elapsed[mode]);}
+                }
+                if iteration>=3 {paired.push(100.0*(elapsed[1]/elapsed[0]-1.0));}
+            }
+            paired.sort_by(f64::total_cmp);
+            for (mode,samples) in times.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                eprintln!("PICK_BOUNDS {}",serde_json::json!({"misses":misses,"mode":mode,
+                    "triangles":cache.mesh.indices.len()/3,"rays":rays.len(),"median_ms":samples[7],
+                    "p95_ms":samples[14],"paired_percent":paired[7]}));
+            }
+        }
+    }
 
     #[test]
     fn index_string_compresses_runs() {

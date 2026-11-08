@@ -1352,7 +1352,7 @@ mod live_settings_tests {
         let mol=&mut scene.molecules[0];let rep=&mut mol.reps[0];
         rep.set_material(crate::material::Material::Glass);
         let geom=rep.take_material_update(false).unwrap();
-        rep.cache_material_update(geom,mol.n_atoms,false);
+        rep.cache_material_update(geom,false);
         dialog.restore_scene(&mut scene);
         let rep=&mut scene.molecules[0].reps[0];
         assert!(rep.appearance_dirty && !rep.geom_dirty && !rep.sel_dirty);

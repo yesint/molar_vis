@@ -907,7 +907,7 @@ options: RebuildOptions,
                 if !grayed {
                     if let Some(geom) = rep.take_material_update(dashed) {
                         renderer.update(rs, &mut rep.gpu, &geom);
-                        rep.cache_material_update(geom, n_atoms, dashed);
+                        rep.cache_material_update(geom, dashed);
                         changed = true;
                         // Positions, pick ownership, and glow geometry are unchanged.
                         continue;

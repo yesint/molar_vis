@@ -186,6 +186,8 @@ pub struct MeshCache {
     pub mesh: crate::geometry::MeshData,
     /// Distinct source atoms of `mesh` (global indices), ascending.
     pub atoms: Vec<u32>,
+    /// Finite vertex bounds, shared by all periodic images. None disables culling.
+    pub(crate) bounds: Option<[Vec3; 2]>,
 }
 
 impl MeshCache {
@@ -198,7 +200,13 @@ impl MeshCache {
             }
         }
         let atoms = (0..n_atoms as u32).filter(|&a| seen[a as usize]).collect();
-        Self { mesh, atoms }
+        let bounds = if mesh.vertices.is_empty() { None } else {
+            mesh.vertices.iter().try_fold([Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)], |[lo, hi], v| {
+                let p = Vec3::from_array(v.pos);
+                p.is_finite().then(|| [lo.min(p), hi.max(p)])
+            })
+        };
+        Self { mesh, atoms, bounds }
     }
 
     /// Whether atom `id` is one the mesh is drawn from.
@@ -334,7 +342,8 @@ impl Representation {
             || self.geometry_cache_dashed != Some(dashed) || self.mesh_cache.is_none()
         { return None; }
         let mut geom = self.geometry_cache.take()?;
-        geom.mesh = self.mesh_cache.take().unwrap().mesh;
+        // Preserve position-dependent metadata during material-only updates.
+        geom.mesh = std::mem::take(&mut self.mesh_cache.as_mut().unwrap().mesh);
         let lighting = self.material.pack_lighting();
         let alpha = (self.material.opacity_u8() as u32) << 24;
         for v in &mut geom.mesh.vertices {
@@ -344,11 +353,11 @@ impl Representation {
         Some(geom)
     }
 
-    pub(crate) fn cache_material_update(&mut self, geom: geometry::GeometryData, n_atoms: usize, dashed: bool) {
-        // Keep the known original alpha even through a fully transparent material.
-        let base_opaque = self.surface_base_opaque;
-        self.cache_geometry(geom, n_atoms, dashed, false);
-        self.surface_base_opaque = base_opaque;
+    pub(crate) fn cache_material_update(&mut self, mut geom: geometry::GeometryData, dashed: bool) {
+        // Positions and source owners have not changed, so keep atoms and bounds.
+        self.mesh_cache.as_mut().expect("material update must retain its mesh cache").mesh =
+            std::mem::take(&mut geom.mesh);
+        self.cache_geometry_state(geom, dashed, false);
     }
 
     pub(crate) fn geometry_pending(&self) -> bool {
@@ -363,8 +372,6 @@ impl Representation {
     ) {
         #[cfg(not(target_arch = "wasm32"))]
         { self.geometry_job = None; self.geometry_waiting = false; }
-        self.appearance_dirty = false;
-        self.geometry_cache_material = Some(self.material);
         let opacity = self.material.opacity_u8();
         // For nonzero opacity, floor(base_alpha * opacity / 255) == opacity
         // proves base_alpha == 255. Unknown/custom alpha keeps the rebuild path
@@ -374,6 +381,12 @@ impl Representation {
             && geom.mesh.vertices.iter().all(|v| v.color >> 24 == opacity as u32);
         self.mesh_cache = (self.kind.draws_mesh() && !geom.mesh.vertices.is_empty())
             .then(|| MeshCache::new(std::mem::take(&mut geom.mesh), n_atoms));
+        self.cache_geometry_state(geom, dashed, grayed);
+    }
+
+    fn cache_geometry_state(&mut self, geom: geometry::GeometryData, dashed: bool, grayed: bool) {
+        self.appearance_dirty = false;
+        self.geometry_cache_material = Some(self.material);
         // Draw-mode gray colors must never enter a normal ray-traced image.
         static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.geometry_revision = NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2086,12 +2099,16 @@ mod tests {
                 for material in Material::ALL.into_iter().chain([zero,Material::Opaque]) {
                     if material==rep.material {continue;}
                     let revision=rep.geometry_revision;
+                    let bounds=rep.mesh_cache.as_ref().unwrap().bounds;
+                    let atoms=rep.mesh_cache.as_ref().unwrap().atoms.as_ptr();
                     rep.set_material(material);
                     assert!(rep.cached_geometry(false).is_none());
                     let fresh=fresh_surface_material(&mol,&rep);
                     if let Some(updated)=rep.take_material_update(false) {
                         assert_material_mesh(&updated.mesh,&fresh.mesh);
-                        rep.cache_material_update(updated,mol.n_atoms,false);
+                        rep.cache_material_update(updated,false);
+                        assert_eq!(bounds,rep.mesh_cache.as_ref().unwrap().bounds);
+                        assert_eq!(atoms,rep.mesh_cache.as_ref().unwrap().atoms.as_ptr());
                     } else {
                         assert!(rep.geom_dirty);
                         rep.cache_geometry(fresh,mol.n_atoms,false,false);
@@ -2153,7 +2170,7 @@ mod tests {
                     } else {
                         rep.set_material(material);
                         let geom=rep.take_material_update(false).unwrap();
-                        rep.cache_material_update(geom,mol.n_atoms,false);
+                        rep.cache_material_update(geom,false);
                     }
                     if iteration>=2 {times[mode].push(start.elapsed().as_secs_f64()*1000.0);}
                 }
