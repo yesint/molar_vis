@@ -262,6 +262,7 @@ impl Mesh {
                             color: self.color(v.color),
                             width: self.state.line_width.clamp(1.0, 10.0),
                             offset_px: 0.0,
+                            cap: 0.0,
                         }
                     })
                     .collect(),

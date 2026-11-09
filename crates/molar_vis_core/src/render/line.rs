@@ -4,7 +4,9 @@
 //! WebGPU/wgpu can only rasterize 1‑px `LineList` primitives, so a settable line
 //! width is done the portable way: each segment (a *pair* of [`LineVertex`]es) is
 //! drawn as an **instanced quad** that is expanded perpendicular to the segment in
-//! screen space by `width` pixels in the vertex shader. The vertex buffer is the
+//! screen space by `width` pixels in the vertex shader. Atom endpoints extend by
+//! half the width and are clipped to round caps; color splits and dashes stay flat.
+//! The vertex buffer is the
 //! same flat pair-list the builder already produces — it is simply reinterpreted
 //! as per-instance data with a stride of two vertices (the shader reads both
 //! endpoints), so the width stays constant in pixels at any zoom, like VMD.
@@ -27,6 +29,8 @@ pub struct LineVertex {
     /// the parallel lines of a double/triple/aromatic bond stay side-by-side and
     /// legible from any angle. `0.0` for a single bond. Equal for both endpoints.
     pub offset_px: f32,
+    /// Round endpoint (1) at an atom/joint; flat (0) at color splits and dash ends.
+    pub cap: f32,
 }
 
 impl LineVertex {
@@ -57,22 +61,24 @@ impl LineVertex {
                 shader_location: 5,
                 format: wgpu::VertexFormat::Float32,
             },
-            // Endpoint 1 (next vertex in the pair): pos @24, color @36, offset_px @44.
+            wgpu::VertexAttribute { offset: 24, shader_location: 7, format: wgpu::VertexFormat::Float32 },
+            // Endpoint 1 (next vertex in the pair): pos @28, color @40, offset_px @48, cap @52.
             wgpu::VertexAttribute {
-                offset: 24,
+                offset: 28,
                 shader_location: 3,
                 format: wgpu::VertexFormat::Float32x3,
             },
             wgpu::VertexAttribute {
-                offset: 36,
+                offset: 40,
                 shader_location: 4,
                 format: wgpu::VertexFormat::Uint32,
             },
             wgpu::VertexAttribute {
-                offset: 44,
+                offset: 48,
                 shader_location: 6,
                 format: wgpu::VertexFormat::Float32,
             },
+            wgpu::VertexAttribute { offset: 52, shader_location: 8, format: wgpu::VertexFormat::Float32 },
         ],
     };
 }

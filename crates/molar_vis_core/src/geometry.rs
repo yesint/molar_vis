@@ -11,6 +11,8 @@ use crate::material::Material;
 use crate::render::{CylinderInstance, LineVertex, MeshVertex, SphereInstance};
 use crate::secstruct::SsMap;
 
+mod aromatic;
+pub(crate) use aromatic::append_aromatic_circles;
 mod cartoon;
 pub(crate) use cartoon::Cache as CartoonCache;
 #[cfg(not(target_arch = "wasm32"))]
@@ -509,8 +511,8 @@ pub fn interaction_lines(
     for it in interactions {
         let color = crate::color::pack_rgba8(settings.color(it.kind));
         for (s, e) in dashes(it.a.to_array(), it.b.to_array()) {
-            out.push(LineVertex { pos: s, color, width: settings.line_width, offset_px: 0.0 });
-            out.push(LineVertex { pos: e, color, width: settings.line_width, offset_px: 0.0 });
+            out.push(LineVertex { pos: s, color, width: settings.line_width, offset_px: 0.0, cap: 0.0 });
+            out.push(LineVertex { pos: e, color, width: settings.line_width, offset_px: 0.0, cap: 0.0 });
         }
     }
     out
@@ -582,56 +584,7 @@ pub fn interaction_geometry(
     data
 }
 
-/// The 12 edges of the periodic box as a line list (24 vertices). The box is the
-/// parallelepiped spanned by its three lattice vectors from the origin (GROMACS
-/// convention). Drawn in a neutral grey.
-/// Line segments tracing a gray circle in the plane of each aromatic ring (the classic
-/// aromatic depiction). Drawn through the line pipeline so it depth-tests against the
-/// atoms/bonds (the back of a tilted circle is correctly occluded). `coords` are the
-/// displayed atom positions (nm); each ring is its atom indices.
-pub fn aromatic_circles(rings: &[Vec<usize>], coords: &[Pos]) -> Vec<LineVertex> {
-    use glam::Vec3;
-    let color = crate::color::pack_rgba8([180, 180, 180, 255]);
-    let mut out = Vec::new();
-    for ring in rings {
-        let pts: Vec<Vec3> = ring
-            .iter()
-            .filter_map(|&a| coords.get(a).map(|p| Vec3::new(p.x, p.y, p.z)))
-            .collect();
-        if pts.len() < 3 || pts.len() != ring.len() {
-            continue;
-        }
-        let c = pts.iter().copied().sum::<Vec3>() / pts.len() as f32;
-        // Newell's best-fit plane normal, then an in-plane orthonormal basis.
-        let mut nrm = Vec3::ZERO;
-        for i in 0..pts.len() {
-            nrm += (pts[i] - c).cross(pts[(i + 1) % pts.len()] - c);
-        }
-        let nrm = nrm.normalize_or_zero();
-        if nrm == Vec3::ZERO {
-            continue;
-        }
-        let u0 = pts[0] - c;
-        let u = (u0 - nrm * u0.dot(nrm)).normalize_or_zero();
-        if u == Vec3::ZERO {
-            continue;
-        }
-        let v = nrm.cross(u);
-        let r = pts.iter().map(|p| (*p - c).length()).sum::<f32>() / pts.len() as f32 * 0.70;
-        const SEG: usize = 40;
-        let at = |k: usize| -> [f32; 3] {
-            let a = std::f32::consts::TAU * k as f32 / SEG as f32;
-            (c + (u * a.cos() + v * a.sin()) * r).to_array()
-        };
-        for k in 0..SEG {
-            for pos in [at(k), at(k + 1)] {
-                out.push(LineVertex { pos, color, width: 1.6, offset_px: 0.0 });
-            }
-        }
-    }
-    out
-}
-
+/// The 12 edges of the periodic box as a neutral gray line list.
 pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
     let m = pbox.get_matrix();
     // Columns of the box matrix are the three lattice vectors a, b, c.
@@ -663,8 +616,8 @@ pub fn box_wireframe(pbox: &PeriodicBox) -> Vec<LineVertex> {
     ];
     let mut v = Vec::with_capacity(24);
     for ((i0, j0, k0), (i1, j1, k1)) in EDGES {
-        v.push(LineVertex { pos: corner(i0, j0, k0), color, width: 1.0, offset_px: 0.0 });
-        v.push(LineVertex { pos: corner(i1, j1, k1), color, width: 1.0, offset_px: 0.0 });
+        v.push(LineVertex { pos: corner(i0, j0, k0), color, width: 1.0, offset_px: 0.0, cap: 0.0 });
+        v.push(LineVertex { pos: corner(i1, j1, k1), color, width: 1.0, offset_px: 0.0, cap: 0.0 });
     }
     v
 }
@@ -711,8 +664,8 @@ fn isolated_crosses(
             let (mut lo, mut hi) = (c, c);
             lo[axis] -= h;
             hi[axis] += h;
-            v.push(LineVertex { pos: lo, color, width, offset_px: 0.0 });
-            v.push(LineVertex { pos: hi, color, width, offset_px: 0.0 });
+            v.push(LineVertex { pos: lo, color, width, offset_px: 0.0, cap: 0.0 });
+            v.push(LineVertex { pos: hi, color, width, offset_px: 0.0, cap: 0.0 });
         }
     }
     v
@@ -990,12 +943,12 @@ fn lines(
     // Emit one half-bond segment (solid or PBC-dashed) at a screen-px offset lane.
     // `offset_px` shifts the line sideways along the segment's screen perpendicular
     // (computed per-frame in the shader). `0.0` = the single-bond center.
-    let mut push = |p0: [f32; 3], p1: [f32; 3], color, color1, offset_px: f32, dashed: bool| {
+    let mut push = |p0: [f32; 3], p1: [f32; 3], color, color1, offset_px: f32, dashed: bool, caps: [f32; 2]| {
         // The raster shader cuts gaps in one segment, avoiding hundreds of
         // CPU dash vertices for stretched periodic bonds during playback.
         let width = if dashed { -width.abs() } else { width };
-        v.push(LineVertex { pos: p0, color, width, offset_px });
-        v.push(LineVertex { pos: p1, color: color1, width, offset_px });
+        v.push(LineVertex { pos: p0, color, width, offset_px, cap: caps[0] });
+        v.push(LineVertex { pos: p1, color: color1, width, offset_px, cap: caps[1] });
     };
     for (index, bond) in bonds.iter().enumerate() {
         let [a, b] = bond.pair();
@@ -1004,8 +957,8 @@ fn lines(
             // PBC-wrapping bond → the single dashed PBC half-bonds (the rare PBC +
             // multi-order combo falls back to one strand). Otherwise split by order.
             if wrapped {
-                push(pa, a_end, ca, ca, 0.0, true);
-                push(pb, b_end, cb, cb, 0.0, true);
+                push(pa, a_end, ca, ca, 0.0, true, [0.0; 2]);
+                push(pb, b_end, cb, cb, 0.0, true, [0.0; 2]);
                 continue;
             }
             for &(slot, dash) in strand_slots(bond.order) {
@@ -1013,19 +966,19 @@ fn lines(
                 let blend = color_blend.clamp(0.0, 1.0);
                 if blend <= 0.0 {
                     // Keep the same direction for both halves so their screen offsets agree.
-                    push(pa, a_end, ca, ca, off, dash);
-                    push(b_end, pb, cb, cb, off, dash);
+                    push(pa, a_end, ca, ca, off, dash, [1.0, 0.0]);
+                    push(b_end, pb, cb, cb, off, dash, [0.0, 1.0]);
                 } else {
                     let a = glam::Vec3::from_array(pa);
                     let b = glam::Vec3::from_array(pb);
                     let lo = a.lerp(b, (1.0 - blend) * 0.5).to_array();
                     let hi = a.lerp(b, (1.0 + blend) * 0.5).to_array();
                     if blend < 1.0 {
-                        push(pa, lo, ca, ca, off, dash);
+                        push(pa, lo, ca, ca, off, dash, [1.0, 0.0]);
                     }
-                    push(lo, hi, ca, cb, off, dash);
+                    push(lo, hi, ca, cb, off, dash, [if blend == 1.0 { 1.0 } else { 0.0 }; 2]);
                     if blend < 1.0 {
-                        push(hi, pb, cb, cb, off, dash);
+                        push(hi, pb, cb, cb, off, dash, [0.0, 1.0]);
                     }
                 }
             }
@@ -1079,6 +1032,21 @@ mod bond_display_tests {
 
     fn endpoints() -> Vec<Option<([f32; 3], u32)>> {
         vec![Some(([0.0, 0.0, 0.0], 0xff0000ff)), Some(([1.0, 0.0, 0.0], 0xffff0000))]
+    }
+
+    #[test]
+    fn line_caps_round_atoms_without_overlapping_color_splits() {
+        for order in [BondOrder::Single, BondOrder::Double, BondOrder::Triple] {
+            for blend in [0.0, 0.4, 1.0] {
+                let vertices = lines(&endpoints(), &[Bond::with_order(0, 1, order)],
+                    12.0, None, blend, None);
+                for vertex in vertices {
+                    let at_atom = vertex.pos[0] == 0.0 || vertex.pos[0] == 1.0;
+                    assert_eq!(vertex.cap == 1.0, at_atom,
+                        "only atom endpoints can extend: {order:?}, blend={blend}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1153,6 +1121,7 @@ mod bond_display_tests {
         let vertices = lines(&lut, &[Bond::new(0, 1)], 2.0, Some(&pbox), 0.0, Some(&[0.14]));
         assert_eq!(vertices.len(), 4, "two periodic stubs, independent of dash count");
         assert!(vertices.iter().all(|v| v.width == -2.0));
+        assert!(vertices.iter().all(|v| v.cap == 0.0), "dash ends must stay flat");
         assert!((vertices[1].pos[0] - 4.93).abs() < 1e-5);
         assert!((vertices[3].pos[0] - 35.07).abs() < 1e-5);
         let tubes = cylinders(&lut, &[Bond::new(0, 1)], 0.02, Some(&pbox), None,

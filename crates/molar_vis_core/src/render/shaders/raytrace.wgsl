@@ -129,11 +129,12 @@ fn ray_sphere(s: Sphere, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32
 // no atom ends at all. Nearest valid hit of {wall, cap0, cap1}; `rd` is unit length, so the
 // ray-sphere tests are monic.
 //
-// `m.w & FLAG_FLAT_ENDS` suppresses the caps, for primitives standing in for the rasterizer's
-// flat-ended **line** quads: a dashed line's gaps are only a few pixels, so rounded ends bridged
-// them and every dashed contact line traced as a solid one.
+// Lines use bit 0 of m.w and explicit start/end cap bits in lane.w. Keep dash
+// ends flat while rounding atom endpoints, matching the screen-space line shader.
 fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 {
-    let flat = (c.m.w & 1u) != 0u;
+    let line = (c.m.w & 1u) != 0u;
+    let cap0 = !line || (u32(c.lane.w) & 1u) != 0u;
+    let cap1 = !line || (u32(c.lane.w) & 2u) != 0u;
     let p0 = c.c0.xyz;
     let r = c.c0.w;
     let axis = c.c1.xyz - p0;
@@ -161,12 +162,12 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 
             if (t > 1e-4 && h >= 0.0 && h <= seg && (best < 0.0 || t < best)) { best = t; }
         }
     }
-    if (flat) { return best; }
+    if (!cap0 && !cap1) { return best; }
     // Cap at p0 — only its outward (h ≤ 0) hemisphere; the rest is inside the wall.
     let b0 = dot(rd, oc);
     let c0 = dot(oc, oc) - r * r;
     let d0 = b0 * b0 - c0;
-    if (d0 >= 0.0) {
+    if (d0 >= 0.0 && cap0) {
         let roots = vec2<f32>(-b0 - sqrt(d0), -b0 + sqrt(d0));
         for (var i = 0u; i < select(1u, 2u, exit_inside); i = i + 1u) {
             let t = roots[i];
@@ -179,7 +180,7 @@ fn ray_cylinder(c: Cyl, ro: vec3<f32>, rd: vec3<f32>, exit_inside: bool) -> f32 
     let b1 = dot(rd, ocf);
     let c1 = dot(ocf, ocf) - r * r;
     let d1 = b1 * b1 - c1;
-    if (d1 >= 0.0) {
+    if (d1 >= 0.0 && cap1) {
         let roots = vec2<f32>(-b1 - sqrt(d1), -b1 + sqrt(d1));
         for (var i = 0u; i < select(1u, 2u, exit_inside); i = i + 1u) {
             let t = roots[i];

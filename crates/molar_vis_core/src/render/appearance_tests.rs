@@ -3064,7 +3064,7 @@ fn procedural_line_dashes_match_explicit_segments() {
     for projection in [Projection::Orthographic, Projection::Perspective] {
         camera.projection = projection;
         for alpha in [255u32, 128] {
-            let v0 = LineVertex { pos: [-0.4, 0.0, -0.2], color: (alpha << 24) | 0x0000ff, width: -4.0, offset_px: 0.0 };
+            let v0 = LineVertex { pos: [-0.4, 0.0, -0.2], color: (alpha << 24) | 0x0000ff, width: -4.0, offset_px: 0.0, cap: 0.0 };
             let v1 = LineVertex { pos: [0.4, 0.0, 0.2], ..v0 };
             let explicit: Vec<_> = crate::geometry::dashes(v0.pos, v1.pos).into_iter()
                 .flat_map(|(a, b)| [LineVertex { pos: a, width: 4.0, ..v0 }, LineVertex { pos: b, width: 4.0, ..v1 }]).collect();

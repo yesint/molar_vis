@@ -177,7 +177,14 @@ pub fn relax_in_system(
             force_tolerance: 200.0,
             ..Default::default()
         },
-        RelaxKind::Cleanup => MinimizeOptions::default(),
+        // Full cleanup must settle soft torsions and nitrogen inversion too.
+        // The backend's generic 10 kJ/mol/nm tolerance can stop with a visible
+        // residual bend at a conjugated amine even though its improper is present.
+        RelaxKind::Cleanup => MinimizeOptions {
+            max_steps: 5000,
+            force_tolerance: 0.01,
+            ..Default::default()
+        },
     };
     let result = model
         .minimize(&mut coordinates, &movable, options)
@@ -265,6 +272,32 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn full_cleanup_converges_conjugated_amine_planarity() {
+        // N-methylaniline with an out-of-plane N-H bond. Its GAFF2 nu improper
+        // is present, but the generic 10 kJ/mol/nm stopping tolerance leaves a
+        // visible residual bend. Test the full viewer preparation/minimization.
+        let mut positions: Vec<[f32; 3]> = (0..6).map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / 6.0;
+            [0.14 * a.cos(), 0.14 * a.sin(), 0.0]
+        }).collect();
+        positions.extend([[0.28, 0.0, 0.0], [0.35, 0.127, 0.0], [0.33, -0.09, 0.04]]);
+        let mut bonds: Vec<_> = (0..6).map(|i|
+            Bond::with_order(i, (i + 1) % 6, BondOrder::Aromatic)).collect();
+        bonds.extend([(0, 6), (6, 7), (6, 8)].map(|(a, b)|
+            Bond::with_order(a, b, BondOrder::Single)));
+        let mut sys = sketch(&[6, 6, 6, 6, 6, 6, 7, 6, 1], &positions, &bonds);
+        let result = relax_in_system(&mut sys, &bonds, RelaxKind::Cleanup,
+            &(0..positions.len()).collect::<Vec<_>>()).unwrap();
+        assert!(result.converged, "{result:?}");
+        let p = &sys.state().coords;
+        let normal = (p[7] - p[0]).cross(&(p[8] - p[0])).normalize();
+        let height = (p[6] - p[0]).dot(&normal).abs();
+        assert!(height < 0.0001, "N remains {height} nm out of plane: {result:?}");
+        assert_eq!(sys.topology().atoms.len(), positions.len());
+        assert!(result.final_energy < result.initial_energy);
+    }
+
     #[test]
     fn gaff_cleanup_completes_hydrogens_privately_and_keeps_hidden_atoms_fixed() {
         let bonds = [Bond::with_order(0, 1, BondOrder::Single)];

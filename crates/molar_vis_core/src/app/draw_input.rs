@@ -321,7 +321,7 @@ impl App {
 
     /// Painter overlays for the drawing editor: a hover highlight on the atom/bond
     /// under the cursor (shown during a drag too). The aromatic-ring circles are drawn
-    /// as depth-tested 3-D line geometry in the scene (`Molecule::aromatic_gpu`), not here.
+    /// as depth-tested geometry in each representation, not here.
     pub(super) fn draw_draw_overlays(&self, ui: &egui::Ui, rect: egui::Rect, size_px: [u32; 2]) {
         let Some(d) = self.draw.as_ref() else { return };
         let Some(mi) = d

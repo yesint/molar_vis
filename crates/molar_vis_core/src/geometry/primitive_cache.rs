@@ -170,12 +170,14 @@ impl PrimitiveCache {
                             color,
                             width,
                             offset_px: 0.0,
+                            cap: 0.0,
                         });
                         data.lines.push(LineVertex {
                             pos: hi,
                             color,
                             width,
                             offset_px: 0.0,
+                            cap: 0.0,
                         });
                     }
                 }

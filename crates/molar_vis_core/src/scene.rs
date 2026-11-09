@@ -710,10 +710,7 @@ pub struct Molecule {
     pub box_gpu: RepGpu,
     /// Box geometry needs (re)building — toggled on, or coordinates changed.
     pub box_dirty: bool,
-    /// GPU line buffer for the aromatic-ring circles (drawn depth-tested in the scene,
-    /// so they occlude correctly); built from `aromatic_rings` when `aromatic_dirty`.
-    pub aromatic_gpu: RepGpu,
-    /// Aromatic-circle geometry needs (re)building — perception ran or coords moved.
+    /// Perceived rings changed; rebuild the circles in each representation.
     pub aromatic_dirty: bool,
     /// A not-yet-committed selection (e.g. captured by a lasso), shown as a glowing
     /// highlight with a minimal accept/discard UI. View state, not undoable; see
@@ -872,7 +869,6 @@ impl Molecule {
             trajectory: Trajectory::default(),
             show_box: false,
             box_gpu: RepGpu::default(),
-            aromatic_gpu: RepGpu::default(),
             aromatic_dirty: false,
             // Build the box geometry up front (if the molecule has one) so a rep's
             // periodic `Box` toggle can draw it without the molecule-level box ever

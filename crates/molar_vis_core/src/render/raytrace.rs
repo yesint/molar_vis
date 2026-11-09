@@ -50,7 +50,8 @@ pub struct GpuSphere {
 /// rasterizer's bonds): `c0 = (p0.xyz, radius)`, `c1 = (p1.xyz, color_blend)`,
 /// The high bits of `flags` store the envelope group (0 disables clipping).
 /// `m = (color_p0, mat, color_p1, flags)` — two-tone, split at the midpoint.
-/// `flags & FLAG_FLAT_ENDS` drops the caps (for stand-ins for flat-ended line quads).
+/// `flags & FLAG_LINE` marks an unlit line; `lane.w` holds its endpoint cap bits
+/// (1 = start, 2 = end). Other cylinders use `lane` for profile offsets/smoothing.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuCylinder {
@@ -339,8 +340,8 @@ impl RtScene {
                 let Some(sel) = rep.sel.as_ref() else { continue };
                 // Camera changes need new screen-space strand/line conversion and
                 // a BVH, but not another surface, cartoon, or atom geometry build.
-                let fresh;
-                let geom = if let Some(cached) = rep.cached_geometry(dashed_pbc) {
+                let mut fresh;
+                let geom = if let Some(cached) = rep.cached_geometry(dashed_pbc).filter(|_| !mol.aromatic_dirty) {
                     cached
                 } else {
                     let smoothed = (rep.smooth_window > 1)
@@ -354,6 +355,9 @@ impl RtScene {
                         &bound, mol.n_atoms, &mol.bonds, &rep.params, rep.color_spec(),
                         rep.material, ss.as_ref(), dashed_pbc,
                         Some(mol.trajectory.frames.first().unwrap_or_else(|| mol.data.state())),
+                    );
+                    geometry::append_aromatic_circles(
+                        &mut fresh, &bound, &mol.aromatic_rings, &rep.params, rep.material,
                     );
                     fresh.as_ref()
                 };
@@ -557,10 +561,9 @@ fn sphere_aabb(s: &GpuSphere) -> Aabb {
     Aabb { min: center - r, max: center + r }
 }
 
-/// Cylinder flag: no end caps — the primitive stands in for a flat-ended line quad. Rounded ends
-/// would lengthen each dash of a dashed line by its radius at both ends, which at line widths of a
-/// few pixels is enough to close the gaps and turn a dashed contact line into a solid one.
-const FLAG_FLAT_ENDS: u32 = 1;
+/// Line primitive: interpolate endpoint colors and use only explicitly enabled caps.
+/// Dash ends and internal color splits are flat so gaps and boundaries stay exact.
+const FLAG_LINE: u32 = 1;
 
 /// The camera the scene is being gathered *for*. Two pieces of geometry are view-dependent —
 /// multi-order bond strand offsets and the pixel widths of lines — so unlike the rest of the
@@ -610,8 +613,8 @@ fn line_capsules(
     let (v0, v1) = (*v0, *v1);
     pieces.into_iter().flatten().chain(solid).filter_map(move |(p0, p1)| {
         line_capsule(
-            &crate::render::line::LineVertex { pos: p0, width: v0.width.abs(), ..v0 },
-            &crate::render::line::LineVertex { pos: p1, width: v1.width.abs(), ..v1 },
+            &crate::render::line::LineVertex { pos: p0, width: v0.width.abs(), cap: if dashed { 0.0 } else { v0.cap }, ..v0 },
+            &crate::render::line::LineVertex { pos: p1, width: v1.width.abs(), cap: if dashed { 0.0 } else { v1.cap }, ..v1 },
             view,
         )
     })
@@ -645,10 +648,10 @@ fn line_capsule(
     }
     Some(GpuCylinder {
         profile: [0.0; 4],
-        lane: [0.0; 4],
+        lane: [0.0, 0.0, 0.0, v0.cap + 2.0 * v1.cap],
         c0: [a[0], a[1], a[2], radius],
         c1: [b[0], b[1], b[2], 0.0],
-        m: [v0.color, FLAT_MAT, v1.color, FLAG_FLAT_ENDS],
+        m: [v0.color, FLAT_MAT, v1.color, FLAG_LINE],
     })
 }
 
@@ -1976,7 +1979,7 @@ fn test_traversal(@builtin(global_invocation_id) id: vec3<u32>) {
         assert!(PreparedKey::new(&scene, moved, false) != PreparedKey::new(&scene, view, false));
         scene.molecules[0].show_box = false;
         scene.molecules[0].reps[0].cache_geometry(crate::geometry::GeometryData {
-            lines: vec![crate::render::LineVertex { pos: [0.0;3], color:0, width:1.0, offset_px:0.0 }],
+            lines: vec![crate::render::LineVertex { pos: [0.0;3], color:0, width:1.0, offset_px:0.0, cap: 0.0 }],
             ..Default::default()
         }, 0, false, false);
         assert!(PreparedKey::new(&scene, view, false).as_ref() != Some(&base));

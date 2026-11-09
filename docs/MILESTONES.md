@@ -997,3 +997,21 @@ These cutoff approximations do not include PME. Missing H is completed privately
 visible atoms alone move, and errors leave the source unchanged. Status shows
 energy and convergence, and coordinate undo is preserved. The 300-atom synchronous
 editor limit remains. Native and WebAssembly use the same mechanics implementation.
+
+Aromatic ring circles in Licorice and Balls+Sticks use shaded tubes. The circle
+radius and tube thickness fit the opening left by the ring bonds and atom spheres,
+including smooth bond joins. Lines keeps a line circle. Circles belong to each
+representation, so selections, visibility, materials, trajectory smoothing,
+periodic copies, and ray-traced exports follow the same geometry.
+
+Full GAFF2 cleanup uses a 0.01 kJ/mol/nm force tolerance and allows up to 5000
+steps. The generic backend tolerance could stop with a residual bend at a
+conjugated amine. A distorted N-methylaniline regression checks planarity after
+the full preparation and minimization path. Quick relaxation retains its short
+interactive budget.
+
+Thick Lines bonds and aromatic circles use rounded endpoints at atoms and ring
+joints. Internal color boundaries and dash ends remain flat. The live renderer
+preserves the original color interpolation and depth across the extended ends;
+ray-traced lines use the same endpoint flags. Render tests check ring corners for
+gaps and compare procedural dashes with explicit segments.

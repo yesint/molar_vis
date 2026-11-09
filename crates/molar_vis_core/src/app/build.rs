@@ -833,13 +833,17 @@ options: RebuildOptions,
         let pick_pending = mol.pick_dirty;
         #[cfg(target_arch = "wasm32")]
         let pick_pending = false;
+        // Ring perception changes representation geometry, including cached trace data.
+        if mol.aromatic_dirty {
+            for rep in &mut mol.reps { rep.geom_dirty = true; }
+            mol.aromatic_dirty = false;
+        }
         let any_rep_dirty = mol
             .reps
             .iter()
             .any(|r| r.sel_dirty || r.geom_dirty || r.coords_dirty || r.appearance_dirty || r.geometry_pending());
         if !(any_rep_dirty
             || (mol.show_box && mol.box_dirty)
-            || mol.aromatic_dirty
             || mol.glow_dirty
             || mol.hover_dirty
             || mol.hover_detail_dirty
@@ -969,7 +973,12 @@ options: RebuildOptions,
                             |cache| cache.build(state, dashed),
                         ));
                     match &mut result {
-                        GeometryBuild::Ready(geom) => { if grayed { gray_out(geom); } }
+                        GeometryBuild::Ready(geom) => {
+                            geometry::append_aromatic_circles(
+                                geom, &bound, &mol.aromatic_rings, &rep.params, rep.material,
+                            );
+                            if grayed { gray_out(geom); }
+                        }
                         #[cfg(not(target_arch = "wasm32"))]
                         GeometryBuild::Background(_) => (),
                     }
@@ -1009,7 +1018,12 @@ options: RebuildOptions,
                             |cache| cache.build(state, dashed),
                         ));
                     match &mut result {
-                        GeometryBuild::Ready(geom) => { if grayed { gray_out(geom); } }
+                        GeometryBuild::Ready(geom) => {
+                            geometry::append_aromatic_circles(
+                                geom, &bound, &mol.aromatic_rings, &rep.params, rep.material,
+                            );
+                            if grayed { gray_out(geom); }
+                        }
                         #[cfg(not(target_arch = "wasm32"))]
                         GeometryBuild::Background(_) => (),
                     }
@@ -1044,16 +1058,6 @@ options: RebuildOptions,
             let geom = geometry::GeometryData { lines, ..Default::default() };
             renderer.update(rs, &mut mol.box_gpu, &geom);
             mol.box_dirty = false;
-            changed = true;
-        }
-
-        // Aromatic-ring circles: depth-tested 3-D line geometry (built from the
-        // perceived rings at the displayed coords), so they occlude correctly.
-        if mol.aromatic_dirty || (rep_geom_changed && !mol.aromatic_rings.is_empty()) {
-            let lines = geometry::aromatic_circles(&mol.aromatic_rings, &render_state.coords);
-            let geom = geometry::GeometryData { lines, ..Default::default() };
-            renderer.update(rs, &mut mol.aromatic_gpu, &geom);
-            mol.aromatic_dirty = false;
             changed = true;
         }
 
@@ -1927,6 +1931,109 @@ mod unobstructed_render_tests {
                     if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
                         std::fs::create_dir_all(&dir).unwrap();
                         image.save(std::path::Path::new(&dir).join(format!("unobstructed_{kind:?}_{projection:?}_{w}x{h}.png"))).unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod aromatic_render_tests {
+    use super::*;
+    use crate::camera::Camera;
+    use glam::Vec3;
+
+    #[test]
+    #[ignore = "requires GPU; checks aromatic tubes through the live rebuild and trace paths"]
+    fn aromatic_tubes_fit_and_render_in_each_representation() {
+        use crate::{geometry::{RepKind, RepParams}, scene::Representation};
+        use molar::prelude::{Atom, BondOrder};
+        let rs = crate::render::test_gpu();
+        let settings = crate::settings::Settings::default();
+        let mut renderer = SceneRenderer::new(&rs, &settings.rendering);
+        let atom = Atom::new().with_name("C").guess();
+        let at = |i: usize| {
+            let a = std::f32::consts::TAU * i as f32 / 6.0;
+            Vec3::new(0.14 * a.cos(), 0.14 * a.sin(), 0.0)
+        };
+        let mut scene = Scene::default();
+        scene.add(crate::data::RawMolecule::single_atom("benzene", atom.clone(), at(0)).unwrap(),
+            &settings.reps);
+        let mol = &mut scene.molecules[0];
+        for i in 1..6 { mol.add_atom(&atom, at(i)); }
+        for i in 0..6 { mol.add_bond(i, (i + 1) % 6, BondOrder::Aromatic); }
+        mol.perceive_aromaticity();
+        assert_eq!(mol.aromatic_rings.len(), 1);
+        let mut camera = Camera::frame_bbox(Vec3::splat(-0.19), Vec3::splat(0.19), 1.0);
+        camera.depth_cue.enabled = false;
+        camera.background = crate::camera::Background::for_theme(false);
+        for kind in [RepKind::Licorice, RepKind::BallAndStick, RepKind::Lines] {
+            scene.molecules[0].reps = vec![Representation::new(kind)];
+            for thick in [false, true] {
+                if thick {
+                    let rep = &mut scene.molecules[0].reps[0];
+                    match &mut rep.params {
+                        RepParams::Licorice { bond_radius, .. } => *bond_radius = 0.05,
+                        RepParams::BallAndStick { sphere_scale, bond_radius, bond_smoothing, .. } => {
+                            *sphere_scale = 0.45;
+                            *bond_radius = 0.03;
+                            *bond_smoothing = 0.5;
+                        }
+                        RepParams::Lines { width, .. } => *width = 12.0,
+                        _ => (),
+                    }
+                    rep.geom_dirty = true;
+                }
+                rebuild_dirty(&mut scene, &renderer, &settings, true, &rs, None, false);
+                let geom = scene.molecules[0].reps[0].cached_geometry(true).unwrap();
+                if kind == RepKind::Lines {
+                    assert!(geom.cylinders.is_empty());
+                    assert!(geom.lines.len() > 100);
+                } else {
+                    assert_eq!(geom.cylinders.len(), 6 + 64);
+                    assert!(geom.lines.is_empty());
+                }
+                for tilt in [0.0, 0.65] {
+                    camera.orientation = glam::Quat::from_rotation_x(tilt);
+                    let cap = renderer.capture_begin(&rs, 320, 240, camera.view(), camera.proj(4.0 / 3.0),
+                        camera.is_perspective(), camera.cue_uniform(), camera.ao_uniform(),
+                        camera.shadow_uniform(), camera.background, camera.eye_depth_range(), &scene);
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    let raster = cap.read();
+                    renderer.prepare_raytrace(&rs, &scene, &camera, [320, 240], true);
+                    let cap = renderer.capture_begin_raytrace(&rs, 320, 240, &camera, 128).unwrap();
+                    rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                    let trace = cap.read();
+                    if kind == RepKind::Lines && thick && tilt == 0.0 {
+                        // A full disc of the line's half-width must cover each atom.
+                        // Flat-ended quads leave a white wedge outside the ring corner.
+                        for i in 0..6 {
+                            let clip = camera.proj(4.0 / 3.0) * camera.view() * at(i).extend(1.0);
+                            let center = glam::Vec2::new(
+                                (clip.x / clip.w + 1.0) * 160.0,
+                                (1.0 - clip.y / clip.w) * 120.0,
+                            );
+                            for y in center.y as u32 - 5..=center.y as u32 + 5 {
+                                for x in center.x as u32 - 5..=center.x as u32 + 5 {
+                                    if center.distance(glam::vec2(x as f32 + 0.5, y as f32 + 0.5)) < 4.5 {
+                                        for img in [&raster, &trace] {
+                                            let pixel = img.get_pixel(x, y);
+                                            assert!(pixel[0] < 230, "gap at ring atom {i}, pixel {x},{y}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let error: f64 = raster.pixels().zip(trace.pixels()).map(|(r, t)|
+                        (0..3).map(|i| r[i].abs_diff(t[i]) as f64).sum::<f64>()).sum();
+                    assert!(error / (320.0 * 240.0 * 3.0) < 3.0,
+                        "{kind:?} thick={thick} tilt={tilt}: raster/trace mismatch");
+                    if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                        std::fs::create_dir_all(&dir).unwrap();
+                        raster.save(format!("{dir}/aromatic_{kind:?}_{thick}_{tilt}_raster.png")).unwrap();
+                        trace.save(format!("{dir}/aromatic_{kind:?}_{thick}_{tilt}_trace.png")).unwrap();
                     }
                 }
             }
