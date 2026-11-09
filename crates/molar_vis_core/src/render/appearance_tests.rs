@@ -2636,6 +2636,50 @@ fn velvet_sheen_softens_shading_without_expanding_the_surface() {
 }
 
 #[test]
+#[ignore = "requires GPU; renders ribbon cutout membranes with and without edge ridges"]
+fn ribbon_cutout_membrane_preview() {
+    use crate::{geometry::{self, RepKind, RepParams}, scene::Representation, secstruct::SsMap};
+    let rs = gpu();
+    let mut renderer = SceneRenderer::new(&rs, &crate::settings::RenderingSettings::default());
+    let raw = crate::data::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/cartoon-preview.pdb"))).unwrap();
+    let mut camera = Camera::frame_bbox(raw.bbox_min, raw.bbox_max, 0.9);
+    camera.orientation = glam::Quat::from_rotation_y(0.6) * glam::Quat::from_rotation_x(0.3);
+    camera.background = crate::camera::Background::for_theme(false);
+    camera.depth_cue.enabled = false;
+    let mut scene = Scene::default();
+    scene.add(raw, &crate::settings::RepDefaults::default());
+    for bevel in [0.0, 0.02] {
+        let mut images = Vec::new();
+        for membrane in [false, true] {
+            let mol = &mut scene.molecules[0];
+            let mut rep = Representation::new(RepKind::Cartoon);
+            if let RepParams::Cartoon { cutouts, cutout_membrane, bevel_height, .. } = &mut rep.params {
+                *cutouts = true; *cutout_membrane = membrane; *bevel_height = bevel;
+            }
+            let sel = mol.data.select_all();
+            let bound = mol.data.bind_with_state(&sel, mol.render_state());
+            let ss = SsMap::compute(&bound, rep.ss_algo);
+            let geom = geometry::build(&bound, mol.n_atoms, &mol.bonds, &rep.params,
+                rep.color_spec(), rep.material, Some(&ss), true);
+            rep.gpu = renderer.upload(&rs, &geom);
+            rep.sel = Some(sel);
+            rep.cache_geometry(geom, mol.n_atoms, true, false);
+            rep.sel_dirty = false; rep.geom_dirty = false; rep.coords_dirty = false;
+            mol.reps = vec![rep];
+            let (raster, trace) = raster_and_trace_at(&mut renderer, &rs, &scene, &camera, 800, 600);
+            if let Ok(dir) = std::env::var("MOLAR_VIS_TEST_IMAGES") {
+                std::fs::create_dir_all(&dir).unwrap();
+                raster.save(format!("{dir}/ribbon_membrane_{membrane}_bevel_{bevel}.png")).unwrap();
+                trace.save(format!("{dir}/ribbon_membrane_{membrane}_bevel_{bevel}_trace.png")).unwrap();
+            }
+            images.push(raster);
+        }
+        let changed = images[0].pixels().zip(images[1].pixels()).filter(|(a, b)| a != b).count();
+        assert!(changed > 1000, "membranes must visibly fill the openings");
+    }
+}
+
+#[test]
 #[ignore = "requires GPU; records live velvet-cartoon pass timings and a close-up"]
 fn velvet_cartoon_raster_timings() {
     use crate::{geometry::RepKind, material::Material};

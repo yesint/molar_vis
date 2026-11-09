@@ -138,6 +138,9 @@ pub enum RepParams {
         /// Rounded windows between trace atoms in helices and sheets.
         #[serde(default)]
         cutouts: bool,
+        /// Fill ribbon windows with a thin, smoothly recessed membrane.
+        #[serde(default)]
+        cutout_membrane: bool,
     },
     Surface {
         /// Probe radius added to each vdW radius (nm). 0 → vdW surface, 0.14 → SAS.
@@ -240,6 +243,7 @@ impl RepParams {
                 ribbon_thickness: 0.03,
                 bevel_height: 0.0,
                 cutouts: false,
+                cutout_membrane: false,
             },
             RepKind::Surface => RepParams::Surface {
                 probe: 0.14,
@@ -417,7 +421,7 @@ pub(crate) fn build_with_reference(
                 ..Default::default()
             }
         }
-        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts } => {
+        RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts, cutout_membrane } => {
             let ss = ss.expect("ss computed for cartoon");
             GeometryData {
                 mesh: cartoon::build(
@@ -429,6 +433,7 @@ pub(crate) fn build_with_reference(
                     ribbon_thickness,
                     bevel_height,
                     cutouts,
+                    cutout_membrane,
                     pbox,
                 ),
                 ..Default::default()

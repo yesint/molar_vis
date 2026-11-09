@@ -56,6 +56,7 @@ pub fn build(
     ribbon_thickness: f32,
     bevel_height: f32,
     cutouts: bool,
+    cutout_membrane: bool,
     pbox: Option<&PeriodicBox>,
 ) -> MeshData {
     // Group atoms by residue (BTreeMap keeps ascending resindex order).
@@ -116,6 +117,7 @@ pub fn build(
         ribbon_thickness,
         bevel_height,
         cutouts,
+        cutout_membrane,
     };
     build_residues(&residues, &shape, pbox, cg, false)
 }
@@ -213,7 +215,7 @@ impl Cache {
         params: &super::RepParams, color: crate::color::ColorSpec,
         material: crate::material::Material, ss: Option<&SsMap>,
     ) -> Option<Self> {
-        let super::RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts } = *params else { return None; };
+        let super::RepParams::Cartoon { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts, cutout_membrane } = *params else { return None; };
         let ss = ss.expect("ss computed for cartoon");
         let colors = Colorizer::new(color, bound, n_atoms, Some(ss));
         let mut by_res = BTreeMap::new();
@@ -232,7 +234,7 @@ impl Cache {
         let residues = by_res.into_iter().filter_map(|(resindex, (trace, orientation, chain))| {
             trace.map(|(trace, color)| CachedResidue { trace, orientation, chain, resindex, color, class: ss.class(resindex) })
         }).collect();
-        Some(Self { residues, shape: Shape { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts }, cg, material })
+        Some(Self { residues, shape: Shape { coil_radius, ribbon_width, ribbon_thickness, bevel_height, cutouts, cutout_membrane }, cg, material })
     }
 
     pub(crate) fn build(&self, state: &State, dashed: bool) -> super::GeometryData {
@@ -304,6 +306,7 @@ struct Shape {
     ribbon_thickness: f32,
     bevel_height: f32,
     cutouts: bool,
+    cutout_membrane: bool,
 }
 
 impl Shape {
@@ -546,7 +549,7 @@ fn build_run(
     }
 
     let windows = if shape.cutouts { ribbon_windows(&ctx, &rings, ext_lo, ext_hi) } else { Vec::new() };
-    emit_windows(&rings, &ring_owner, shape.bevel_height, &windows, mesh);
+    emit_windows(&rings, &ring_owner, shape.bevel_height, &windows, shape.cutout_membrane, mesh);
 }
 
 /// The `[start, end]` residue index span of the contiguous helix run containing
@@ -961,10 +964,10 @@ fn sample(c: &RunCtx, i: usize, u: f32) -> Ring {
 /// `mesh.vert_res` / `mesh.vert_atom`.
 #[cfg(test)]
 fn emit(rings: &[Ring], owner: &[&Residue], bevel_height: f32, mesh: &mut MeshData) {
-    emit_windows(rings, owner, bevel_height, &[], mesh);
+    emit_windows(rings, owner, bevel_height, &[], false, mesh);
 }
 
-fn emit_windows(rings: &[Ring], owner: &[&Residue], bevel_height: f32, windows: &[RibbonWindow], mesh: &mut MeshData) {
+fn emit_windows(rings: &[Ring], owner: &[&Residue], bevel_height: f32, windows: &[RibbonWindow], membrane: bool, mesh: &mut MeshData) {
     // Duplicate face endpoints for sharp ridge normals. Keep the same topology
     // throughout a run, including coils and transitions, for trajectory updates.
     let bevel_height = if bevel_height.is_finite() { bevel_height.max(0.0) } else { 0.0 };
@@ -973,11 +976,12 @@ fn emit_windows(rings: &[Ring], owner: &[&Residue], bevel_height: f32, windows: 
     let base = mesh.vertices.len() as u32;
     // Windows have disjoint longitudinal spans. Index them by spline strip so
     // clipping stays linear in the size of the ribbon.
+    let profiles: Vec<_> = windows.iter().map(|w| membrane.then(|| MembraneProfile::new(w, rings))).collect();
     let mut strip_windows = vec![None; rings.len() - 1];
-    for window in windows {
+    for (window, profile) in windows.iter().zip(&profiles) {
         let start = (window.min[0] * STEPS as f32).floor() as usize;
         let end = ((window.max[0] * STEPS as f32).ceil() as usize).min(strip_windows.len());
-        for slot in strip_windows.iter_mut().take(end).skip(start) { *slot = Some(window); }
+        for slot in strip_windows.iter_mut().take(end).skip(start) { *slot = Some((window, profile.as_ref())); }
     }
 
     for (ri, r) in rings.iter().enumerate() {
@@ -1038,9 +1042,9 @@ fn emit_windows(rings: &[Ring], owner: &[&Residue], bevel_height: f32, windows: 
             let b = a0 + k2 as u32;
             let c = b0 + k2 as u32;
             let d = b0 + k as u32;
-            if let Some(window) = strip_windows[r] {
+            if let Some((window, profile)) = strip_windows[r] {
                 cut_window_quad(mesh, [a, b, c, d], [&rings[r], &rings[r + 1]],
-                    r, edge_ridges, k / if edge_ridges { 2 } else { 1 }, window);
+                    r, edge_ridges, k / if edge_ridges { 2 } else { 1 }, window, profile);
             } else {
                 mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
             }
@@ -1102,7 +1106,6 @@ impl WindowVertex {
 /// An opening in spline coordinates. Physical width coordinates let the
 /// triangular opening retain its shape as the surrounding arrow widens.
 struct RibbonWindow {
-    #[cfg(test)]
     boundary: Vec<[f32; 2]>,
     pieces: Vec<WindowPiece>,
     min: [f32; 2],
@@ -1120,7 +1123,7 @@ impl RibbonWindow {
             }
         }
         let pieces = window_pieces(&boundary);
-        Self { #[cfg(test)] boundary, pieces, min, max }
+        Self { boundary, pieces, min, max }
     }
 }
 
@@ -1325,7 +1328,114 @@ fn emit_window_polygon(mesh: &mut MeshData, poly: &[WindowVertex]) {
     }
 }
 
-fn cut_window_quad(mesh: &mut MeshData, ids: [u32; 4], rings: [&Ring; 2], step: usize, ridges: bool, face: usize, window: &RibbonWindow) {
+/// Distances are measured in nm, using one longitudinal scale for the whole
+/// window so adjacent spline strips and convex pieces share exactly one bevel.
+struct MembraneProfile {
+    boundary: Vec<[f32; 2]>,
+    origin: [f32; 2],
+    u_scale: f32,
+    bevel: f32,
+}
+
+impl MembraneProfile {
+    fn new(window: &RibbonWindow, rings: &[Ring]) -> Self {
+        let start = (window.min[0] * STEPS as f32).floor() as usize;
+        let end = ((window.max[0] * STEPS as f32).ceil() as usize).min(rings.len() - 1);
+        let length: f32 = rings[start..=end].windows(2).map(|r| (r[1].center - r[0].center).norm()).sum();
+        let u_scale = (length * STEPS as f32 / (end - start).max(1) as f32).max(1e-5);
+        let width = window.max[1] - window.min[1];
+        // Leave a broad thin center, including inside the narrower arrow stem.
+        let bevel = (width * 0.22).min((window.max[0] - window.min[0]) * u_scale * 0.22).max(1e-6);
+        let origin = window.min;
+        let boundary = window.boundary.iter().map(|p| [(p[0] - origin[0]) * u_scale, p[1] - origin[1]]).collect();
+        Self { boundary, origin, u_scale, bevel }
+    }
+
+    /// Fraction of the half-thickness removed and its UV gradient. Smoothstep
+    /// gives zero slope at both the original surface and the thin membrane.
+    fn recess(&self, uv: [f32; 2]) -> (f32, [f32; 2]) {
+        let p = [(uv[0] - self.origin[0]) * self.u_scale, uv[1] - self.origin[1]];
+        let mut distance2 = f32::INFINITY;
+        let mut delta = [0.0; 2];
+        for i in 0..self.boundary.len() {
+            let a = self.boundary[i];
+            let b = self.boundary[(i + 1) % self.boundary.len()];
+            let edge = [b[0] - a[0], b[1] - a[1]];
+            let len2 = edge[0] * edge[0] + edge[1] * edge[1];
+            let t = (((p[0] - a[0]) * edge[0] + (p[1] - a[1]) * edge[1]) / len2.max(1e-20)).clamp(0.0, 1.0);
+            let d = [p[0] - a[0] - t * edge[0], p[1] - a[1] - t * edge[1]];
+            let d2 = d[0] * d[0] + d[1] * d[1];
+            if d2 < distance2 { distance2 = d2; delta = d; }
+        }
+        let distance = distance2.sqrt();
+        let t = (distance / self.bevel).clamp(0.0, 1.0);
+        // Six percent of the original thickness remains: two distinct faces,
+        // with no coplanar overlap or vertical wall through the membrane.
+        let depth = 0.94 * t * t * (3.0 - 2.0 * t);
+        let slope = 0.94 * 6.0 * t * (1.0 - t) / (self.bevel * distance.max(1e-12));
+        (depth, [slope * delta[0] * self.u_scale, slope * delta[1]])
+    }
+}
+
+fn emit_membrane_polygon(mesh: &mut MeshData, poly: &[WindowVertex], source: &[WindowVertex], profile: &MembraneProfile) {
+    // A shared UV grid resolves the curved bevel and gives matching samples
+    // across triangle, ring and convex-partition seams, including concave arrows.
+    let spacing = [profile.bevel / (3.0 * profile.u_scale), profile.bevel / 3.0];
+    let mut min = [f32::INFINITY; 2];
+    let mut max = [f32::NEG_INFINITY; 2];
+    for v in poly {
+        for axis in 0..2 { min[axis] = min[axis].min(v.uv[axis]); max[axis] = max[axis].max(v.uv[axis]); }
+    }
+    let first: [i32; 2] = std::array::from_fn(|i| ((min[i] - profile.origin[i]) / spacing[i]).floor() as i32);
+    let last: [i32; 2] = std::array::from_fn(|i| ((max[i] - profile.origin[i]) / spacing[i]).ceil() as i32);
+    let a = &source[0];
+    let b = &source[1];
+    let c = &source[2];
+    let (bu, bv) = (b.uv[0] - a.uv[0], b.uv[1] - a.uv[1]);
+    let (cu, cv) = (c.uv[0] - a.uv[0], c.uv[1] - a.uv[1]);
+    let det = bu * cv - bv * cu;
+    if det.abs() < 1e-14 { return; }
+    let du = ((b.pos - a.pos) * cv - (c.pos - a.pos) * bv) / det;
+    let dv = ((c.pos - a.pos) * bu - (b.pos - a.pos) * cu) / det;
+    let cross = du.cross(&dv);
+    let norm2 = cross.norm_squared();
+    if norm2 < 1e-20 { return; }
+    let dual_u = dv.cross(&cross) / norm2;
+    let dual_v = cross.cross(&du) / norm2;
+    let displace = |v: &mut WindowVertex| {
+        let (depth, gradient) = profile.recess(v.uv);
+        let half = (v.pos - v.bottom) * 0.5;
+        v.pos -= half * depth;
+        v.normal = (v.normal + (dual_u * gradient[0] + dual_v * gradient[1]) * half.dot(&v.normal)).normalize_or_zero();
+    };
+    for u in first[0]..last[0] {
+        for x in first[1]..last[1] {
+            let lo = [profile.origin[0] + u as f32 * spacing[0], profile.origin[1] + x as f32 * spacing[1]];
+            let hi = [profile.origin[0] + (u + 1) as f32 * spacing[0], profile.origin[1] + (x + 1) as f32 * spacing[1]];
+            let corners = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]];
+            let mut cell = poly.to_vec();
+            for i in 0..4 {
+                cell = window_clip(&cell, corners[i], corners[(i + 1) % 4], i, true);
+                if cell.len() < 3 { break; }
+            }
+            if cell.len() < 3 { continue; }
+            let mut center = cell[0].clone();
+            for (i, v) in cell.iter().enumerate().skip(1) { center = center.mix(v, 1.0 / (i + 1) as f32); }
+            displace(&mut center);
+            for v in &mut cell { displace(v); }
+            let base = push_window_vertex(mesh, &center, center.pos, center.normal);
+            for v in &cell { push_window_vertex(mesh, v, v.pos, v.normal); }
+            for i in 0..cell.len() {
+                let next = (i + 1) % cell.len();
+                if (cell[i].pos - center.pos).cross(&(cell[next].pos - center.pos)).norm_squared() > 1e-18 {
+                    mesh.indices.extend_from_slice(&[base, base + 1 + i as u32, base + 1 + next as u32]);
+                }
+            }
+        }
+    }
+}
+
+fn cut_window_quad(mesh: &mut MeshData, ids: [u32; 4], rings: [&Ring; 2], step: usize, ridges: bool, face: usize, window: &RibbonWindow, membrane: Option<&MembraneProfile>) {
     let top = if ridges { face < 5 } else { face < RING / 2 };
     let vertices: Vec<_> = ids.iter().enumerate().map(|(i, &id)| {
         let r = rings[usize::from(i >= 2)];
@@ -1357,7 +1467,8 @@ fn cut_window_quad(mesh: &mut MeshData, ids: [u32; 4], rings: [&Ring; 2], step: 
     // Mirror the diagonal on the lower face so inner walls meet both surfaces.
     let triangles = if top { [[0, 1, 2], [0, 2, 3]] } else { [[0, 1, 3], [1, 2, 3]] };
     for triangle in triangles {
-        let mut exterior = vec![triangle.iter().map(|&i| vertices[i].clone()).collect::<Vec<_>>()];
+        let source: Vec<_> = triangle.iter().map(|&i| vertices[i].clone()).collect();
+        let mut exterior = vec![source.clone()];
         for piece in &window.pieces {
             let boundary = &piece.boundary;
             let mut next_exterior = Vec::new();
@@ -1371,7 +1482,7 @@ fn cut_window_quad(mesh: &mut MeshData, ids: [u32; 4], rings: [&Ring; 2], step: 
                     remaining = window_clip(&remaining, a, b, i, true);
                     if remaining.len() < 3 { break; }
                 }
-                if !top || remaining.len() < 3 { continue; }
+                if remaining.len() < 3 { continue; }
                 // Adjacent pieces can touch along an edge without sharing
                 // area. Such degenerate intersections must not emit walls.
                 let origin = remaining[0].uv;
@@ -1382,6 +1493,11 @@ fn cut_window_quad(mesh: &mut MeshData, ids: [u32; 4], rings: [&Ring; 2], step: 
                         - (a[1] as f64 - origin[1] as f64) * (b[0] as f64 - origin[0] as f64)
                 }).sum();
                 if area.abs() < 1e-12 { continue; }
+                if let Some(profile) = membrane {
+                    emit_membrane_polygon(mesh, &remaining, &source, profile);
+                    continue;
+                }
+                if !top { continue; }
                 // Only edges on the hole boundary need walls; triangle and ring seams
                 // inside the opening are deliberately excluded.
                 for i in 0..remaining.len() {
@@ -1679,7 +1795,7 @@ mod tests {
                         mesh.vert_atom.push(42);
                     }
                     cut_window_quad(&mut mesh, ids, [&rings[0], &rings[1]],
-                        residue * STEPS + step, true, 2, &window);
+                        residue * STEPS + step, true, 2, &window, None);
                 }
                 let perimeter: f32 = (0..window.boundary.len()).map(|i| {
                     let a = window.boundary[i];
@@ -1716,7 +1832,7 @@ mod tests {
                 }).collect();
                 let owners = vec![&residue; rings.len()];
                 let mut mesh = MeshData::default();
-                emit_windows(&rings, &owners, bevel, &[RibbonWindow::new(window_boundary(0.12, 0.88, 0.15))], &mut mesh);
+                emit_windows(&rings, &owners, bevel, &[RibbonWindow::new(window_boundary(0.12, 0.88, 0.15))], false, &mut mesh);
                 let ray = |x, z| crate::pick::ray_mesh(&mesh,
                     rotation * Vec3::new(x, -1.0, z), rotation * Vec3::Y);
                 assert!(ray(0.0, 0.19).is_none(), "window center is open");
@@ -1741,6 +1857,63 @@ mod tests {
     }
 
     #[test]
+    fn membranes_fill_windows_with_two_thin_faces_and_smooth_bevels() {
+        use glam::Vec3;
+        for bevel in [0.0, 0.02] {
+            for rotation in [glam::Quat::IDENTITY, glam::Quat::from_rotation_x(0.7) * glam::Quat::from_rotation_z(0.9)] {
+                let turn = |p: [f32; 3]| Vector3f::from((rotation * Vec3::from(p)).to_array());
+                let residue = Residue { ca: Vector3f::zeros(), o: None, color: u32::MAX,
+                    class: SsClass::Helix, chain: 'A', resindex: 7, trace: 42 };
+                let rings: Vec<_> = (0..=STEPS).map(|i| Ring {
+                    center: turn([0.0, 0.0, 0.38 * i as f32 / STEPS as f32]),
+                    tangent: turn([0.0, 0.0, 1.0]), width: turn([1.0, 0.0, 0.0]),
+                    normal: turn([0.0, 1.0, 0.0]), hw: 0.15, ht: 0.03, color: u32::MAX,
+                }).collect();
+                for boundary in [window_boundary(0.12, 0.88, 0.15),
+                    rounded_stem_arrow_window(0.12, 0.4, 0.88, 0.072, 0.036)] {
+                    let window = RibbonWindow::new(boundary);
+                    let profile = MembraneProfile::new(&window, &rings);
+                    for &uv in &window.boundary {
+                        let (depth, gradient) = profile.recess(uv);
+                        assert!(depth < 1e-8 && gradient.iter().all(|v| v.abs() < 1e-3),
+                            "bevel must meet original surface tangentially");
+                    }
+                    let mut mesh = MeshData::default();
+                    emit_windows(&rings, &vec![&residue; rings.len()], bevel, &[window], true, &mut mesh);
+                    let height = |x, z, side: f32| {
+                        let hit = crate::pick::ray_mesh(&mesh, rotation * Vec3::new(x, side, z),
+                            rotation * Vec3::new(0.0, -side, 0.0)).unwrap_or_else(|| panic!(
+                                "membrane must close the opening: x={x}, z={z}, side={side}, bevel={bevel}, rotation={rotation:?}"));
+                        assert_eq!(hit.1, 42);
+                        1.0 - hit.0
+                    };
+                    for side in [-1.0, 1.0] {
+                        let center = height(0.0013, 0.1917, side);
+                        assert!(center > 0.001 && center < 0.0021, "membrane has small positive thickness: {center}");
+                        // Avoid an exact outer-profile seam in the two-sided ray test.
+                        let bridge = height(0.001, 0.02, side);
+                        assert!(bridge > 0.029, "Cα bridge keeps its thickness: {bridge}, bevel {bevel}, side {side}, rotation {rotation:?}");
+                        assert!(height(0.12, 0.1917, side) > 0.015, "edge rail keeps its thickness");
+                        // Sample across partition, ring and triangle seams, including
+                        // the concave head/stem join: neither face may have holes.
+                        for i in 0..11 {
+                            // Offset from exact profile edges: ray_mesh uses strict
+                            // barycentric bounds and can miss shared edges after rotation.
+                            for j in 0..9 { height(-0.0597 + j as f32 * 0.015, 0.0502 + i as f32 * 0.028, side); }
+                        }
+                    }
+                    assert_eq!(mesh.vert_res, vec![7; mesh.vertices.len()]);
+                    assert_eq!(mesh.vert_atom, vec![42; mesh.vertices.len()]);
+                    for v in &mesh.vertices {
+                        assert!(v.pos.iter().chain(&v.normal).all(|x| x.is_finite()));
+                        assert!((Vec3::from(v.normal).length() - 1.0).abs() < 1e-4);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn cutouts_apply_to_helices_and_sheets_but_leave_coils_solid() {
         for class in [SsClass::Coil, SsClass::Helix, SsClass::Sheet] {
             let residues: Vec<_> = (0..8).map(|i| Residue {
@@ -1749,8 +1922,10 @@ mod tests {
                 color: u32::MAX, class, chain: 'A', resindex: i, trace: i as u32,
             }).collect();
             let mut shape = Shape { coil_radius: 0.03, ribbon_width: 0.15,
-                ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false };
+                ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false, cutout_membrane: false };
             let solid = build_residues(&residues, &shape, None, false, false);
+            shape.cutout_membrane = true;
+            assert_mesh_equal(&solid, &build_residues(&residues, &shape, None, false, false));
             shape.cutouts = true;
             let windows = build_residues(&residues, &shape, None, false, false);
             if class == SsClass::Coil { assert_mesh_equal(&solid, &windows); }
@@ -1768,7 +1943,7 @@ mod tests {
         }).collect();
         for bevel_height in [0.0, 0.02] {
             let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15,
-                ribbon_thickness: 0.03, bevel_height, cutouts: true };
+                ribbon_thickness: 0.03, bevel_height, cutouts: true, cutout_membrane: false };
             let mesh = build_residues(&residues, &shape, None, false, false);
             let ray = |x: f32, r: f32| crate::pick::ray_mesh(&mesh, Vec3::new(x, -1.0, r * 0.38), Vec3::Y);
             assert!(ray(0.0, 5.5).is_none(), "the original arrow cutout remains open");
@@ -1824,7 +1999,7 @@ mod tests {
 
         let shape = Shape {
             coil_radius: 0.03, ribbon_width: 0.15,
-            ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false,
+            ribbon_thickness: 0.03, bevel_height: 0.0, cutouts: false, cutout_membrane: false,
         };
         let mut mesh = MeshData::default();
         build_run(&run, &shape, 0, 0, None, false, &mut mesh);
@@ -1882,10 +2057,15 @@ mod tests {
             let sel = mol.data.select_all();
             let bound = mol.data.bind_with_state(&sel, mol.render_state());
             let ss = SsMap::compute(&bound, Default::default());
-            for enabled in [false, true] {
+            for (enabled, membrane) in [(false, false), (true, false), (true, true)] {
                 let mut params = super::super::RepParams::for_kind(super::super::RepKind::Cartoon);
-                if let super::super::RepParams::Cartoon { cutouts, .. } = &mut params { *cutouts = enabled; }
+                if let super::super::RepParams::Cartoon { cutouts, cutout_membrane, .. } = &mut params {
+                    *cutouts = enabled; *cutout_membrane = membrane;
+                }
                 for color in crate::color::ColorMethod::ALL {
+                    // One color exercises the denser membrane on all frames;
+                    // the existing cases cover every color method independently.
+                    if membrane && color != crate::color::ColorMethod::ALL[0] { continue; }
                     let cache = Cache::new(&bound, mol.n_atoms, &params, color.into(), crate::material::Material::Transparent, Some(&ss)).unwrap();
                     for frame in 0..3 {
                         let mut state = mol.render_state().clone();
@@ -1916,7 +2096,7 @@ mod tests {
             chain: char::from_u32('A' as u32 + i as u32 / 512).unwrap(), resindex: i, trace: i as u32 * 3,
         }).collect();
         for cutouts in [false, true] {
-            let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness:0.025, bevel_height:0.015, cutouts };
+            let shape = Shape { coil_radius: 0.03, ribbon_width: 0.15, ribbon_thickness:0.025, bevel_height:0.015, cutouts, cutout_membrane: false };
             for cg in [false, true] {
                 let serial = build_residues(&residues, &shape, None, cg, false);
                 let parallel = build_residues(&residues, &shape, None, cg, true);
@@ -2006,9 +2186,10 @@ mod tests {
         let old = r#"{"Cartoon":{"coil_radius":0.03,"ribbon_width":0.15,"ribbon_thickness":0.03}}"#;
         let mut params: RepParams = serde_json::from_str(old).unwrap();
         assert_eq!(params, RepParams::for_kind(RepKind::Cartoon));
-        if let RepParams::Cartoon { bevel_height, cutouts, .. } = &mut params {
+        if let RepParams::Cartoon { bevel_height, cutouts, cutout_membrane, .. } = &mut params {
             *bevel_height = 0.045;
             *cutouts = true;
+            *cutout_membrane = true;
         }
         for field in ["edge_ridges", "bevel_edges"] {
             for (enabled, height) in [(false, 0.0), (true, 0.0195)] {

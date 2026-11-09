@@ -1780,13 +1780,14 @@ pub(super) fn draw_style_options(ui: &mut egui::Ui, params: &mut RepParams) -> b
 }
 
 fn draw_style_toggles(ui: &mut egui::Ui, params: &mut RepParams) -> bool {
-    let RepParams::Cartoon { cutouts, .. } = params else { return false; };
-    ui.horizontal(|ui| {
-        ui.label("Ribbon cutouts");
-        ui.checkbox(cutouts, "")
-            .on_hover_text("Rounded rectangular windows between adjacent backbone atoms in helices and sheets.")
-            .changed()
-    }).inner
+    let RepParams::Cartoon { cutouts, cutout_membrane, .. } = params else { return false; };
+    let mut changed = ui.checkbox(cutouts, "Ribbon cutouts")
+        .on_hover_text("Rounded rectangular windows between adjacent backbone atoms in helices and sheets.")
+        .changed();
+    changed |= ui.add_enabled(*cutouts, egui::Checkbox::new(cutout_membrane, "Filled cutouts"))
+        .on_hover_text("Fill each cutout with a very thin recessed membrane, smoothly bevelled into the ribbon on both sides.")
+        .changed();
+    changed
 }
 
 fn draw_style_dimensions(ui: &mut egui::Ui, params: &mut RepParams) -> bool {

@@ -55,7 +55,9 @@ in the Cartoon settings to add rounded rectangular windows between adjacent
 backbone atoms in helices and sheets. The windows follow the ribbon orientation;
 cutouts within β-strand arrowheads have a triangular head joined to a short
 rectangular stem, with rounded corners. Coils, transitions and arrow tips remain
-solid. This option is off by default. Molecular surfaces have adjustable probe
+solid. With cutouts enabled, **Filled cutouts** fills each opening
+with a very thin recessed surface, smoothly bevelled into the ribbon on both
+sides. Both options are off by default. Molecular surfaces have adjustable probe
 radius, resolution and smoothing, so you can choose the level of
 detail appropriate for the system.
 
