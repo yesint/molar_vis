@@ -34,6 +34,10 @@ that older plan describe the pre-implementation state; they must not be read as 
 
 ## Implementation order
 
+The user revised the order for remaining work on 2026-11-09: **R4, then S1 exact color
+replay, then R5 tree maintenance**. Remaining S4/S5 work has lower priority. The table below
+preserves the original audit sequence; the results log records implementation status.
+
 P1 items remove substantial or directly repeated work, or correct a scheduling estimate.
 P2 items require a larger ownership change or evidence from a particular workload. P3 items
 are experiments that should proceed only after profiling identifies the relevant bottleneck.

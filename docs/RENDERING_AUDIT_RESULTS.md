@@ -27,7 +27,13 @@ The implementation plan is not finished. The accepted changes and remaining work
 | S6, glow geometry | Surface glows omit unused color diffusion. | No remaining implementation in this package. |
 | S7, browser picking | Conservative mesh bounds reject missed meshes. | A triangle BVH remains conditional on hover profiles. |
 
-The next major implementation candidates are R4 and the remaining S4/S5 scheduling work.
+The user set the remaining implementation order on 2026-11-09:
+
+1. R4: Cache converted RT geometry per representation and upload only changed ranges.
+2. S1: Add exact surface color replay without rebuilding surface geometry.
+3. R5: Measure envelope-tree degradation and add a calibrated rebuild trigger.
+
+The remaining S4/S5 scheduling, cancellation, and memory-admission work has lower priority.
 Rejected experiments must not be restored without new evidence that resolves their regressions.
 GPU tests now use small captures and short, separately timed processes with idle gaps; the
 earlier sustained baseline commands below are historical methods, not the current test policy.
