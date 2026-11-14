@@ -67,6 +67,12 @@ jobs:
           cp -r crates/molar_vis_js/web/pkg dist/pkg
           cp tests/2lao.pdb dist/2lao.pdb
 
+      - name: Check demo in Chromium with WebGL2
+        run: |
+          python -m pip install playwright Pillow
+          python -m playwright install --with-deps chromium
+          python crates/molar_vis_js/tests/run_demo.py --site dist --check-errors
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

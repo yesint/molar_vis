@@ -22,7 +22,7 @@ molecular file handling, atom selections and analysis algorithms. The interface
 uses [egui](https://github.com/emilk/egui), and rendering uses
 [wgpu](https://github.com/gfx-rs/wgpu). It is available as a desktop application and
 also runs in the browser through WebAssembly.
-[Try the browser version online](https://yesint.github.io/molar_vis/).
+[Try the browser version online](https://yesint.github.io/molar_vis/) ([note for Firefox users](docs/FIREFOX_WEBGPU.md)).
 
 Python bindings combine the desktop viewer with MolAR's analysis tools, allowing
 changes to molecular coordinates to appear directly in the viewer. A JavaScript

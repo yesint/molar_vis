@@ -18,7 +18,7 @@
         height: 100%;
         display: block;
       }
-      /* Simple centred loading text shown until the viewer paints. */
+      /* Keep startup errors visible until the viewer is ready. */
       #loading {
         position: absolute;
         inset: 0;
@@ -27,6 +27,9 @@
         justify-content: center;
         color: #8ab4ff;
         font: 16px system-ui, sans-serif;
+        padding: 2rem;
+        box-sizing: border-box;
+        white-space: pre-wrap;
       }
     </style>
   </head>
@@ -41,17 +44,35 @@
       wasm-pack-built ES module from ./pkg/ and fetches the bundled 2lao.pdb.
     -->
     <script type="module">
-      import init, { start, System } from "./pkg/molar_vis.js";
+      function showError(error) {
+        console.error(error);
+        let el = document.getElementById("loading");
+        if (!el) {
+          el = document.createElement("div");
+          el.id = "loading";
+          document.body.append(el);
+        }
+        el.setAttribute("role", "alert");
+        el.textContent = "molar_vis failed to start: " + (error?.message ?? error);
+      }
+      // Rust panics and asynchronous renderer failures can occur outside main().
+      window.addEventListener("error", event => showError(event.error ?? event.message));
+      window.addEventListener("unhandledrejection", event => showError(event.reason));
 
       async function main() {
+        // Import inside the guarded startup path so download errors are visible too.
+        const { default: init, start_embedded, System } = await import("./pkg/molar_vis.js");
         // 1. Instantiate the wasm module (downloads + compiles the .wasm).
         await init();
 
-        // 2. Boot the viewer onto the canvas already in the page.
-        const vis = start("molar_vis_canvas");
+        // 2. Wait for graphics initialization, then show the full demo controls.
+        const vis = await start_embedded("molar_vis_canvas");
+        await vis.set_ui_visibility(true, true);
 
         // 3. Fetch a structure and parse it (bytes -> a molar System).
-        const buf = await (await fetch("./2lao.pdb")).arrayBuffer();
+        const response = await fetch("./2lao.pdb");
+        if (!response.ok) throw new Error(`Cannot load 2lao.pdb: HTTP ${response.status}`);
+        const buf = await response.arrayBuffer();
         const sys = System.from_bytes("2lao.pdb", new Uint8Array(buf));
 
         // 4. Render it, then add an SS-colored cartoon over the protein.
@@ -72,19 +93,13 @@
         // Expose handles for interactive poking from the devtools console.
         Object.assign(window, { vis, sys, mol, rep });
 
-        // Drop the loading text once the canvas has been laid out / painted.
-        const obs = new ResizeObserver(() => {
-          document.getElementById("loading")?.remove();
-          obs.disconnect();
-        });
-        obs.observe(document.getElementById("molar_vis_canvas"));
+        // The scene queries above complete on the viewer's update loop. Canvas
+        // resizing alone does not mean graphics initialization succeeded.
+        const loading = document.getElementById("loading");
+        if (!loading?.hasAttribute("role")) loading?.remove();
       }
 
-      main().catch((e) => {
-        console.error(e);
-        const el = document.getElementById("loading");
-        if (el) el.textContent = "molar_vis failed to start: " + e;
-      });
+      main().catch(showError);
     </script>
   </body>
 </html>

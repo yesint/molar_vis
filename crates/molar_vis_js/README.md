@@ -182,6 +182,22 @@ python -m http.server -d crates/molar_vis_js/web 8000  # ES modules + wasm need 
 # open http://localhost:8000/ ; the browser console logs mols/reps counts
 ```
 
+The demo awaits `start_embedded` and then enables the sidebar and toolbar with
+`set_ui_visibility(true, true)`. This makes graphics startup failures catchable
+before it loads the example molecule. Download errors and runtime failures remain
+visible in the page.
+
+The Pages workflow checks the assembled demo in Chromium with WebGPU disabled.
+The check verifies scene counts and rendered molecule pixels, and simulates
+module, structure-download, and graphics initialization failures. Run it locally
+with an assembled site directory:
+
+```sh
+python -m pip install playwright Pillow
+python -m playwright install chromium
+python crates/molar_vis_js/tests/run_demo.py --site dist --check-errors
+```
+
 ## Scope (v1)
 
 Viewer control only — load-from-bytes, selection, `add_mol`/`add_rep`, the
