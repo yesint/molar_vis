@@ -1411,6 +1411,65 @@ fn spawn(visible: bool) -> PyResult<Visualizer> {
     Ok(Visualizer { jobs: tx })
 }
 
+/// Start a viewer with **no window and no display server**: the scene, the job queue
+/// and `render(...)` run on a wgpu device built straight from the adapter, with no winit
+/// window and no eframe event loop anywhere in the process.
+///
+/// Use this instead of `spawn(visible=False)` for rendering. `visible=False` cannot keep
+/// a window off the desktop: eframe un-hides the window itself once it has painted its
+/// first frame (`epi_integration.rs`, "We keep hidden until we've painted something"), so
+/// the window appears anyway and takes keyboard focus. It also still needs an X or Wayland
+/// session, which a compute node does not have.
+///
+/// Everything the renderer needs works here — load a session, set representations, move
+/// the camera, seek a trajectory, `render(...)` (rasterized or path-traced). What is gone
+/// is the interactive UI: no window to look at, and `movie(...).render(...)` (the movie
+/// exporter is driven from inside egui's frame) is not serviced. Render a frame sequence
+/// with `movie.seek(i)` + `render(...)` in a loop, as the ray-traced path already does.
+#[pyfunction]
+fn spawn_headless() -> PyResult<Visualizer> {
+    use std::sync::atomic::Ordering;
+    let (tx, rx) = std::sync::mpsc::channel::<AppJob>();
+    // Report device/app construction back to Python, so a failure here raises instead of
+    // leaving every later job to fail with "viewer window is closed".
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+    lifecycle::spawn_with_stop(move |ui_ctx, stop| {
+        let egui_ctx = eframe::egui::Context::default();
+        let _ = ui_ctx.set(egui_ctx.clone());
+        let built = molar_vis_core::headless_render_state().and_then(|rs| {
+            App::new_headless(&egui_ctx, &rs, AppLaunch::default())
+                .map_err(|e| molar_vis_core::error_chain(&*e))
+        });
+        let mut app = match built {
+            Ok(app) => {
+                let _ = ready_tx.send(Ok(()));
+                app
+            }
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
+        app.set_jobs(rx);
+        while !stop.load(Ordering::Relaxed) {
+            // `pump_headless` reports whether a load is still in flight; idle ticks sleep
+            // so an open viewer costs no CPU between jobs.
+            if !app.pump_headless(&egui_ctx) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    })?;
+
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(Visualizer { jobs: tx }),
+        Ok(Err(error)) => Err(pyo3::exceptions::PyRuntimeError::new_err(error)),
+        Err(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "headless viewer thread stopped before it finished starting",
+        )),
+    }
+}
+
 /// The `molar_vis` extension module: pymolar's API + the viewer's.
 #[pymodule]
 fn molar_vis(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -1425,6 +1484,7 @@ fn molar_vis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RepHandle>()?;
     m.add_class::<MeshHandle>()?;
     m.add_function(wrap_pyfunction!(spawn, m)?)?;
+    m.add_function(wrap_pyfunction!(spawn_headless, m)?)?;
     let shutdown = wrap_pyfunction!(lifecycle::shutdown, m)?;
     m.py().import("atexit")?.call_method1("register", (&shutdown,))?;
     m.add_function(shutdown)?;

@@ -45,6 +45,9 @@ rfd = "0.15"
 # Native geometry parallelism and bounded workers; browser builds retain serial paths.
 rayon = "1"
 directories = "5"
+# `block_on` for the windowless device setup (`headless_render_state`); eframe does
+# the same thing internally when it builds a device for a window.
+pollster = "0.4"
 # Browser runtime: the eframe `WebRunner` entry (`launch::run_web`) needs the
 # canvas + async glue; `wgpu`'s `webgl` feature gives a WebGL2 fallback for
 # browsers without WebGPU; `getrandom`'s `wasm_js` backend (+ the matching cfg in

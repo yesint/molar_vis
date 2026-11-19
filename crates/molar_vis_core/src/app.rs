@@ -655,6 +655,21 @@ impl App {
         }
     }
 
+    /// One tick of the windowless host loop (`molar_vis_py::spawn_headless`): apply the
+    /// jobs Python queued and advance asynchronous loading, with no egui frame and no
+    /// window. That is the whole of `ui()` a headless host needs, because rendering there
+    /// is explicit ([`App::render_to_file`], which builds dirty geometry itself) rather
+    /// than a side effect of painting a frame. Returns true while a load is still in
+    /// flight, which is what a caller waits on instead of a fixed sleep.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pump_headless(&mut self, ctx: &egui::Context) -> bool {
+        let loading = self.service_loading(ctx);
+        self.run_external_jobs();
+        let exporting = self.service_movie_with(ctx, None);
+        self.service_animation(ctx);
+        loading || exporting
+    }
+
     // --- External (native Python module) API, run via `AppJob`s on the UI thread. ---
 
     /// Add a molecule backed by a shared external source (pymolar), rendered
