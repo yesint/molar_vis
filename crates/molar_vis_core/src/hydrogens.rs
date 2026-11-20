@@ -189,7 +189,9 @@ impl Molecule {
             removed.push(i);
         }
         let count = removed.len();
-        self.hydrogen_cache.extend(cached);
+        if !cached.is_empty() {
+            std::sync::Arc::make_mut(&mut self.hydrogen_cache).extend(cached);
+        }
         self.remove_atoms(&removed);
         count
     }
@@ -236,7 +238,12 @@ impl Molecule {
         }
         let original_bonds = self.bonds.clone();
         let mut added = Vec::new();
-        let cache = std::mem::take(&mut self.hydrogen_cache);
+        // Copy-on-write: a cache still shared with the editor journal is copied here once.
+        let cache = if self.hydrogen_cache.is_empty() {
+            Vec::new()
+        } else {
+            std::mem::take(std::sync::Arc::make_mut(&mut self.hydrogen_cache))
+        };
         let cached_count = cache.len();
         for h in cache {
             if h.parent >= z.len() || z[h.parent] != h.parent_element {
@@ -259,7 +266,7 @@ impl Molecule {
                 && heavy.len() == h.heavy_bonds.len()
                 && heavy.iter().all(|b| h.heavy_bonds.contains(b));
             if warning.is_some() && !same_site {
-                self.hydrogen_cache.push(h);
+                std::sync::Arc::make_mut(&mut self.hydrogen_cache).push(h);
                 continue; // A changed site needs a valid valence assignment before reuse.
             }
             let needed = if same_site {
@@ -268,7 +275,7 @@ impl Molecule {
                 missing[h.parent] > 0
             };
             if !scope.contains(&h.parent) || !needed {
-                self.hydrogen_cache.push(h);
+                std::sync::Arc::make_mut(&mut self.hydrogen_cache).push(h);
                 continue;
             }
             let pos = h.restored_position(&coords);
@@ -289,7 +296,7 @@ impl Molecule {
                 missing[h.parent] = missing[h.parent].saturating_sub(1);
                 added.push((i, h.parent));
             } else {
-                self.hydrogen_cache.push(h);
+                std::sync::Arc::make_mut(&mut self.hydrogen_cache).push(h);
             }
         }
         if self.hydrogen_cache.len() != cached_count {
@@ -529,25 +536,17 @@ mod tests {
                 }
             }
         }
-        let original = crate::history::StructureSnapshot::capture(&mol);
+        let original = structure(&mol);
         mol.reps[0].sel_text = "index 0:4".into();
         let id = mol.id;
         let mut scene = Scene::default();
         scene.molecules.push(mol);
         let mut history = crate::history::History::new(crate::history::EditState::capture(&scene));
-        let before = scene.molecules[0].structure_snapshot().unwrap();
+        scene.molecules[0].begin_edit();
         assert_eq!(scene.molecules[0].remove_edit_hydrogens(&[0]), 4);
-        let after = scene.molecules[0].structure_snapshot().unwrap();
-        assert_eq!(after.hydrogen_cache.len(), 4);
-        // The cache also survives session-style serialization.
-        let decoded: crate::history::StructureSnapshot =
-            serde_json::from_str(&serde_json::to_string(&after).unwrap()).unwrap();
-        assert!(decoded.hydrogen_cache == after.hydrogen_cache);
-        history.record_struct(
-            id,
-            crate::history::StructEdit::Topology { before, after },
-            "remove H".into(),
-        );
+        let ops = scene.molecules[0].end_edit();
+        assert_eq!(scene.molecules[0].hydrogen_cache.len(), 4);
+        history.record_struct(id, crate::history::StructEdit::Journal(ops), "remove H".into());
         history.maybe_record(crate::history::EditState::capture(&scene));
         assert_eq!(
             history.undo_len(),
@@ -557,6 +556,8 @@ mod tests {
         history.undo(&mut scene);
         assert_eq!(scene.molecules[0].n_atoms, 5);
         assert_eq!(scene.molecules[0].reps[0].sel_text, "index 0:4");
+        assert!(scene.molecules[0].hydrogen_cache.is_empty());
+        assert!(structure(&scene.molecules[0]) == original, "undo restores the exact structure");
         history.maybe_record(crate::history::EditState::capture(&scene));
         assert_eq!(history.undo_len(), 0);
         history.redo(&mut scene);
@@ -566,11 +567,19 @@ mod tests {
             scene.molecules[0].add_edit_hydrogens(&[0]).unwrap().0.len(),
             4
         );
-        let restored = crate::history::StructureSnapshot::capture(&scene.molecules[0]);
-        assert!(original.atoms == restored.atoms);
-        assert_eq!(original.coords, restored.coords);
-        assert_eq!(original.bonds, restored.bonds);
-        assert!(restored.hydrogen_cache.is_empty());
+        let restored = structure(&scene.molecules[0]);
+        assert!(original == restored);
+        assert!(scene.molecules[0].hydrogen_cache.is_empty());
+    }
+
+    /// Atoms (all metadata), coordinates and bonds of `mol`, for exact comparisons.
+    fn structure(mol: &Molecule) -> (Vec<crate::history::AtomLite>, Vec<[f32; 3]>, Vec<Bond>) {
+        let top = mol.data.topology();
+        (
+            (0..mol.n_atoms).map(|i| crate::history::AtomLite::capture(&top.get_atom(i).unwrap())).collect(),
+            mol.data.state().coords.iter().map(|p| [p.x, p.y, p.z]).collect(),
+            mol.bonds.clone(),
+        )
     }
 
     #[test]

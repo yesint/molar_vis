@@ -48,9 +48,12 @@ next frame). The menus —
   keeps the viewer editable and shows estimated additional RAM directly below the checkbox. See [ANIMATION.md](ANIMATION.md).
 - **Help → Selection language** — opens the [colored selection reference](https://yesint.github.io/molar_vis/selection-language.html) in the browser. The static page has copyable examples, syntax colors, light/dark themes, and a responsive layout. It is also accessible from the web build.
 - **Edit** — **Undo** / **Redo** (single step, each labelled with the next action's
-  `describe_change` and a `shortcut_text`; the old `▼` **cumulative** undo/redo dropdown is gone, but
-  Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y still repeat — `History::undo_n`/`redo_n`/`undo_len`/`redo_len`
-  remain as test-only/API machinery) · **Settings…** (`GEAR_SIX`) opening the program-settings window
+  `describe_change` and a `shortcut_text`) · **Undo history** / **Redo history** submenus (up to 20
+  labelled steps; an entry undoes or redoes every step down to and including itself). Ctrl+Z /
+  Ctrl+Shift+Z / Ctrl+Y do the same, except while a text field has focus (there they are the
+  field's own text undo). The status bar names the undone or redone step. **In Draw mode** these
+  items read "Undo (editor)" / "Redo (editor)" and walk the drawing editor's local steps; the
+  global timeline gets the whole accepted edit at Finish (see `app/draw_undo.rs`) · **Settings…** (`GEAR_SIX`) opening the program-settings window
   (`App::draw_settings_dialog`; see `settings.rs` / M21).
 - **Analysis** — measurements on the loaded structures; pure computation on the scene, so it is in
   the browser build too. **Align…** (`ARROWS_IN`) opens the alignment window
@@ -312,6 +315,11 @@ Shift+RMB moves the scene through the front clipping plane. The far clipping pla
 automatically covers the visible scene, including when a small selection is framed.
 **Render → Reset clipping** fits the visible scene and clears the clipping offset
 while preserving the viewing orientation.
+
+The drawing palette has **Undo** and **Redo** buttons for the editor's local steps
+(the same as Ctrl+Z / Ctrl+Shift+Z in Draw mode); each tooltip names the step. One
+click with its automatic relax is one step; Clean up and a bond twist are their own
+steps. **Finish** accepts the edit: global undo then reverts it as one step.
 
 The drawing palette has separate **H+** and **H−** buttons. H− caches removed
 hydrogens; H+ restores cached sites and then fills missing valences using local

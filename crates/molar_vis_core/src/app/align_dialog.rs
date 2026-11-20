@@ -359,6 +359,7 @@ impl App {
             Ok((rmsd, edits)) => {
                 if !edits.is_empty() {
                     // One step, however many frames moved: it was one press of one button.
+                    self.accept_draw_edit(); // keep the global timeline in order
                     self.history.record_structs(edits, "align".into());
                     self.view_dirty = true;
                 }

@@ -12,12 +12,12 @@
 //! whole slider drag becomes one undo step. Each step is tagged with a descriptive
 //! label (derived by diffing the two states) shown in the undo/redo dropdowns.
 
-use std::sync::Arc;
 
 use molar::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::color::ColorMethod;
+use crate::edit_journal::EditOp;
 use crate::geometry::{RepKind, RepParams};
 use crate::material::Material;
 use crate::scene::{
@@ -172,55 +172,6 @@ impl AtomLite {
     }
 }
 
-/// A full structure snapshot of an **editable** (drawn) molecule — atoms, their
-/// coordinates, and the bond graph with orders. Captured per checkpoint only for
-/// molecules flagged `editable`; loaded molecules carry `None` (referenced by
-/// source / id instead), so this adds zero cost to the normal load path. Small by
-/// construction (sketches are tens of atoms), so cloning it each frame is cheap.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
-pub struct StructureSnapshot {
-    pub atoms: Vec<AtomLite>,
-    pub coords: Vec<[f32; 3]>,
-    /// The bond graph with orders (molar's [`Bond`] derives serde directly).
-    pub bonds: Vec<Bond>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hydrogen_cache: Vec<crate::hydrogens::CachedHydrogen>,
-    #[serde(skip)]
-    pub selections: Vec<(RepId, String)>,
-}
-
-impl StructureSnapshot {
-    /// Snapshot a molecule's live structure (topology atoms + system coords + the
-    /// editor's bond graph). Called by [`Molecule::structure_snapshot`], which caches
-    /// the result behind an `Arc` keyed by the molecule's `structure_version`.
-    pub fn capture(mol: &Molecule) -> Self {
-        let topo = mol.data.topology();
-        let atoms = (0..mol.n_atoms)
-            .filter_map(|i| topo.get_atom(i))
-            .map(|a| AtomLite::capture(&a))
-            .collect();
-        let coords = mol
-            .data
-            .state()
-            .coords
-            .iter()
-            .map(|p| [p.x, p.y, p.z])
-            .collect();
-        StructureSnapshot {
-            atoms,
-            coords,
-            bonds: mol.bonds.clone(),
-            hydrogen_cache: mol.hydrogen_cache.clone(),
-            selections: mol.reps.iter().map(|r| (r.id, r.sel_text.clone())).collect(),
-        }
-    }
-}
-
-/// The editable state of a molecule (its representations + visibility, plus — for a
-/// drawn molecule — its full structure). A *loaded* molecule's heavy data (the molar
-/// `System`, source, trajectory) is referenced by [`MolId`] for undo/redo and by
-/// source for sessions, never snapshotted; a *drawn* molecule has no source to
-/// reload from, so its structure rides in `structure`.
 /// The editable **document** state of a molecule: its representations + visibility.
 /// A molecule's *structure* (atoms/coords/bonds) is **not** here — it's undone via
 /// self-contained [`StructEdit`] deltas on the same timeline (see [`Step`]), so the
@@ -252,12 +203,10 @@ pub enum StructEdit {
         after: Vec<[f32; 3]>,
         frame: Option<usize>,
     },
-    /// A topology change (atom/bond add/remove, element/order): full before/after
-    /// structure snapshots, `Arc`-shared with neighbours so unchanged history is cheap.
-    Topology {
-        before: Arc<StructureSnapshot>,
-        after: Arc<StructureSnapshot>,
-    },
+    /// An accepted drawing-editor edit: the journal of small reversible ops of all its
+    /// gestures (see [`crate::edit_journal`]), replayed in order (redo) or inverted in
+    /// reverse (undo). No full structure is stored.
+    Journal(Vec<EditOp>),
     /// A per-atom partial-charge assignment (espaloma): the charged atoms and their
     /// charges before/after. Shaped like [`StructEdit::Coords`] but with no frame target —
     /// charges live in the topology, not per trajectory frame. Only ever produced natively
@@ -283,37 +232,13 @@ impl StructEdit {
                 m.mark_coords_dirty(true);
                 m.refresh_bbox();
             }
-            StructEdit::Topology { before, after } => {
-                let snap = if forward { after } else { before };
-                reconcile_structure(&mut scene.molecules[mi], snap);
-            }
+            StructEdit::Journal(ops) => scene.molecules[mi].replay(ops, forward),
             StructEdit::Charges { atoms, before, after } => {
                 let charges = if forward { after } else { before };
                 scene.molecules[mi].set_charges(atoms, charges);
             }
         }
     }
-}
-
-/// A concise undo label for a topology change, from the atom/bond count/identity diff
-/// between the before/after snapshots (mirrors the old `describe_change` structure
-/// block, now that structure edits carry their own label).
-pub fn topology_label(before: &StructureSnapshot, after: &StructureSnapshot) -> String {
-    use std::cmp::Ordering::*;
-    match after.atoms.len().cmp(&before.atoms.len()) {
-        Greater => return "add atom".into(),
-        Less => return "delete atom".into(),
-        Equal => {}
-    }
-    match after.bonds.len().cmp(&before.bonds.len()) {
-        Greater => return "add bond".into(),
-        Less => return "delete bond".into(),
-        Equal => {}
-    }
-    if after.bonds != before.bonds {
-        return "change bond order".into();
-    }
-    "edit structure".into()
 }
 
 /// The undoable state of a [`MolGroup`]: its membership, group-level visibility, and
@@ -403,6 +328,10 @@ impl EditState {
             new_mols.push(mol);
         }
         for (id, mol) in pool {
+            // A molecule leaving the document stops its trajectory loader, exactly as an
+            // explicit delete does (`Scene::trash_molecule`); otherwise the loader keeps
+            // reading and its frames are discarded while the molecule is in the trash.
+            scene.drop_loaders(id);
             scene.trash.insert(id, mol);
         }
         scene.molecules = new_mols;
@@ -466,94 +395,54 @@ impl EditState {
     }
 }
 
-/// Rebuild a molecule's molar `System` + bond graph from a [`StructureSnapshot`]
-/// (undo/redo of a structural change). Then adopts the `Arc` as the molecule's current
-/// snapshot so the next undo capture sees it by identity (no spurious step). Marks the
-/// reps for a geometry rebuild.
-fn reconcile_structure(mol: &mut Molecule, snap: &Arc<StructureSnapshot>) {
-    let mut top = Topology::default();
-    for lite in &snap.atoms {
-        top.atoms.push(&lite.to_atom());
-    }
-    if snap.atoms.iter().any(|a| a.properties.is_none()) { top.assign_resindex(); }
-    top.bonds = crate::data::bonds::bond_storage(&snap.bonds);
-    let st = State {
-        coords: snap.coords.iter().map(|c| Pos::new(c[0], c[1], c[2])).collect(),
-        ..Default::default()
-    };
-    if let Ok(sys) = System::new(top, st) {
-        mol.data = crate::moldata::MolData::Owned(sys);
-        mol.bonds = snap.bonds.clone();
-        mol.hydrogen_cache = snap.hydrogen_cache.clone();
-        mol.n_atoms = snap.atoms.len();
-        mol.hover_grid = None;
-        mol.refresh_bbox();
-        for rep in &mut mol.reps {
-            if let Some((_, text)) = snap.selections.iter().find(|(id, _)| *id == rep.id) {
-                rep.sel_text = text.clone();
+/// Reconcile a molecule's reps to `target`, matching them by [`RepId`] — not by position —
+/// so adding, deleting or reordering one rep keeps every other rep's built geometry (an
+/// SES surface is expensive to compute again).
+fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
+    let mut old: Vec<Option<Representation>> = mol.reps.drain(..).map(Some).collect();
+    mol.reps = target
+        .iter()
+        .map(|s| {
+            let cur = old
+                .iter_mut()
+                .find(|r| r.as_ref().is_some_and(|r| r.id == s.id))
+                .and_then(Option::take);
+            match cur {
+                Some(mut cur) => {
+                    update_rep(&mut cur, s);
+                    cur
+                }
+                None => s.to_representation(),
             }
-            // The atom set changed, so any cached compiled selection holds indices
-            // from the old (possibly larger) system — re-evaluate it against the new
-            // one before building, else molar rejects the stale indices ("selection
-            // out of bounds"). `reconcile_reps` won't recompile a rep whose text is
-            // unchanged (e.g. "all"), so force it here.
-            rep.sel = None;
-            rep.expr = None;
-            rep.sel_dirty = true;
-            rep.geom_dirty = true;
-            rep.coords_dirty = false;
-            rep.ss_cache = None;
-            rep.mesh_cache = None;
-        }
-        // Transient highlights may reference now-gone atoms — drop them.
-        mol.pending = None;
-        mol.glow_dirty = true;
-        mol.hover = None;
-        mol.hover_dirty = true;
-        mol.hover_detail = None;
-        mol.hover_detail_dirty = true;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            mol.pick_dirty = true;
-        }
-        // Adopt this exact Arc as the current snapshot (identity for the next capture).
-        mol.adopt_structure_snapshot(snap.clone());
-    }
+        })
+        .collect();
 }
 
-fn reconcile_reps(mol: &mut Molecule, target: &[RepState]) {
-    if mol.reps.len() != target.len() {
-        mol.reps = target.iter().map(RepState::to_representation).collect();
+/// Bring the live rep `cur` (same id as `s`) to state `s`: rebuild it if a
+/// geometry-affecting field differs, else apply the cheap fields in place.
+fn update_rep(cur: &mut Representation, s: &RepState) {
+    let needs_rebuild = cur.kind != s.kind
+        || cur.params != s.params
+        || cur.color != s.color
+        || cur.charge_kind != s.charge_kind
+        || cur.partner != s.partner
+        || cur.ss_algo != s.ss_algo
+        || cur.sel_text != s.sel_text
+        || (cur.material != s.material && cur.kind != crate::geometry::RepKind::Surface);
+    if needs_rebuild {
+        *cur = s.to_representation();
         return;
     }
-    for (i, s) in target.iter().enumerate() {
-        let needs_rebuild = {
-            let cur = &mol.reps[i];
-            cur.id != s.id
-                || cur.kind != s.kind
-                || cur.params != s.params
-                || cur.color != s.color
-                || cur.charge_kind != s.charge_kind
-                || cur.partner != s.partner
-                || cur.ss_algo != s.ss_algo
-                || cur.sel_text != s.sel_text
-                || (cur.material != s.material && cur.kind != crate::geometry::RepKind::Surface)
-        };
-        if needs_rebuild {
-            mol.reps[i] = s.to_representation();
-        } else {
-            mol.reps[i].set_material(s.material);
-            // Cheap, no-geometry changes (periodic display is render-only too).
-            mol.reps[i].visible = s.visible;
-            mol.reps[i].dynamic = s.dynamic;
-            mol.reps[i].ss_per_frame = s.ss_per_frame;
-            mol.reps[i].periodic = s.periodic;
-            // Smoothing changes the rendered coords → mark for an incremental rebuild.
-            if mol.reps[i].smooth_window != s.smooth_window {
-                mol.reps[i].smooth_window = s.smooth_window;
-                mol.reps[i].coords_dirty = true;
-            }
-        }
+    cur.set_material(s.material);
+    // Cheap, no-geometry changes (periodic display is render-only too).
+    cur.visible = s.visible;
+    cur.dynamic = s.dynamic;
+    cur.ss_per_frame = s.ss_per_frame;
+    cur.periodic = s.periodic;
+    // Smoothing changes the rendered coords → mark for an incremental rebuild.
+    if cur.smooth_window != s.smooth_window {
+        cur.smooth_window = s.smooth_window;
+        cur.coords_dirty = true;
     }
 }
 
@@ -623,6 +512,18 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
             if o.smooth_window != n.smooth_window {
                 return "change smoothing".into();
             }
+            if o.material != n.material {
+                return "change material".into();
+            }
+            if o.charge_kind != n.charge_kind {
+                return "change charge type".into();
+            }
+            if o.partner != n.partner {
+                return "change interaction partner".into();
+            }
+            if o.ss_per_frame != n.ss_per_frame {
+                return "toggle per-frame SS".into();
+            }
         }
     }
     // Group-level changes (shared reps, membership, group visibility).
@@ -640,6 +541,9 @@ fn describe_change(old: &EditState, new: &EditState) -> String {
         }
         if og.members.len() != ng.members.len() {
             return "edit group".into();
+        }
+        if og.members != ng.members {
+            return "reorder group".into();
         }
         match ng.shared_reps.len().cmp(&og.shared_reps.len()) {
             Greater => return "add shared representation".into(),
@@ -706,6 +610,13 @@ pub struct History {
     redo: Vec<Entry>,
     committed: EditState,
     cap: usize,
+    /// Molecules whose structural steps were trimmed off the bottom of the undo stack.
+    /// Those edits are now permanent, so they still count for
+    /// [`struct_edited_ids`](Self::struct_edited_ids).
+    retired_struct: std::collections::HashSet<MolId>,
+    /// Set when steps were dropped (redo cleared or cap trim), so trashed molecules may
+    /// have become unreachable; [`collect_garbage`](Self::collect_garbage) then runs.
+    gc_pending: bool,
 }
 
 impl History {
@@ -715,6 +626,8 @@ impl History {
             redo: Vec::new(),
             committed: initial,
             cap: 200,
+            retired_struct: Default::default(),
+            gc_pending: false,
         }
     }
 
@@ -723,9 +636,70 @@ impl History {
     fn push_undo(&mut self, step: Step, label: String) {
         self.undo.push(Entry { step, label });
         if self.undo.len() > self.cap {
-            self.undo.remove(0);
+            let old = self.undo.remove(0);
+            if let Step::Struct(edits) = &old.step {
+                self.retired_struct.extend(edits.iter().map(|(mol, _)| *mol));
+            }
+            self.gc_pending = true;
         }
-        self.redo.clear();
+        if !self.redo.is_empty() {
+            self.redo.clear();
+            self.gc_pending = true;
+        }
+    }
+
+    /// Whether `current` differs from the last committed document state (a document
+    /// step would be recorded now).
+    pub fn doc_differs(&self, current: &EditState) -> bool {
+        *current != self.committed
+    }
+
+    /// Free trashed molecules and groups that no step can restore any more. A deleted
+    /// molecule stays in [`Scene::trash`] (with its System, frames and GPU buffers) only
+    /// while a document state on the timeline still lists it. Cheap when nothing was
+    /// dropped since the last call.
+    pub fn collect_garbage(&mut self, scene: &mut Scene) {
+        if !std::mem::take(&mut self.gc_pending) {
+            return;
+        }
+        let mut mols = std::collections::HashSet::new();
+        let mut groups = std::collections::HashSet::new();
+        let docs = self.undo.iter().chain(&self.redo).filter_map(|e| match &e.step {
+            Step::Doc(s) => Some(s),
+            Step::Struct(_) => None,
+        });
+        for s in std::iter::once(&self.committed).chain(docs) {
+            mols.extend(s.mols.iter().map(|m| m.id));
+            groups.extend(s.groups.iter().map(|g| g.id));
+        }
+        scene.purge_trash(&mols, &groups);
+    }
+
+    /// Re-target trajectory-frame coordinate edits of `mol` after frames were deleted.
+    /// `map[old] = Some(new)` for a kept frame, `None` for a deleted one. An edit of a
+    /// deleted frame is gone with its frame, so it is removed (and so is a step that
+    /// becomes empty).
+    pub fn remap_frames(&mut self, mol: MolId, map: &[Option<usize>]) {
+        for stack in [&mut self.undo, &mut self.redo] {
+            for e in stack.iter_mut() {
+                if let Step::Struct(edits) = &mut e.step {
+                    edits.retain_mut(|(id, edit)| {
+                        let StructEdit::Coords { frame: Some(f), .. } = edit else { return true };
+                        if *id != mol {
+                            return true;
+                        }
+                        match map.get(*f).copied().flatten() {
+                            Some(n) => {
+                                *f = n;
+                                true
+                            }
+                            None => false,
+                        }
+                    });
+                }
+            }
+            stack.retain(|e| !matches!(&e.step, Step::Struct(v) if v.is_empty()));
+        }
     }
 
     /// Record a **document** checkpoint if `current` differs from the last committed
@@ -743,7 +717,7 @@ impl History {
     /// settle-time [`maybe_record`](Self::maybe_record) stays silent for it (no
     /// double-record), and being pushed mid-frame it lands before that frame's doc step.
     pub fn record_struct(&mut self, mol: MolId, edit: StructEdit, label: String) {
-        self.record_structs(vec![(mol, edit)], label);
+        self.record_structs(vec![(mol, edit)], label)
     }
 
     /// Record several molecules' deltas as **one** step, so undo/redo takes them together.
@@ -752,34 +726,42 @@ impl History {
             return;
         }
         for (mol, edit) in &edits { self.adopt_structure_selections(*mol, edit, true); }
-        self.push_undo(Step::Struct(edits), label);
+        self.push_undo(Step::Struct(edits), label)
     }
 
-    /// Index remaps and newly included atoms belong to the topology gesture, rather
+    /// Index remaps and newly included atoms belong to the structural edit, rather
     /// than a second document step at frame settle.
     fn adopt_structure_selections(&mut self, id: MolId, edit: &StructEdit, forward: bool) {
-        let StructEdit::Topology { before, after } = edit else { return };
-        let snap = if forward { after } else { before };
+        let StructEdit::Journal(ops) = edit else { return };
+        if let Some(texts) = crate::edit_journal::selections_after(ops, forward) {
+            self.adopt_selections(id, texts);
+        }
+    }
+
+    /// Write the selection texts `texts` (by rep id) of molecule `id` into the committed
+    /// document, so a selection change that an editor gesture made is not recorded again
+    /// as a document step.
+    pub fn adopt_selections(&mut self, id: MolId, texts: &[(RepId, String)]) {
         let reps = self.committed.mols.iter_mut().filter(|m| m.id == id).flat_map(|m| &mut m.reps)
             .chain(self.committed.groups.iter_mut().flat_map(|g| &mut g.shared_reps));
         for rep in reps {
-            if let Some((_, text)) = snap.selections.iter().find(|(id, _)| *id == rep.id) {
+            if let Some((_, text)) = texts.iter().find(|(rid, _)| *rid == rep.id) {
                 rep.sel_text = text.clone();
             }
         }
     }
 
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
+    #[cfg(test)]
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
-    #[allow(dead_code)]
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
-    #[allow(dead_code)]
     pub fn redo_len(&self) -> usize {
         self.redo.len()
     }
@@ -807,6 +789,7 @@ impl History {
                 Step::Doc(_) => None,
             })
             .flatten()
+            .chain(self.retired_struct.iter().copied())
             .collect()
     }
 
@@ -978,20 +961,18 @@ mod tests {
         let mut hist = History::new(EditState::capture(&scene));
         let id = scene.molecules[0].id;
 
-        // Add a second atom + bond it to the first, recorded as a Topology delta (the
-        // before/after snapshots the app's `record_topology` builds).
-        let before = scene.molecules[0].structure_snapshot().unwrap();
+        // Add a second atom + bond it to the first, journaled as an editor gesture.
         let mol = &mut scene.molecules[0];
+        mol.begin_edit();
         let idx = mol
             .add_atom(&Atom::new().with_name("C").guess(), Vec3::new(0.15, 0.0, 0.0))
             .unwrap();
         assert!(mol.add_bond(0, idx, BondOrder::Single));
-        let after = scene.molecules[0].structure_snapshot().unwrap();
-        let label = topology_label(&before, &after);
-        hist.record_struct(id, StructEdit::Topology { before, after }, label);
-        assert_eq!(hist.undo_label(0), "add atom");
+        let ops = mol.end_edit();
+        assert_eq!(crate::edit_journal::LocalEdit::label_for(&ops), "add atom");
+        hist.record_struct(id, StructEdit::Journal(ops), "add atom".into());
 
-        // Undo → back to the lone carbon, no bonds (the System is rebuilt from the snap).
+        // Undo → back to the lone carbon, no bonds.
         hist.undo(&mut scene);
         assert_eq!(scene.molecules[0].n_atoms, 1);
         assert_eq!(scene.molecules[0].bonds.len(), 0);
@@ -1163,18 +1144,158 @@ mod tests {
         assert!(!scene.molecules[0].reps[0].visible);
     }
 
-    /// Capturing an unchanged (even large) molecule every settle must be cheap — the
-    /// structure snapshot is shared by identity, so repeated captures return the *same*
-    /// `Arc` and compare equal by pointer (no full re-clone, no spurious undo step).
+    /// Two captures with no edit in between are equal (no spurious step).
     #[test]
-    fn unchanged_structure_snapshot_is_shared_by_identity() {
+    fn idle_recapture_is_not_a_change() {
         let scene = load_scene();
-        let a = scene.molecules[0].structure_snapshot().expect("owned → Some");
-        let b = scene.molecules[0].structure_snapshot().expect("owned → Some");
-        assert!(Arc::ptr_eq(&a, &b), "no structural change → same Arc");
-        // And two captures with no edit in between produce equal EditStates (no step).
-        let s0 = EditState::capture(&scene);
-        let s1 = EditState::capture(&scene);
-        assert!(s0 == s1, "idle re-capture must not look like a change");
+        assert!(EditState::capture(&scene) == EditState::capture(&scene));
     }
+
+    fn coords_step(frame: Option<usize>) -> StructEdit {
+        StructEdit::Coords { atoms: vec![0], before: vec![[0.0; 3]], after: vec![[1.0; 3]], frame }
+    }
+
+    /// A structural edit trimmed off the bottom of the stack is permanent; session save
+    /// must still see the molecule as edited.
+    #[test]
+    fn trimmed_struct_step_still_counts_as_edited() {
+        let mut scene = load_scene();
+        let id = scene.molecules[0].id;
+        let mut hist = History::new(EditState::capture(&scene));
+        hist.cap = 2;
+        hist.record_struct(id, coords_step(None), "rotate bond".into());
+        for vis in [false, true, false] {
+            scene.molecules[0].reps[0].visible = vis;
+            hist.maybe_record(EditState::capture(&scene));
+        }
+        assert_eq!(hist.undo_len(), 2);
+        assert!(hist.struct_edited_ids().contains(&id));
+    }
+
+    /// Deleting frames re-targets frame edits and drops the edits of deleted frames.
+    #[test]
+    fn frame_deletion_remaps_coordinate_steps() {
+        let scene = load_scene();
+        let id = scene.molecules[0].id;
+        let mut hist = History::new(EditState::capture(&scene));
+        for f in [0, 1, 4] {
+            hist.record_struct(id, coords_step(Some(f)), format!("f{f}"));
+        }
+        let mut traj = crate::trajectory::Trajectory::default();
+        traj.frames = vec![State::default(); 5];
+        let map = traj.delete_range_map(1, 2);
+        assert_eq!(map, vec![Some(0), None, None, Some(1), Some(2)]);
+        hist.remap_frames(id, &map);
+        let frames: Vec<_> = hist.undo.iter().map(|e| match &e.step {
+            Step::Struct(v) => match &v[0].1 { StructEdit::Coords { frame, .. } => *frame, _ => None },
+            Step::Doc(_) => None,
+        }).collect();
+        assert_eq!(frames, vec![Some(0), Some(2)], "frame 1 edit gone, frame 4 → 2");
+        assert_eq!(traj.decimate_map(2), vec![Some(0), None, Some(1), None, Some(2)]);
+    }
+
+    /// A trashed molecule is freed once no document state on the timeline lists it.
+    #[test]
+    fn unreachable_trash_is_freed() {
+        let mut scene = load_scene();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
+        scene.add(crate::data::load(Path::new(path)).unwrap(), &crate::settings::RepDefaults::default());
+        let mut hist = History::new(EditState::capture(&scene));
+        scene.trash_molecule(1);
+        hist.maybe_record(EditState::capture(&scene));
+        scene.molecules[0].reps[0].visible = false;
+        hist.maybe_record(EditState::capture(&scene));
+        hist.collect_garbage(&mut scene);
+        assert_eq!(scene.trash.len(), 1, "still restorable by undo");
+        hist.cap = 1; // the next record trims the delete step away
+        scene.molecules[0].reps[0].visible = true;
+        hist.maybe_record(EditState::capture(&scene));
+        hist.collect_garbage(&mut scene);
+        assert!(scene.trash.is_empty(), "no step can restore it any more");
+    }
+
+    /// Undoing "add molecule" stops that molecule's trajectory loader.
+    #[test]
+    fn undo_of_add_stops_loader() {
+        let mut scene = load_scene();
+        let mut hist = History::new(EditState::capture(&scene));
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/2lao.pdb");
+        let id = scene.add(crate::data::load(Path::new(path)).unwrap(), &crate::settings::RepDefaults::default());
+        hist.maybe_record(EditState::capture(&scene));
+        let (_tx, rx) = std::sync::mpsc::channel();
+        scene.loaders.insert(id, rx);
+        hist.undo(&mut scene);
+        assert!(scene.trash.contains_key(&id));
+        assert!(scene.loaders.is_empty());
+    }
+
+    /// Undoing a rep deletion rebuilds only that rep; the others keep their geometry.
+    #[test]
+    fn rep_undo_keeps_unchanged_reps_built() {
+        let mut scene = load_scene();
+        scene.molecules[0].reps.push(Representation::new(RepKind::Vdw));
+        scene.molecules[0].reps.push(Representation::new(RepKind::Vdw));
+        let ids: Vec<_> = scene.molecules[0].reps.iter().map(|r| r.id).collect();
+        let mut hist = History::new(EditState::capture(&scene));
+        scene.molecules[0].reps.remove(1);
+        hist.maybe_record(EditState::capture(&scene));
+        for r in &mut scene.molecules[0].reps {
+            r.geom_dirty = false; // stands in for "built"
+        }
+        hist.undo(&mut scene);
+        let reps = &scene.molecules[0].reps;
+        assert_eq!(reps.iter().map(|r| r.id).collect::<Vec<_>>(), ids);
+        assert!(!reps[0].geom_dirty && !reps[2].geom_dirty, "untouched reps not rebuilt");
+        assert!(reps[1].sel.is_none(), "restored rep is a fresh, unbuilt rep");
+    }
+
+    /// Atoms, metadata, coordinates, bonds (with list order), selections and the
+    /// hydrogen cache of `mol` — everything a journal replay must restore exactly.
+    fn full_state(mol: &Molecule) -> (Vec<AtomLite>, Vec<[f32; 3]>, Vec<Bond>, Vec<String>, usize) {
+        let top = mol.data.topology();
+        (
+            (0..mol.n_atoms).map(|i| AtomLite::capture(&top.get_atom(i).unwrap())).collect(),
+            mol.data.state().coords.iter().map(|p| [p.x, p.y, p.z]).collect(),
+            mol.bonds.clone(),
+            mol.reps.iter().map(|r| r.sel_text.clone()).collect(),
+            mol.hydrogen_cache.len(),
+        )
+    }
+
+    /// A journal of mixed edits on a real protein replays back and forth exactly: the
+    /// inverse of an atom removal puts the same atoms back at the same indices, with
+    /// their bonds at the same places in the bond list.
+    #[test]
+    fn journal_replay_is_exact_both_ways() {
+        use glam::Vec3;
+        let mut scene = load_scene();
+        scene.molecules[0].reps[0].sel_text = "index 3 to 40".into();
+        let id = scene.molecules[0].id;
+        let start = full_state(&scene.molecules[0]);
+        let mut hist = History::new(EditState::capture(&scene));
+
+        let mol = &mut scene.molecules[0];
+        mol.begin_edit();
+        mol.remove_atoms(&[5, 11, 12, 300]);
+        mol.remove_atom(0);
+        let c = mol.add_atom(&Atom::new().with_name("C").guess(), Vec3::new(1.0, 1.0, 1.0)).unwrap();
+        assert!(mol.add_bond(1, c, BondOrder::Double));
+        mol.cycle_bond_order(3);
+        mol.remove_bond_at(7);
+        mol.set_atom_element(2, &Atom::new().with_name("N").guess());
+        let text = format!("{} or index {c}", mol.reps[0].sel_text); // as `include_atom` does
+        mol.reps[0].sel_text = text;
+        let ops = mol.end_edit();
+        let edited = full_state(&scene.molecules[0]);
+        assert!(edited != start);
+        hist.record_struct(id, StructEdit::Journal(ops), "edit".into());
+
+        hist.undo(&mut scene);
+        assert!(full_state(&scene.molecules[0]) == start, "undo restores everything");
+        hist.redo(&mut scene);
+        assert!(full_state(&scene.molecules[0]) == edited, "redo repeats everything");
+        hist.undo(&mut scene);
+        assert!(full_state(&scene.molecules[0]) == start, "second undo is exact too");
+    }
+
 }

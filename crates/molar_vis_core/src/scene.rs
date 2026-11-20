@@ -1,6 +1,5 @@
 //! The scene graph: a set of molecules, each with its own representations.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
@@ -13,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::color::ColorMethod;
 use crate::data::{bond_storage, RawMolecule};
 use crate::geometry::{self, RepKind, RepParams};
-use crate::history::{RepState, StructureSnapshot};
+use crate::history::RepState;
 use crate::material::Material;
 use crate::minimize::{Bond, BondOrder};
 use crate::moldata::MolData;
@@ -655,20 +654,19 @@ pub struct Molecule {
     /// recorded order are `Unspecified`). Mutated only via the helper methods so it
     /// stays consistent.
     pub bonds: Vec<Bond>,
-    pub(crate) hydrogen_cache: Vec<crate::hydrogens::CachedHydrogen>,
+    /// Hydrogens removed by H− for exact restoration by H+. An `Arc` with copy-on-write,
+    /// so the editor journal keeps its "before" value with a pointer copy.
+    pub(crate) hydrogen_cache: Arc<Vec<crate::hydrogens::CachedHydrogen>>,
+    /// The open journal of a drawing-editor gesture (see [`crate::edit_journal`]).
+    /// Transient.
+    pub(crate) journal: Option<crate::edit_journal::Journal>,
     /// Source connectivity before distance guessing, retained for live settings edits.
     pub(crate) bond_guess_source: Vec<Bond>,
     pub(crate) bond_guess_version: u64,
     /// Monotonic counter bumped by every structural mutation (atom/bond add/remove,
-    /// element/order change, `rotate_fragment`). Undo capture uses it to snapshot a
-    /// molecule's structure only when it actually changed — see
-    /// [`structure_snapshot`](Self::structure_snapshot) + [`crate::history`]. Transient.
+    /// element/order change, `rotate_fragment`). Tells derived caches (bond guessing)
+    /// that the structure changed. Transient.
     pub structure_version: u64,
-    /// Cache for [`structure_snapshot`](Self::structure_snapshot): the last built
-    /// `Arc<StructureSnapshot>` plus the `structure_version` it was built at, so a
-    /// re-capture at the same version is a cheap `Arc` clone (interior mutability, since
-    /// undo capture borrows the scene immutably). Transient.
-    structure_cache: RefCell<Option<(u64, Arc<StructureSnapshot>)>>,
     pub n_atoms: usize,
     pub bbox_min: Vec3,
     pub bbox_max: Vec3,
@@ -848,11 +846,11 @@ impl Molecule {
             traj_loads: Vec::new(),
             data,
             bonds,
-            hydrogen_cache: Vec::new(),
+            hydrogen_cache: Arc::default(),
+            journal: None,
             bond_guess_source,
             bond_guess_version: 0,
             structure_version: 0,
-            structure_cache: RefCell::new(None),
             n_atoms,
             bbox_min,
             bbox_max,
@@ -1090,38 +1088,6 @@ impl Molecule {
         self.sel_bbox(&self.data.select_all())
     }
 
-    /// The molecule's structure snapshot (atoms + coords + bonds) for undo, as a
-    /// shared `Arc`, (re)built **only** when [`structure_version`](Self::structure_version)
-    /// has changed since the last call — so an unchanged molecule costs an `Arc` clone,
-    /// not a full copy, at every undo checkpoint. Returns `None` for a **shared**
-    /// (pymolar/JS) molecule: its coordinates live outside the viewer and can't be
-    /// structure-edited or restored, so it has no undoable structure.
-    pub fn structure_snapshot(&self) -> Option<Arc<StructureSnapshot>> {
-        if self.data.is_shared() {
-            return None;
-        }
-        let mut cache = self.structure_cache.borrow_mut();
-        if let Some((v, arc)) = cache.as_ref() {
-            if *v == self.structure_version
-                && arc.selections.iter().map(|(id, text)| (*id, text.as_str()))
-                    .eq(self.reps.iter().map(|r| (r.id, r.sel_text.as_str()))) {
-                return Some(arc.clone());
-            }
-        }
-        let arc = Arc::new(StructureSnapshot::capture(self));
-        *cache = Some((self.structure_version, arc.clone()));
-        Some(arc)
-    }
-
-    /// Adopt `snap` as this molecule's current structure snapshot after the caller has
-    /// rebuilt the molecule to match it (undo/redo of a structural change). Bumps the
-    /// version and seeds the cache with **this exact `Arc`**, so the next
-    /// [`structure_snapshot`](Self::structure_snapshot) returns it *by identity* — the
-    /// undo diff (`Arc::ptr_eq`) then sees no change and doesn't record a spurious step.
-    pub fn adopt_structure_snapshot(&mut self, snap: Arc<StructureSnapshot>) {
-        self.structure_version = self.structure_version.wrapping_add(1);
-        *self.structure_cache.borrow_mut() = Some((self.structure_version, snap));
-    }
 
     /// Recompute the cached bounding box from the live structure (guards the
     /// 0-atom case, where molar's `min_max` would panic).
@@ -1189,6 +1155,7 @@ impl Molecule {
         let p = Pos::new(pos.x, pos.y, pos.z);
         match self.data.append_atom(atom, &p) {
             Ok(_) => {
+                self.log_op(crate::edit_journal::EditOp::Append { atom: atom.clone(), pos: p });
                 let idx = self.n_atoms;
                 self.n_atoms += 1;
                 self.bbox_min = self.bbox_min.min(pos);
@@ -1265,7 +1232,9 @@ impl Molecule {
         if i == j || i >= self.n_atoms || j >= self.n_atoms || self.bond_between(i, j).is_some() {
             return false;
         }
-        self.bonds.push(Bond::with_order(i, j, order));
+        let bond = Bond::with_order(i, j, order);
+        self.bonds.push(bond);
+        self.log_op(crate::edit_journal::EditOp::AddBond(bond));
         self.structure_version += 1;
         self.sync_bonds_to_topology();
         true
@@ -1274,7 +1243,8 @@ impl Molecule {
     /// Remove the bond at index `k`.
     pub fn remove_bond_at(&mut self, k: usize) {
         if k < self.bonds.len() {
-            self.bonds.remove(k);
+            let bond = self.bonds.remove(k);
+            self.log_op(crate::edit_journal::EditOp::RemoveBond { k, bond });
             self.structure_version += 1;
             self.sync_bonds_to_topology();
         }
@@ -1286,7 +1256,9 @@ impl Molecule {
         match self.bond_between(i, j) {
             Some(k) => {
                 if self.bonds[k].order != order {
+                    let before = self.bonds[k].order;
                     self.bonds[k].order = order;
+                    self.log_op(crate::edit_journal::EditOp::BondOrder { k, before, after: order });
                     self.structure_version += 1;
                     self.sync_bonds_to_topology();
                     return true;
@@ -1304,11 +1276,17 @@ impl Molecule {
         if i >= self.n_atoms {
             return;
         }
-        let mut bound = self.data.select_all_bound_mut();
-        if let Some(mut a) = bound.get_atom_mut(i) {
-            a.set_name(src.get_name());
-            a.set_atomic_number(src.get_atomic_number());
-            a.set_mass(src.get_mass());
+        let before = self.element_data(i);
+        {
+            let mut bound = self.data.select_all_bound_mut();
+            if let Some(mut a) = bound.get_atom_mut(i) {
+                a.set_name(src.get_name());
+                a.set_atomic_number(src.get_atomic_number());
+                a.set_mass(src.get_mass());
+            }
+        }
+        if let (Some(before), Some(after)) = (before, self.element_data(i)) {
+            self.log_op(crate::edit_journal::EditOp::Element { i, before, after });
         }
         self.hover_grid = None;
         self.structure_version += 1;
@@ -1414,7 +1392,10 @@ impl Molecule {
     pub fn cycle_bond_order(&mut self, k: usize) {
         use crate::minimize::BondOrderExt;
         if let Some(b) = self.bonds.get_mut(k) {
+            let before = b.order;
             b.order = b.order.cycle();
+            let after = b.order;
+            self.log_op(crate::edit_journal::EditOp::BondOrder { k, before, after });
             self.structure_version += 1;
             self.sync_bonds_to_topology();
         }
@@ -1433,19 +1414,26 @@ impl Molecule {
         let mut removed: Vec<_> = indices.iter().copied().filter(|&i| i < self.n_atoms).collect();
         removed.sort_unstable(); removed.dedup();
         if removed.is_empty() { return self.n_atoms == 0; }
-        let mut map = vec![None; self.n_atoms];
-        let mut next = 0;
-        for (i, entry) in map.iter_mut().enumerate() {
-            if removed.binary_search(&i).is_err() { *entry = Some(next); next += 1; }
+        // For the editor journal: the removed atoms, their coordinates, and their bonds
+        // with their places in the bond list — exactly what the inverse puts back.
+        let op = self.journaling().then(|| {
+            let top = self.data.topology();
+            let coords = &self.data.state().coords;
+            let bonds = self.bonds.iter().copied().enumerate()
+                .filter(|(_, b)| removed.binary_search(&b.i1).is_ok() || removed.binary_search(&b.i2).is_ok())
+                .collect();
+            crate::edit_journal::EditOp::Remove {
+                atoms: removed.iter().map(|&i| top.atoms.to_atom(i)).collect(),
+                coords: removed.iter().map(|&i| coords[i]).collect(),
+                indices: removed.clone(),
+                bonds,
+            }
+        });
+        let Some(map) = self.remove_atoms_raw(&removed) else { return false };
+        if let Some(op) = op { self.log_op(op); }
+        if !self.hydrogen_cache.is_empty() {
+            Arc::make_mut(&mut self.hydrogen_cache).retain_mut(|h| h.remap(&map));
         }
-        if let Err(error) = self.data.remove(removed.iter().copied()) {
-            log::error!("cannot remove atoms: {}", crate::errors::error_chain(&error));
-            return false;
-        }
-        self.bonds = self.bonds.iter().filter_map(|b|
-            Some(Bond::with_order(map[b.i1]?, map[b.i2]?, b.order))).collect();
-        self.hydrogen_cache.retain_mut(|h| h.remap(&map));
-        self.n_atoms = next;
         self.structure_version += 1;
         self.hover_grid = None;
         self.sync_bonds_to_topology();
@@ -1538,8 +1526,15 @@ impl Molecule {
         let mut top = self.data.topology().clone();
         top.bonds = bond_storage(&self.bonds);
         let perc = perceive(&mut top);
-        for (b, r) in self.bonds.iter_mut().zip(top.bonds.iter()) {
-            b.order = r.order();
+        let mut changed = Vec::new();
+        for (k, (b, r)) in self.bonds.iter_mut().zip(top.bonds.iter()).enumerate() {
+            if b.order != r.order() {
+                changed.push((k, b.order, r.order()));
+                b.order = r.order();
+            }
+        }
+        for (k, before, after) in changed {
+            self.log_op(crate::edit_journal::EditOp::BondOrder { k, before, after });
         }
         self.aromatic_rings = perc.aromatic_rings().cloned().collect();
         self.aromatic_dirty = true; // the ring-circle geometry must rebuild
@@ -1995,10 +1990,26 @@ impl Scene {
     }
 
     /// Drop any loader belonging to molecule `id` (native thread receiver / wasm stream).
-    fn drop_loaders(&mut self, id: MolId) {
+    pub(crate) fn drop_loaders(&mut self, id: MolId) {
         self.loaders.remove(&id);
         #[cfg(target_arch = "wasm32")]
         self.wasm_loaders.remove(&id);
+    }
+
+    /// Free every trashed molecule / group not in `keep_mols` / `keep_groups` — the ids
+    /// the undo timeline can still restore (see `History::collect_garbage`). Dropping a
+    /// molecule frees its System, trajectory frames and GPU buffers.
+    pub fn purge_trash(
+        &mut self,
+        keep_mols: &std::collections::HashSet<MolId>,
+        keep_groups: &std::collections::HashSet<GroupId>,
+    ) {
+        let gone: Vec<MolId> = self.trash.keys().filter(|id| !keep_mols.contains(id)).copied().collect();
+        for id in gone {
+            self.trash.remove(&id);
+            self.drop_loaders(id);
+        }
+        self.group_trash.retain(|id, _| keep_groups.contains(id));
     }
 
     pub fn clamp_selection(&mut self) {

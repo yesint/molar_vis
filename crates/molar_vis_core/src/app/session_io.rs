@@ -135,6 +135,8 @@ impl App {
             self.loading_jobs.clear();
         }
         self.load_dialog = None;
+        // The document closes, so the drawing editor's open edits go with it.
+        self.draw = None;
     }
 
     /// Start a new, empty visualization state: remove every molecule, reset the
@@ -292,6 +294,8 @@ impl App {
         // Where the `*.edited.*` copies go: next to the session (falls back to the
         // original's own directory if the session has no parent).
         let session_dir = path.parent().map(|p| p.to_path_buf());
+        // Edits still open in the drawing editor must count too.
+        self.accept_draw_edit();
 
         // Which molecules have a *net applied* structural edit (not one that's been fully
         // undone). `structure_version` can't tell those apart — it only counts up — so use

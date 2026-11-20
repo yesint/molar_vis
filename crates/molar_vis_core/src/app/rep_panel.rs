@@ -401,6 +401,7 @@ impl App {
         }
         if !edits.is_empty() {
             // One step for the whole gesture, so a single Ctrl+Z takes back every member.
+            self.accept_draw_edit(); // keep the global timeline in order
             self.history.record_structs(edits, "compute charges".into());
             self.view_dirty = true;
         }

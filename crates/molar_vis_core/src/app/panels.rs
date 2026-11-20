@@ -340,18 +340,49 @@ impl App {
 
             // — Edit —
             menu_buttons.push(ui.menu_button("Edit", |ui| {
-                let can_undo = self.history.can_undo();
-                if history_menu_item(ui, can_undo, icon::ARROW_COUNTER_CLOCKWISE, "Undo", "Ctrl+Z",
-                    can_undo.then(|| self.history.undo_label(0))).clicked() {
+                // In Draw mode the editor's local steps are what Ctrl+Z walks, so the
+                // menu shows those; the global timeline gets the accepted edit at Finish.
+                let drawing = self.draw.is_some();
+                let labels = |redo: bool| -> Vec<String> {
+                    if drawing {
+                        self.local_labels(redo)
+                    } else if redo {
+                        (0..self.history.redo_len()).map(|d| self.history.redo_label(d).to_owned()).collect()
+                    } else {
+                        (0..self.history.undo_len()).map(|d| self.history.undo_label(d).to_owned()).collect()
+                    }
+                };
+                let (undo_labels, redo_labels) = (labels(false), labels(true));
+                let (undo_name, redo_name) = if drawing { ("Undo (editor)", "Redo (editor)") } else { ("Undo", "Redo") };
+                if history_menu_item(ui, !undo_labels.is_empty(), icon::ARROW_COUNTER_CLOCKWISE, undo_name, "Ctrl+Z",
+                    undo_labels.first().map(String::as_str)).clicked() {
                     self.pending_undo_n = Some(1);
                     ui.close();
                 }
-
-                let can_redo = self.history.can_redo();
-                if history_menu_item(ui, can_redo, icon::ARROW_CLOCKWISE, "Redo", "Ctrl+Shift+Z",
-                    can_redo.then(|| self.history.redo_label(0))).clicked() {
+                if history_menu_item(ui, !redo_labels.is_empty(), icon::ARROW_CLOCKWISE, redo_name, "Ctrl+Shift+Z",
+                    redo_labels.first().map(String::as_str)).clicked() {
                     self.pending_redo_n = Some(1);
                     ui.close();
+                }
+
+                // Jump several steps at once: each entry undoes (redoes) every step down
+                // to and including itself.
+                const SHOWN: usize = 20;
+                for (redo, list) in [(false, &undo_labels), (true, &redo_labels)] {
+                    let title = if redo { "Redo history" } else { "Undo history" };
+                    ui.add_enabled_ui(!list.is_empty(), |ui| {
+                        ui.menu_button(title, |ui| {
+                            for (d, label) in list.iter().take(SHOWN).enumerate() {
+                                if ui.button(format!("{}. {label}", d + 1)).clicked() {
+                                    if redo { self.pending_redo_n = Some(d + 1) } else { self.pending_undo_n = Some(d + 1) }
+                                    ui.close();
+                                }
+                            }
+                            if list.len() > SHOWN {
+                                ui.weak(format!("… {} more steps", list.len() - SHOWN));
+                            }
+                        });
+                    });
                 }
 
                 ui.separator();

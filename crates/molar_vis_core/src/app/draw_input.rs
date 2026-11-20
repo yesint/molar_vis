@@ -137,7 +137,9 @@ impl App {
     pub(super) fn sync_draw_target(&mut self) {
         let Some(target) = self.draw.as_ref().and_then(|d| d.target) else { return };
         let Some(mi) = self.scene.mol_index(target) else {
-            self.draw = None;
+            // The target left the scene (deleted, or a document undo). Accept its edits
+            // now — before the document step that removed it is recorded at settle.
+            self.end_draw();
             return;
         };
         if let Some(gi) = self.scene.molecules[mi].group.and_then(|id| self.scene.group_index(id)) {
@@ -252,7 +254,7 @@ impl App {
             // molecule, which the document's "add molecule" step captures (via the trash),
             // so it runs unwrapped.
             match target_mi {
-                Some(mi) => self.record_topology(mi, |s| match tool {
+                Some(mi) => self.record_topology(mi, None, |s| match tool {
                     DrawTool::Draw => {
                         s.draw_input_draw(response, rect, size_px, element, bond_order, target_mi)
                     }
@@ -598,8 +600,8 @@ impl App {
         // and for a group member behind three of them. Unfold + scroll so it visibly lands.
         let new_rep = self.scene.molecules[mi].reps.len() - 1;
         self.scene.reveal_rep(mi, new_rep);
+        self.retarget_draw(Some(id));
         if let Some(d) = self.draw.as_mut() {
-            d.target = Some(id);
             d.drag = DrawDrag::Idle;
             d.dihedral = super::dihedral::DihedralState::default();
             self.pick_mode = PickMode::Off;
@@ -683,17 +685,19 @@ impl App {
         let scope = self.draw_scope(mi);
         let (ro, rd) = self.camera.pixel_ray(px, rect, size_px);
         if let Some((i, _)) = pick::nearest_atom(&self.scene.molecules[mi], ro, rd, 0.08, scope.as_ref()) {
-            let empty = self.scene.molecules[mi].remove_atom(i);
-            if empty {
-                // The molecule is now empty → delete it (park in trash, undoable).
+            if self.scene.molecules[mi].n_atoms == 1 {
+                // Erasing the last atom deletes the molecule (park in trash, undoable by
+                // the document step). The atom is not removed first, so an undo of the
+                // delete brings back the molecule as it was.
                 self.scene.trash_molecule(mi);
+                self.retarget_draw(None);
                 if let Some(d) = self.draw.as_mut() {
-                    d.target = None;
                     d.drag = DrawDrag::Idle;
                     d.minimize_pending = false;
                 }
                 self.view_dirty = true;
             } else {
+                self.scene.molecules[mi].remove_atom(i);
                 self.scene.flag_edit(mi);
                 self.view_dirty = true;
                 if let Some(d) = self.draw.as_mut() {
@@ -713,42 +717,6 @@ impl App {
             if let Some(d) = self.draw.as_mut() {
                 d.minimize_pending = true;
             }
-        }
-    }
-
-    /// Run a topology-editing gesture `f` on molecule `mi`, recording it as one undoable
-    /// [`StructEdit::Topology`] step (before/after structure snapshots). A no-op wrapper
-    /// (just runs `f`) for a shared molecule, or a gesture that deletes the whole molecule
-    /// — the document's "delete molecule" step restores that from the trash. Coalesces all
-    /// of `f`'s mutations into one step. (No atom-count cap: a topology snapshot is cheap
-    /// and rare, and every owned molecule must be undoable — the [`DRAW_AUTO_MAX_ATOMS`]
-    /// cap gates only synchronous auto-relax, not undo.)
-    pub(super) fn record_topology<F: FnOnce(&mut Self)>(&mut self, mi: usize, f: F) {
-        // Keep any preceding UI selection change separate from this atom-index remap.
-        self.history.maybe_record(EditState::capture(&self.scene));
-        let (before, id) = {
-            let Some(mol) = self.scene.molecules.get(mi) else {
-                f(self);
-                return;
-            };
-            let eligible = !mol.data.is_shared();
-            (eligible.then(|| mol.structure_snapshot()).flatten(), mol.id)
-        };
-        f(self);
-        let Some(before) = before else { return };
-        // `f` may have deleted the molecule (erased its last atom) — the document handles
-        // that; nothing to record.
-        let Some(mi2) = self.scene.mol_index(id) else { return };
-        let Some(after) = self.scene.molecules[mi2].structure_snapshot() else {
-            return;
-        };
-        if !std::sync::Arc::ptr_eq(&before, &after) {
-            let label = crate::history::topology_label(&before, &after);
-            self.history.record_struct(
-                id,
-                crate::history::StructEdit::Topology { before, after },
-                label,
-            );
         }
     }
 
@@ -846,20 +814,20 @@ impl App {
                     (before != after).then_some((mol.id, before, after))
                 });
                 self.view_dirty = true;
-                // Record the coordinate delta as one undoable step (after the mol borrow).
+                // Record the move of the atoms that moved (after the mol borrow). The
+                // automatic Quick relax joins the editor step of the edit that caused it;
+                // an explicit Clean up is its own step. Relax edits the owned System
+                // coords (system_mut), never a frame.
                 if let Some((id, before, after)) = coord_edit {
-                    let atoms: Vec<usize> = (0..before.len()).collect();
-                    let label = if matches!(kind, crate::minimize::RelaxKind::Cleanup) {
-                        "clean up"
-                    } else {
-                        "relax"
-                    };
-                    self.history.record_struct(
-                        id,
-                        // relax edits the owned System coords (system_mut), never a frame.
-                        crate::history::StructEdit::Coords { atoms, before, after, frame: None },
-                        label.into(),
-                    );
+                    let (atoms, (before, after)): (Vec<usize>, (Vec<_>, Vec<_>)) = before
+                        .into_iter()
+                        .zip(after)
+                        .enumerate()
+                        .filter(|(_, (b, a))| b != a)
+                        .unzip();
+                    let quick = matches!(kind, crate::minimize::RelaxKind::Quick);
+                    let label = if quick { "relax" } else { "clean up" };
+                    self.push_local_coords(id, label, quick, atoms, before, after, None);
                 }
             }
             // One-shot: clear the job.

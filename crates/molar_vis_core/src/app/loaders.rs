@@ -113,6 +113,7 @@ impl App {
         let id = mol.id;
         if mol.data.is_shared() { return; }
         self.pick_mode = PickMode::Off;
+        self.retarget_draw(Some(id));
         let mut session = self.draw.take().unwrap_or_default();
         session.target = Some(id);
         session.drag = DrawDrag::Idle;
@@ -308,12 +309,19 @@ impl App {
             },
             |app, dialog| {
                 if let Some(mol) = app.scene.molecules.iter_mut().find(|m| m.id == dialog.mol_id) {
-                    let removed = match dialog.mode {
+                    // Frame indices shift, so coordinate undo steps that target a frame
+                    // must follow them (or go away with a deleted frame).
+                    let (removed, map) = match dialog.mode {
                         DeleteFramesMode::Range => {
-                            mol.trajectory.delete_range(dialog.from, dialog.to)
+                            let map = mol.trajectory.delete_range_map(dialog.from, dialog.to);
+                            (mol.trajectory.delete_range(dialog.from, dialog.to), map)
                         }
-                        DeleteFramesMode::Decimate => mol.trajectory.decimate(dialog.stride),
+                        DeleteFramesMode::Decimate => {
+                            let map = mol.trajectory.decimate_map(dialog.stride);
+                            (mol.trajectory.decimate(dialog.stride), map)
+                        }
                     };
+                    app.history.remap_frames(dialog.mol_id, &map);
                     // Re-render at the (clamped) current frame, or the static structure
                     // if every frame was removed.
                     mol.box_dirty = true;

@@ -52,6 +52,7 @@ mod dihedral;
 mod docking_dialog;
 mod draw;
 mod draw_input;
+mod draw_undo;
 mod export;
 mod init;
 pub(crate) mod startup;
@@ -1355,8 +1356,13 @@ impl eframe::App for App {
             }
         }
 
-        // Keyboard: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo.
+        // Keyboard: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y redo. Not while a
+        // text field has focus: there Ctrl+Z belongs to the field's own text undo.
+        let text_focused = ctx.egui_wants_keyboard_input();
         ctx.input(|i| {
+            if text_focused {
+                return;
+            }
             if i.modifiers.command && i.key_pressed(egui::Key::Z) {
                 if i.modifiers.shift {
                     self.pending_redo_n = Some(1);
@@ -1396,25 +1402,16 @@ impl eframe::App for App {
         // Apply undo/redo after the panel so list indices stay stable during draw. Each
         // step is replayed individually (a structural delta must be inverted in order —
         // no jump-to-snapshot shortcut); undo/redo apply to the scene in place.
-        let mut applied = false;
-        if let Some(n) = self.pending_undo_n.take() {
-            for _ in 0..n {
-                if self.history.undo(&mut self.scene).is_none() {
-                    break;
-                }
-                applied = true;
-            }
-        }
-        if let Some(n) = self.pending_redo_n.take() {
-            for _ in 0..n {
-                if self.history.redo(&mut self.scene).is_none() {
-                    break;
-                }
-                applied = true;
-            }
-        }
-        if applied {
-            self.view_dirty = true;
+        // In Draw mode, undo/redo walk the editor's local steps; the global timeline
+        // sees the accepted edit only (see `app/draw_undo.rs`).
+        if self.draw.is_some() {
+            self.apply_pending_local();
+        } else if self.pending_undo_n.is_some() || self.pending_redo_n.is_some() {
+            // Commit any change not yet recorded (e.g. a selection text typed just before
+            // the menu click) as its own step first. Else a structural undo would leave it
+            // in the scene, and its late record at settle would clear the redo stack.
+            self.record_doc_checkpoint();
+            self.apply_pending_history();
         }
 
         // Advance playback for any playing molecule (time-based, so the fps knob
@@ -1485,8 +1482,75 @@ impl eframe::App for App {
         // Record a checkpoint once the gesture has settled (coalesces drags/typing).
         let settled = !ctx.egui_is_using_pointer() && !ctx.egui_wants_keyboard_input();
         if settled {
-            self.history.maybe_record(EditState::capture(&self.scene));
+            self.record_doc_checkpoint();
         }
+        // Free trashed molecules that no undo/redo step can bring back.
+        self.history.collect_garbage(&mut self.scene);
+    }
+}
+
+impl App {
+    /// Replay the queued undo/redo as drawing-editor local steps.
+    fn apply_pending_local(&mut self) {
+        let (n, forward) = match (self.pending_undo_n.take(), self.pending_redo_n.take()) {
+            (Some(n), _) => (n, false),
+            (None, Some(n)) => (n, true),
+            (None, None) => return,
+        };
+        let done = self.replay_local(n, forward);
+        let verb = if forward { "Redo" } else { "Undo" };
+        self.status = match done.as_slice() {
+            [] => format!("{verb}: nothing to {} in the editor (Finish accepts the edit)", verb.to_lowercase()),
+            [one] => format!("{verb} (editor): {one}"),
+            many => format!("{verb} (editor): {} steps (last: {})", many.len(), many[many.len() - 1]),
+        };
+    }
+
+    /// Replay the queued undo/redo steps on the scene and report them in the status bar.
+    fn apply_pending_history(&mut self) {
+        let loading_before: Vec<MolId> = self.loading_ids();
+        let mut done: Vec<String> = Vec::new();
+        let mut verb = "Undo";
+        if let Some(n) = self.pending_undo_n.take() {
+            for _ in 0..n {
+                let Some(label) = self.history.undo(&mut self.scene) else { break };
+                done.push(label);
+            }
+        }
+        if let Some(n) = self.pending_redo_n.take() {
+            verb = "Redo";
+            for _ in 0..n {
+                let Some(label) = self.history.redo(&mut self.scene) else { break };
+                done.push(label);
+            }
+        }
+        if done.is_empty() {
+            return;
+        }
+        self.view_dirty = true;
+        self.status = match done.as_slice() {
+            [one] => format!("{verb}: {one}"),
+            many => format!("{verb}: {} steps (last: {})", many.len(), many[many.len() - 1]),
+        };
+        // A molecule removed by the undo stops loading its trajectory (see
+        // `EditState::apply`); say so, since a redo brings it back with fewer frames.
+        let live = self.loading_ids();
+        let stopped: Vec<MolId> = loading_before.into_iter().filter(|id| !live.contains(id)).collect();
+        if !stopped.is_empty() {
+            for id in &stopped {
+                self.async_load_progress.remove(id);
+            }
+            self.status.push_str("; trajectory loading stopped for the removed molecule");
+        }
+    }
+
+    /// Molecules with a trajectory loader still running.
+    fn loading_ids(&self) -> Vec<MolId> {
+        #[allow(unused_mut)]
+        let mut ids: Vec<MolId> = self.scene.loaders.keys().copied().collect();
+        #[cfg(target_arch = "wasm32")]
+        ids.extend(self.scene.wasm_loaders.keys().copied());
+        ids
     }
 }
 

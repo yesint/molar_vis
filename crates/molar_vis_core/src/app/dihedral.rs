@@ -329,10 +329,10 @@ impl App {
                         let mol_id = self.scene.molecules[mi].id;
                         match build_axis(&self.scene.molecules[mi], k) {
                             Some(axis) => {
+                                self.retarget_draw(Some(mol_id)); // subsequent edits act here
                                 if let Some(d) = self.draw.as_mut() {
                                     d.dihedral.axis = Some(axis);
                                     d.dihedral.drag = None;
-                                    d.target = Some(mol_id); // subsequent edits act here
                                 }
                                 self.status.clear();
                             }
@@ -509,11 +509,7 @@ impl App {
             return;
         }
         let id = self.scene.molecules[mi].id;
-        self.history.record_struct(
-            id,
-            crate::history::StructEdit::Coords { atoms, before, after, frame },
-            "rotate bond".into(),
-        );
+        self.push_local_coords(id, "rotate bond", false, atoms, before, after, frame);
     }
 
     /// Advance an active handle drag: rotate the grabbed side by the change in the

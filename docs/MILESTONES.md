@@ -1015,3 +1015,26 @@ joints. Internal color boundaries and dash ends remain flat. The live renderer
 preserves the original color interpolation and depth across the extended ends;
 ray-traced lines use the same endpoint flags. Render tests check ring corners for
 gaps and compare procedural dashes with explicit segments.
+
+Undo audit fixes. Ctrl+Z no longer reaches the history while a text field has focus.
+An undo first commits any change not yet recorded. Session save still writes
+structural edits whose step was trimmed by the 200-step cap. Deleting trajectory
+frames re-targets frame coordinate steps. Undoing "add molecule" stops its loader.
+Trashed molecules are freed when no step can restore them, so deleting a large
+trajectory releases its memory. Rep undo matches reps by id and rebuilds only the
+changed rep. A draw click and its automatic relax are one undo step, and a relax
+step keeps only the atoms that moved. Labels cover material, charge type, partner,
+per-frame SS and group reorder. The status bar names the undone step, and
+Edit ▸ Undo/Redo history jumps several steps. Not done: a memory budget for
+topology snapshots, and undo for rename, frame deletion and trajectory loading.
+
+Drawing-editor local undo. Global undo reverts an accepted edit as a whole; inside
+Draw mode, Ctrl+Z and the palette's undo/redo buttons walk the single drawing steps.
+The steps are small reversible ops (`edit_journal.rs`), not structure snapshots:
+atom removal keeps only the removed atoms, coordinates and bonds, and its inverse
+inserts them back at their old indices. The hydrogen cache is copy-on-write, so a
+gesture keeps its old value with a pointer copy. An edit is accepted at Finish,
+on a new target, when the target leaves the scene, before any other global step,
+and at session save. A molecule drawn in the session needs no journal step,
+because its "add molecule" step covers it. The automatic relax joins the click
+that triggered it. This replaces `StructEdit::Topology` and `StructureSnapshot`.

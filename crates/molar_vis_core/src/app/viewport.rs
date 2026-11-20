@@ -835,7 +835,7 @@ impl App {
         }
         self.rep_pick = None;
         self.scene.clear_hover();
-        self.history.maybe_record(crate::history::EditState::capture(&self.scene));
+        self.record_doc_checkpoint();
         self.view_dirty = true;
     }
 

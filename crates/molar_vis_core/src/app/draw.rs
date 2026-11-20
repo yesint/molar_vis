@@ -154,6 +154,9 @@ pub(super) struct DrawSession {
     pub(super) minimize_pending: bool,
     /// Active relaxation job, if any (drives the per-frame `relax_in_system` call).
     pub(super) relax: Option<RelaxJob>,
+    /// The editor's local undo/redo of the target molecule's edits; accepted onto the
+    /// global timeline as one step (see `app/draw_undo.rs`).
+    pub(super) local: crate::edit_journal::LocalHistory,
     /// A world point the drawing plane passes through (updated to the last-touched
     /// atom). `None` ⇒ use the camera target.
     pub(super) plane_depth: Option<glam::Vec3>,
@@ -172,6 +175,7 @@ impl Default for DrawSession {
             drag: DrawDrag::Idle,
             minimize_pending: false,
             relax: None,
+            local: Default::default(),
             plane_depth: None,
             dihedral: DihedralState::default(),
         }
@@ -182,7 +186,7 @@ impl App {
     /// entering Draw forces `pick_mode = Off` (and clears any in-progress lasso).
     pub(super) fn toggle_draw(&mut self) {
         if self.draw.is_some() {
-            self.draw = None;
+            self.end_draw();
         } else {
             self.draw = Some(DrawSession::default());
             self.pick_mode = PickMode::Off;
@@ -210,6 +214,11 @@ impl App {
             rep.geom_dirty = true;
         }
         self.scene.selected_mol = Some(self.scene.molecules.len() - 1);
+        // A new molecule: accept the edits of the previous one; the new molecule's own
+        // "add molecule" document step covers what is drawn into it now.
+        super::draw_undo::accept_local(&mut self.history, &mut session.local);
+        session.local.mol = Some(id);
+        session.local.created = true;
         session.target = Some(id);
         // A freshly drawn molecule has exactly one `all` rep — scope Draw to it, so new
         // atoms fold into that selection (an `all` scope means "the whole molecule").
@@ -309,6 +318,34 @@ impl App {
 
                         ui.separator();
 
+                        // — Editor undo / redo: the local drawing steps. Finish (or another
+                        // molecule) accepts them as one global undo step.
+                        let (n_undo, n_redo) = self
+                            .draw
+                            .as_ref()
+                            .map_or((0, 0), |d| (d.local.undo.len(), d.local.redo.len()));
+                        for (redo, glyph, n) in [
+                            (false, icon::ARROW_COUNTER_CLOCKWISE, n_undo),
+                            (true, icon::ARROW_CLOCKWISE, n_redo),
+                        ] {
+                            let tip = match (redo, self.local_labels(redo).first()) {
+                                (false, Some(l)) => format!("Undo drawing step: {l} (Ctrl+Z)"),
+                                (true, Some(l)) => format!("Redo drawing step: {l} (Ctrl+Shift+Z)"),
+                                (false, None) => "Nothing to undo in this edit".into(),
+                                (true, None) => "Nothing to redo in this edit".into(),
+                            };
+                            let clicked = ui
+                                .add_enabled_ui(n > 0, |ui| overlay_button(ui, glyph, false).on_hover_text(tip).clicked())
+                                .inner;
+                            if clicked {
+                                if redo { self.pending_redo_n = Some(1) } else { self.pending_undo_n = Some(1) }
+                                // The queue is served early in the next frame.
+                                ui.ctx().request_repaint();
+                            }
+                        }
+
+                        ui.separator();
+
                         // Target molecule facts that gate the Clean up / H+ actions.
                         let target_mi = self
                             .draw
@@ -368,7 +405,8 @@ impl App {
                             }).inner;
                             if clicked {
                                 if let Some(mi) = target_mi {
-                                    self.record_topology(mi, |s| s.edit_hydrogens(mi, add));
+                                    let label = if add { "add hydrogens" } else { "remove hydrogens" };
+                                    self.record_topology(mi, Some(label), |s| s.edit_hydrogens(mi, add));
                                 }
                             }
                         }
@@ -377,17 +415,17 @@ impl App {
                             .on_hover_text("New — start a fresh molecule on the next click")
                             .clicked()
                         {
+                            self.retarget_draw(None);
                             if let Some(d) = self.draw.as_mut() {
-                                d.target = None;
                                 d.drag = DrawDrag::Idle;
                             }
                         }
-                        // — Finish: leave Draw mode.
+                        // — Finish: accept the edit (one global undo step), leave Draw mode.
                         if overlay_button(ui, icon::CHECK, false)
-                            .on_hover_text("Finish — leave Draw mode")
+                            .on_hover_text("Finish — accept the edit and leave Draw mode")
                             .clicked()
                         {
-                            self.draw = None;
+                            self.end_draw();
                         }
 
                         // Alt-to-rotate hint (icon only; tooltip explains).

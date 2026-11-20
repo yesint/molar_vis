@@ -121,6 +121,33 @@ impl Trajectory {
         before - self.frames.len()
     }
 
+    /// Where each current frame goes under [`delete_range`](Self::delete_range)`(from, to)`:
+    /// `Some(new index)` if kept, `None` if deleted. Same clamping as `delete_range`.
+    pub fn delete_range_map(&self, from: usize, to: usize) -> Vec<Option<usize>> {
+        let n = self.frames.len();
+        if n == 0 || from > to || from >= n {
+            return (0..n).map(Some).collect();
+        }
+        let to = to.min(n - 1);
+        let removed = to - from + 1;
+        (0..n)
+            .map(|f| match f {
+                f if f < from => Some(f),
+                f if f <= to => None,
+                f => Some(f - removed),
+            })
+            .collect()
+    }
+
+    /// Where each current frame goes under [`decimate`](Self::decimate)`(stride)`.
+    pub fn decimate_map(&self, stride: usize) -> Vec<Option<usize>> {
+        let n = self.frames.len();
+        if stride <= 1 {
+            return (0..n).map(Some).collect();
+        }
+        (0..n).map(|f| (f % stride == 0).then_some(f / stride)).collect()
+    }
+
     /// Clamp `current` to a valid index after the frame set shrank.
     fn clamp_current(&mut self) {
         self.current = self.current.min(self.frames.len().saturating_sub(1));

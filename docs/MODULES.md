@@ -48,7 +48,8 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
     preparation, one-second loading modal/terminal feedback, and async loading state.
   - `app/session_io.rs` — save molecule/selection/session, view-state seam, new/reset doc, demo.
   - `app/commands.rs` — shared scene-command execution.
-  - `app/draw.rs` + `app/draw_input.rs` — Draw-mode types + palette UI / input-gesture engine.
+  - `app/draw.rs` + `app/draw_input.rs` + `app/draw_undo.rs` — Draw-mode types + palette UI /
+    input-gesture engine / local editor undo and accept-to-global.
     A Draw session targets a molecule. `open_molecule_in_editor` is available from the
     molecule menu or a group's **Edit shown molecule** menu item. Switching group members
     moves the editor target to the shown molecule. `Molecule::visible_edit_atoms` forms the
@@ -303,10 +304,11 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   plus a `source: MoleculeSource` (`File(path)`/`Bytes{name}`) and `traj_loads: Vec<TrajLoad>`
   (the trajectory files loaded into it, in order) — both for session save/load (see `session.rs`).
   **One molecule type** — every owned molecule is editable/undoable (there's no `editable` flag;
-  a *shared* pymolar/JS molecule just can't be mutated in place). `Molecule::structure_snapshot`
-  returns an `Arc<StructureSnapshot>` (atoms+coords+bonds) rebuilt **only when `structure_version`
-  bumps** (bumped by every structural mutator — `add_atom`/`add_bond`/`remove_*`/`cycle_bond_order`/
-  `set_atom_element`/`rotate_fragment`/`set_coords`), so it's O(1) at idle; `rotate_fragment`
+  a *shared* pymolar/JS molecule just can't be mutated in place). Every structural mutator
+  (`add_atom`/`add_bond`/`remove_*`/`cycle_bond_order`/`set_atom_element`/`perceive_aromaticity`)
+  logs its reversible `EditOp` into the open editor journal (`Molecule::journal`, see
+  `edit_journal.rs`) and bumps `structure_version`; `hydrogen_cache` is an `Arc<Vec<…>>` with
+  copy-on-write so the journal keeps its "before" value by pointer; `rotate_fragment`
   (dihedral) + `set_coords` (undo) edit the **displayed** coords in place (trajectory frame or owned
   System).
 - `history.rs` — **undo/redo on one unified timeline** (M30). A single strict-LIFO stack of `Step`s,
@@ -317,10 +319,10 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   atoms' positions (dihedral twist, minimizer/cleanup) plus the coordinate store the delta targets —
   `frame: Some(i)` = trajectory frame *i*, `None` = the owned System — captured at edit time (via
   `Molecule::coord_edit_target`) so undo hits the **same** store even after the displayed frame or
-  trajectory changes; a dihedral twist is undoable whether or not a trajectory is loaded. **`StructEdit::Topology {
-  before, after: Arc<StructureSnapshot> }`** carries full before/after snapshots for atom/bond
-  add/remove (molar re-indexes on removal, so per-atom topology deltas aren't feasible; rare + small,
-  Arc-shared). **`StructEdit::Charges { atoms, before, after }`** (M31) is the espaloma assignment —
+  trajectory changes; a dihedral twist is undoable whether or not a trajectory is loaded.
+  **`StructEdit::Journal(Vec<EditOp>)`** is an *accepted drawing-editor edit*: the small reversible
+  ops of all its gestures, replayed forward (redo) or inverted in reverse (undo) by
+  `Molecule::replay` — no full structure is stored (see `edit_journal.rs`). **`StructEdit::Charges { atoms, before, after }`** (M31) is the espaloma assignment —
   shaped like `Coords` but with **no frame target**, since charges live in the topology rather than
   per trajectory frame (applied by `Molecule::set_charges`, which marks every rep `geom_dirty` because
   colors are baked into the geometry). A `Step::Struct` holds a **`Vec<(MolId, StructEdit)>`**, so one
@@ -329,11 +331,45 @@ empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).
   a molecule's *existence* (add/delete) rides the document but its live structure is preserved across
   add/delete undo by reusing the `Molecule` (with its `System`) from the scene/`trash`. `undo(&mut
   Scene)`/`redo` apply one step in place (Doc → swap+`apply` committed; Struct → `StructEdit::apply`
-  writing coords / rebuilding via `reconcile_structure`) and return the label; there is **no
-  jump-to-committed shortcut** (each delta must be replayed in order). `RepState`/`StructureSnapshot`
-  live here (see the *save/load* design in `session.rs`). Recording sites: `app/draw_input.rs`
-  `record_topology` wraps Draw/Erase + `edit_hydrogens`; `drive_minimize` records the relax's
-  `Coords`; `app/dihedral.rs` records the twist's `Coords` at drag end.
+  writing coords / replaying a journal) and return the label; there is **no
+  jump-to-committed shortcut** (each delta must be replayed in order). `RepState`/`AtomLite`
+  live here (see the *save/load* design in `session.rs`). Recording sites: the drawing editor
+  (`app/draw_undo.rs`) records one `Journal` per accepted edit; align and charges record
+  `Coords`/`Charges` (accepting any open editor edit first). `adopt_selections` writes a
+  gesture's own selection changes (index remaps, newly drawn atoms) into `committed`, so they
+  never become a second document step. **Trash GC**: when steps drop
+  (redo cleared, 200-step cap trim) `collect_garbage` (end of each frame) frees `trash` /
+  `group_trash` entries that no `Doc` state or `committed` lists — `Scene::purge_trash` also
+  drops their loaders. A molecule leaving the document through `EditState::apply` stops its
+  loader too, like `trash_molecule`. A trimmed `Struct` step's molecules stay in
+  `retired_struct`, so `struct_edited_ids` (session save) still sees the edit. **Frame
+  deletion** remaps frame-targeted `Coords` steps (`remap_frames` with
+  `Trajectory::delete_range_map`/`decimate_map`); edits of deleted frames go away.
+  `reconcile_reps` matches reps **by `RepId`**, so add/delete/reorder undo rebuilds only the
+  rep that changed. App side: Ctrl+Z is ignored while a text field has focus (its own text undo);
+  a pending undo first commits any unrecorded change; the status bar shows "Undo: <label>";
+  Edit ▸ Undo/Redo history jumps several steps.
+- `edit_journal.rs` — **delta-based structure editing history** for the drawing editor. `EditOp`
+  (`Append`, `Remove { indices, atoms, coords, bonds-with-list-positions }`, `AddBond`, `RemoveBond`,
+  `BondOrder`, `Element`, `Coords`, plus the per-gesture set-ops `Selections`/`HydrogenCache`/`Rings`);
+  structural ops never touch selections/cache/rings, so replay in both directions is exact.
+  `Molecule::begin_edit`/`end_edit` bracket one gesture; `replay(ops, forward)` applies them and
+  refreshes the derived state (coords-only replays take the in-place coordinate path). The inverse
+  of `Remove` re-inserts atoms at their old indices: molar has no insert, so it rebuilds the
+  `System` from `AtomStorage::to_atom` rows (O(N) time, no stored copy; molecule ranges kept as
+  molar's removal keeps them). `LocalEdit` = one gesture; `LocalHistory` = the editor's local
+  undo/redo stacks + `created` (molecule made in this session: its "add molecule" document step
+  covers the result, until an accept forced by another global step) + `relax_open` (the automatic
+  Quick relax joins the gesture that triggered it). `LocalHistory::accept` flattens the applied
+  edits into one global `Journal` step.
+- `app/draw_undo.rs` — editor undo wiring. In Draw mode Ctrl+Z / Edit ▸ Undo / the palette's undo
+  buttons walk the **local** stack (`replay_local`); the global timeline gets **one** step per
+  accepted edit. Accept points: Finish / leaving Draw mode (`end_draw`), another target or New
+  (`retarget_draw`), the target leaving the scene (`sync_draw_target`), a document change at settle
+  (`record_doc_checkpoint`), align / charge assignment, session save. A document reset closes the
+  editor without recording. `record_topology(mi, label, f)` brackets a gesture with
+  `begin_edit`/`end_edit`; `push_local_coords` records twists and relaxes. Erasing the last atom
+  trashes the molecule without removing the atom, so undoing the delete restores it intact.
 - `session.rs` — **save/load visualization state** (M13). `Session { format, version, view:
   ViewState, molecules: Vec<MolSession> }`, serialized to JSON. The design goal is
   *extensible-without-ceremony*: the per-rep document is serialized through the **same**

@@ -16,6 +16,7 @@ mod charges;
 mod color;
 mod color_presets;
 mod data;
+mod edit_journal;
 mod errors;
 /// Loading a docking result (receptor + ligand poses) — see the module docs. Native-only,
 /// like the dialog that drives it (`app::docking_dialog`): reading several files from disk.
