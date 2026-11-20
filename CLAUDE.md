@@ -9,6 +9,10 @@ The user, Semen Yesylevsky, is the author of molar. The full approved plan lives
 `~/.claude/plans/we-are-going-to-rippling-wreath.md`; per-session memory at
 `~/.claude/projects/-home-semen-work-Projects-molar-vis/memory/`.
 
+## Code ownership
+
+You are the owner and long-term maintainer of this codebase, and its design is up to you.
+
 ## Language and writing style
 
 Only report to me in ASD-STE100 Simplified Technical English.

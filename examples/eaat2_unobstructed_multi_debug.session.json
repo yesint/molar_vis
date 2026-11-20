@@ -1,0 +1,243 @@
+{
+  "format": "molar_vis.session",
+  "version": 1,
+  "view": {
+    "camera": {
+      "target": [
+        12.506294,
+        15.895732,
+        12.0186615
+      ],
+      "orientation": [
+        0.5057198,
+        0.8097951,
+        -0.14652304,
+        -0.25886372
+      ],
+      "distance": 2.3679433,
+      "scene_radius": 0.8175836,
+      "fov_y": 0.7853982,
+      "projection": "Orthographic",
+      "depth_cue": {
+        "enabled": true,
+        "start": 0.3,
+        "strength": 0.55,
+        "mode": "Linear"
+      },
+      "ao": {
+        "enabled": false,
+        "strength": 0.5,
+        "radius": 0.4
+      },
+      "shadow": {
+        "enabled": false,
+        "strength": 0.25,
+        "softness": 0.4
+      },
+      "background": {
+        "kind": "Solid",
+        "color": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "top": [
+          0.11,
+          0.13,
+          0.2,
+          1.0
+        ],
+        "bottom": [
+          0.01,
+          0.01,
+          0.02,
+          1.0
+        ]
+      },
+      "fill": 0.9,
+      "gi": 0.0
+    },
+    "pick_mode": "Off",
+    "selection_mode": "Atoms",
+    "axes_on": false,
+    "axes_corner": "BottomRight"
+  },
+  "molecules": [
+    {
+      "source": {
+        "File": "/home/semen/work/Projects/molar_vis/examples/data/eaat2_both_superposed.pdb"
+      },
+      "name": "mol 0",
+      "visible": true,
+      "show_box": false,
+      "reps": [
+        {
+          "kind": "Cartoon",
+          "params": {
+            "Cartoon": {
+              "coil_radius": 0.03,
+              "ribbon_width": 0.15,
+              "ribbon_thickness": 0.03
+            }
+          },
+          "color": {
+            "Solid": [
+              240,
+              130,
+              180,
+              255
+            ]
+          },
+          "ss_algo": "Dssp",
+          "sel_text": "index 0:3178",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "charge_kind": "Partial",
+          "partner": null
+        },
+        {
+          "kind": "Cartoon",
+          "params": {
+            "Cartoon": {
+              "coil_radius": 0.03,
+              "ribbon_width": 0.15,
+              "ribbon_thickness": 0.03
+            }
+          },
+          "color": {
+            "Solid": [
+              170,
+              220,
+              40,
+              255
+            ]
+          },
+          "ss_algo": "Dssp",
+          "sel_text": "index 3204:6310",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "charge_kind": "Partial",
+          "partner": null
+        },
+        {
+          "kind": "BallAndStick",
+          "params": {
+            "BallAndStick": {
+              "sphere_scale": 0.27,
+              "bond_radius": 0.015
+            }
+          },
+          "color": {
+            "Solid": [
+              230,
+              50,
+              50,
+              255
+            ]
+          },
+          "ss_algo": "Dssp",
+          "sel_text": "index 3179:3203",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "charge_kind": "Partial",
+          "partner": null
+        },
+        {
+          "kind": "BallAndStick",
+          "params": {
+            "BallAndStick": {
+              "sphere_scale": 0.26,
+              "bond_radius": 0.015
+            }
+          },
+          "color": {
+            "Solid": [
+              60,
+              200,
+              80,
+              255
+            ]
+          },
+          "ss_algo": "Dssp",
+          "sel_text": "index 6311:6349",
+          "visible": true,
+          "dynamic": false,
+          "ss_per_frame": false,
+          "material": "Opaque",
+          "periodic": {
+            "self_img": true,
+            "show_box": false,
+            "neg": [
+              0,
+              0,
+              0
+            ],
+            "pos": [
+              0,
+              0,
+              0
+            ]
+          },
+          "smooth_window": 1,
+          "charge_kind": "Partial",
+          "partner": null
+        }
+      ],
+      "traj_loads": [],
+      "current_frame": 0
+    }
+  ],
+  "groups": []
+}
