@@ -415,6 +415,19 @@ pub fn continuous_range(
     }
 }
 
+/// PDB chain labels follow A–Z, a–z, then 0–9. Keep this mapping independent
+/// of the selected atoms so the same chain has the same color in every representation.
+/// An unlabeled chain uses the first palette entry.
+fn chain_palette_index(chain: char) -> usize {
+    match chain {
+        'A'..='Z' => chain as usize - 'A' as usize,
+        'a'..='z' => 26 + chain as usize - 'a' as usize,
+        '0'..='9' => 52 + chain as usize - '0' as usize,
+        ' ' | '\0' => 0,
+        _ => chain as usize,
+    }
+}
+
 /// A per-method atom colorizer. Holds any context needed (e.g. the B-factor range
 /// of the selection, the atom count for the Index gradient) computed once.
 pub struct Colorizer {
@@ -474,7 +487,7 @@ impl Colorizer {
     pub fn color(&self, atom: impl AtomLike, id: usize) -> u32 {
         let rgba = match self.method {
             ColorMethod::Element => self.preferences.element(atom.get_atomic_number()),
-            ColorMethod::Chain => self.preferences.categorical(atom.get_chain() as usize),
+            ColorMethod::Chain => self.preferences.categorical(chain_palette_index(atom.get_chain())),
             ColorMethod::ResId => self.preferences.categorical(atom.get_resid().rem_euclid(1 << 24) as usize),
             ColorMethod::ResName => self.preferences.categorical(hash_str(atom.get_resname())),
             ColorMethod::Index => self.preferences.continuous.sample(id as f32 * self.inv_n),
@@ -663,6 +676,27 @@ mod preference_tests {
     }
 
     #[test]
+    fn chain_colors_start_at_the_first_palette_entry_and_wrap() {
+        let mut top = Topology::default();
+        for chain in ['A', 'B', 'C', 'S', 'a', '0', ' '] {
+            top.atoms.push(&Atom::new().with_name("CA").with_resname("ALA").with_chain(chain).guess());
+        }
+        let system = System::new(top, State { coords: vec![Pos::new(0.0, 0.0, 0.0); 7], ..Default::default() }).unwrap();
+        let bound = system.select_all_bound();
+        for palette in [PALETTE.to_vec(), vec![[1, 2, 3, 255], [4, 5, 6, 255], [7, 8, 9, 255]]] {
+            let mut preferences = ColorPreferences::default();
+            preferences.categorical = palette.clone();
+            let spec = ColorSpec { method: ColorMethod::Chain, preferences: std::sync::Arc::new(preferences), ..Default::default() };
+            let colors = Colorizer::new(spec.clone(), &bound, 7, None);
+            let expected = [0, 1, 2, 18, 26, 52, 0].map(|index| pack_rgba8(palette[index % palette.len()]));
+            assert_eq!(bound.iter_particle().map(|p| colors.color(p.atom, p.id)).collect::<Vec<_>>(), expected);
+            let only_b = system.select_bound("chain B").unwrap();
+            let colors = Colorizer::new(spec, &only_b, 7, None);
+            assert_eq!(colors.color(only_b.iter_atoms().next().unwrap(), 1), expected[1]);
+        }
+    }
+
+    #[test]
     fn editable_categorical_palette_colors_residues_names_and_chains() {
         let mut top = Topology::default();
         let mut atom = Atom::new()
@@ -696,7 +730,7 @@ mod preference_tests {
         );
         prefs.categorical = vec![red, green];
         for (method, expected) in [
-            (ColorMethod::Chain, green),
+            (ColorMethod::Chain, red),
             (ColorMethod::ResId, green),
             (ColorMethod::ResName, red),
         ] {

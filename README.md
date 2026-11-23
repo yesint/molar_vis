@@ -139,7 +139,9 @@ in sessions and can be saved as startup defaults. The continuous gradient has
 editable endpoints and a movable midpoint; the default runs from blue through
 white to red, with positive charges shown in red. The discrete palette starts with
 18 colors and allows adding, removing and editing entries. Color-picker presets
-use the same palette.
+use the same palette. Chain colors start at its first entry for A, then follow
+A–Z, a–z and 0–9, wrapping when needed. Unlabeled chains use the first entry.
+A chain keeps its color when a representation selects only part of the system.
 
 Materials range from opaque and transparent to glass, metal, flat outlines and
 Molecular Nodes-style shading. Live previews help choose a material. Lighting,
