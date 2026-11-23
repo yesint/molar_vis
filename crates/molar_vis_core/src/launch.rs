@@ -302,6 +302,52 @@ pub fn run_web() {
     });
 }
 
+/// A wgpu device built with **no window and no display server**: the same device
+/// configuration [`early_z_wgpu_options`] gives the windowed viewer, but from an adapter
+/// requested without a surface. Vulkan, Metal and DX12 all render offscreen without a
+/// surface, so this works over SSH and on a compute node with no X or Wayland session.
+///
+/// Pairs with [`crate::App::new_headless`] + [`crate::App::pump_headless`]: together they
+/// run the scene, the job queue and `render_to_file` with no winit window in the process.
+/// The format is the one `egui_wgpu` picks when there is no surface to query; nothing
+/// presents here, and the offscreen capture path chooses its own texture formats.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn headless_render_state() -> Result<eframe::egui_wgpu::RenderState, String> {
+    use eframe::egui::epaint::mutex::RwLock;
+    use eframe::egui_wgpu::{RenderState, Renderer, RendererOptions, WgpuSetup};
+    use eframe::wgpu;
+    use std::sync::Arc;
+
+    let instance = wgpu::Instance::default();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .map_err(|e| {
+        format!("no wgpu adapter is available without a display: {}", crate::errors::error_chain(&e))
+    })?;
+    let WgpuSetup::CreateNew(setup) = early_z_wgpu_options().wgpu_setup else {
+        return Err("expected the native device configuration".to_string());
+    };
+    let (device, queue) = pollster::block_on(adapter.request_device(&(setup.device_descriptor)(&adapter)))
+        .map_err(|e| {
+            format!("could not create a headless wgpu device: {}", crate::errors::error_chain(&e))
+        })?;
+    log::info!("molar_vis headless adapter: {:?}", adapter.get_info());
+
+    let target_format = wgpu::TextureFormat::Rgba8Unorm;
+    let renderer = Renderer::new(&device, target_format, RendererOptions::default());
+    Ok(RenderState {
+        adapter: adapter.clone(),
+        available_adapters: vec![adapter],
+        device,
+        queue,
+        target_format,
+        renderer: Arc::new(RwLock::new(renderer)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_file_args;
@@ -340,6 +386,20 @@ mod tests {
             assert_eq!(buffer.size(), REPORTED_LINE_BUFFER_BYTES);
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         });
+    }
+
+    /// The headless device must come up from an adapter requested with no surface --
+    /// that is the whole difference from the windowed path, and what lets the renderer
+    /// run over SSH and on a compute node.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "requires a native GPU"]
+    fn headless_render_state_builds_without_a_surface() {
+        let rs = super::headless_render_state().expect("a headless wgpu device");
+        assert!(!rs.available_adapters.is_empty());
+        assert_eq!(rs.target_format, wgpu::TextureFormat::Rgba8Unorm);
+        assert!(rs.device.limits().max_texture_dimension_2d >= 8192);
+        rs.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 
     #[test]

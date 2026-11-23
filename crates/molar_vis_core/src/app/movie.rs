@@ -141,10 +141,23 @@ impl App {
 
     /// Returns true while export owns the UI. Input is blocked except for Cancel/Esc.
     pub(super) fn service_movie(&mut self, ui: &mut egui::Ui) -> bool {
+        let ctx = ui.ctx().clone();
+        self.service_movie_with(&ctx, Some(ui))
+    }
+
+    /// The movie exporter, with the on-screen progress bar made optional. Every frame it
+    /// produces comes from the offscreen capture + readback path, not from painting the
+    /// viewport, so the only part that needs a `Ui` is the progress widget: a headless
+    /// host (`App::pump_headless`) passes `ui = None` and exports exactly the same frames.
+    pub(super) fn service_movie_with(
+        &mut self,
+        ctx: &egui::Context,
+        ui: Option<&mut egui::Ui>,
+    ) -> bool {
         let Some(mut job) = self.movie_job.take() else {
             return false;
         };
-        let ctx = ui.ctx().clone();
+        let ctx = ctx.clone();
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             job.handle.cancel();
         }
@@ -159,7 +172,9 @@ impl App {
             return true;
         }
         let result = self.advance_movie(&mut job, &ctx);
-        self.draw_movie_progress(ui, &job);
+        if let Some(ui) = ui {
+            self.draw_movie_progress(ui, &job);
+        }
         if let Err(error) = result {
             self.finish_movie(job, Err(error));
         } else {

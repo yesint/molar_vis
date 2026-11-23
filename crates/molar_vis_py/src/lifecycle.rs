@@ -2,13 +2,19 @@
 use crate::eframe::egui;
 use pyo3::{exceptions::PyRuntimeError, prelude::*};
 use std::{
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     thread::JoinHandle,
     time::Duration,
 };
 
 struct Viewer {
     context: Arc<OnceLock<egui::Context>>,
+    /// Set at shutdown. A windowed viewer stops on `ViewportCommand::Close`; a headless
+    /// host has no viewport to close, so it polls this instead.
+    stop: Arc<AtomicBool>,
     thread: JoinHandle<()>,
 }
 
@@ -25,6 +31,14 @@ static VIEWERS: Mutex<Registry> = Mutex::new(Registry {
 pub(super) fn spawn(
     run: impl FnOnce(Arc<OnceLock<egui::Context>>) + Send + 'static,
 ) -> PyResult<()> {
+    spawn_with_stop(move |context, _stop| run(context))
+}
+
+/// As [`spawn`], but the thread also receives the shutdown flag. Used by the headless
+/// host, which has no egui viewport for `stop_and_join` to send a close command to.
+pub(super) fn spawn_with_stop(
+    run: impl FnOnce(Arc<OnceLock<egui::Context>>, Arc<AtomicBool>) + Send + 'static,
+) -> PyResult<()> {
     let mut registry = VIEWERS.lock().unwrap();
     if registry.shutting_down {
         return Err(PyRuntimeError::new_err(
@@ -33,15 +47,17 @@ pub(super) fn spawn(
     }
     let context = Arc::new(OnceLock::new());
     let ui_context = context.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
     // Registration and thread creation share the lock, so shutdown cannot miss
     // a thread that has started but has not yet published its egui context.
     let thread = std::thread::Builder::new()
         .name("molar_vis-ui".into())
-        .spawn(move || run(ui_context))
+        .spawn(move || run(ui_context, thread_stop))
         .map_err(|error| {
             PyRuntimeError::new_err(format!("failed to start viewer thread: {}", molar_vis_core::error_chain(&error)))
         })?;
-    registry.viewers.push(Viewer { context, thread });
+    registry.viewers.push(Viewer { context, stop, thread });
     Ok(())
 }
 
@@ -65,6 +81,7 @@ fn stop_and_join(viewers: Vec<Viewer>) {
     while viewers.iter().any(|viewer| !viewer.thread.is_finished()) {
         for viewer in &viewers {
             if !viewer.thread.is_finished() {
+                viewer.stop.store(true, Ordering::Relaxed);
                 if let Some(ctx) = viewer.context.get() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     ctx.request_repaint();

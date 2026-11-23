@@ -656,6 +656,23 @@ impl App {
         }
     }
 
+    /// One tick of the windowless host loop (`molar_vis_py::spawn_headless`): apply the
+    /// jobs Python queued and advance asynchronous loading, with no egui frame and no
+    /// window. That is the whole of `ui()` a headless host needs, because rendering there
+    /// is explicit ([`App::render_to_file`], which builds dirty geometry itself) rather
+    /// than a side effect of painting a frame. Returns true while a load is still in
+    /// flight, which is what a caller waits on instead of a fixed sleep.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pump_headless(&mut self, ctx: &egui::Context) -> bool {
+        let loading = self.service_loading(ctx);
+        self.run_external_jobs();
+        // No `ui()` frame runs here to poll shared molecules for host-side edits.
+        self.scene.mark_shared_dirty();
+        let exporting = self.service_movie_with(ctx, None);
+        self.service_animation(ctx);
+        loading || exporting
+    }
+
     // --- External (native Python module) API, run via `AppJob`s on the UI thread. ---
 
     /// Add a molecule backed by a shared external source (pymolar), rendered
@@ -907,6 +924,10 @@ impl App {
             .clone()
             .ok_or("wgpu render state unavailable (eframe must use the wgpu backend)")?;
         let (w, h) = (width.max(1), height.max(1));
+
+        // A render runs as a host job, ahead of the loop's own poll of shared molecules,
+        // so pick up host coordinate edits made just before it here.
+        self.scene.mark_shared_dirty();
 
         // Build + upload any dirty geometry (cartoons, surfaces, interaction dashes),
         // exactly as the first `ui()` frame would — offscreen capture reads the built
@@ -1625,5 +1646,88 @@ mod ime_workaround_tests {
             );
         }
         assert_eq!(text, "allXY");
+    }
+}
+
+/// A headless host has no `ui()` frame, so nothing else polls shared (pymolar) molecules
+/// for coordinate edits: the headless pump and `render_to_file` must do it themselves.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod headless_shared_tests {
+    use super::*;
+    use molar::prelude::{PosMutProvider, Sel, SelectionExpr, State, System, Topology};
+    use std::cell::{Cell, UnsafeCell};
+    use std::rc::Rc;
+
+    /// Stand-in for a pymolar `System`, edited behind the viewer's back.
+    struct Host {
+        sys: UnsafeCell<System>,
+        version: Cell<u64>,
+    }
+
+    impl Host {
+        /// A coordinate write through a pymolar mutator, which bumps the version.
+        fn shift(&self, dx: f32) {
+            unsafe { &mut *self.sys.get() }.iter_pos_mut().next().unwrap().x += dx;
+            self.version.set(self.version.get() + 1);
+        }
+    }
+
+    struct Source(Rc<Host>);
+
+    impl crate::moldata::SharedSource for Source {
+        fn topology(&self) -> &Topology {
+            unsafe { (*self.0.sys.get()).topology() }
+        }
+        fn state(&self) -> &State {
+            unsafe { (*self.0.sys.get()).state() }
+        }
+        fn evaluate(&self, text: &str) -> Result<(SelectionExpr, Sel), crate::scene::EvalError> {
+            crate::scene::evaluate(unsafe { &*self.0.sys.get() }, text)
+        }
+        fn coords_version(&self) -> u64 {
+            self.0.version.get()
+        }
+    }
+
+    fn headless_app_with_shared_molecule() -> (App, egui::Context, Rc<Host>) {
+        let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/pbc_pair.pdb"));
+        let host = Rc::new(Host { sys: UnsafeCell::new(System::from_file(path).unwrap()), version: Cell::new(0) });
+        let ctx = egui::Context::default();
+        let rs = crate::launch::headless_render_state().expect("a headless wgpu device");
+        let mut app = App::new_headless(&ctx, &rs, crate::AppLaunch::default()).unwrap();
+        app.add_shared_molecule(Box::new(Source(host.clone())), "shared".into()).unwrap();
+        (app, ctx, host)
+    }
+
+    fn settle(app: &mut App) {
+        app.scene.mark_shared_dirty();
+        for rep in &mut app.scene.molecules[0].reps {
+            rep.coords_dirty = false;
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU"]
+    fn headless_pump_picks_up_shared_coordinate_edits() {
+        let (mut app, ctx, host) = headless_app_with_shared_molecule();
+        settle(&mut app);
+        host.shift(0.1);
+        app.pump_headless(&ctx);
+        assert_eq!(app.scene.molecules[0].shared_coords_version, 1);
+        assert!(app.scene.molecules[0].reps[0].coords_dirty, "the edit must reach the geometry");
+    }
+
+    /// `render_to_file` runs as a host job, so an edit made just before it is queued
+    /// ahead of any loop poll: the render itself must pick it up.
+    #[test]
+    #[ignore = "requires a native GPU"]
+    fn render_to_file_picks_up_shared_edits_made_just_before_it() {
+        let (mut app, _ctx, host) = headless_app_with_shared_molecule();
+        settle(&mut app);
+        host.shift(0.1);
+        let out = std::env::temp_dir().join(format!("molar_vis-headless-shared-{}.png", std::process::id()));
+        app.render_to_file(&out, 64, 64, false, 1).unwrap();
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(app.scene.molecules[0].shared_coords_version, 1, "rendered stale coordinates");
     }
 }

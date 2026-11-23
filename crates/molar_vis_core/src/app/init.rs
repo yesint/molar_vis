@@ -29,6 +29,32 @@ impl App {
         )
     }
 
+    /// Build the app with **no window**, on a device from
+    /// [`crate::headless_render_state`]. `App::new` only ever takes the egui context and
+    /// the wgpu render state out of eframe's `CreationContext`, so this is the same
+    /// construction with those two supplied directly. The egui context is never painted;
+    /// it carries the settings/theme and the loading-progress plumbing. Drive the result
+    /// with [`App::pump_headless`] and render with [`App::render_to_file`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_headless(
+        egui_ctx: &eframe::egui::Context,
+        render_state: &eframe::egui_wgpu::RenderState,
+        launch: AppLaunch,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let _timing = crate::performance::span("app-init");
+        let settings = Self::startup_settings(egui_ctx);
+        let renderer = SceneRenderer::new(render_state, &settings.rendering);
+        Self::from_renderer(
+            &super::startup::Context {
+                egui_ctx: egui_ctx.clone(),
+                wgpu_render_state: Some(render_state.clone()),
+            },
+            launch,
+            settings,
+            renderer,
+        )
+    }
+
     pub(super) fn startup_settings(ctx: &egui::Context) -> Settings {
         // Program settings: load from the platform config dir (created with defaults
         // on first launch). `MOLAR_VIS_DEBUG_DEFAULTS=1` forces built-in defaults

@@ -74,7 +74,7 @@ pub use scene::{evaluate, EvalError};
 pub use scene::{reserve_mol_id, reserve_rep_id};
 pub use launch::{parse_file_args, parse_launch_args, AppLaunch, DockingLaunch};
 #[cfg(not(target_arch = "wasm32"))]
-pub use launch::{early_z_wgpu_options, run};
+pub use launch::{early_z_wgpu_options, headless_render_state, run};
 #[cfg(target_arch = "wasm32")]
 pub use launch::run_web;
 
