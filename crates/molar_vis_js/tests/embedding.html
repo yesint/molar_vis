@@ -68,6 +68,31 @@ try {
   assert(await vis.background_json() === gradient, "Loading a replacement molecule preserves the gradient");
   assert(await vis.theme() === "light", "Replacement keeps the UI theme");
   await vis.clear();
+  const emptyMol = vis.add_mol(second, true);
+  assert((await emptyMol.reps()).length === 0, "A caller can start with an empty representation list");
+  const added = await emptyMol.add_rep_text("all", "ballstick", "element");
+  await added.select_text("index 0");
+  await emptyMol.show_box(true);
+  await emptyMol.show_box(false);
+  await rejects(() => emptyMol.add_rep_text("all", "invalid-style", "element"));
+  assert((await emptyMol.reps()).length === 1, "Invalid appearance rolls back the new representation");
+  await added.remove();
+  await rejects(() => added.select_text("all"));
+  await rejects(() => emptyMol.set_editing(true));
+  const ligand = await vis.add_editable("methane.sdf", encoder.encode(text));
+  await ligand.set_editing(true);
+  assert(await ligand.editing(), "Owned molecules can enter the native editor");
+  await emptyMol.set_editing(false);
+  assert(await ligand.editing(), "Another molecule cannot close the active editor");
+  await ligand.set_editing(false);
+  assert(!(await ligand.editing()), "Finishing returns the molecule to view mode");
+  const cif = await ligand.export_cif();
+  assert(cif.includes("_atom_site.pdbx_formal_charge") && cif.includes("_struct_conn.pdbx_value_order"),
+    "The export includes charges and bond orders");
+  const reread = StructureFile.from_bytes("roundtrip.cif", encoder.encode(cif));
+  assert(reread.numAtoms === 5 && cif.match(/ covale /g)?.length === 4, "The exported ligand retains its atoms and bonds");
+  reread.free();
+  await vis.clear();
   const groupedFile = StructureFile.from_bytes("group.sdf", encoder.encode(text + single));
   const group = await vis.add_file(groupedFile);
   groupedFile.free();
@@ -87,7 +112,7 @@ try {
   await vis.clear();
   await rejects(() => group.members());
   await rejects(() => start_embedded("viewer"));
-  report = "PASS: file counts, parsed record ownership, malformed input, awaited startup, UI controls, appearance, background preservation, complete-file groups, and scene replacement";
+  report = "PASS: file counts, parsed record ownership, malformed input, awaited startup, UI controls, appearance, background preservation, complete-file groups, editable ligand round-trip, representation edits and scene replacement";
 } catch (error) { report = `FAIL: ${error.stack || error}`; }
 await fetch("/result", { method:"POST", body:report });
 </script></html>

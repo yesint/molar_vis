@@ -38,6 +38,7 @@ use egui_phosphor::regular as icon;
 // `pub(crate)`: the ray tracer gathers interaction dashes through `build::build_interactions`
 // too, so the trace shows the same contact lines the raster does.
 mod align_dialog;
+mod ligand;
 mod animation;
 pub use animation::PreparedMovie;
 #[cfg(not(target_arch = "wasm32"))]
@@ -580,6 +581,15 @@ impl App {
         Ok(())
     }
 
+    /// Remove a representation without replacing it or changing the camera.
+    pub fn remove_rep_by_id(&mut self, mol_id: u64, rep_id: u64) -> Result<(), String> {
+        let (mi, ri) = self.resolve_rep(mol_id, rep_id)?;
+        let mol = &mut self.scene.molecules[mi];
+        mol.delete_rep(ri, ri < mol.n_shared);
+        self.view_dirty = true;
+        Ok(())
+    }
+
     pub fn add_rep_default_with_id(&mut self, mol_id: u64, rep_id: u64) -> Result<(), String> {
         let mi = self.resolve_molecule(mol_id)?;
         let ri = self.add_rep_default(mi)?;
@@ -695,6 +705,15 @@ impl App {
         self.execute_command(crate::script::Command::ShowMol { mol, visible })
     }
 
+    /// Show or hide the molecule's native periodic-box wireframe.
+    pub fn set_molecule_box_visible(&mut self, mol: usize, visible: bool) -> Result<(), String> {
+        let molecule = self.scene.molecules.get_mut(mol).ok_or_else(|| format!("no molecule {mol}"))?;
+        molecule.show_box = visible;
+        molecule.box_dirty = true;
+        self.view_dirty = true;
+        Ok(())
+    }
+
     /// Append a default representation to molecule `mol`; returns the new rep index.
     pub fn add_rep_default(&mut self, mol: usize) -> Result<usize, String> {
         self.execute_command(crate::script::Command::AddRep { mol })?;
@@ -731,6 +750,15 @@ impl App {
             mol,
             rep: crate::script::RepRef::Index(rep),
             name: name.to_string(),
+        })
+    }
+
+    /// Set a representation's selection without replacing its expression with atom indices.
+    pub fn set_rep_selection_text(&mut self, mol: usize, rep: usize, text: &str) -> Result<(), String> {
+        self.execute_command(crate::script::Command::Select {
+            mol,
+            rep: crate::script::RepRef::Index(rep),
+            text: text.to_string(),
         })
     }
 

@@ -741,9 +741,15 @@ impl Visualizer {
         Ok(MolGroup { id, jobs: self.jobs.clone() })
     }
 
+    /// Load a molecule owned by the viewer and editable through its native UI.
+    pub async fn add_editable(&self, name: String, bytes: Vec<u8>) -> Result<MolHandle, JsError> {
+        let mol = query_job(&self.jobs, move |app| app.add_editable_bytes(&name, bytes)).await?;
+        Ok(MolHandle { mol, jobs: self.jobs.clone() })
+    }
+
     /// Add a molecule, rendering **directly** from the parsed `System` (by reference);
-    /// returns a handle.
-    pub fn add_mol(&self, sys: &System) -> MolHandle {
+    /// returns a handle. Set `empty` to omit the default representation.
+    pub fn add_mol(&self, sys: &System, empty: Option<bool>) -> MolHandle {
         let mol = molar_vis_core::reserve_mol_id().0;
         let name = format!("mol {mol}");
         let src = WebSystemSource {
@@ -755,6 +761,12 @@ impl Visualizer {
             Box::new(move |app: &mut App| {
                 if let Err(e) = app.add_shared_molecule_with_id(mol, Box::new(src), name) {
                     log::error!("add_mol failed: {e}");
+                    return;
+                }
+                if empty.unwrap_or(false) {
+                    if let Ok(ids) = app.rep_ids(mol) {
+                        for id in ids { let _ = app.remove_rep_by_id(mol, id); }
+                    }
                 }
             }),
         );
@@ -1009,6 +1021,32 @@ pub struct MolHandle {
 
 #[wasm_bindgen]
 impl MolHandle {
+    /// Show or hide the native periodic box; remains editable in the viewer UI.
+    pub async fn show_box(&self, visible: bool) -> Result<(), JsError> {
+        let mol = self.mol;
+        query_job(&self.jobs, move |app| {
+            let index = app.resolve_molecule(mol)?;
+            app.set_molecule_box_visible(index, visible)
+        }).await
+    }
+
+    /// Enter or leave the native drawing editor for this molecule.
+    pub async fn set_editing(&self, enabled: bool) -> Result<(), JsError> {
+        let mol = self.mol;
+        query_job(&self.jobs, move |app| app.set_molecule_editing(mol, enabled)).await
+    }
+
+    pub async fn editing(&self) -> Result<bool, JsError> {
+        let mol = self.mol;
+        query_job(&self.jobs, move |app| app.molecule_editing(mol)).await
+    }
+
+    /// Export the edited ligand as mmCIF, preserving missing chemistry metadata.
+    pub async fn export_cif(&self) -> Result<String, JsError> {
+        let mol = self.mol;
+        query_job(&self.jobs, move |app| app.molecule_cif(mol)).await
+    }
+
     /// Add an interactions representation against a partner representation.
     pub fn add_interactions(&self, partner: &RepHandle) -> RepHandle {
         let rep = molar_vis_core::reserve_rep_id().0;
@@ -1115,6 +1153,26 @@ impl MolHandle {
             rep,
             jobs: self.jobs.clone(),
         }
+    }
+
+    /// Create a representation with its expression and appearance in one frame.
+    pub async fn add_rep_text(&self, text: String, style: String, color: String) -> Result<RepHandle, JsError> {
+        let mol = self.mol;
+        let rep = molar_vis_core::reserve_rep_id().0;
+        query_job(&self.jobs, move |app| {
+            app.add_rep_default_with_id(mol, rep)?;
+            let result = (|| {
+                let (mi, ri) = app.resolve_rep(mol, rep)?;
+                app.set_rep_selection_text(mi, ri, &text)?;
+                app.set_rep_style(mi, ri, &style)?;
+                app.set_rep_color(mi, ri, &color)?;
+                if style == "ballstick" { app.set_ballstick_bonds(mi, ri, 0.15, 0.5)?; }
+                Ok(())
+            })();
+            if result.is_err() { let _ = app.remove_rep_by_id(mol, rep); }
+            result
+        }).await?;
+        Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
     }
 
     /// This molecule's representations, as handles.
@@ -1270,6 +1328,12 @@ pub struct RepHandle {
 
 #[wasm_bindgen]
 impl RepHandle {
+    /// Remove this representation from the scene. The handle becomes stale.
+    pub async fn remove(&self) -> Result<(), JsError> {
+        let (mol, rep) = (self.mol, self.rep);
+        query_job(&self.jobs, move |app| app.remove_rep_by_id(mol, rep)).await
+    }
+
     /// Set fluid bonds and bond-color blending (both 0–1) for ball-and-stick.
     pub async fn set_ballstick_bonds(&self, fluid_bonds: f32, color_blend: f32) -> Result<(), JsError> {
         let (mol, rep) = (self.mol, self.rep);
@@ -1335,6 +1399,16 @@ impl RepHandle {
                 }
             }),
         );
+    }
+
+    /// Apply a selection expression and preserve it in the representation's text field.
+    /// Rejects invalid syntax and stale representation handles.
+    pub async fn select_text(&self, text: String) -> Result<(), JsError> {
+        let (mol, rep) = (self.mol, self.rep);
+        query_job(&self.jobs, move |app| {
+            let (mi, ri) = app.resolve_rep(mol, rep)?;
+            app.set_rep_selection_text(mi, ri, &text)
+        }).await
     }
 
     /// Set the selection from a `Sel`'s atoms.
