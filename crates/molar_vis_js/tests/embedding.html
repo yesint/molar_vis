@@ -71,13 +71,19 @@ try {
   const emptyMol = vis.add_mol(second, true);
   assert((await emptyMol.reps()).length === 0, "A caller can start with an empty representation list");
   const added = await emptyMol.add_rep_text("all", "ballstick", "element");
+  const pose = await vis.view_json();
+  await added.set_visible(false);
   await added.select_text("index 0");
+  await added.set_visible(true);
+  assert(await vis.view_json() === pose, "Toggling a cached highlight preserves the camera");
+
   await emptyMol.show_box(true);
   await emptyMol.show_box(false);
   await rejects(() => emptyMol.add_rep_text("all", "invalid-style", "element"));
   assert((await emptyMol.reps()).length === 1, "Invalid appearance rolls back the new representation");
   await added.remove();
   await rejects(() => added.select_text("all"));
+  await rejects(() => added.set_visible(true));
   await rejects(() => emptyMol.set_editing(true));
   const ligand = await vis.add_editable("methane.sdf", encoder.encode(text));
   await ligand.set_editing(true);

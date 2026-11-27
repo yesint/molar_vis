@@ -549,6 +549,7 @@ impl App {
             mesh_rx,
             draw: None,
             last_gray_active: None,
+            edit_subscriptions: Vec::new(),
             jobs_rx: None,
             preview: None,
             #[cfg(not(target_arch = "wasm32"))]

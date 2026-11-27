@@ -39,6 +39,7 @@ use egui_phosphor::regular as icon;
 // too, so the trace shows the same contact lines the raster does.
 mod align_dialog;
 mod ligand;
+pub use ligand::MoleculeEvent;
 mod animation;
 pub use animation::PreparedMovie;
 #[cfg(not(target_arch = "wasm32"))]
@@ -241,6 +242,7 @@ pub struct App {
     /// running viewer. `None` for the standalone app (native + the trunk web demo);
     /// connected by `molar_vis_py::spawn` / `molar_vis_js::start`. See [`AppJob`].
     jobs_rx: Option<std::sync::mpsc::Receiver<AppJob>>,
+    edit_subscriptions: Vec<ligand::EditSubscription>,
     /// A clone of eframe's wgpu render state (device/queue/adapter), captured at
     /// construction from `cc.wgpu_render_state`. It lets an external host (the native
     /// Python module) drive an **offscreen** render-to-file from an [`AppJob`], which
@@ -663,6 +665,7 @@ impl App {
                 None => break,
             };
             job(self);
+            self.publish_molecule_edits();
         }
     }
 
@@ -703,6 +706,34 @@ impl App {
     /// Show or hide molecule `mol` through the shared scene-command path.
     pub fn set_molecule_visible(&mut self, mol: usize, visible: bool) -> Result<(), String> {
         self.execute_command(crate::script::Command::ShowMol { mol, visible })
+    }
+
+    /// Create a styled representation, removing it again if the selection or appearance is invalid.
+    pub fn add_styled_rep(&mut self, mol: u64, selection: &str, style: &str, color: &str) -> Result<u64, String> {
+        let rep = crate::reserve_rep_id().0;
+        self.add_rep_default_with_id(mol, rep)?;
+        let result = (|| {
+            let (mi, ri) = self.resolve_rep(mol, rep)?;
+            self.set_rep_selection_text(mi, ri, selection)?;
+            self.set_rep_style(mi, ri, style)?;
+            self.set_rep_color(mi, ri, color)?;
+            if style == "ballstick" {
+                self.set_ballstick_bonds(mi, ri, 0.15, 0.5)?;
+            }
+            Ok(rep)
+        })();
+        if result.is_err() {
+            self.remove_rep_by_id(mol, rep)?;
+        }
+        result
+    }
+
+    /// Toggle a representation without rebuilding its geometry.
+    pub fn set_rep_visible(&mut self, mol_id: u64, rep_id: u64, visible: bool) -> Result<(), String> {
+        let (mi, ri) = self.resolve_rep(mol_id, rep_id)?;
+        self.scene.molecules[mi].reps[ri].visible = visible;
+        self.view_dirty = true;
+        Ok(())
     }
 
     /// Show or hide the molecule's native periodic-box wireframe.
@@ -1514,6 +1545,7 @@ impl eframe::App for App {
         }
         // Free trashed molecules that no undo/redo step can bring back.
         self.history.collect_garbage(&mut self.scene);
+        self.publish_molecule_edits();
     }
 }
 

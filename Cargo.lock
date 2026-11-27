@@ -2230,6 +2230,7 @@ dependencies = [
  "egui-phosphor",
  "egui-stylesheet",
  "egui-wgpu",
+ "futures-channel",
  "getrandom 0.3.4",
  "glam 0.32.1",
  "image",
@@ -2260,6 +2261,7 @@ dependencies = [
  "log",
  "molar",
  "molar_vis_core",
+ "molar_vis_web",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2283,7 +2285,10 @@ dependencies = [
 name = "molar_vis_web"
 version = "0.3.0"
 dependencies = [
+ "futures-channel",
+ "molar",
  "molar_vis_core",
+ "web-sys",
 ]
 
 [[package]]

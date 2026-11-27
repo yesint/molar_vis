@@ -242,6 +242,9 @@ cd crates/molar_vis_web
 trunk serve
 ```
 
+A Rust web frontend can mount a persistent viewer on its own canvas and control it
+through the [Rust embedding API](crates/molar_vis_web/README.md).
+
 To embed a viewer in a web page and control it from JavaScript, use the separate
 [JavaScript module](https://github.com/yesint/molar_vis/blob/main/crates/molar_vis_js/README.md).
 

@@ -22,6 +22,7 @@ wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 log.workspace = true
+futures-channel = "0.3"
 web-time = "1"
 molar = { workspace = true }
 # GAFF2 mechanics and Espaloma charges run on native and WebAssembly.

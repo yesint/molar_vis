@@ -50,7 +50,7 @@ mod theme;
 mod trajectory;
 mod unobstructed;
 
-pub use app::{App, AppJob};
+pub use app::{App, AppJob, MoleculeEvent};
 pub use errors::error_chain;
 #[cfg(target_arch = "wasm32")]
 pub use errors::js_error_chain;

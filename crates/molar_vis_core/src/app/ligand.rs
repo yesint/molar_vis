@@ -1,8 +1,55 @@
 //! Editable molecule loading and ligand export for embedding clients.
 use super::App;
 use crate::data;
+use crate::scene::{MolId, Scene};
+use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use molar::prelude::{AtomLike, AtomProvider, BondOrder};
 use std::fmt::Write;
+
+/// Changes to an observed molecule, coalesced per viewer command or UI frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoleculeEvent {
+    Changed { molecule: u64 },
+    Editing { molecule: u64, enabled: bool },
+    Removed { molecule: u64 },
+}
+
+pub(super) struct EditSubscription {
+    molecule: MolId,
+    version: u64,
+    editing: bool,
+    sender: UnboundedSender<MoleculeEvent>,
+}
+
+impl EditSubscription {
+    fn publish(&mut self, scene: &Scene, target: Option<MolId>) -> bool {
+        if self.sender.is_closed() {
+            return false;
+        }
+        let molecule = self.molecule.0;
+        let Some(index) = scene.mol_index(self.molecule) else {
+            let _ = self
+                .sender
+                .unbounded_send(MoleculeEvent::Removed { molecule });
+            return false;
+        };
+        let version = scene.molecules[index].structure_version;
+        if self.version != version {
+            self.version = version;
+            let _ = self
+                .sender
+                .unbounded_send(MoleculeEvent::Changed { molecule });
+        }
+        let enabled = target == Some(self.molecule);
+        if self.editing != enabled {
+            self.editing = enabled;
+            let _ = self
+                .sender
+                .unbounded_send(MoleculeEvent::Editing { molecule, enabled });
+        }
+        true
+    }
+}
 
 const ELEMENTS: [&str; 119] = [
     "X", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S",
@@ -16,6 +63,34 @@ const ELEMENTS: [&str; 119] = [
 ];
 
 impl App {
+    /// Subscribe to edits of this molecule. The first event gives its current editor
+    /// mode. Removing the molecule or clearing the scene ends the stream.
+    pub fn watch_molecule(
+        &mut self,
+        molecule: u64,
+    ) -> Result<UnboundedReceiver<MoleculeEvent>, String> {
+        let index = self.resolve_molecule(molecule)?;
+        let editing = self.molecule_editing(molecule)?;
+        let (sender, receiver) = unbounded();
+        let _ = sender.unbounded_send(MoleculeEvent::Editing {
+            molecule,
+            enabled: editing,
+        });
+        self.edit_subscriptions.push(EditSubscription {
+            molecule: MolId(molecule),
+            version: self.scene.molecules[index].structure_version,
+            editing,
+            sender,
+        });
+        Ok(receiver)
+    }
+
+    pub(super) fn publish_molecule_edits(&mut self) {
+        let target = self.draw.as_ref().and_then(|draw| draw.target);
+        self.edit_subscriptions
+            .retain_mut(|watch| watch.publish(&self.scene, target));
+    }
+
     /// Load an owned molecule, so the drawing editor can change its topology.
     pub fn add_editable_bytes(&mut self, name: &str, bytes: Vec<u8>) -> Result<u64, String> {
         let raw = data::load_from_bytes(name, bytes, &self.settings.behavior.bond_params())?;
@@ -142,5 +217,76 @@ impl App {
         }
         out.push_str("#\n");
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{data, settings::RepDefaults};
+
+    #[test]
+    fn editor_events_follow_bond_edits_and_replay() {
+        use glam::Vec3;
+        use molar::prelude::Atom;
+        let atom = Atom::new().with_name("C").guess();
+        let raw = data::RawMolecule::single_atom("ethene", atom.clone(), Vec3::ZERO).unwrap();
+        let mut scene = Scene::default();
+        scene.add(raw, &RepDefaults::default());
+        let mol = &mut scene.molecules[0];
+        let second = mol.add_atom(&atom, Vec3::new(0.134, 0.0, 0.0)).unwrap();
+        assert!(mol.add_bond(0, second, BondOrder::Single));
+        let id = scene.molecules[0].id;
+        let molecule = id.0;
+        let (sender, mut events) = unbounded();
+        let mut watch = EditSubscription {
+            molecule: id,
+            version: scene.molecules[0].structure_version,
+            editing: false,
+            sender,
+        };
+        assert!(watch.publish(&scene, Some(id)));
+        assert_eq!(
+            events.try_recv().unwrap(),
+            MoleculeEvent::Editing {
+                molecule,
+                enabled: true
+            }
+        );
+
+        let mol = &mut scene.molecules[0];
+        mol.begin_edit();
+        mol.cycle_bond_order(0);
+        let ops = mol.end_edit();
+        assert!(watch.publish(&scene, Some(id)));
+        assert_eq!(
+            events.try_recv().unwrap(),
+            MoleculeEvent::Changed { molecule }
+        );
+        for forward in [false, true] {
+            scene.molecules[0].replay(&ops, forward);
+            assert!(watch.publish(&scene, Some(id)));
+            assert_eq!(
+                events.try_recv().unwrap(),
+                MoleculeEvent::Changed { molecule }
+            );
+        }
+
+        assert!(watch.publish(&scene, None));
+        assert_eq!(
+            events.try_recv().unwrap(),
+            MoleculeEvent::Editing {
+                molecule,
+                enabled: false
+            }
+        );
+        assert!(watch.publish(&scene, None));
+        assert!(events.try_recv().is_err());
+        scene.molecules.clear();
+        assert!(!watch.publish(&scene, None));
+        assert_eq!(
+            events.try_recv().unwrap(),
+            MoleculeEvent::Removed { molecule }
+        );
     }
 }

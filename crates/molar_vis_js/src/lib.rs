@@ -23,24 +23,24 @@
 //!   `AppJob` alias has no `Send` bound, which lets a job capture the non-`Send`
 //!   `Rc<System>` the JS `System` shares.
 //! - There is no external owner like pymolar: a JS `System` **owns** its molar `System`
-//!   in an `Rc`, so [`WebSystemSource`] implements [`SharedSource`] with plain safe
+//!   in an `Rc`, so [`SystemSource`] implements [`SharedSource`] with plain safe
 //!   borrows (no raw pointers / GIL). v1 coordinates are static after load
 //!   (`coords_version` is constant); live JS coordinate edits are a future item.
 
 #![cfg(target_arch = "wasm32")]
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
 use wasm_bindgen::prelude::*;
 
 use molar::prelude::{
-    FileHandler, FileFormatError, IndexSliceProvider, Sel as MSel, SelectionExpr, State, System as MSystem, Topology,
+    FileHandler, FileFormatError, IndexSliceProvider, System as MSystem,
 };
-use molar_vis_core::eframe;
+use molar_vis_web::{SystemSource, ViewerHandle};
 use molar_vis_core::{
-    App, AppJob, AppLaunch, CueMode, EvalError, SharedSource, parse_corner, parse_cue_mode,
+    App, AppJob, CueMode, EvalError, SharedSource, parse_corner, parse_cue_mode,
     parse_projection,
 };
 
@@ -226,7 +226,8 @@ impl Movie {
 
 // At most one viewer per page for v1 (single-threaded wasm + one global job channel).
 thread_local! {
-    static VIEWER_STARTED: Cell<bool> = const { Cell::new(false) };
+    // The legacy API keeps its viewer running even when the JS handle is collected.
+    static JS_VIEWER: RefCell<Option<ViewerHandle>> = const { RefCell::new(None) };
 }
 
 /// Queue a job onto the viewer (UI) thread; logs if the window has been closed.
@@ -250,37 +251,6 @@ fn rgba(bytes: &[u8]) -> Result<[u8; 4], JsError> {
         .map_err(|_| JsError::new("expected exactly four RGBA8 bytes"))
 }
 
-/// A [`SharedSource`] backed by an `Rc<System>` owned jointly with the JS [`System`]
-/// handle. The `Rc` keeps the `System` alive for as long as the source, so the borrows
-/// returned by `topology`/`state` are sound — no raw pointers, no `unsafe`, no `Send`
-/// (single-threaded wasm; the trait has no `Send` bound and the wasm `AppJob` doesn't
-/// require it). `version` is a generation counter the viewer polls to re-render on a
-/// coordinate edit; it stays `0` in v1 (coordinates are static after load).
-struct WebSystemSource {
-    system: Rc<MSystem>,
-    version: Rc<Cell<u64>>,
-}
-
-impl SharedSource for WebSystemSource {
-    fn topology(&self) -> &Topology {
-        self.system.topology()
-    }
-
-    fn state(&self) -> &State {
-        self.system.state()
-    }
-
-    fn coords_version(&self) -> u64 {
-        self.version.get()
-    }
-
-    fn evaluate(&self, text: &str) -> Result<(SelectionExpr, MSel), EvalError> {
-        // We own a full molar `System`, so compile + run the selection against it
-        // directly via the core helper (same path the owned/standalone app uses).
-        molar_vis_core::evaluate(&self.system, text)
-    }
-}
-
 /// A structure parsed in the browser. Owns a molar `System` in an `Rc`; `add_mol`
 /// shares it into the scene by reference (a cheap `Rc` clone), so the `System` stays
 /// usable from JS (e.g. for more `select` calls) afterward.
@@ -288,7 +258,6 @@ impl SharedSource for WebSystemSource {
 #[wasm_bindgen]
 pub struct System {
     system: Rc<MSystem>,
-    version: Rc<Cell<u64>>,
     name: String,
     n_atoms: usize,
 }
@@ -310,7 +279,6 @@ impl System {
             .map_err(|e| JsError::new(&format!("invalid structure in {name}: {}", molar_vis_core::error_chain(&e))))?;
         Ok(System {
             system: Rc::new(system),
-            version: Rc::new(Cell::new(0)),
             name: name.to_string(),
             n_atoms,
         })
@@ -362,7 +330,7 @@ impl StructureFile {
                         .map_err(|e| JsError::new(&molar_vis_core::error_chain(&e)))?;
                     n_atoms += count;
                     molecules.push(System {
-                        system: Rc::new(system), version: Rc::new(Cell::new(0)),
+                        system: Rc::new(system),
                         name: format!("{name} #{}", molecules.len() + 1), n_atoms: count,
                     });
                 }
@@ -403,9 +371,7 @@ impl Sel {
 }
 
 async fn query_job<R: 'static>(jobs: &Sender<AppJob>, f: impl FnOnce(&mut App) -> Result<R, String> + 'static) -> Result<R, JsError> {
-    let (tx, rx) = futures_channel::oneshot::channel();
-    send(jobs, Box::new(move |app| { let _ = tx.send(f(app)); }));
-    rx.await.map_err(|_| JsError::new("viewer closed"))?.map_err(|e| JsError::new(&e))
+    molar_vis_web::query(jobs, f).await.map_err(|error| JsError::new(&error))
 }
 
 /// A live handle to the running viewer. Returned by [`start`]; queues jobs to the
@@ -733,9 +699,7 @@ impl Visualizer {
     pub async fn add_file(&self, file: &StructureFile) -> Result<MolGroup, JsError> {
         let name = file.name.clone();
         let sources = file.molecules.iter().map(|system| {
-            (system.name.clone(), Box::new(WebSystemSource {
-                system: system.system.clone(), version: system.version.clone(),
-            }) as Box<dyn SharedSource>)
+            (system.name.clone(), Box::new(SystemSource(system.system.clone())) as Box<dyn SharedSource>)
         }).collect();
         let id = query_job(&self.jobs, move |app| app.add_shared_group(sources, name)).await?;
         Ok(MolGroup { id, jobs: self.jobs.clone() })
@@ -752,10 +716,7 @@ impl Visualizer {
     pub fn add_mol(&self, sys: &System, empty: Option<bool>) -> MolHandle {
         let mol = molar_vis_core::reserve_mol_id().0;
         let name = format!("mol {mol}");
-        let src = WebSystemSource {
-            system: sys.system.clone(),
-            version: sys.version.clone(),
-        };
+        let src = SystemSource(sys.system.clone());
         send(
             &self.jobs,
             Box::new(move |app: &mut App| {
@@ -1158,20 +1119,7 @@ impl MolHandle {
     /// Create a representation with its expression and appearance in one frame.
     pub async fn add_rep_text(&self, text: String, style: String, color: String) -> Result<RepHandle, JsError> {
         let mol = self.mol;
-        let rep = molar_vis_core::reserve_rep_id().0;
-        query_job(&self.jobs, move |app| {
-            app.add_rep_default_with_id(mol, rep)?;
-            let result = (|| {
-                let (mi, ri) = app.resolve_rep(mol, rep)?;
-                app.set_rep_selection_text(mi, ri, &text)?;
-                app.set_rep_style(mi, ri, &style)?;
-                app.set_rep_color(mi, ri, &color)?;
-                if style == "ballstick" { app.set_ballstick_bonds(mi, ri, 0.15, 0.5)?; }
-                Ok(())
-            })();
-            if result.is_err() { let _ = app.remove_rep_by_id(mol, rep); }
-            result
-        }).await?;
+        let rep = query_job(&self.jobs, move |app| app.add_styled_rep(mol, &text, &style, &color)).await?;
         Ok(RepHandle { mol, rep, jobs: self.jobs.clone() })
     }
 
@@ -1328,6 +1276,12 @@ pub struct RepHandle {
 
 #[wasm_bindgen]
 impl RepHandle {
+    /// Show or hide the cached representation on the next viewer frame.
+    pub async fn set_visible(&self, visible: bool) -> Result<(), JsError> {
+        let (mol, rep) = (self.mol, self.rep);
+        query_job(&self.jobs, move |app| app.set_rep_visible(mol, rep, visible)).await
+    }
+
     /// Remove this representation from the scene. The handle becomes stale.
     pub async fn remove(&self) -> Result<(), JsError> {
         let (mol, rep) = (self.mol, self.rep);
@@ -1433,25 +1387,29 @@ impl RepHandle {
 /// running on this page (one viewer per page in v1).
 #[wasm_bindgen]
 pub fn start(canvas_id: &str) -> Result<Visualizer, JsError> {
-    let (canvas, tx, rx) = prepare_viewer(canvas_id)?;
+    let (jobs, startup) = ViewerHandle::start_deferred(canvas(canvas_id)?, false)
+        .map_err(|error| JsError::new(&error))?;
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(error) = run_viewer(canvas, rx, false).await {
-            log::error!("molar_vis failed to start: {error:?}");
-        }
+        match startup.await {
+            Ok(viewer) => { JS_VIEWER.with(|slot| slot.replace(Some(viewer))); }
+            Err(error) => log::error!("molar_vis failed to start: {error}"),
+        };
     });
-    Ok(Visualizer { jobs: tx })
+    Ok(Visualizer { jobs })
 }
 
 /// Start an embedded viewer with its selection sidebar and toolbar hidden.
 /// Resolves after graphics initialization; rejects if the renderer cannot start.
 #[wasm_bindgen]
 pub async fn start_embedded(canvas_id: &str) -> Result<Visualizer, JsError> {
-    let (canvas, tx, rx) = prepare_viewer(canvas_id)?;
-    run_viewer(canvas, rx, true).await?;
-    Ok(Visualizer { jobs: tx })
+    let (jobs, startup) = ViewerHandle::start_deferred(canvas(canvas_id)?, true)
+        .map_err(|error| JsError::new(&error))?;
+    let viewer = startup.await.map_err(|error| JsError::new(&error))?;
+    JS_VIEWER.with(|slot| slot.replace(Some(viewer)));
+    Ok(Visualizer { jobs })
 }
 
-fn prepare_viewer(canvas_id: &str) -> Result<(web_sys::HtmlCanvasElement, Sender<AppJob>, std::sync::mpsc::Receiver<AppJob>), JsError> {
+fn canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsError> {
     use wasm_bindgen::JsCast as _;
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
@@ -1459,26 +1417,5 @@ fn prepare_viewer(canvas_id: &str) -> Result<(web_sys::HtmlCanvasElement, Sender
     let canvas = document.get_element_by_id(canvas_id)
         .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         .ok_or_else(|| JsError::new(&format!("page has no canvas {canvas_id:?}")))?;
-    if VIEWER_STARTED.with(|f| f.replace(true)) {
-        return Err(JsError::new("a molar_vis viewer is already running on this page"));
-    }
-    let (tx, rx) = std::sync::mpsc::channel::<AppJob>();
-    Ok((canvas, tx, rx))
-}
-
-async fn run_viewer(canvas: web_sys::HtmlCanvasElement, rx: std::sync::mpsc::Receiver<AppJob>, embedded: bool) -> Result<(), JsError> {
-    let result = eframe::WebRunner::new().start(
-        canvas, eframe::WebOptions::default(),
-        Box::new(move |cc| {
-            let mut app = App::new(cc, AppLaunch::default())?;
-            if embedded { app.set_ui_visibility(false, false); }
-            app.set_jobs(rx);
-            Ok(Box::new(app) as Box<dyn eframe::App>)
-        }),
-    ).await;
-    if let Err(error) = result {
-        VIEWER_STARTED.with(|f| f.set(false));
-        return Err(JsError::new(&molar_vis_core::js_error_chain(&error)));
-    }
-    Ok(())
+    Ok(canvas)
 }
