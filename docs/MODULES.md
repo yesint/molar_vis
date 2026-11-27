@@ -5,7 +5,7 @@
 ## Workspace & modules
 
 `crates/molar_vis_core` (library, WASM-safe, all logic) + `crates/molar_vis` (native bin:
-argv + logging) + `crates/molar_vis_web` (wasm bin, the trunk demo) + `crates/molar_vis_py` (native
+argv + logging) + `crates/molar_vis_web` (Rust embedding library and standalone Trunk viewer) + `crates/molar_vis_py` (native
 PyO3 module — M26, see below) + `crates/molar_vis_js` (wasm-bindgen JS API — M27, the browser face
 of the viewer, a cdylib built with wasm-pack; content gated to wasm32 so a native build compiles it
 empty). **Modern module layout** (`<module>.rs` + `<module>/`, no `mod.rs`).

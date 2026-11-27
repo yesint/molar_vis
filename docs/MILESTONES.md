@@ -946,6 +946,11 @@ the full search across viewing angles, widths, lengths and animation phases.
 
 ## Browser embedding and file inspection
 
+Rust hosts can mount one persistent viewer, receive molecule edit events and
+export edited ligands as mmCIF. Both Rust and JavaScript hosts can toggle
+representation visibility while preserving the camera view.
+[Rust embedding guide](BUILD.md#embed-the-viewer-in-a-rust-web-application)
+
 The JavaScript API parses complete structure files through `StructureFile`, with
 molecule/atom totals and shared `System` handles for individual records. Embedded
 startup waits for graphics initialization and starts with the selection sidebar

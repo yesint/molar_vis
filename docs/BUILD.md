@@ -215,6 +215,83 @@ WebGL render, so it's verifiable headlessly even without a GPU; only the pixels 
   quick test trajectory with the Python snippet that wrote `tests/2lao_traj.pdb` (multi-MODEL, **not
   in git**).
 
+## Embed the viewer in a Rust web application
+
+A Rust application such as a Leptos frontend can link `molar_vis_web` into its
+own WebAssembly module and call the viewer directly. The application owns the
+canvas and decides when to save edits or replace a structure.
+
+### Configure the host project
+
+Install the browser target with `rustup target add wasm32-unknown-unknown`.
+Add the following dependencies to the host project's `Cargo.toml`. This example
+uses the revision that introduced the embedding API.
+
+```toml
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+molar_vis_web = { git = "https://github.com/yesint/molar_vis", rev = "4d549f1506edc4471861d2694262869468a93f82" }
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+```
+
+Add the following target setting to the host workspace's `.cargo/config.toml`
+so that `getrandom` uses its browser backend.
+
+```toml
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+```
+
+### Mount the canvas and open a molecule
+
+Give the canvas a nonzero width and height. Once it is in the DOM, pass its
+`HtmlCanvasElement` to `ViewerHandle::start`. Keep that handle in a component
+that stays mounted while the user moves between steps. This example opens an
+SDF ligand in the drawing editor and returns both handles to the host.
+
+```rust
+use molar_vis_web::{MoleculeHandle, ViewerHandle};
+use web_sys::HtmlCanvasElement;
+
+async fn open_ligand(
+    canvas: HtmlCanvasElement,
+    sdf: Vec<u8>,
+) -> Result<(ViewerHandle, MoleculeHandle), String> {
+    let viewer = ViewerHandle::start(canvas).await?;
+    let ligand = viewer.add_editable("ligand.sdf".into(), sdf).await?;
+    ligand.set_editing(true).await?;
+    Ok((viewer, ligand))
+}
+```
+
+For a read-only preview, pass a parsed `Rc<molar::prelude::System>` to
+`viewer.add_system` to share the structure by reference. Use
+`molecule.representations().await?` to access its existing representations or
+`molecule.add_rep` to create a styled selection. For example, calling
+`highlight.set_visible(false).await?` hides a binding-site highlight while
+preserving the camera position. Calling `set_visible(true)` shows it again.
+Use `viewer.with_app` to call other public `molar_vis_core::App` methods,
+including camera controls.
+
+### Handle edits and reuse the viewer
+
+Subscribe with `ligand.events().await?`. To read the stream asynchronously, add
+`futures-util = "0.3"` to the host dependencies, import `futures_util::StreamExt`,
+and call `events.next().await`. Each event identifies the molecule by its ID.
+The viewer groups changes made during one host command or one UI frame.
+
+| Event | What the host receives |
+| --- | --- |
+| `MoleculeEvent::Editing { molecule, enabled }` | The first event reports the current editor mode. Later events report when the user enters or leaves the editor. |
+| `MoleculeEvent::Changed { molecule }` | The structure changed, including through undo or redo. The host can mark calculations based on the previous structure as stale. |
+| `MoleculeEvent::Removed { molecule }` | The molecule left the scene. Its event stream then closes. |
+
+When the user leaves an edited ligand, await `ligand.export_cif()` and save the
+returned mmCIF before clearing the scene. The export includes coordinates, formal
+charges and bond orders. If export fails, keep the current scene available for
+correction. After a successful save, call `viewer.clear().await?` and load the
+next structure on the same canvas. Obtain fresh handles for its molecules and
+representations. Drop the viewer handle when the host closes the viewer.
+
 ## Tech stack (working versions)
 
 eframe / egui / egui-wgpu **0.34.3**, wgpu **29.0.3**, egui-phosphor **0.12** (icon font),

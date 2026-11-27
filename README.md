@@ -179,8 +179,8 @@ On the desktop, save a session to restore molecules, representations, camera,
 view settings, color preferences and custom meshes. Meshes are embedded in the
 session, while source structure and trajectory files must remain available.
 You can also export a molecule or a selected part of it at the displayed frame.
-The browser supports image and PLY downloads; molecular file export and session
-files are desktop features.
+The standalone browser viewer supports image and PLY downloads. The desktop viewer
+also saves molecular structures and session files.
 
 ## Building
 
@@ -242,8 +242,9 @@ cd crates/molar_vis_web
 trunk serve
 ```
 
-A Rust web frontend can mount a persistent viewer on its own canvas and control it
-through the [Rust embedding API](crates/molar_vis_web/README.md).
+Rust web applications can reuse one viewer across structures, toggle representations
+while preserving the camera view, and receive ligand edit notifications before
+exporting the edited molecule as mmCIF. [Rust embedding guide](docs/BUILD.md#embed-the-viewer-in-a-rust-web-application)
 
 To embed a viewer in a web page and control it from JavaScript, use the separate
 [JavaScript module](https://github.com/yesint/molar_vis/blob/main/crates/molar_vis_js/README.md).
