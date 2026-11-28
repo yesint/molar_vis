@@ -109,12 +109,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dim = u.misc.xy;
     let coord = vec2<i32>(i32(in.pos.x), i32(in.pos.y));
     let depth = textureLoad(depth_tex, coord, 0);
+    let uv = vec2<f32>(in.pos.xy) / dim;
+    let p = view_pos(uv, depth);
+    // Derivatives need every fragment in the quad, including background pixels.
+    let depth_normal = cross(dpdx(p), dpdy(p));
     if (depth >= 1.0) {
         return vec4<f32>(1.0); // background: no occlusion
     }
 
-    let uv = vec2<f32>(in.pos.xy) / dim;
-    let p = view_pos(uv, depth);
     // Screen-space depth alone cannot compare `q.z > p.z`: half of every tilted
     // plane is closer to the camera and would falsely occlude itself. Use the same
     // smooth normals as lighting; depth derivatives are only a fallback.
@@ -125,7 +127,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var normal = stored_normal;
     let stored_len = length(stored_normal);
     if (stored_len <= 0.5) {
-        normal = cross(dpdx(p), dpdy(p));
+        normal = depth_normal;
     }
     let normal_len = length(normal);
     normal = select(vec3<f32>(0.0, 0.0, 1.0), normal / max(normal_len, 1e-12), normal_len > 1e-8);

@@ -272,6 +272,25 @@ preserving the camera position. Calling `set_visible(true)` shows it again.
 Use `viewer.with_app` to call other public `molar_vis_core::App` methods,
 including camera controls.
 
+A Rust input handler can use `viewer.update_now` to apply several changes in
+one call. For example, a checkbox can change the visibility of all its ligand
+representations and schedule one repaint. The closure can borrow the host's
+selection list. It returns after the scene changes and the browser draws the
+result on the next frame.
+
+```rust
+viewer.update_now(|app| {
+    for &rep in &ligand_reps {
+        app.set_rep_visible(molecule.id(), rep, checked)?;
+    }
+    Ok(())
+})?;
+```
+
+Call `update_now` from the host between viewer frames. It returns an error if
+the viewer is busy or closed. Await any queued operation whose result the
+update needs.
+
 ### Handle edits and reuse the viewer
 
 Subscribe with `ligand.events().await?`. To read the stream asynchronously, add

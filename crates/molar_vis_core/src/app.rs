@@ -617,6 +617,15 @@ impl App {
         self.jobs_rx = Some(rx);
     }
 
+    /// Apply a browser host edit between frames, notify observers and schedule its paint.
+    #[cfg(target_arch = "wasm32")]
+    pub fn update_from_host<T>(&mut self, edit: impl FnOnce(&mut Self) -> T) -> T {
+        let result = edit(self);
+        self.publish_molecule_edits();
+        self.loading_context.request_repaint();
+        result
+    }
+
     /// Current shared color preferences, including any persisted edits.
     pub fn color_preferences(&self) -> crate::color::ColorPreferences {
         self.settings.colors.clone()
@@ -1269,6 +1278,11 @@ impl App {
 
 
 impl eframe::App for App {
+    #[cfg(target_arch = "wasm32")]
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // No continuous repaint: egui repaints on input (incl. active drags), and
         // we re-render the 3D scene only when it actually changed (see viewport).

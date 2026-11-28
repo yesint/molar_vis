@@ -242,8 +242,8 @@ cd crates/molar_vis_web
 trunk serve
 ```
 
-Rust web applications can reuse one viewer across structures, toggle representations
-while preserving the camera view, and receive ligand edit notifications before
+Rust web applications can reuse one viewer across structures, apply representation
+changes synchronously in one repaint, and receive ligand edit notifications before
 exporting the edited molecule as mmCIF. [Rust embedding guide](docs/BUILD.md#embed-the-viewer-in-a-rust-web-application)
 
 To embed a viewer in a web page and control it from JavaScript, use the separate

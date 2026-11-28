@@ -83,6 +83,19 @@ impl ViewerHandle {
         Ok((jobs, startup))
     }
 
+    /// Apply a host interaction synchronously and schedule one repaint.
+    /// Call between viewer frames. Await earlier queued operations if their order matters.
+    pub fn update_now<T>(
+        &self,
+        edit: impl FnOnce(&mut App) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut app = self
+            .runner
+            .app_mut::<App>()
+            .ok_or("viewer is busy or closed")?;
+        app.update_from_host(edit)
+    }
+
     /// Run an operation on the viewer thread and await its result.
     pub async fn with_app<T: 'static>(
         &self,
